@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast, runtime_checkable
 
 from pyhermit.backends.python.state import (
     Node,
@@ -26,6 +26,9 @@ from pyhermit.backends.python.state import (
     TableauSession,
 )
 from pyhermit.exceptions import InternalInvariantError
+
+if TYPE_CHECKING:
+    from pyhermit.clauses import ClauseProgram
 
 
 class _StringEnum(str, Enum):
@@ -61,6 +64,43 @@ class BlockingVocabulary:
         object.__setattr__(self, "atomic_concepts", concepts)
         object.__setattr__(self, "atomic_object_roles", roles)
 
+    @classmethod
+    def from_program(cls, program: ClauseProgram) -> BlockingVocabulary:
+        """Derive the exact blocking vocabulary from one compiled ontology.
+
+        Negative concepts participate in a node label just like positive concepts.
+        Negative object-role assertions do not participate in the pairwise edge label,
+        matching the pinned direct checkers' ``AtomicRole`` boundary.
+        """
+
+        from pyhermit.clauses import ClauseProgram, PredicateKind
+
+        if not isinstance(program, ClauseProgram):
+            raise TypeError("program must be ClauseProgram")
+        concept_kinds = frozenset(
+            {
+                PredicateKind.CONCEPT,
+                PredicateKind.NEGATED_CONCEPT,
+                PredicateKind.NOMINAL,
+                PredicateKind.NEGATED_NOMINAL,
+                PredicateKind.AUTOMATON_STATE,
+                PredicateKind.DISJOINT_GUARD,
+                PredicateKind.NAMED_INDIVIDUAL,
+            }
+        )
+        return cls(
+            frozenset(
+                predicate.predicate_id
+                for predicate in program.predicates.predicates
+                if predicate.kind in concept_kinds
+            ),
+            frozenset(
+                predicate.predicate_id
+                for predicate in program.predicates.predicates
+                if predicate.kind is PredicateKind.OBJECT_ROLE
+            ),
+        )
+
     @property
     def fingerprint(self) -> str:
         digest = hashlib.sha256(b"pyhermit:blocking-vocabulary:v1\0")
@@ -79,6 +119,10 @@ class BlockingLabels:
     core_concepts: MappingProxyType[NodeHandle, tuple[int, ...]]
     roles: MappingProxyType[tuple[NodeHandle, NodeHandle], tuple[int, ...]]
     core_roles: MappingProxyType[tuple[NodeHandle, NodeHandle], tuple[int, ...]]
+    nodes: MappingProxyType[
+        NodeHandle,
+        tuple[int, NodeKind, NodeLifecycle, NodeHandle | None],
+    ]
     state_digest: str
 
     @classmethod
@@ -106,8 +150,18 @@ class BlockingLabels:
             ),
             key=lambda node: node.creation_id,
         )
+        node_records: dict[
+            NodeHandle,
+            tuple[int, NodeKind, NodeLifecycle, NodeHandle | None],
+        ] = {}
         for node in active_nodes:
             parent = node.parent
+            node_records[node.handle] = (
+                node.creation_id,
+                node.kind,
+                node.lifecycle,
+                parent,
+            )
             digest.update(
                 struct.pack(
                     "<IIQ",
@@ -122,6 +176,7 @@ class BlockingLabels:
             else:
                 digest.update(b"P" + struct.pack("<II", parent.slot, parent.generation))
 
+        relevant_rows = []
         for row in session.extensions.active_rows():
             predicate = row.key.predicate_id
             arguments = row.key.arguments
@@ -137,6 +192,18 @@ class BlockingLabels:
                     core_role_sets.setdefault(role_key, set()).add(predicate)
             else:
                 continue
+            relevant_rows.append(row)
+
+        for row in sorted(
+            relevant_rows,
+            key=lambda value: (
+                value.key.predicate_id,
+                value.key.arguments,
+                value.core,
+            ),
+        ):
+            predicate = row.key.predicate_id
+            arguments = row.key.arguments
             digest.update(struct.pack("<IB", predicate, len(arguments)))
             for argument in arguments:
                 digest.update(struct.pack("<II", argument.slot, argument.generation))
@@ -147,8 +214,39 @@ class BlockingLabels:
             MappingProxyType(_freeze_sets(core_concept_sets)),
             MappingProxyType(_freeze_sets(role_sets)),
             MappingProxyType(_freeze_sets(core_role_sets)),
+            MappingProxyType(node_records),
             digest.hexdigest(),
         )
+
+    def earliest_difference(self, other: BlockingLabels) -> int | None:
+        """Return the earliest creation ID whose blocking projection differs."""
+
+        if not isinstance(other, BlockingLabels):
+            raise TypeError("other must be BlockingLabels")
+        changed: list[int] = []
+        for handle in self.nodes.keys() | other.nodes.keys():
+            before = self.nodes.get(handle)
+            after = other.nodes.get(handle)
+            if before != after:
+                for record in (before, after):
+                    if record is not None:
+                        changed.append(record[0])
+        concept_handles = _different_keys(self.concepts, other.concepts) | _different_keys(
+            self.core_concepts, other.core_concepts
+        )
+        for handle in concept_handles:
+            record = self.nodes.get(handle) or other.nodes.get(handle)
+            if record is not None:
+                changed.append(record[0])
+        role_edges = _different_keys(self.roles, other.roles) | _different_keys(
+            self.core_roles, other.core_roles
+        )
+        for edge in role_edges:
+            for handle in edge:
+                record = self.nodes.get(handle) or other.nodes.get(handle)
+                if record is not None:
+                    changed.append(record[0])
+        return min(changed) if changed else None
 
     def concept_label(self, node: NodeHandle, *, core_only: bool = False) -> tuple[int, ...]:
         source = self.core_concepts if core_only else self.concepts
@@ -170,6 +268,13 @@ KeyT = TypeVar("KeyT")
 
 def _freeze_sets(values: dict[KeyT, set[int]]) -> dict[KeyT, tuple[int, ...]]:
     return {key: tuple(sorted(items)) for key, items in values.items()}
+
+
+def _different_keys(
+    left: MappingProxyType[KeyT, tuple[int, ...]],
+    right: MappingProxyType[KeyT, tuple[int, ...]],
+) -> set[KeyT]:
+    return {key for key in left.keys() | right.keys() if left.get(key, ()) != right.get(key, ())}
 
 
 @dataclass(frozen=True, slots=True)

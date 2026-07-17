@@ -15,7 +15,7 @@ from pyhermit.backends.python.blocking import (
 )
 from pyhermit.backends.python.state import DependencySet, NodeHandle, NodeKind, TableauSession
 from pyhermit.config import BlockingMode
-from pyhermit.events import CancellationSource
+from pyhermit.events import CancellationSource, CancellationToken
 from pyhermit.exceptions import InternalInvariantError, ReasonerInterruptedError
 
 VOCABULARY = BlockingVocabulary(frozenset({1, 2}), frozenset({10}))
@@ -38,6 +38,45 @@ class _PromotingValidator:
         self.calls += 1
         if blocked == self.blocked:
             return ValidationDecision(False, (self.row_id,), (blocked,), (99,))
+        return ValidationDecision(True)
+
+
+@dataclass
+class _PassAwareValidator:
+    fail: bool = False
+    begins: int = 0
+    ends: int = 0
+    active: bool = False
+    state_digest: str | None = None
+
+    def begin_validation_pass(
+        self,
+        session: TableauSession,
+        state_digest: str,
+        token: CancellationToken,
+    ) -> None:
+        del session
+        token.check()
+        self.begins += 1
+        self.active = True
+        self.state_digest = state_digest
+
+    def end_validation_pass(self) -> None:
+        assert self.active
+        self.ends += 1
+        self.active = False
+
+    def validate_block(
+        self,
+        session: TableauSession,
+        blocked: NodeHandle,
+        blocker: NodeHandle,
+        signature: BlockingSignature,
+    ) -> ValidationDecision:
+        del session, blocked, blocker, signature
+        assert self.active
+        if self.fail:
+            raise RuntimeError("pass-aware validator failure")
         return ValidationDecision(True)
 
 
@@ -102,3 +141,70 @@ def test_validation_cancellation_rolls_back_without_promoting_or_masquerading_as
     assert session.canonical_snapshot() == baseline
     assert not session.extensions.row(row_id).core
     assert session.clashes.current is None
+
+
+def test_validation_rejection_core_promotion_and_trace_roll_back_exactly() -> None:
+    session, manager, blocked, row_id = _validated()
+    session.begin_operation()
+    state_before = session.canonical_snapshot()
+    blocking_before = manager.canonical_snapshot()
+    trace_before = manager.trace_snapshot()
+
+    result = manager.validation_pass(_PromotingValidator(blocked, row_id))
+    assert not result.valid
+    assert session.extensions.row(row_id).core
+    assert manager.trace_snapshot() != trace_before
+
+    session.reset_to_operation_root()
+    assert session.canonical_snapshot() == state_before
+    assert manager.canonical_snapshot() == blocking_before
+    assert manager.trace_snapshot() == trace_before
+    assert not session.extensions.row(row_id).core
+    assert manager.compute() == 0
+
+
+class _CancelAfterCore(CancellationToken):
+    __slots__ = ("_session",)
+
+    def __init__(self, session: TableauSession) -> None:
+        super().__init__()
+        self._session = session
+
+    def check(self) -> None:
+        if "fact.core" in self._session.trail.kinds():
+            raise ReasonerInterruptedError("cancel after blocking repair")
+        super().check()
+
+
+def test_cancellation_after_repair_mutation_restores_manager_and_tableau() -> None:
+    session, manager, blocked, row_id = _validated()
+    session.begin_operation()
+    state_before = session.canonical_snapshot()
+    blocking_before = manager.canonical_snapshot()
+
+    with pytest.raises(ReasonerInterruptedError, match="after blocking repair"):
+        manager.validation_pass(
+            _PromotingValidator(blocked, row_id),
+            token=_CancelAfterCore(session),
+        )
+
+    assert session.canonical_snapshot() == state_before
+    assert manager.canonical_snapshot() == blocking_before
+    assert not session.extensions.row(row_id).core
+
+
+def test_pass_aware_validator_lifecycle_is_bracketed_on_success_and_failure() -> None:
+    _session, manager, _blocked, _row_id = _validated()
+    validator = _PassAwareValidator()
+    result = manager.validation_pass(validator)
+    assert result.valid
+    assert result.checked_blocks == 1
+    assert validator.begins == validator.ends == 1
+    assert not validator.active
+    assert validator.state_digest == result.state_digest
+
+    validator.fail = True
+    with pytest.raises(RuntimeError, match="pass-aware validator failure"):
+        manager.validation_pass(validator)
+    assert validator.begins == validator.ends == 2
+    assert not validator.active

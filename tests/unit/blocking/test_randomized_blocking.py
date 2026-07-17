@@ -88,11 +88,11 @@ def test_incremental_and_unannounced_changes_match_full_recompute_after_every_st
                     manager.notify_fact_change(row)
         elif action == 4:
             child = randomizer.choice(nodes)
-            parent = session.nodes.get(child).parent
-            if parent is not None:
+            child_parent = session.nodes.get(child).parent
+            if child_parent is not None:
                 outcome = session.extensions.add(
                     randomizer.choice((20, 21)),
-                    (parent, child),
+                    (child_parent, child),
                     DependencySet(),
                 )
                 if randomizer.randrange(2):

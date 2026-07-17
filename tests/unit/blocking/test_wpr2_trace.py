@@ -42,11 +42,14 @@ def test_wpr2_pairwise_signature_trace_is_frozen() -> None:
         "afef482dafc98b2e6ba3609daffe8b3454aebd38e5e7e920979c8e4515c4f9fe"
     )
     assert labels.state_digest == (
-        "0207689b9aee994891e37af9d94ce124de6d22e902158b9a59271a7ae2c5c271"
+        "7a3e473b7645ea487009830e281bd4841bf7397cf81cf4ca08a155de57bf3871"
     )
     assert checker.signature(session, labels, second).sha256 == (
         "ca28b8412213a75045055e07b19a54add4e1cf86f1b1b4e61001d3696842cfb5"
     )
     assert hashlib.sha256(snapshot).hexdigest() == (
-        "70af0ffc2cf93f840453fbccf51f8877928d6f382416cedce3da0856cab18498"
+        "0d5d6e6812947622116f8f0ac34fc3ded80192077dd869517819457f83230e90"
+    )
+    assert hashlib.sha256(manager.trace_snapshot().encode("utf-8")).hexdigest() == (
+        "39dfcc2ffa3d8ee2739faaf26b6214e058aa098848f3f044a8989670f8ccebf4"
     )

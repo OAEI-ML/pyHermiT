@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from pyhermit.config import BlockingMode
 
 from .signatures import DirectCheckerKind
+
+if TYPE_CHECKING:
+    from pyhermit.clauses import ClauseProgram
 
 
 class _StringEnum(str, Enum):
@@ -39,6 +42,7 @@ class BlockingRequirements:
     complex_core: bool = False
     has_additional_ontology: bool = False
     query_local_axioms: bool = False
+    direct_checker_kind: DirectCheckerKind | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -53,6 +57,47 @@ class BlockingRequirements:
                 raise TypeError(f"{name} must be bool")
         if self.complex_core and not self.requires_validated_core:
             raise ValueError("complex_core requires validated core blocking")
+        if self.direct_checker_kind is not None and not isinstance(
+            self.direct_checker_kind, DirectCheckerKind
+        ):
+            raise TypeError("direct_checker_kind must be DirectCheckerKind or None")
+
+    @classmethod
+    def from_program(
+        cls,
+        program: ClauseProgram,
+        *,
+        has_inverse_roles: bool | None = None,
+        has_nominals: bool | None = None,
+        requires_validated_core: bool = False,
+        complex_core: bool = False,
+        has_additional_ontology: bool = False,
+        query_local_axioms: bool = False,
+        direct_checker_kind: DirectCheckerKind | None = None,
+    ) -> BlockingRequirements:
+        from pyhermit.clauses import ClauseProgram
+
+        if not isinstance(program, ClauseProgram):
+            raise TypeError("program must be ClauseProgram")
+        for name, value in (
+            ("has_inverse_roles", has_inverse_roles),
+            ("has_nominals", has_nominals),
+        ):
+            if value is not None and not isinstance(value, bool):
+                raise TypeError(f"{name} must be bool or None")
+        return cls(
+            has_inverse_roles=(
+                program.expressivity.inverse_roles
+                if has_inverse_roles is None
+                else has_inverse_roles
+            ),
+            has_nominals=(program.expressivity.nominals if has_nominals is None else has_nominals),
+            requires_validated_core=requires_validated_core,
+            complex_core=complex_core,
+            has_additional_ontology=has_additional_ontology,
+            query_local_axioms=query_local_axioms,
+            direct_checker_kind=direct_checker_kind,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +126,13 @@ def select_blocking_plan(
     )
     if validated:
         manager = BlockingManagerKind.VALIDATED_ANYWHERE
-        direct = DirectCheckerKind.VALIDATED_SINGLE
+        if requirements.direct_checker_kind in {
+            DirectCheckerKind.PAIRWISE,
+            DirectCheckerKind.VALIDATED_PAIRWISE,
+        }:
+            direct = DirectCheckerKind.VALIDATED_PAIRWISE
+        else:
+            direct = DirectCheckerKind.VALIDATED_SINGLE
         core = CoreBlockingMode.COMPLEX if requirements.complex_core else CoreBlockingMode.SIMPLE
     else:
         manager = (
@@ -89,7 +140,12 @@ def select_blocking_plan(
             if mode is BlockingMode.ANCESTOR
             else BlockingManagerKind.ANYWHERE
         )
-        direct = (
+        if requirements.direct_checker_kind in {
+            DirectCheckerKind.VALIDATED_SINGLE,
+            DirectCheckerKind.VALIDATED_PAIRWISE,
+        }:
+            raise ValueError("validated direct checkers require validated-anywhere blocking")
+        direct = requirements.direct_checker_kind or (
             DirectCheckerKind.PAIRWISE
             if requirements.has_inverse_roles
             else DirectCheckerKind.SINGLE

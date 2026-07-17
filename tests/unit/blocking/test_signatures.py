@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pyowl_core.model as owl
+
 from pyhermit.backends.python.blocking import (
     BlockingLabels,
     BlockingVocabulary,
@@ -8,7 +10,14 @@ from pyhermit.backends.python.blocking import (
     ValidatedPairwiseDirectBlockingChecker,
     ValidatedSingleDirectBlockingChecker,
 )
-from pyhermit.backends.python.state import DependencySet, NodeKind, TableauSession
+from pyhermit.backends.python.state import (
+    DependencySet,
+    NodeHandle,
+    NodeKind,
+    TableauSession,
+)
+from pyhermit.clauses import compile_normalized
+from pyhermit.normalize import normalize_axioms
 
 VOCABULARY = BlockingVocabulary(frozenset({1, 2, 3}), frozenset({10, 11}))
 
@@ -101,3 +110,62 @@ def test_validated_pairwise_uses_parent_core_projection_and_inverse_eligibility(
     session.extensions.add(2, (second_parent,), DependencySet(), core=True)
     labels = BlockingLabels.from_session(session, VOCABULARY)
     assert not checker.is_blocked_by(session, labels, first, second)
+
+
+def test_vocabulary_derivation_and_label_digest_are_canonical_across_fact_order() -> None:
+    concept = owl.Class(owl.IRI("urn:test:blocking:concept"))
+    filler = owl.Class(owl.IRI("urn:test:blocking:filler"))
+    role = owl.ObjectProperty(owl.IRI("urn:test:blocking:role"))
+    program = compile_normalized(
+        normalize_axioms(
+            (owl.SubClassOf(concept, owl.ObjectAllValuesFrom(role, filler)),),
+            logical_fingerprint="ab" * 32,
+        )
+    )
+    vocabulary = BlockingVocabulary.from_program(program)
+    assert vocabulary.atomic_concepts
+    assert vocabulary.atomic_object_roles
+
+    first = TableauSession()
+    second = TableauSession()
+    first_root = first.create_node(NodeKind.ROOT)
+    first_nodes = (
+        first.create_node(NodeKind.TREE, parent=first_root),
+        first.create_node(NodeKind.TREE, parent=first_root),
+    )
+    second_root = second.create_node(NodeKind.ROOT)
+    second_nodes = (
+        second.create_node(NodeKind.TREE, parent=second_root),
+        second.create_node(NodeKind.TREE, parent=second_root),
+    )
+    concept_id = min(vocabulary.atomic_concepts)
+    role_id = min(vocabulary.atomic_object_roles)
+    facts: tuple[tuple[int, tuple[NodeHandle, ...]], ...] = (
+        (concept_id, (first_nodes[0],)),
+        (concept_id, (first_nodes[1],)),
+        (role_id, first_nodes),
+    )
+    for predicate_id, arguments in facts:
+        first.extensions.add(predicate_id, arguments, DependencySet())
+    translated: tuple[tuple[int, tuple[NodeHandle, ...]], ...] = (
+        (concept_id, (second_nodes[0],)),
+        (concept_id, (second_nodes[1],)),
+        (role_id, second_nodes),
+    )
+    for predicate_id, arguments in reversed(translated):
+        second.extensions.add(predicate_id, arguments, DependencySet())
+
+    first_labels = BlockingLabels.from_session(first, vocabulary)
+    second_labels = BlockingLabels.from_session(second, vocabulary)
+    assert first_labels.state_digest == second_labels.state_digest
+    assert first_labels.earliest_difference(second_labels) is None
+
+    second.extensions.add(
+        sorted(vocabulary.atomic_concepts)[-1],
+        (second_nodes[1],),
+        DependencySet(),
+    )
+    changed = BlockingLabels.from_session(second, vocabulary)
+    assert (
+        first_labels.earliest_difference(changed) == second.nodes.get(second_nodes[1]).creation_id
+    )

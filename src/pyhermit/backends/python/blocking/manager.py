@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
+from typing import cast
 
 from pyhermit.backends.python.state import (
     FactRow,
@@ -22,13 +24,78 @@ from pyhermit.backends.python.state import (
     NodeLifecycle,
     TableauSession,
 )
-from pyhermit.events import CancellationToken
+from pyhermit.events import CancellationSource, CancellationToken
 from pyhermit.exceptions import InternalInvariantError, ResourceLimitError
 
 from .cache import BlockingSignatureCache
 from .signatures import BlockingLabels, BlockingSignature, DirectBlockingChecker
 from .strategy import BlockingManagerKind, BlockingPlan
-from .validation import BlockingValidator, ValidationPassResult
+from .validation import (
+    BlockingValidator,
+    CancellableBlockingValidator,
+    PassAwareBlockingValidator,
+    ValidationPassResult,
+)
+
+
+class _StringEnum(str, Enum):
+    def __str__(self) -> str:
+        return cast(str, self.value)
+
+
+class BlockingEvent(_StringEnum):
+    INVALIDATED = "invalidated"
+    DIRECT_BLOCK = "direct_block"
+    INDIRECT_BLOCK = "indirect_block"
+    CACHE_BLOCK = "cache_block"
+    UNBLOCKED = "unblocked"
+    RECOMPUTED = "recomputed"
+    BLOCK_VALIDATED = "block_validated"
+    BLOCK_REJECTED = "block_rejected"
+
+
+@dataclass(frozen=True, slots=True)
+class BlockingTraceEvent:
+    sequence: int
+    event: BlockingEvent
+    node: NodeHandle | None = None
+    blocker: NodeHandle | None = None
+    state_digest: str | None = None
+    details: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
+            raise TypeError("trace sequence must be a nonnegative integer")
+        if self.sequence < 0:
+            raise ValueError("trace sequence must be a nonnegative integer")
+        if not isinstance(self.event, BlockingEvent):
+            raise TypeError("event must be BlockingEvent")
+        for name in ("node", "blocker"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, NodeHandle):
+                raise TypeError(f"{name} must be NodeHandle or None")
+        if self.state_digest is not None and (
+            not isinstance(self.state_digest, str) or not self.state_digest
+        ):
+            raise ValueError("state_digest must be a nonempty string or None")
+        details = tuple(self.details)
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in details
+        ):
+            raise ValueError("trace details must be nonnegative integers")
+        object.__setattr__(self, "details", details)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "blocker": None
+            if self.blocker is None
+            else [self.blocker.slot, self.blocker.generation],
+            "details": list(self.details),
+            "event": self.event.value,
+            "node": None if self.node is None else [self.node.slot, self.node.generation],
+            "sequence": self.sequence,
+            "state_digest": self.state_digest,
+        }
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -72,9 +139,11 @@ class BlockingManager:
         "_last_labels",
         "_last_recomputed_from",
         "_rejected_blocks",
+        "_trace",
         "_validated_digest",
         "cache",
         "checker",
+        "max_trace_events",
         "plan",
         "session",
     )
@@ -86,6 +155,7 @@ class BlockingManager:
         plan: BlockingPlan,
         *,
         cache: BlockingSignatureCache | None = None,
+        max_trace_events: int = 100_000,
     ) -> None:
         if not isinstance(session, TableauSession):
             raise TypeError("session must be TableauSession")
@@ -95,6 +165,12 @@ class BlockingManager:
             raise TypeError("plan must be BlockingPlan")
         if checker.kind is not plan.direct_checker_kind:
             raise ValueError("checker kind does not match the blocking plan")
+        if (
+            isinstance(max_trace_events, bool)
+            or not isinstance(max_trace_events, int)
+            or max_trace_events < 0
+        ):
+            raise ValueError("max_trace_events must be a nonnegative integer")
         if cache is not None:
             if not isinstance(cache, BlockingSignatureCache):
                 raise TypeError("cache must be BlockingSignatureCache or None")
@@ -102,22 +178,30 @@ class BlockingManager:
                 raise ValueError("this blocking plan forbids signature caching")
             if cache.namespace.checker_kind is not checker.kind:
                 raise ValueError("cache namespace checker kind does not match")
+            if cache.namespace.core_mode is not plan.core_mode:
+                raise ValueError("cache namespace core mode does not match")
             if cache.namespace.vocabulary_fingerprint != checker.vocabulary.fingerprint:
                 raise ValueError("cache namespace vocabulary does not match")
         self.session = session
         self.checker = checker
         self.plan = plan
         self.cache = cache
+        self.max_trace_events = max_trace_events
         self._cache_blocks: set[NodeHandle] = set()
         self._dirty_creation_id: int | None = 0
         self._last_labels: BlockingLabels | None = None
         self._last_recomputed_from: int | None = None
         self._rejected_blocks: dict[tuple[NodeHandle, NodeHandle], str] = {}
+        self._trace: list[BlockingTraceEvent] = []
         self._validated_digest: str | None = None
 
     @property
     def last_recomputed_from(self) -> int | None:
         return self._last_recomputed_from
+
+    @property
+    def trace(self) -> tuple[BlockingTraceEvent, ...]:
+        return tuple(self._trace)
 
     def invalidate(self, node: NodeHandle | None = None) -> None:
         if node is None:
@@ -129,9 +213,15 @@ class BlockingManager:
                 changed = self.session.nodes.get(node).creation_id
             except KeyError:
                 changed = 0
-        if self._dirty_creation_id is None or changed < self._dirty_creation_id:
-            self._dirty_creation_id = changed
+        dirty = (
+            changed if self._dirty_creation_id is None else min(changed, self._dirty_creation_id)
+        )
+        if dirty == self._dirty_creation_id and self._validated_digest is None:
+            return
+        self._trail_state("invalidate")
+        self._dirty_creation_id = dirty
         self._validated_digest = None
+        self._record(BlockingEvent.INVALIDATED, node=node, details=(changed,))
 
     def notify_fact_change(self, row: FactRow | int) -> None:
         value = self.session.extensions.row(row) if isinstance(row, int) else row
@@ -161,52 +251,64 @@ class BlockingManager:
             raise TypeError("force_full must be bool")
         labels = BlockingLabels.from_session(self.session, self.checker.vocabulary)
         previous = self._last_labels
-        if force_full:
-            earliest = 0
-        elif self._dirty_creation_id is not None:
-            earliest = self._dirty_creation_id
-        elif previous is None or previous.state_digest != labels.state_digest:
+        if force_full or previous is None:
             earliest = 0
         else:
-            self._last_recomputed_from = None
-            return 0
+            projected = previous.earliest_difference(labels)
+            candidates = tuple(
+                value for value in (self._dirty_creation_id, projected) if value is not None
+            )
+            if not candidates and previous.state_digest == labels.state_digest:
+                return 0
+            earliest = min(candidates) if candidates else 0
 
-        expected = self.reference_assignments(labels)
-        expected_by_node = {assignment.node: assignment for assignment in expected}
-        active_handles = {
-            node.handle
-            for node in self.session.nodes.existing_nodes()
-            if node.lifecycle is NodeLifecycle.ACTIVE
-        }
-        self._cache_blocks.intersection_update(active_handles)
-        changed = 0
-        old_blocked = {handle: self.is_blocked(handle) for handle in active_handles}
-        for assignment in expected:
-            node = self.session.nodes.get(assignment.node)
-            current = self._current_assignment(node)
-            if current != assignment:
-                self._apply_assignment(assignment)
-                changed += 1
-        for handle in tuple(self._cache_blocks):
-            if handle not in expected_by_node or not expected_by_node[handle].from_cache:
-                self._cache_blocks.remove(handle)
-
-        for handle, was_blocked in old_blocked.items():
-            if was_blocked and not expected_by_node[handle].blocked:
-                self._reschedule_pending(handle)
-        self._last_labels = labels
-        if previous is None or previous.state_digest != labels.state_digest:
-            self._rejected_blocks = {
-                pair: digest
-                for pair, digest in self._rejected_blocks.items()
-                if digest == labels.state_digest
+        checkpoint = self.session.trail.checkpoint("blocking-compute-atomic")
+        self._trail_state("compute")
+        try:
+            expected = self.reference_assignments(labels)
+            expected_by_node = {assignment.node: assignment for assignment in expected}
+            active_handles = {
+                node.handle
+                for node in self.session.nodes.existing_nodes()
+                if node.lifecycle is NodeLifecycle.ACTIVE
             }
-        self._dirty_creation_id = None
-        self._last_recomputed_from = earliest
-        if previous is None or previous.state_digest != labels.state_digest:
-            self._validated_digest = None
-        self.check_invariants(labels=labels, expected=expected)
-        return changed
+            self._cache_blocks.intersection_update(active_handles)
+            changed = 0
+            old_blocked = {handle: self.is_blocked(handle) for handle in active_handles}
+            for assignment in expected:
+                node = self.session.nodes.get(assignment.node)
+                current = self._current_assignment(node)
+                if current != assignment:
+                    self._apply_assignment(assignment, state_digest=labels.state_digest)
+                    changed += 1
+            for handle in tuple(self._cache_blocks):
+                if handle not in expected_by_node or not expected_by_node[handle].from_cache:
+                    self._cache_blocks.remove(handle)
+
+            for handle, was_blocked in old_blocked.items():
+                if was_blocked and not expected_by_node[handle].blocked:
+                    self._reschedule_pending(handle)
+            self._last_labels = labels
+            if previous is None or previous.state_digest != labels.state_digest:
+                self._rejected_blocks = {
+                    pair: digest
+                    for pair, digest in self._rejected_blocks.items()
+                    if digest == labels.state_digest
+                }
+            self._dirty_creation_id = None
+            self._last_recomputed_from = earliest
+            if previous is None or previous.state_digest != labels.state_digest:
+                self._validated_digest = None
+            self._record(
+                BlockingEvent.RECOMPUTED,
+                state_digest=labels.state_digest,
+                details=(earliest, len(expected), changed),
+            )
+            self.check_invariants(labels=labels, expected=expected)
+            return changed
+        except Exception:
+            self.session.trail.rollback(checkpoint)
+            raise
 
     def reference_assignments(
         self,
@@ -313,50 +415,129 @@ class BlockingManager:
             raise TypeError("validator must implement BlockingValidator")
         if token is not None and not isinstance(token, CancellationToken):
             raise TypeError("token must be CancellationToken or None")
+        effective_token = CancellationSource().token if token is None else token
+        return self.session.run_with_recovery(
+            effective_token,
+            lambda: self._validation_pass(validator, effective_token),
+        )
+
+    def _validation_pass(
+        self,
+        validator: BlockingValidator,
+        token: CancellationToken,
+    ) -> ValidationPassResult:
         self.compute()
         labels = self._last_labels
         if labels is None:
             raise InternalInvariantError("blocking labels are unavailable after compute")
         assignments = self.reference_assignments(labels)
-        checked = 0
-        for assignment in assignments:
-            if not assignment.directly or assignment.from_cache or assignment.blocker is None:
-                continue
-            if token is not None:
-                self.session.poll(token)
-            signature = self.checker.signature(self.session, labels, assignment.node)
-            decision = validator.validate_block(
-                self.session,
-                assignment.node,
-                assignment.blocker,
-                signature,
-            )
-            checked += 1
-            if token is not None:
-                self.session.poll(token)
-            if decision.valid:
-                continue
-            self._rejected_blocks[(assignment.node, assignment.blocker)] = labels.state_digest
-            self._apply_assignment(BlockingAssignment(assignment.node, None, False))
-            promoted = sum(
-                int(self.session.extensions.set_core(row_id)) for row_id in decision.promote_row_ids
-            )
-            reschedule = set(decision.reschedule_nodes)
-            reschedule.add(assignment.node)
-            for node in sorted(reschedule):
-                self._reschedule_pending(node, force=True)
-            self.invalidate(assignment.node)
-            return ValidationPassResult(
-                False,
-                checked,
-                1,
-                promoted,
-                len(reschedule),
-                decision.violation_ids,
-                labels.state_digest,
-            )
-        self._validated_digest = labels.state_digest
-        return ValidationPassResult(True, checked, 0, 0, 0, (), labels.state_digest)
+        direct_assignments = tuple(
+            assignment
+            for assignment in assignments
+            if assignment.directly and not assignment.from_cache and assignment.blocker is not None
+        )
+        checkpoint = self.session.trail.checkpoint("blocking-validation-atomic")
+        self._trail_state("validation")
+        pass_aware = (
+            cast(PassAwareBlockingValidator, validator)
+            if isinstance(validator, PassAwareBlockingValidator)
+            else None
+        )
+        pass_started = False
+        try:
+            if pass_aware is not None and direct_assignments:
+                pass_aware.begin_validation_pass(self.session, labels.state_digest, token)
+                pass_started = True
+            try:
+                checked = 0
+                for assignment in direct_assignments:
+                    if assignment.blocker is None:
+                        raise InternalInvariantError("direct block has no live blocker")
+                    token.check()
+                    signature = self.checker.signature(self.session, labels, assignment.node)
+                    if isinstance(validator, CancellableBlockingValidator):
+                        decision = validator.validate_block_cancellable(
+                            self.session,
+                            assignment.node,
+                            assignment.blocker,
+                            signature,
+                            token,
+                        )
+                    else:
+                        decision = validator.validate_block(
+                            self.session,
+                            assignment.node,
+                            assignment.blocker,
+                            signature,
+                        )
+                    checked += 1
+                    token.check()
+                    if decision.valid:
+                        self._record(
+                            BlockingEvent.BLOCK_VALIDATED,
+                            node=assignment.node,
+                            blocker=assignment.blocker,
+                            state_digest=labels.state_digest,
+                        )
+                        continue
+                    for row_id in decision.promote_row_ids:
+                        if not self.session.extensions.row(row_id).active:
+                            raise ValueError("validator requested promotion of an inactive row")
+                    for node in decision.reschedule_nodes:
+                        self.session.nodes.require_active(node)
+                    self._rejected_blocks[(assignment.node, assignment.blocker)] = (
+                        labels.state_digest
+                    )
+                    self._apply_assignment(
+                        BlockingAssignment(assignment.node, None, False),
+                        state_digest=labels.state_digest,
+                    )
+                    promoted = sum(
+                        int(self.session.extensions.set_core(row_id))
+                        for row_id in decision.promote_row_ids
+                    )
+                    reschedule = set(decision.reschedule_nodes)
+                    reschedule.add(assignment.node)
+                    for node in sorted(
+                        reschedule,
+                        key=lambda value: self.session.nodes.require_active(value).creation_id,
+                    ):
+                        self._reschedule_pending(node, force=True)
+                    self._record(
+                        BlockingEvent.BLOCK_REJECTED,
+                        node=assignment.node,
+                        blocker=assignment.blocker,
+                        state_digest=labels.state_digest,
+                        details=decision.violation_ids,
+                    )
+                    self.invalidate(assignment.node)
+                    token.check()
+                    return ValidationPassResult(
+                        False,
+                        checked,
+                        1,
+                        promoted,
+                        len(reschedule),
+                        decision.violation_ids,
+                        labels.state_digest,
+                    )
+                self._validated_digest = labels.state_digest
+                token.check()
+                return ValidationPassResult(
+                    True,
+                    checked,
+                    0,
+                    0,
+                    0,
+                    (),
+                    labels.state_digest,
+                )
+            finally:
+                if pass_started and pass_aware is not None:
+                    pass_aware.end_validation_pass()
+        except Exception:
+            self.session.trail.rollback(checkpoint)
+            raise
 
     def validate_to_fixed_point(
         self,
@@ -493,6 +674,14 @@ class BlockingManager:
             sort_keys=True,
         )
 
+    def trace_snapshot(self) -> str:
+        return json.dumps(
+            [event.as_dict() for event in self._trace],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
     def _current_assignment(self, node: Node) -> BlockingAssignment:
         if node.handle in self._cache_blocks:
             return BlockingAssignment(node.handle, None, True, True)
@@ -502,13 +691,24 @@ class BlockingManager:
             node.directly_blocked if node.blocker is not None else False,
         )
 
-    def _apply_assignment(self, assignment: BlockingAssignment) -> None:
+    def _apply_assignment(
+        self,
+        assignment: BlockingAssignment,
+        *,
+        state_digest: str | None = None,
+    ) -> None:
         node = self.session.nodes.require_active(assignment.node)
         if assignment.from_cache:
             if node.blocker is not None:
                 self.session.nodes.set_blocked(node.handle, None, directly=False)
             self._cache_blocks.add(node.handle)
+            self._record(
+                BlockingEvent.CACHE_BLOCK,
+                node=node.handle,
+                state_digest=state_digest,
+            )
             return
+        was_cache_blocked = node.handle in self._cache_blocks
         self._cache_blocks.discard(node.handle)
         if node.blocker != assignment.blocker or (
             assignment.blocker is not None and node.directly_blocked != assignment.directly
@@ -518,6 +718,69 @@ class BlockingManager:
                 assignment.blocker,
                 directly=assignment.directly,
             )
+            event = (
+                BlockingEvent.UNBLOCKED
+                if assignment.blocker is None
+                else (
+                    BlockingEvent.DIRECT_BLOCK
+                    if assignment.directly
+                    else BlockingEvent.INDIRECT_BLOCK
+                )
+            )
+            self._record(
+                event,
+                node=node.handle,
+                blocker=assignment.blocker,
+                state_digest=state_digest,
+            )
+        elif was_cache_blocked:
+            self._record(
+                BlockingEvent.UNBLOCKED,
+                node=node.handle,
+                state_digest=state_digest,
+            )
+
+    def _trail_state(self, kind: str) -> None:
+        cache_blocks = set(self._cache_blocks)
+        dirty_creation_id = self._dirty_creation_id
+        last_labels = self._last_labels
+        last_recomputed_from = self._last_recomputed_from
+        rejected_blocks = dict(self._rejected_blocks)
+        validated_digest = self._validated_digest
+        trace_length = len(self._trace)
+
+        def undo() -> None:
+            self._cache_blocks = set(cache_blocks)
+            self._dirty_creation_id = dirty_creation_id
+            self._last_labels = last_labels
+            self._last_recomputed_from = last_recomputed_from
+            self._rejected_blocks = dict(rejected_blocks)
+            self._validated_digest = validated_digest
+            del self._trace[trace_length:]
+
+        self.session.trail.record(f"blocking.{kind}", undo)
+
+    def _record(
+        self,
+        event: BlockingEvent,
+        *,
+        node: NodeHandle | None = None,
+        blocker: NodeHandle | None = None,
+        state_digest: str | None = None,
+        details: tuple[int, ...] = (),
+    ) -> None:
+        if len(self._trace) >= self.max_trace_events:
+            return
+        self._trace.append(
+            BlockingTraceEvent(
+                len(self._trace),
+                event,
+                node,
+                blocker,
+                state_digest,
+                details,
+            )
+        )
 
     def _reschedule_pending(self, handle: NodeHandle, *, force: bool = False) -> None:
         try:
@@ -530,4 +793,9 @@ class BlockingManager:
         self.session.existential_candidates.enqueue(handle, priority)
 
 
-__all__ = ["BlockingAssignment", "BlockingManager"]
+__all__ = [
+    "BlockingAssignment",
+    "BlockingEvent",
+    "BlockingManager",
+    "BlockingTraceEvent",
+]

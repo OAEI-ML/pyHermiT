@@ -95,6 +95,22 @@ def test_unannounced_mutations_merge_prune_and_backtrack_cannot_leave_stale_bloc
     manager.compute()
     assert manager.canonical_snapshot() == baseline
 
+
+def test_diagnostic_trace_is_explicitly_bounded_without_affecting_assignments() -> None:
+    session, blocker, blocked, descendant = _branched_session()
+    plan = select_blocking_plan(BlockingMode.ANYWHERE, BlockingRequirements())
+    manager = BlockingManager(
+        session,
+        SingleDirectBlockingChecker(VOCABULARY),
+        plan,
+        max_trace_events=1,
+    )
+    manager.compute()
+    assert len(manager.trace) == 1
+    assert manager.blocker(blocked) == blocker
+    assert manager.blocker(descendant) == blocked
+    baseline = manager.canonical_snapshot()
+
     checkpoint = session.trail.checkpoint("prune")
     session.prune_subtree(blocked)
     manager.compute()
