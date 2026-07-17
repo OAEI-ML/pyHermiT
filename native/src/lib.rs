@@ -22,6 +22,7 @@ pub mod existentials;
 pub mod merging;
 pub mod model;
 pub mod nominals;
+pub mod roles;
 pub mod rules;
 pub mod store;
 pub mod wire;

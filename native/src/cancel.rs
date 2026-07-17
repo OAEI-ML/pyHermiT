@@ -154,6 +154,17 @@ impl crate::blocking::BlockingControl for CancellationState {
     }
 }
 
+impl crate::roles::RoleControl for CancellationState {
+    fn poll(&self) -> Result<(), crate::roles::RoleError> {
+        Self::poll(self).map_err(cancellation_role_error)
+    }
+
+    fn observe_memory(&self, bytes: u64) -> Result<(), crate::roles::RoleError> {
+        Self::observe_memory(self, bytes);
+        Self::poll(self).map_err(cancellation_role_error)
+    }
+}
+
 fn cancellation_blocking_error(error: NativeError) -> crate::blocking::BlockingError {
     match error.kind {
         ErrorKind::Cancelled | ErrorKind::Timeout => {
@@ -174,6 +185,28 @@ fn cancellation_blocking_error(error: NativeError) -> crate::blocking::BlockingE
                 .unwrap_or_default(),
         ),
         _ => crate::blocking::BlockingError::invariant(error.message),
+    }
+}
+
+fn cancellation_role_error(error: NativeError) -> crate::roles::RoleError {
+    match error.kind {
+        ErrorKind::Cancelled | ErrorKind::Timeout => {
+            crate::roles::RoleError::cancelled(error.message)
+        }
+        ErrorKind::Resource => crate::roles::RoleError::resource(
+            "max_memory_bytes",
+            error
+                .context
+                .get("observed")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default(),
+            error
+                .context
+                .get("allowed")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default(),
+        ),
+        _ => crate::roles::RoleError::invalid(error.message),
     }
 }
 
