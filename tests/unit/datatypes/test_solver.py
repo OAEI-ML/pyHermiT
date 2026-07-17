@@ -21,6 +21,7 @@ from pyhermit.datatypes import (
     FixedValueConstraint,
     InequalityConstraint,
     RangeConstraint,
+    SymbolicDataWitness,
     compile_datatype_semantic_model,
     compile_literal,
 )
@@ -172,7 +173,10 @@ def test_infinite_domains_are_eliminated_without_materialization() -> None:
     solver = DatatypeConstraintSolver()
     result = solver.solve(component)
     assert result.satisfiable
-    assert all(item.value is None for item in result.assignments)
+    assignments = {item.variable: item.value for item in result.assignments}
+    assert len(set(assignments.values())) == 3
+    assert result == solver.solve(component)
+    assert not any(isinstance(value, SymbolicDataWitness) for value in assignments.values())
     with pytest.raises(ValueError, match="requires finite"):
         solver.solve_exhaustive(component)
 

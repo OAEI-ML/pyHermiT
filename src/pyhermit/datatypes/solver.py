@@ -27,10 +27,12 @@ from .model import (
     CompiledLiteral,
     DataIdentity,
     DatatypeLimits,
+    DatatypeWitness,
     DateTimeIdentity,
     IEEEIdentity,
     NumericIdentity,
     StringIdentity,
+    SymbolicDataWitness,
     URIIdentity,
     XMLIdentity,
 )
@@ -45,6 +47,7 @@ _DATA_IDENTITIES = (
     StringIdentity,
     URIIdentity,
     XMLIdentity,
+    SymbolicDataWitness,
 )
 
 
@@ -218,15 +221,15 @@ class DatatypeClash:
 
 @dataclass(frozen=True, slots=True)
 class DatatypeVariableAssignment:
-    """Concrete identity, or ``None`` for a sound symbolic existential witness."""
+    """Concrete identity or explicit deterministic symbolic existential certificate."""
 
     variable: int
-    value: DataIdentity | None
+    value: DatatypeWitness
 
     def __post_init__(self) -> None:
         _validate_variable(self.variable)
-        if self.value is not None and not isinstance(self.value, _DATA_IDENTITIES):
-            raise TypeError("value must be a data-domain identity or None")
+        if not isinstance(self.value, _DATA_IDENTITIES):
+            raise TypeError("value must be a datatype witness")
 
 
 @dataclass(frozen=True, slots=True)
@@ -643,12 +646,12 @@ def _colour(
     if colouring is None:
         return _search_clash(prepared, active)
 
-    values_by_representative: dict[int, DataIdentity | None] = {
+    values_by_representative: dict[int, DatatypeWitness] = {
         **fixed_identities,
         **colouring,
     }
     for variable in reversed(eliminated):
-        values_by_representative[variable] = _finite_eliminated_witness(
+        values_by_representative[variable] = _eliminated_witness(
             variable,
             prepared,
             values_by_representative,
@@ -659,7 +662,7 @@ def _colour(
     assignments = tuple(
         DatatypeVariableAssignment(
             variable,
-            values_by_representative.get(prepared.representative_by_variable[variable]),
+            values_by_representative[prepared.representative_by_variable[variable]],
         )
         for variable in prepared.component.variables
     )
@@ -717,33 +720,26 @@ def _advance_search(
     return False
 
 
-def _finite_eliminated_witness(
+def _eliminated_witness(
     variable: int,
     prepared: _Prepared,
-    assigned: dict[int, DataIdentity | None],
+    assigned: dict[int, DatatypeWitness],
     limits: DatatypeLimits,
     cancellation: CancellationToken | None,
     work: _Work,
-) -> DataIdentity | None:
-    cardinality = prepared.domains[variable].finite_cardinality(
-        limits=limits,
-        cancellation=cancellation,
-    )
-    if cardinality is None or cardinality > limits.max_enumeration_values:
-        return None
+) -> DatatypeWitness:
     forbidden = {
         value
         for neighbour in prepared.adjacency[variable]
         if (value := assigned.get(neighbour)) is not None
     }
-    for value in prepared.domains[variable].enumerate_identities(
+    witness = prepared.domains[variable].witness(
+        excluding=forbidden,
         limits=limits,
         cancellation=cancellation,
-    ):
-        work.add()
-        if value not in forbidden:
-            return value
-    raise AssertionError("elimination cardinality proof did not leave a witness")
+    )
+    work.add()
+    return witness
 
 
 def _search_clash(

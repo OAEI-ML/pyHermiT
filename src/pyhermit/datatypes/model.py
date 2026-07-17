@@ -549,6 +549,40 @@ DataIdentity: TypeAlias = (
     | XMLIdentity
     | DateTimeIdentity
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolicDataWitness:
+    """Deterministic existential certificate when no literal identity can denote it.
+
+    This is not a data-value identity and is never returned as an OWL literal. It
+    records the exact range digest plus a stable ordinal for solver certificates such
+    as an irrational member of ``owl:real`` outside ``owl:rational``.
+    """
+
+    family: str
+    domain_digest: str
+    ordinal: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.family, str) or not self.family:
+            raise ValueError("family must be a nonempty string")
+        if (
+            not isinstance(self.domain_digest, str)
+            or len(self.domain_digest) != 64
+            or any(char not in "0123456789abcdef" for char in self.domain_digest)
+        ):
+            raise ValueError("domain_digest must be a lowercase SHA-256 hexadecimal digest")
+        if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int):
+            raise TypeError("ordinal must be int")
+        if self.ordinal < 0:
+            raise ValueError("ordinal must be nonnegative")
+
+    def as_tagged(self) -> tuple[str, str, str, int]:
+        return ("symbolic-data-witness-v1", self.family, self.domain_digest, self.ordinal)
+
+
+DatatypeWitness: TypeAlias = DataIdentity | SymbolicDataWitness
 ComparisonValue: TypeAlias = (
     NumericComparison
     | BooleanComparison
@@ -639,6 +673,7 @@ __all__ = [
     "CompiledLiteral",
     "DataIdentity",
     "DatatypeLimits",
+    "DatatypeWitness",
     "DateTimeComparison",
     "DateTimeIdentity",
     "IEEECategory",
@@ -652,6 +687,7 @@ __all__ = [
     "SourceLiteralIdentity",
     "StringComparison",
     "StringIdentity",
+    "SymbolicDataWitness",
     "URIComparison",
     "URIIdentity",
     "XMLComparison",

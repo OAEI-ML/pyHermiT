@@ -20,6 +20,7 @@ from typing import TypeAlias
 from pyhermit.events import CancellationToken
 from pyhermit.exceptions import ResourceLimitError
 
+from .language_tags import LanguageTagRange
 from .model import (
     BinaryComparison,
     BinaryIdentity,
@@ -287,6 +288,45 @@ class BinaryRange:
         _poll(cancellation, work)
         return tuple(output)
 
+    def first_identity(
+        self,
+        *,
+        excluding: Iterable[BinaryIdentity] = (),
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> BinaryIdentity:
+        """Return the deterministic least-length/lexicographic available value."""
+
+        selected_limits = _controls(limits, cancellation)
+        forbidden = frozenset(excluding)
+        if not all(isinstance(value, BinaryIdentity) for value in forbidden):
+            raise TypeError("excluding must contain BinaryIdentity values")
+        by_length: dict[int, set[int]] = {}
+        for value in forbidden:
+            if value.kind is self.kind:
+                by_length.setdefault(len(value.octets), set()).add(
+                    int.from_bytes(value.octets, "big")
+                )
+        for interval in self.lengths.intervals:
+            length = interval.lower
+            while interval.upper is None or length <= interval.upper:
+                if length > selected_limits.max_binary_bytes:
+                    raise ResourceLimitError(
+                        "binary witness exceeds the configured byte limit",
+                        limit="max_binary_bytes",
+                        observed=length,
+                        allowed=selected_limits.max_binary_bytes,
+                    )
+                blocked = by_length.get(length, set())
+                number = 0
+                while number in blocked:
+                    number += 1
+                if number.bit_length() <= length * 8:
+                    return BinaryIdentity(self.kind, number.to_bytes(length, "big"))
+                length += 1
+                _poll(cancellation, 1)
+        raise ValueError("binary range has no nonexcluded member")
+
     def _require_kind(self, other: BinaryRange) -> None:
         if not isinstance(other, BinaryRange):
             raise TypeError("other must be BinaryRange")
@@ -299,11 +339,11 @@ class TextLanguageRectangle:
     """One symbolic product of text and nonempty language-tag languages."""
 
     text: XSDRegex
-    language: XSDRegex
+    language: LanguageTagRange
 
     def __post_init__(self) -> None:
-        if not isinstance(self.text, XSDRegex) or not isinstance(self.language, XSDRegex):
-            raise TypeError("text and language must be XSDRegex values")
+        if not isinstance(self.text, XSDRegex) or not isinstance(self.language, LanguageTagRange):
+            raise TypeError("text must be XSDRegex and language must be LanguageTagRange")
 
     def intersection(self, other: TextLanguageRectangle) -> TextLanguageRectangle:
         if not isinstance(other, TextLanguageRectangle):
@@ -378,9 +418,8 @@ class StringRange:
             return False
         if selected.language is None:
             return self.without_language.fullmatch(selected.text)
-        language = selected.language.lower()
         return any(
-            clause.text.fullmatch(selected.text) and clause.language.fullmatch(language)
+            clause.text.fullmatch(selected.text) and clause.language.contains(selected.language)
             for clause in self.with_language
         )
 
@@ -463,11 +502,11 @@ class StringRange:
             present,
         )
 
-    def with_text_language(self, language: XSDRegex) -> StringRange:
+    def with_text_language(self, language: LanguageTagRange) -> StringRange:
         """Intersect this range with a case-folded language-range language."""
 
-        if not isinstance(language, XSDRegex):
-            raise TypeError("language must be XSDRegex")
+        if not isinstance(language, LanguageTagRange):
+            raise TypeError("language must be LanguageTagRange")
         return StringRange(
             self.datatype_iri,
             self.universe_without_language,
@@ -520,6 +559,8 @@ class StringRange:
                 limits=selected_limits,
                 cancellation=cancellation,
             )
+            if text_count == 0 or language_count == 0:
+                continue
             if text_count is None or language_count is None:
                 return None
             total += text_count * language_count
@@ -635,7 +676,7 @@ class StringRange:
                 limits=selected_limits,
                 cancellation=cancellation,
             )
-            languages = clause.language.enumerate_strings(
+            languages = clause.language.enumerate_tags(
                 limits=selected_limits,
                 cancellation=cancellation,
             )
@@ -645,6 +686,56 @@ class StringRange:
         if len(output) != cardinality:
             raise AssertionError("string-range cardinality and enumeration disagree")
         return tuple(sorted(output, key=lambda value: (value.text, value.language or "")))
+
+    def first_identity(
+        self,
+        *,
+        excluding: Iterable[StringIdentity] = (),
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> StringIdentity:
+        """Return the deterministic first text/language product member."""
+
+        selected_limits = _controls(limits, cancellation)
+        forbidden = frozenset(excluding)
+        if not all(isinstance(value, StringIdentity) for value in forbidden):
+            raise TypeError("excluding must contain StringIdentity values")
+        try:
+            text = self.without_language.first_string(
+                excluding=(value.text for value in forbidden if value.language is None),
+                limits=selected_limits,
+                cancellation=cancellation,
+            )
+        except ValueError:
+            pass
+        else:
+            return StringIdentity(text)
+        for clause in self.with_language:
+            skipped_texts: set[str] = set()
+            for _attempt in range(len(forbidden) + 1):
+                try:
+                    text = clause.text.first_string(
+                        excluding=skipped_texts,
+                        limits=selected_limits,
+                        cancellation=cancellation,
+                    )
+                except ValueError:
+                    break
+                try:
+                    language = clause.language.first_tag(
+                        excluding=(
+                            value.language
+                            for value in forbidden
+                            if value.text == text and value.language is not None
+                        ),
+                        limits=selected_limits,
+                        cancellation=cancellation,
+                    )
+                except ValueError:
+                    skipped_texts.add(text)
+                    continue
+                return StringIdentity(text, language)
+        raise ValueError("string range has no nonexcluded member")
 
     def _require_universe(self, other: StringRange) -> None:
         if not isinstance(other, StringRange):
@@ -752,6 +843,24 @@ class URIRange:
             )
         )
 
+    def first_identity(
+        self,
+        *,
+        excluding: Iterable[URIIdentity] = (),
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> URIIdentity:
+        forbidden = frozenset(excluding)
+        if not all(isinstance(value, URIIdentity) for value in forbidden):
+            raise TypeError("excluding must contain URIIdentity values")
+        return URIIdentity(
+            self.language.first_string(
+                excluding=(value.value for value in forbidden),
+                limits=limits,
+                cancellation=cancellation,
+            )
+        )
+
 
 XMLValue: TypeAlias = XMLIdentity | XMLComparison | CompiledLiteral
 
@@ -795,6 +904,20 @@ class XMLRange:
 
     def finite_cardinality(self) -> int | None:
         return None if self.include_all else 0
+
+    def first_identity(self, *, excluding: Iterable[XMLIdentity] = ()) -> XMLIdentity:
+        forbidden = frozenset(excluding)
+        if not all(isinstance(value, XMLIdentity) for value in forbidden):
+            raise TypeError("excluding must contain XMLIdentity values")
+        if not self.include_all:
+            raise ValueError("XML range is empty")
+        index = 0
+        while True:
+            # Plain character data is a valid XML fragment and already canonical.
+            candidate = XMLIdentity("" if index == 0 else str(index - 1))
+            if candidate not in forbidden:
+                return candidate
+            index += 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -922,7 +1045,7 @@ def _string_universe(
     text = XSDRegex.compile(pattern)
     if datatype_iri != RDF_PLAIN_LITERAL:
         return text, None
-    return text, TextLanguageRectangle(text, XSDRegex.compile(".+"))
+    return text, TextLanguageRectangle(text, LanguageTagRange.all())
 
 
 def _normalize_lengths(intervals: Iterable[LengthInterval]) -> tuple[LengthInterval, ...]:

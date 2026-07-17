@@ -131,6 +131,25 @@ class CharSet:
         return sum(upper - lower + 1 for lower, upper in self.intervals)
 
 
+def _first_codepoint_outside(characters: CharSet, blocked: tuple[int, ...]) -> int | None:
+    """Return the least member not in one sorted finite set."""
+
+    blocked_index = 0
+    for lower, upper in characters.intervals:
+        candidate = lower
+        while blocked_index < len(blocked) and blocked[blocked_index] < candidate:
+            blocked_index += 1
+        while blocked_index < len(blocked) and blocked[blocked_index] <= upper:
+            value = blocked[blocked_index]
+            if candidate < value:
+                return candidate
+            candidate = value + 1
+            blocked_index += 1
+        if candidate <= upper:
+            return candidate
+    return None
+
+
 XML_CHARACTERS: Final = CharSet(XML_INTERVALS)
 _SPACE = CharSet(((0x9, 0xA), (0xD, 0xD), (0x20, 0x20)))
 
@@ -193,6 +212,16 @@ class _DFATransition:
 class _DFA:
     transitions: tuple[tuple[_DFATransition, ...], ...]
     accepting: frozenset[int]
+
+
+@dataclass(slots=True)
+class _StringTrie:
+    terminal: bool
+    children: dict[int, _StringTrie]
+
+    def __init__(self) -> None:
+        self.terminal = False
+        self.children = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,6 +492,84 @@ class XSDRegex:
         if len(output) != cardinality:
             raise AssertionError("DFA cardinality and enumeration disagree")
         return tuple(output)
+
+    def first_string(
+        self,
+        *,
+        excluding: Iterable[str] = (),
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> str:
+        """Return the deterministic shortest/code-point-first nonexcluded member.
+
+        The finite exclusion set is represented as a trie. Once a path leaves that
+        trie, only the smallest character leading to each DFA target is relevant;
+        this avoids expanding million-code-point Unicode transitions.
+        """
+
+        selected_limits = _controls(limits, cancellation)
+        try:
+            forbidden = frozenset(excluding)
+        except TypeError as error:
+            raise TypeError("excluding must be an iterable of strings") from error
+        if not all(isinstance(value, str) for value in forbidden):
+            raise TypeError("excluding must contain strings")
+        automaton = _determinize(
+            self._expression,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+        productive = _productive_dfa_states(automaton)
+        if 0 not in productive:
+            raise ValueError("regular language is empty")
+        trie = _StringTrie()
+        for value in forbidden:
+            cursor = trie
+            for char in value:
+                cursor = cursor.children.setdefault(ord(char), _StringTrie())
+            cursor.terminal = True
+
+        pending: deque[tuple[int, _StringTrie | None, str]] = deque(((0, trie, ""),))
+        visited: set[tuple[int, int]] = set()
+        work = 0
+        while pending:
+            state, trie_node, prefix = pending.popleft()
+            key = (state, -1 if trie_node is None else id(trie_node))
+            if key in visited:
+                continue
+            visited.add(key)
+            if state in automaton.accepting and (trie_node is None or not trie_node.terminal):
+                return prefix
+            candidates: list[tuple[int, int, _StringTrie | None]] = []
+            for transition in automaton.transitions[state]:
+                if transition.target not in productive:
+                    continue
+                if trie_node is None:
+                    codepoint = transition.characters.intervals[0][0]
+                    candidates.append((codepoint, transition.target, None))
+                    continue
+                blocked = tuple(sorted(trie_node.children))
+                for codepoint in blocked:
+                    if transition.characters.contains(codepoint):
+                        candidates.append(
+                            (codepoint, transition.target, trie_node.children[codepoint])
+                        )
+                available = _first_codepoint_outside(transition.characters, blocked)
+                if available is not None:
+                    candidates.append((available, transition.target, None))
+            for codepoint, target, child in sorted(candidates):
+                pending.append((target, child, prefix + chr(codepoint)))
+                work += 1
+                if work > selected_limits.max_pattern_transitions:
+                    raise ResourceLimitError(
+                        "regular-language witness search exceeds the transition limit",
+                        limit="max_pattern_transitions",
+                        observed=work,
+                        allowed=selected_limits.max_pattern_transitions,
+                    )
+                if work % selected_limits.cancellation_poll_stride == 0:
+                    _poll(cancellation, selected_limits.cancellation_poll_stride)
+        raise ValueError("regular language has no nonexcluded member")
 
 
 class _Parser:

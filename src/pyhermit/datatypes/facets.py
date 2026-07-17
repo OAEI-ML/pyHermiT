@@ -15,6 +15,7 @@ from pyhermit.exceptions import OntologyProfileError
 
 from .binary import XSD_BASE64_BINARY, XSD_HEX_BINARY
 from .ieee_ranges import IEEERange
+from .language_tags import LanguageTagRange
 from .literals import (
     NUMERIC_DATATYPES,
     RDFS_LITERAL,
@@ -177,9 +178,7 @@ def _apply_facet(
             return string_range.with_text_pattern(
                 XSDRegex.compile(text, limits=limits, cancellation=cancellation)
             )
-        return string_range.with_text_language(
-            _language_range_regex(text, limits=limits, cancellation=cancellation)
-        )
+        return string_range.with_text_language(_language_tag_range(text))
 
     if datatype_iri == XSD_ANY_URI:
         _require_facet(datatype_iri, facet_iri, _LENGTH_FACETS | {XSD_PATTERN})
@@ -291,33 +290,15 @@ def _string_facet_value(
     return identity.text
 
 
-def _language_range_regex(
-    language_range: str,
-    *,
-    limits: DatatypeLimits,
-    cancellation: CancellationToken | None,
-) -> XSDRegex:
-    if language_range == "*":
-        return XSDRegex.compile(".+", limits=limits, cancellation=cancellation)
-    parts = language_range.split("-")
-    if not (
-        1 <= len(parts[0]) <= 8
-        and parts[0].isascii()
-        and parts[0].isalpha()
-        and all(1 <= len(part) <= 8 and part.isascii() and part.isalnum() for part in parts[1:])
-    ):
+def _language_tag_range(language_range: str) -> LanguageTagRange:
+    try:
+        return LanguageTagRange.basic(language_range)
+    except ValueError:
         raise OntologyProfileError(
             "rdf:langRange requires an RFC 4647 basic language range",
             code="INVALID_FACET_VALUE",
             context={"facet_iri": RDF_LANG_RANGE},
-        )
-    folded = language_range.lower()
-    escaped = "".join("\\" + char if char in r"\|.-?*+{}()[]^" else char for char in folded)
-    return XSDRegex.compile(
-        escaped + "(-.*)?",
-        limits=limits,
-        cancellation=cancellation,
-    )
+        ) from None
 
 
 def _require_facet(

@@ -11,6 +11,7 @@ the complete data domain.  No tableau or backend state is imported.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -22,6 +23,12 @@ from pyhermit.exceptions import ResourceLimitError, UnsupportedDatatypeError
 
 from .binary import XSD_BASE64_BINARY, XSD_HEX_BINARY
 from .facets import FacetRestriction, restrict_datatype
+from .ieee754 import (
+    comparison_from_identity,
+    identity_from_comparison,
+    identity_from_ordered_rank,
+    ordered_rank,
+)
 from .ieee_ranges import IEEERange
 from .literals import (
     NUMERIC_DATATYPES,
@@ -38,13 +45,17 @@ from .model import (
     CompiledLiteral,
     DataIdentity,
     DatatypeLimits,
+    DatatypeWitness,
     DateTimeIdentity,
+    IEEECategory,
+    IEEEComparison,
     IEEEFormat,
     IEEEIdentity,
     NumericComparison,
     NumericDomain,
     NumericIdentity,
     StringIdentity,
+    SymbolicDataWitness,
     URIIdentity,
     XMLIdentity,
 )
@@ -86,6 +97,17 @@ class DataValueFamily(_StringEnum):
 
 
 _FAMILIES = tuple(DataValueFamily)
+_DATA_IDENTITY_TYPES = (
+    BinaryIdentity,
+    BooleanIdentity,
+    DateTimeIdentity,
+    IEEEIdentity,
+    NumericIdentity,
+    StringIdentity,
+    URIIdentity,
+    XMLIdentity,
+)
+_DATATYPE_WITNESS_TYPES = (*_DATA_IDENTITY_TYPES, SymbolicDataWitness)
 _FamilyRange: TypeAlias = (
     NumericRange
     | BooleanRange
@@ -345,6 +367,62 @@ class DataDomainRange:
             for identity in _enumerate_clause(clause, selected, cancellation)
         }
         return tuple(sorted(identities, key=lambda value: repr(value.as_tagged())))
+
+    def witness(
+        self,
+        *,
+        excluding: Iterable[DatatypeWitness] = (),
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> DatatypeWitness:
+        """Return a deterministic member or an explicit existential certificate.
+
+        Concrete identities are preferred. ``SymbolicDataWitness`` is used only for
+        infinite value-space regions that the literal identity vocabulary cannot
+        denote directly, such as irrational reals, or whose concrete materialization
+        would violate configured hostile-input limits.
+        """
+
+        selected = _controls(limits, cancellation)
+        try:
+            forbidden = frozenset(excluding)
+        except TypeError as error:
+            raise TypeError("excluding must be an iterable of datatype witnesses") from error
+        if not all(isinstance(value, _DATATYPE_WITNESS_TYPES) for value in forbidden):
+            raise TypeError("excluding must contain datatype witnesses")
+        concrete = cast(
+            frozenset[DataIdentity],
+            frozenset(value for value in forbidden if not isinstance(value, SymbolicDataWitness)),
+        )
+        for clause in self._clauses:
+            explicit = _explicit_candidates(clause)
+            if explicit is not None:
+                for identity in explicit:
+                    if identity not in concrete:
+                        return identity
+                continue
+            for subset in _clause_family_subsets(clause):
+                candidate = subset.first_identity(selected, cancellation, concrete)
+                if candidate is not None:
+                    return candidate
+                if subset.cardinality_up_to(
+                    len(concrete) + 1,
+                    selected,
+                    cancellation,
+                ) > len(concrete):
+                    digest = _witness_digest(self._clauses)
+                    used = {
+                        value.ordinal
+                        for value in forbidden
+                        if isinstance(value, SymbolicDataWitness)
+                        and value.domain_digest == digest
+                        and value.family == subset.family.value
+                    }
+                    ordinal = 0
+                    while ordinal in used:
+                        ordinal += 1
+                    return SymbolicDataWitness(subset.family.value, digest, ordinal)
+        raise ValueError("data-domain range has no nonexcluded member")
 
 
 class _DNFContext:
@@ -638,6 +716,37 @@ class _FamilySubset:
             identity
             for identity in _range_enumerate(self.base, limits, cancellation)
             if self.contains(identity)
+        )
+
+    def first_identity(
+        self,
+        limits: DatatypeLimits,
+        cancellation: CancellationToken | None,
+        excluding: frozenset[DataIdentity],
+    ) -> DataIdentity | None:
+        """Return a concrete member, or ``None`` when a symbolic one is required."""
+
+        family_exclusions = frozenset(
+            value for value in excluding if _identity_family(value) is self.family
+        )
+        cardinality = self.cardinality(limits, cancellation)
+        if cardinality is not None and cardinality <= limits.max_enumeration_values:
+            for identity in self.enumerate(limits, cancellation):
+                if identity not in family_exclusions:
+                    return identity
+            return None
+        try:
+            candidate = _range_first_identity(
+                self.base,
+                family_exclusions | self.finite_exclusions,
+                self.numeric_exclusions,
+                limits,
+                cancellation,
+            )
+        except (ResourceLimitError, ValueError):
+            return None
+        return (
+            candidate if self.contains(candidate) and candidate not in family_exclusions else None
         )
 
 
@@ -1000,6 +1109,177 @@ def _range_enumerate(
     if _range_empty(value, limits, cancellation):
         return ()
     raise ValueError("nonempty string/URI/XML family range is infinite")
+
+
+def _range_first_identity(
+    value: _FamilyRange,
+    excluding: frozenset[DataIdentity],
+    numeric_exclusions: tuple[NumericRange, ...],
+    limits: DatatypeLimits,
+    cancellation: CancellationToken | None,
+) -> DataIdentity:
+    if isinstance(value, NumericRange):
+        return _numeric_first_identity(value, excluding, numeric_exclusions)
+    if isinstance(value, BooleanRange):
+        for selected in (False, True):
+            candidate = BooleanIdentity(selected)
+            if value.contains(BooleanComparison(selected)) and candidate not in excluding:
+                return candidate
+        raise ValueError("Boolean range has no nonexcluded member")
+    if isinstance(value, IEEERange):
+        blocked_ranks: set[int] = set()
+        blocked_nan = False
+        for identity in excluding:
+            if isinstance(identity, IEEEIdentity) and identity.format is value.format:
+                comparison = comparison_from_identity(identity)
+                if comparison.category.value == "nan":
+                    blocked_nan = True
+                else:
+                    blocked_ranks.add(ordered_rank(identity))
+        for interval in value.intervals:
+            rank = interval.lower_rank
+            while rank in blocked_ranks:
+                rank += 1
+            if rank <= interval.upper_rank:
+                return identity_from_ordered_rank(value.format, rank)
+        if value.include_nan and not blocked_nan:
+            return identity_from_comparison(IEEEComparison(value.format, IEEECategory.NAN))
+        raise ValueError("IEEE range has no nonexcluded member")
+    if isinstance(value, StringRange):
+        return value.first_identity(
+            excluding=(item for item in excluding if isinstance(item, StringIdentity)),
+            limits=limits,
+            cancellation=cancellation,
+        )
+    if isinstance(value, BinaryRange):
+        return value.first_identity(
+            excluding=(item for item in excluding if isinstance(item, BinaryIdentity)),
+            limits=limits,
+            cancellation=cancellation,
+        )
+    if isinstance(value, URIRange):
+        return value.first_identity(
+            excluding=(item for item in excluding if isinstance(item, URIIdentity)),
+            limits=limits,
+            cancellation=cancellation,
+        )
+    if isinstance(value, XMLRange):
+        return value.first_identity(
+            excluding=(item for item in excluding if isinstance(item, XMLIdentity))
+        )
+    return _date_time_first_identity(value, excluding, limits, cancellation)
+
+
+def _numeric_first_identity(
+    value: NumericRange,
+    excluding: frozenset[DataIdentity],
+    nested_exclusions: tuple[NumericRange, ...] = (),
+) -> NumericIdentity:
+    forbidden = {item for item in excluding if isinstance(item, NumericIdentity)}
+    anchors = [NumericComparison(0)]
+    for interval in value.intervals:
+        if interval.lower is not None:
+            anchors.append(interval.lower)
+        if interval.upper is not None:
+            anchors.append(interval.upper)
+        if interval.lower is not None and interval.upper is not None:
+            anchors.append(
+                NumericComparison(
+                    interval.lower.numerator * interval.upper.denominator
+                    + interval.upper.numerator * interval.lower.denominator,
+                    2 * interval.lower.denominator * interval.upper.denominator,
+                )
+            )
+    for excluded in nested_exclusions:
+        for interval in excluded.intervals:
+            if interval.lower is not None:
+                anchors.append(interval.lower)
+            if interval.upper is not None:
+                anchors.append(interval.upper)
+    deltas = (
+        NumericComparison(0),
+        NumericComparison(1),
+        NumericComparison(-1),
+        NumericComparison(1, 2),
+        NumericComparison(-1, 2),
+        NumericComparison(1, 3),
+        NumericComparison(-1, 3),
+        NumericComparison(1, 10),
+        NumericComparison(-1, 10),
+    )
+    rounds = len(forbidden) + len(nested_exclusions) * 2 + 3
+    for round_ in range(rounds):
+        for anchor in anchors:
+            for delta in deltas:
+                numerator = (
+                    anchor.numerator * delta.denominator
+                    + (delta.numerator + round_ * delta.denominator) * anchor.denominator
+                )
+                denominator = anchor.denominator * delta.denominator
+                candidate = NumericIdentity(numerator, denominator)
+                comparison = NumericComparison(candidate.numerator, candidate.denominator)
+                if (
+                    candidate not in forbidden
+                    and value.contains(comparison)
+                    and not any(excluded.contains(comparison) for excluded in nested_exclusions)
+                ):
+                    return candidate
+    raise ValueError("numeric range requires a non-rational or nonlocal symbolic witness")
+
+
+def _date_time_first_identity(
+    value: DateTimeRange,
+    excluding: frozenset[DataIdentity],
+    limits: DatatypeLimits,
+    cancellation: CancellationToken | None,
+) -> DateTimeIdentity:
+    forbidden = {item for item in excluding if isinstance(item, DateTimeIdentity)}
+    zoned_timelines = frozenset(
+        NumericIdentity(
+            item.local_numerator - item.timezone_offset_minutes * 60 * item.local_denominator,
+            item.local_denominator,
+        )
+        for item in forbidden
+        if item.timezone_offset_minutes is not None
+    )
+    try:
+        point = _numeric_first_identity(value.zoned, zoned_timelines)
+    except ValueError:
+        point = None
+    if point is not None:
+        for offset in range(-840, 841):
+            candidate = DateTimeIdentity(
+                point.numerator + offset * 60 * point.denominator,
+                point.denominator,
+                offset,
+            )
+            if candidate not in forbidden and value.contains(candidate):
+                return candidate
+            _poll(cancellation, offset + 841, limits.cancellation_poll_stride)
+    if value.include_unzoned_domain:
+        unzoned = frozenset(
+            NumericIdentity(item.local_numerator, item.local_denominator)
+            for item in forbidden
+            if item.timezone_offset_minutes is None
+        )
+        point = _numeric_first_identity(value.unzoned, unzoned)
+        candidate = DateTimeIdentity(point.numerator, point.denominator)
+        if candidate not in forbidden and value.contains(candidate):
+            return candidate
+    raise ValueError("date/time range has no materializable nonexcluded member")
+
+
+def _witness_digest(clauses: _DNF) -> str:
+    digest = hashlib.sha256(b"pyhermit/data-domain-witness/v1\0")
+    for clause in clauses:
+        digest.update(b"[")
+        for atom in clause:
+            digest.update(b"+" if atom.positive else b"-")
+            payload = atom.payload.canonical_bytes()
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        digest.update(b"]")
+    return digest.hexdigest()
 
 
 def _identity_numeric_comparison(value: DataIdentity) -> NumericComparison:
