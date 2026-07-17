@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use _native::error::NativeResult;
+use _native::merging::MergingManager;
 use _native::model::{DependencySet, NodeKind};
 use _native::rules::{
     GroundAtom, PredicateKind, RuleAtom, RuleClause, RuleEngine, RulePredicate, RuleProgram, Term,
@@ -70,6 +71,53 @@ fn branch_input() -> NativeResult<(TableauKernel, RuleEngine, Arc<CancellationSt
     Ok((kernel, engine, cancellation()?))
 }
 
+type MergeInput = (
+    TableauKernel,
+    MergingManager,
+    _native::model::NodeHandle,
+    _native::model::NodeHandle,
+    Arc<CancellationState>,
+);
+
+fn merge_input() -> NativeResult<MergeInput> {
+    const FACT_COUNT: u32 = 512;
+    let mut predicates = (0..FACT_COUNT)
+        .map(concept)
+        .collect::<NativeResult<Vec<_>>>()?;
+    predicates.push(
+        RulePredicate::new(
+            FACT_COUNT,
+            PredicateKind::Equality,
+            vec![TermSort::Object, TermSort::Object],
+        )?
+        .with_opposite(FACT_COUNT + 1),
+    );
+    predicates.push(
+        RulePredicate::new(
+            FACT_COUNT + 1,
+            PredicateKind::Inequality,
+            vec![TermSort::Object, TermSort::Object],
+        )?
+        .with_opposite(FACT_COUNT),
+    );
+    let program = RuleProgram::new(predicates, Vec::new())?;
+    let manager = MergingManager::new(&program)?;
+    let mut kernel = TableauKernel::new();
+    let target = kernel.create_node(NodeKind::Root, None, true, Some(0), None, None)?;
+    let source = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+    for predicate_id in 0..FACT_COUNT {
+        kernel.add_fact(
+            predicate_id,
+            vec![source],
+            DependencySet::empty(),
+            predicate_id % 2 == 0,
+            Some(predicate_id),
+        )?;
+    }
+    kernel.begin_operation()?;
+    Ok((kernel, manager, source, target, cancellation()?))
+}
+
 fn rule_kernel(criterion: &mut Criterion) {
     let dependencies = [
         DependencySet::empty().add(0).add(2).add(4).add(6),
@@ -104,6 +152,25 @@ fn rule_kernel(criterion: &mut Criterion) {
                     )?;
                     engine.resolve_clash(&mut kernel, &control)
                 });
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    criterion.bench_function("wpr2_merge_copy_512", |bencher| {
+        bencher.iter_batched(
+            merge_input,
+            |input| {
+                let result =
+                    input.and_then(|(mut kernel, manager, source, target, cancellation)| {
+                        manager.merge(
+                            &mut kernel,
+                            source,
+                            target,
+                            DependencySet::empty(),
+                            Some(&cancellation),
+                        )
+                    });
                 black_box(result)
             },
             BatchSize::SmallInput,
