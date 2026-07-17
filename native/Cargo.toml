@@ -1,0 +1,59 @@
+[package]
+name = "pyhermit-native"
+version = "0.1.0-dev"
+edition = "2021"
+rust-version = "1.83"
+license = "LGPL-3.0-or-later"
+repository = "https://github.com/OAEI-ML/pyHermiT"
+description = "Private Java-free native state kernel for pyHermiT"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+# Keep the native crate independent from the currently empty repository workspace.  WPP0
+# owns final workspace integration; WPR0 must already support `cargo --manifest-path` builds.
+[workspace]
+resolver = "2"
+
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "=0.28.3", features = ["abi3-py310"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.145"
+sha2 = "=0.10.9"
+
+[build-dependencies]
+pyo3-build-config = "=0.28.3"
+
+[dev-dependencies]
+criterion = { version = "=0.5.1", default-features = false }
+# Criterion permits newer Clap releases whose manifests require post-MSRV Cargo. Keep the
+# benchmark-only resolver on the last verified Rust 1.83-compatible line.
+clap = { version = "=4.5.21", default-features = false, features = ["std"] }
+
+[[bench]]
+name = "state_kernel"
+harness = false
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "unwind"
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
+nursery = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
