@@ -109,6 +109,13 @@ Golden regeneration is an explicit command and never happens during a test. Chan
 produce a semantic diff for review. A reference-update PR must run old and new oracle
 versions over the complete corpus.
 
+The `normalization` operation is a component oracle: after loading the staged import closure it
+runs pinned `OWLNormalization` into `OWLAxioms`, without constructing `Reasoner` or invoking
+clausification. Its typed value contains concept/data disjunction arrays, ordered simple and
+complex property inclusions, disjoint/characteristic property families, facts, keys, and defined
+datatypes. SWRL rules are rejected as excluded scope. A broad project-authored golden covers all
+families; a second atomic golden has no generated definitions and supports exact WP04 overlap.
+
 ## 4. Normalized comparison
 
 Normalize representation only where it has no semantic/public meaning:
@@ -124,6 +131,9 @@ Normalize representation only where it has no semantic/public meaning:
   configured node policy;
 - blank nodes are alpha-canonicalized within each document and standardized apart
   across imports;
+- HermiT `internal:` entities in structural-normalization output are graph-alpha-canonicalized
+  within their entity sort; canonicalization preserves distinct symbols and fails at a bounded
+  ambiguity limit rather than using Java allocation names;
 - literals compare their observable source token `(lexical, datatype IRI, normalized
   language component)`, their data-domain identity token, and—where a facet/range
   operation is under test—the separate comparison/order result; returned lexical

@@ -77,6 +77,9 @@ def build(args: argparse.Namespace) -> None:
     dependencies = classpath_file.read_text().strip().split(os.pathsep)
     compile_classpath = os.pathsep.join([str(worktree / "target/classes"), *dependencies])
     oracle_classes.mkdir(parents=True, exist_ok=True)
+    java_sources = sorted(args.java_source.resolve().parent.glob("*.java"))
+    if not java_sources:
+        raise RuntimeError("oracle adapter Java sources are absent")
     checked(
         [
             str(javac),
@@ -90,7 +93,7 @@ def build(args: argparse.Namespace) -> None:
             compile_classpath,
             "-d",
             str(oracle_classes),
-            str(args.java_source.resolve()),
+            *(str(source) for source in java_sources),
         ],
         cwd=worktree,
         env=env,

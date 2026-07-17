@@ -15,6 +15,11 @@ def test_initial_goldens_cover_empty_builtins_and_error_shapes(tmp_path: Path) -
     assert records["inconsistent-consistency"]["outcome"] == "UNSAT"
     assert records["builtins-class-hierarchy"]["value"]["kind"] == "hierarchy"
     assert records["malformed-error"]["error"]["category"] == "ERROR"
+    normalization = records["structural-normalization"]["value"]
+    assert normalization["kind"] == "structural_normalization"
+    assert normalization["families"]["concept_inclusions"]
+    atomic = records["atomic-structural-normalization"]["value"]
+    assert '"private"' not in json.dumps(atomic)
     candidate = tmp_path / "candidate.jsonl"
     candidate.write_text(GOLDENS.read_text())
     assert semantic_diff(GOLDENS, candidate) == ""

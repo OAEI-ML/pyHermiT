@@ -8,7 +8,7 @@
   "properties": {
     "schema_version": {"const": "1.0"},
     "request_id": {"type": "string", "minLength": 1},
-    "operation": {"enum": ["identity", "consistency", "class_hierarchy"]},
+    "operation": {"enum": ["identity", "consistency", "class_hierarchy", "normalization"]},
     "input": {
       "type": "object",
       "additionalProperties": false,

@@ -109,6 +109,11 @@ public final class OracleMain {
         OWLOntology ontology = manager.loadOntologyFromOntologyDocument(
             new File(String.valueOf(request.get("_resolved_document")))
         );
+        if ("normalization".equals(operation)) {
+            response.put("status", "LOGICAL");
+            response.put("value", NormalizationSerializer.normalize(ontology));
+            return response;
+        }
         Map<String, Object> configValue = (Map<String, Object>) request.get("config");
         Configuration configuration = new Configuration();
         configuration.ignoreUnsupportedDatatypes = Boolean.TRUE.equals(

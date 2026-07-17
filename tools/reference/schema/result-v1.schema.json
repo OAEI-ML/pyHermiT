@@ -2,6 +2,146 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://oaei-ml.org/pyhermit/reference/result-v1.schema.json",
   "title": "pyHermiT reference oracle result",
+  "$defs": {
+    "normalizationNode": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "anonymous_individual", "class", "data_all", "data_complement",
+            "data_exact", "data_has_value", "data_intersection", "data_max",
+            "data_min", "data_one_of", "data_property", "data_some", "data_union",
+            "datatype", "datatype_restriction", "inverse_object_property", "literal",
+            "named_individual", "object_all", "object_complement", "object_exact",
+            "object_has_self", "object_has_value", "object_intersection", "object_max",
+            "object_min", "object_one_of", "object_property", "object_some", "object_union"
+          ]
+        }
+      }
+    },
+    "normalizationFact": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "class_assertion", "data_property_assertion", "different_individuals",
+            "negative_data_property_assertion", "negative_object_property_assertion",
+            "object_property_assertion", "same_individual"
+          ]
+        }
+      }
+    },
+    "normalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "families"],
+      "properties": {
+        "kind": {"const": "structural_normalization"},
+        "families": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "asymmetric_object_properties", "complex_object_property_inclusions",
+            "concept_inclusions", "data_property_inclusions", "data_range_inclusions",
+            "defined_datatypes", "disjoint_data_properties", "disjoint_object_properties",
+            "facts", "has_keys", "irreflexive_object_properties",
+            "reflexive_object_properties", "simple_object_property_inclusions"
+          ],
+          "properties": {
+            "asymmetric_object_properties": {
+              "type": "array", "items": {"$ref": "#/$defs/normalizationNode"}
+            },
+            "complex_object_property_inclusions": {
+              "type": "array",
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["chain", "super_property"],
+                "properties": {
+                  "chain": {
+                    "type": "array", "minItems": 1,
+                    "items": {"$ref": "#/$defs/normalizationNode"}
+                  },
+                  "super_property": {"$ref": "#/$defs/normalizationNode"}
+                }
+              }
+            },
+            "concept_inclusions": {
+              "type": "array",
+              "items": {
+                "type": "array", "minItems": 1,
+                "items": {"$ref": "#/$defs/normalizationNode"}
+              }
+            },
+            "data_property_inclusions": {
+              "type": "array",
+              "items": {
+                "type": "array", "minItems": 2, "maxItems": 2,
+                "items": {"$ref": "#/$defs/normalizationNode"}
+              }
+            },
+            "data_range_inclusions": {
+              "type": "array",
+              "items": {
+                "type": "array", "minItems": 1,
+                "items": {"$ref": "#/$defs/normalizationNode"}
+              }
+            },
+            "defined_datatypes": {
+              "type": "array", "items": {"$ref": "#/$defs/normalizationNode"}
+            },
+            "disjoint_data_properties": {
+              "type": "array",
+              "items": {
+                "type": "array", "minItems": 2,
+                "items": {"$ref": "#/$defs/normalizationNode"}
+              }
+            },
+            "disjoint_object_properties": {
+              "type": "array",
+              "items": {
+                "type": "array", "minItems": 2,
+                "items": {"$ref": "#/$defs/normalizationNode"}
+              }
+            },
+            "facts": {
+              "type": "array", "items": {"$ref": "#/$defs/normalizationFact"}
+            },
+            "has_keys": {
+              "type": "array",
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["class_expression", "data_properties", "object_properties"],
+                "properties": {
+                  "class_expression": {"$ref": "#/$defs/normalizationNode"},
+                  "data_properties": {
+                    "type": "array", "items": {"$ref": "#/$defs/normalizationNode"}
+                  },
+                  "object_properties": {
+                    "type": "array", "items": {"$ref": "#/$defs/normalizationNode"}
+                  }
+                }
+              }
+            },
+            "irreflexive_object_properties": {
+              "type": "array", "items": {"$ref": "#/$defs/normalizationNode"}
+            },
+            "reflexive_object_properties": {
+              "type": "array", "items": {"$ref": "#/$defs/normalizationNode"}
+            },
+            "simple_object_property_inclusions": {
+              "type": "array",
+              "items": {
+                "type": "array", "minItems": 2, "maxItems": 2,
+                "items": {"$ref": "#/$defs/normalizationNode"}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
   "type": "object",
   "required": ["schema_version", "request_id", "status", "identity", "evidence"],
   "properties": {

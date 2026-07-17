@@ -9,7 +9,7 @@ equisatisfiable intermediate form with no parser-order artifacts.
 |---|---|
 | Normal-form stages and invariants | `normalization-clausification.md` §§1–2, 5–8 |
 | Model/canonical names | `ontology-model.md` §6; `contracts.md` §§2–3 |
-| Java behavior | pinned `structural/OWLNormalization.java`, `ExpressionManager.java`, `OWLAxioms.java` |
+| Java behavior | pinned `structural/OWLNormalization.java`, `ExpressionManager.java`, `OWLAxioms.java`; WP03 `normalization` JSONL operation and atomic/broad goldens |
 | Formal semantics | OWL 2 Direct Semantics expression/axiom tables |
 
 ## Deliverables

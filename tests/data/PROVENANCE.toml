@@ -26,6 +26,18 @@ license_expression = "LGPL-3.0-or-later"
 sha256 = "83d00a347663c5faa4806c5b5725329e2ca7d6a369800e49676b1dfc9c3e1692"
 
 [[artifact]]
+path = "tests/data/reference/inputs/normalization.ofn"
+origin = "project-authored structural-normalization coverage fixture"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "f9b5c6b27b3ee49fccd350319100b3b6fa69665e9f5732b5cdefb2e15c692211"
+
+[[artifact]]
+path = "tests/data/reference/inputs/normalization-atomic.ofn"
+origin = "project-authored atomic structural-normalization overlap fixture"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "1198bb7d9fcbe0623dfe60cf63cccef33da273cffc0e4e3e1ef462d60195bb8a"
+
+[[artifact]]
 path = "tests/data/reference/api-shapes.json"
 origin = "project-authored"
 license_expression = "LGPL-3.0-or-later"
@@ -35,13 +47,13 @@ sha256 = "cbcd72321a2ce64a92d8e3112a0db0f93d1c21f131af916abe6eb71cfd0f8f53"
 path = "tests/data/reference/requests-v1.jsonl"
 origin = "project-authored oracle requests"
 license_expression = "LGPL-3.0-or-later"
-sha256 = "8079f66b1700e2dc7ec73befd3e18acc49c75079804b81bc8f085114bec84a65"
+sha256 = "8b085aab41477ee5cca0094a5eef819f8fa4f3955d77efa465faeb42f51f4411"
 
 [[artifact]]
 path = "tests/data/reference/goldens-v1.jsonl"
 origin = "generated HermiT results over project-authored inputs"
 license_expression = "project-generated factual output"
-sha256 = "d359e2881c001cbc05676782846ac205a8b0a43719d1f99b4bc50108a932caf3"
+sha256 = "7a6e4912b6c57e5edf6cca19209d05d1449a2956061c423477b9446a44b37c34"
 contains_external_bodies = false
 
 [[artifact]]

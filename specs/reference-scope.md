@@ -223,6 +223,11 @@ Retain all eight structural class responsibilities:
 Strip code paths whose only inputs are SWRL or description graphs. Do not strip ordinary
 OWL keys/property chains/negative assertions because they share structural machinery.
 
+The quarantined WP03 `normalization` request is the exact component oracle for the
+`OWLNormalization`/`OWLAxioms` boundary. It exposes every retained holder family as typed JSON,
+alpha-canonicalizes HermiT-private names, and rejects SWRL. It is development evidence only and
+must never become a runtime Java bridge.
+
 Authoritative pipeline:
 
 1. Identity-preserving pyowl-core `OntologyView` capture, strict import closure, and

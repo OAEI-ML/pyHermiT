@@ -38,9 +38,10 @@ python -m tools.reference.build_oracle \
 The build patch removes only an obsolete SVN build-number plugin whose HTTP-era dependency
 resolution fails today. `build_oracle.py` verifies the exact reference commit, applies the
 hash-pinned patch to a detached worktree, captures a content-hashed dependency lock, compiles
-outside distributable paths, and requires an explicit JDK/Maven location.
+the project-authored Java adapter sources beside `OracleMain.java` outside distributable paths,
+and requires an explicit JDK/Maven location.
 
-Run the four reviewed requests (one Java subprocess per request, with timeout and heap cap):
+Run the six reviewed requests (one Java subprocess per request, with timeout and heap cap):
 
 ```console
 python -m tools.reference.oracle \
@@ -61,6 +62,43 @@ python -m tools.reference.goldens \
 The final command compares only the deterministic semantic projection and never overwrites a
 committed golden. Full live records still carry reference, JVM, OWLAPI, configuration, input,
 generator, duration, sampled peak RSS, exit status, and stdout/stderr identities.
+
+## Structural-normalization endpoint
+
+The v1 request operation `normalization` loads the hash-bound ontology/import closure and invokes
+the pinned `OWLNormalization` over a fresh `OWLAxioms` holder. It does not construct a reasoner or
+run clausification. The normalized `value` is a language-neutral typed tree:
+
+```text
+{"kind":"structural_normalization","families":{
+  "concept_inclusions": [[ClassExpression, ...]],
+  "data_range_inclusions": [[DataRange, ...]],
+  "simple_object_property_inclusions": [[sub, super]],
+  "complex_object_property_inclusions": [{"chain": [...], "super_property": ...}],
+  "disjoint_object_properties": [[...]],
+  "reflexive_object_properties": [...],
+  "irreflexive_object_properties": [...],
+  "asymmetric_object_properties": [...],
+  "data_property_inclusions": [[sub, super]],
+  "disjoint_data_properties": [[...]],
+  "facts": [...], "has_keys": [...], "defined_datatypes": [...]
+}}
+```
+
+Concept/data inclusion members are disjuncts, exactly matching the corresponding HermiT holder
+arrays; property pairs and chains retain semantic order. Set-valued operands, groups, facts, and
+families are validated, de-duplicated, and canonical-sorted by the Python driver. Full IRIs and
+literal lexical/datatype/language identity are retained. HermiT-reserved `internal:` entities and
+anonymous-individual IDs are treated as graph-local private symbols, refined by their complete
+structural context, and renamed to typed IDs such as `class:0` or `datatype:0`. A bounded
+canonical search resolves residual symmetries and fails explicitly rather than leaking source or
+Java iteration names.
+
+`normalization.ofn` exercises every emitted holder family and private-symbol alpha-renaming.
+`normalization-atomic.ofn` contains no private definitions and is the smallest exact overlap
+golden for Python WP04. SWRL-normalized rules are rejected because they are outside pyHermiT's
+OWL 2 core scope. Ordinary tests read these reviewed goldens and exercise only the pure-Python
+validator/canonicalizer; they never discover or invoke Java.
 
 ## W3C executor and inventories
 

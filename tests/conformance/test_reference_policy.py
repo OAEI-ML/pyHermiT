@@ -24,6 +24,8 @@ def test_requests_are_versioned_local_and_hash_bound() -> None:
         "inconsistent-consistency",
         "builtins-class-hierarchy",
         "malformed-error",
+        "structural-normalization",
+        "atomic-structural-normalization",
     }
     for request in requests:
         path = ROOT / "tests/data/reference/inputs" / request["input"]["document"]

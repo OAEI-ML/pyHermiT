@@ -63,15 +63,20 @@ than expected logical answers.
 
 ## Oracle results and determinism
 
-Two consecutive four-request live runs produced identical semantic projections and matched the
+Two consecutive six-request live runs produced identical semantic projections and matched the
 reviewed goldens:
 
 - empty ontology consistency: `LOGICAL`, `SAT`, `true`;
 - inconsistent ontology consistency: `LOGICAL`, `UNSAT`, `false`;
 - built-in/class hierarchy: four quotient nodes and three direct edges, including exact
-  `owl:Thing`/`owl:Nothing` identities; and
+  `owl:Thing`/`owl:Nothing` identities;
 - malformed input: stable `ERROR` /
-  `org.semanticweb.owlapi.io.UnparsableOntologyException` identity.
+  `org.semanticweb.owlapi.io.UnparsableOntologyException` identity;
+- broad structural normalization: `LOGICAL`, all 13 `OWLAxioms` concept/data/property/fact/key
+  families present, with five concept inclusions, four data-range inclusions, seven facts, two
+  alpha-normalized private classes, and one alpha-normalized private datatype; and
+- atomic structural normalization: `LOGICAL`, one concept inclusion, one simple object-property
+  inclusion, one data-property inclusion, five facts, one key, and no private symbols.
 
 The live records include raw and normalized outcomes, reference/tree/archive, Maven/build patch,
 dependency lock, JVM executable/version/vendor/VM/platform, OWLAPI, exact configuration,
@@ -97,3 +102,31 @@ Ordinary tests only read committed Python/JSON/TOML data. They do not discover a
 Java/Maven, access `.reference/`, or use the network. Live Java differential regeneration remains
 an explicit developer/release action. This checkpoint does not begin WP01 or WP04 and does not
 claim execution of reasoner services that belong to later work packages.
+
+## WP03 extension: pinned structural-normalization oracle
+
+The request schema now admits the operation `normalization`. The adapter loads only hash-bound
+local documents/imports, invokes pinned `OWLNormalization` over a fresh `OWLAxioms`, and returns
+before constructing `Reasoner` or running `OWLClausification`. A project-authored serializer emits
+typed trees for concept/data disjunction arrays, simple and complex object-property inclusions,
+object-property disjointness/characteristics, data-property inclusion/disjointness, facts, keys,
+and defined datatypes. The pinned JDK 11 compiled both adapter sources successfully with the same
+expected Java 8 bootstrap warning.
+
+The Python boundary validates exact family fields, node/fact variants, arities, entity sorts,
+cardinalities, absolute IRIs, and literal identity. It canonical-sorts and de-duplicates every
+set-valued position while preserving property-pair and chain order. HermiT `internal:` IRIs and
+anonymous-individual IDs are whole-graph alpha-canonicalized within their sort. Color refinement
+handles ordinary cases; a bounded lexicographic search resolves residual symmetries and fails
+explicitly above 100,000 permutations rather than retaining Java allocation names.
+
+Two parallel live runs of all six requests again produced byte-identical semantic projections.
+The broad and atomic live normalization values matched their committed goldens exactly; the atomic
+fixture deliberately contains no generated definition, providing a direct Python WP04 overlap
+gate despite the projects' different private-definition allocation policies.
+
+Extension validation on CPython 3.10.11 and 3.12.3 produced **19 passed** conformance/parity tests
+per runtime. Ruff formatting/lint was clean over `tools/reference`, conformance, and parity files;
+strict MyPy was clean over all nine reference Python modules; both runtimes compiled the reference
+Python/tests; the project, work-package, Markdown-link, provenance, and release-blocked validators
+passed. These ordinary gates read Python/JSON/TOML only and do not discover or invoke Java.

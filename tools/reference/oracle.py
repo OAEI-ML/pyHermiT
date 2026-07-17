@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from tools.reference._util import canonical_json, confined_path, sha256_bytes, sha256_file
-from tools.reference.canonicalize import canonical_boolean, canonical_error, canonical_hierarchy
+from tools.reference.canonicalize import (
+    canonical_boolean,
+    canonical_error,
+    canonical_hierarchy,
+    canonical_normalization,
+)
 
 SCHEMA_VERSION = "1.0"
 REFERENCE = {
@@ -46,7 +51,12 @@ def _validate_request(value: Any) -> dict[str, Any]:
         raise ValueError("unsupported schema_version")
     if not isinstance(value["request_id"], str) or not value["request_id"]:
         raise ValueError("request_id must be a non-empty string")
-    if value["operation"] not in {"identity", "consistency", "class_hierarchy"}:
+    if value["operation"] not in {
+        "identity",
+        "consistency",
+        "class_hierarchy",
+        "normalization",
+    }:
         raise ValueError("unsupported operation")
     input_value = value["input"]
     if not isinstance(input_value, dict) or set(input_value) != {"document", "sha256", "imports"}:
@@ -82,6 +92,7 @@ def _generator_identity(tool_root: Path) -> dict[str, Any]:
         tool_root / "oracle.py",
         tool_root / "canonicalize.py",
         tool_root / "java/org/oaeiml/pyhermit/reference/OracleMain.java",
+        tool_root / "java/org/oaeiml/pyhermit/reference/NormalizationSerializer.java",
         tool_root / "schema/request-v1.schema.json",
         tool_root / "schema/result-v1.schema.json",
     ]
@@ -289,6 +300,10 @@ def run_one(request: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
         if isinstance(raw_value, dict) and raw_value.get("kind") == "raw_hierarchy":
             raw = raw_value
             result["value"] = canonical_hierarchy(raw["nodes"], raw["edges"])
+        elif (
+            isinstance(raw_value, dict) and raw_value.get("kind") == "raw_structural_normalization"
+        ):
+            result["value"] = canonical_normalization(raw_value)
         elif "value" in response:
             result["value"] = (
                 canonical_boolean(raw_value) if isinstance(raw_value, bool) else raw_value
