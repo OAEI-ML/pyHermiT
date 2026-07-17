@@ -1,0 +1,7 @@
+Prefix(:=<urn:pyhermit:fixture:inconsistent#>)
+Ontology(<urn:pyhermit:fixture:inconsistent>
+  Declaration(Class(:A))
+  Declaration(NamedIndividual(:a))
+  ClassAssertion(:A :a)
+  ClassAssertion(ObjectComplementOf(:A) :a)
+)

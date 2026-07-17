@@ -1,0 +1,29 @@
+{
+  "blank_node_triples": [
+    [
+      {"kind": "bnode", "id": "source-name-9"},
+      {"kind": "iri", "value": "urn:fixture:p"},
+      {"kind": "bnode", "id": "source-name-2"}
+    ],
+    [
+      {"kind": "bnode", "id": "source-name-2"},
+      {"kind": "iri", "value": "urn:fixture:q"},
+      {"kind": "literal", "lexical": "01", "datatype": {"kind": "iri", "value": "http://www.w3.org/2001/XMLSchema#integer"}, "value_key": "integer:1", "comparison_key": "numeric:1"}
+    ]
+  ],
+  "error": {"category": "ERROR", "message": "parse failed", "type": "ParseError"},
+  "hierarchy": {
+    "nodes": [["urn:fixture:A", "urn:fixture:A2"], ["urn:fixture:B"]],
+    "edges": [[ ["urn:fixture:B"], ["urn:fixture:A2", "urn:fixture:A"] ]]
+  },
+  "inverse_property": {"kind": "inverse_object_property", "property": {"kind": "iri", "value": "urn:fixture:p"}},
+  "literal_term_identity": {
+    "kind": "literal",
+    "lexical": "01",
+    "datatype": {"kind": "iri", "value": "http://www.w3.org/2001/XMLSchema#integer"},
+    "value_key": "integer:1",
+    "comparison_key": "numeric:1"
+  },
+  "same_as": [["urn:fixture:i2", "urn:fixture:i1"], ["urn:fixture:i3"]],
+  "typed_iri": {"kind": "iri", "value": "urn:fixture:A"}
+}

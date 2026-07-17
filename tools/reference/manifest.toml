@@ -1,0 +1,115 @@
+schema = 1
+purpose = "Development-only exact HermiT oracle; excluded from runtime and distributions"
+
+[reference]
+repository = "https://github.com/phillord/hermit-reasoner.git"
+commit = "37ec30aced32ac81ebecc5e33fad255ddefcb4c3"
+tree = "576db18fd8152be24d577b24c99e2af0d31ceef8"
+commit_date = "2017-10-04T08:39:39+00:00"
+commit_subject = "minor fix, do not affect functionality"
+version = "1.4.0.0-SNAPSHOT"
+license_expression = "LGPL-3.0-or-later"
+archive_format = "git-archive-tar"
+archive_bytes = 22978560
+archive_sha256 = "41e389ddaf63dcff32bd3b5e360d000c15fccb328ddc749fd8464894f9c29dd7"
+acquisition = "fetch-only"
+redistributed = false
+
+[reference.tests]
+tracked_files = 186
+static_test_methods = 598
+inventory = "tests/data/reference/upstream-test-inventory.json"
+inventory_sha256 = "4f31509b536883bbdbac59dae0ddeabd93a3fedd8170198da02ece3bcfc936d9"
+
+[reference.w3c_export]
+path = "src/test/resources/org/semanticweb/HermiT/owl_wg_tests/ontologies/all.rdf"
+sha256 = "a703d36b774f55f14c0758cf20f2bdd635677045f7ba55053199660c10d6fefc"
+selected_cases = 266
+selected_checks = 350
+selection = "Approved AND DIRECT semantics AND DL species"
+acquisition = "fetch-only; redistribution rights unresolved"
+inventory = "tests/data/w3c/approved-direct-dl-inventory.json"
+inventory_sha256 = "d4e7a4c5a0b31ab5327b1404263da472759242ece7626e9d393354f4c9c6f1f9"
+
+[build]
+quarantine_root = ".reference/"
+patch = "tools/reference/patches/skip-buildnumber.patch"
+patch_sha256 = "576fb81fec05b6adc0b22e4b5e8446e17e838624514bcf307536f7ef7651a377"
+patch_purpose = "Remove obsolete build-number/SVN plugin only; it does not affect HermiT sources or behavior"
+automatic_downloads = false
+ordinary_tests_invoke_java = false
+compiled_main_sources = 200
+compiled_test_sources = 60
+dependency_count = 79
+classpath_file_sha256 = "75ff51b80cbe4eb294f5b594f86ea02dd6cc5b29bcab7927432cc1181d61f4b7"
+dependency_lock = "tools/reference/dependencies.lock.json"
+dependency_lock_sha256 = "c7d254d2ef6238154498900d1528b4f24bb46850077d874aa732fd33ac77d7c8"
+
+[toolchain.jdk]
+distribution = "Homebrew OpenJDK"
+version = "11.0.31"
+java_binary_sha256 = "f172fef0efafc193e527c6ab9d9dd10906e456d49153257e087456bd6f55f50f"
+javac_binary_sha256 = "d6dbd1716aa0d581e3a1502b4139b68fc7010479eb2adbc0fe9b5ae2141e1338"
+
+[toolchain.maven]
+version = "3.9.16"
+revision = "2bdd9fddda4b155ebf8000e807eb73fd829a51d5"
+launcher_sha256 = "235e67d7e6b46c491f01d9a441b14b39a1fc05353d69fb529c874475bcbdaf37"
+required_guard = "JAVA_HOME must name the pinned JDK 11; Maven otherwise follows the ambient JVM"
+
+[dependencies.owlapi]
+coordinate = "net.sourceforge.owlapi:owlapi-distribution:4.2.8"
+jar_bytes = 2948486
+jar_sha256 = "ae5eb861d74fd5d10706477d23547f4c4a5c30d8c851acdbfadf9a31d0f26d23"
+
+[observations.known_failures]
+path = "known-test-failures.txt"
+sha256 = "8fdd5d7eb6cba92051663fd4e6907586a89f0f2095aa12c3dfd988c5503b672f"
+meaning = "historical observations only; never converted into expected passes"
+
+[observations.all_tests_report]
+path = "src/test/testreports/Test Results - AllTests.html"
+sha256 = "8f2851335831b57fa7df2ae06acc1c1865618af7313561d4161d62799effe5f7"
+reported_tests = 1269
+reported_failures = 0
+reported_errors = 0
+reported_seconds = 30.20
+
+[observations.hermit_report]
+path = "src/test/testreports/Test Results - All_in_HermiT.html"
+sha256 = "9c0881cba31c61671b4666e66ccd395375905cbd716dceaee91c7c7e45b0a797"
+
+[[corpus]]
+id = "hermit-source-and-src-test"
+kind = "external"
+decision = "fetch-only"
+redistributed = false
+reason = "Oracle compilation and inventory input; exact upstream LGPL source remains quarantined"
+
+[[corpus]]
+id = "w3c-all-rdf-export"
+kind = "external"
+decision = "fetch-only"
+redistributed = false
+reason = "Redistribution rights for embedded ontology bodies have not been established"
+
+[[corpus]]
+id = "derived-inventories"
+kind = "generated-metadata"
+decision = "vendored-generated"
+redistributed = true
+reason = "Only identifiers, counts, sizes, hashes, scope decisions, and field availability"
+
+[[corpus]]
+id = "reference-goldens"
+kind = "generated-output"
+decision = "vendored-generated"
+redistributed = true
+reason = "Small oracle results over project-authored inputs; no upstream ontology bodies"
+
+[[corpus]]
+id = "pyhermit-original-fixtures"
+kind = "project-authored"
+decision = "vendored"
+redistributed = true
+license_expression = "LGPL-3.0-or-later"

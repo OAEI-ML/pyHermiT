@@ -1,0 +1,410 @@
+{
+  "dependencies": [
+    {
+      "bytes": 4467,
+      "path": "aopalliance/aopalliance/1.0/aopalliance-1.0.jar",
+      "sha256": "0addec670fedcd3f113c5c8091d783280d23f75e3acb841b61a9cdb079376a08"
+    },
+    {
+      "bytes": 280928,
+      "path": "ch/qos/logback/logback-classic/1.1.3/logback-classic-1.1.3.jar",
+      "sha256": "98c3f18f5d0d642cd5f327cc724566cd19649626c7d88f70143bd704c94157d5"
+    },
+    {
+      "bytes": 455041,
+      "path": "ch/qos/logback/logback-core/1.1.3/logback-core-1.1.3.jar",
+      "sha256": "47c0fd342995d3315b8faccacc324b2a76143b27c430d4b2d6a29eabc31f5c14"
+    },
+    {
+      "bytes": 39817,
+      "path": "com/fasterxml/jackson/core/jackson-annotations/2.5.1/jackson-annotations-2.5.1.jar",
+      "sha256": "836a18d49b1cc515dde8b14cb7ea2b3ac3fd26b1c914b5a399bca0ecc9fbf4bc"
+    },
+    {
+      "bytes": 229860,
+      "path": "com/fasterxml/jackson/core/jackson-core/2.5.1/jackson-core-2.5.1.jar",
+      "sha256": "ba80bd8304bc268a573ac424b692f465a7c087db2207daa50979d7ab2751baf6"
+    },
+    {
+      "bytes": 1138921,
+      "path": "com/fasterxml/jackson/core/jackson-databind/2.5.1/jackson-databind-2.5.1.jar",
+      "sha256": "0d817bad8b533a61fe0e50b53303d89a1f71b2f92b237d9fe2e314bc4a9b0f90"
+    },
+    {
+      "bytes": 13774,
+      "path": "com/github/jsonld-java/jsonld-java-sesame/0.5.0/jsonld-java-sesame-0.5.0.jar",
+      "sha256": "7f642489bd4f949137573e70402d7bf4c2b388d0264312ef0c92b0eb4d87c19d"
+    },
+    {
+      "bytes": 118779,
+      "path": "com/github/jsonld-java/jsonld-java/0.5.0/jsonld-java-0.5.0.jar",
+      "sha256": "7bd3c137e8a1e12148a706015618d3b8ad01be7ac641a348d289933ecc63b8b4"
+    },
+    {
+      "bytes": 31866,
+      "path": "com/google/code/findbugs/jsr305/2.0.1/jsr305-2.0.1.jar",
+      "sha256": "1e7f53fa5b8b5c807e986ba335665da03f18d660802d8bf061823089d1bee468"
+    },
+    {
+      "bytes": 2256213,
+      "path": "com/google/guava/guava/18.0/guava-18.0.jar",
+      "sha256": "d664fbfc03d2e5ce9cab2a44fb01f1d0bf9dfebeccc1a473b1f9ea31f79f6f99"
+    },
+    {
+      "bytes": 43425,
+      "path": "com/google/inject/extensions/guice-assistedinject/4.0/guice-assistedinject-4.0.jar",
+      "sha256": "ed44e4d809e6b3bc41ccd6e8b5acf43fb517234f4ac4c1125d7a82c44826f147"
+    },
+    {
+      "bytes": 81388,
+      "path": "com/google/inject/extensions/guice-multibindings/4.0/guice-multibindings-4.0.jar",
+      "sha256": "79d1d122ce059ed2c55d5acfd77eb31e3891f6a4aa997257ec0e7aec3d10f078"
+    },
+    {
+      "bytes": 668235,
+      "path": "com/google/inject/guice/4.0/guice-4.0.jar",
+      "sha256": "b378ffc35e7f7125b3c5f3a461d4591ae1685e3c781392f0c854ed7b7581d6d2"
+    },
+    {
+      "bytes": 62263,
+      "path": "com/googlecode/mdock/mdock/2.0.1/mdock-2.0.1.jar",
+      "sha256": "d5c0e956ce467feeb2031f1428d4accb10b7d098c4a71752d2db09ac7f191699"
+    },
+    {
+      "bytes": 31348,
+      "path": "com/jgoodies/jgoodies-common/1.6.0/jgoodies-common-1.6.0.jar",
+      "sha256": "4420e0cc341d26b0a3afc7aa0630deb5ae2911f641ee615c90cf8c1c3c01cb67"
+    },
+    {
+      "bytes": 402425,
+      "path": "com/jgoodies/jgoodies-looks/2.5.3/jgoodies-looks-2.5.3.jar",
+      "sha256": "c0cdf153d692f7b9bbf59e6a8c0eb522187fb7b191877aca12eed7db77a8bfb4"
+    },
+    {
+      "bytes": 263965,
+      "path": "commons-codec/commons-codec/1.9/commons-codec-1.9.jar",
+      "sha256": "ad19d2601c3abf0b946b5c3a4113e226a8c1e3305e395b90013b78dd94a723ce"
+    },
+    {
+      "bytes": 185140,
+      "path": "commons-io/commons-io/2.4/commons-io-2.4.jar",
+      "sha256": "cc6a41dc3eaacc9e440a6bd0d2890b20d36b4ee408fe2d67122f328bb6e01581"
+    },
+    {
+      "bytes": 62050,
+      "path": "commons-logging/commons-logging/1.1.3/commons-logging-1.1.3.jar",
+      "sha256": "70903f6fc82e9908c8da9f20443f61d90f0870a312642991fe8462a0b9391784"
+    },
+    {
+      "bytes": 176285,
+      "path": "dk/brics/automaton/automaton/1.11-8/automaton-1.11-8.jar",
+      "sha256": "a24475f6ccfe1cc7a4fe9e34e05ce687b0ce0c6e8cb781e0eced3b186482c61e"
+    },
+    {
+      "bytes": 50930,
+      "path": "edu/stanford/protege/org.protege.xmlcatalog/1.0.5/org.protege.xmlcatalog-1.0.5.jar",
+      "sha256": "1fab9d8ca928cb54d7f795da3fbe99909662a3d8e91d0fe5e6cba160b0f8f2aa"
+    },
+    {
+      "bytes": 5669,
+      "path": "edu/stanford/protege/protege-common/5.0.0-beta-21/protege-common-5.0.0-beta-21.jar",
+      "sha256": "49ff2e8ef978daa4551651389edaacc8d736349c974c036b16567627ac115b78"
+    },
+    {
+      "bytes": 1055432,
+      "path": "edu/stanford/protege/protege-editor-core/5.0.0-beta-21/protege-editor-core-5.0.0-beta-21.jar",
+      "sha256": "64317a0f29aaa1c1e3ff57dfbbd8cadf445b079ee5f8ad48ce72a17bf03efc69"
+    },
+    {
+      "bytes": 2246624,
+      "path": "edu/stanford/protege/protege-editor-owl/5.0.0-beta-21/protege-editor-owl-5.0.0-beta-21.jar",
+      "sha256": "fcfc6a0722ae4fc2f2b7773242020c532ffa272a44c71eef895ccc528eff8bd4"
+    },
+    {
+      "bytes": 59788,
+      "path": "gnu/getopt/java-getopt/1.0.13/java-getopt-1.0.13.jar",
+      "sha256": "f09dc6369ffc4fe4362cbd49b6ac6c4a7471375ac5d884c71b0a625a889c38c4"
+    },
+    {
+      "bytes": 2497,
+      "path": "javax/inject/javax.inject/1/javax.inject-1.jar",
+      "sha256": "91c77044a50c481636c32d916fd89c9118a72195390452c81065080f957de7ff"
+    },
+    {
+      "bytes": 226161,
+      "path": "jaxen/jaxen/1.1.4/jaxen-1.1.4.jar",
+      "sha256": "5da6c3bfc2aaf0fd7d43dc76829164a815fb9a9567eca9b7ccf67998fa70e3b5"
+    },
+    {
+      "bytes": 314932,
+      "path": "junit/junit/4.12/junit-4.12.jar",
+      "sha256": "59721f0805e223d84b90677887d9ff567dc534d7c502ca903c0c2b17f05c116a"
+    },
+    {
+      "bytes": 489884,
+      "path": "log4j/log4j/1.2.17/log4j-1.2.17.jar",
+      "sha256": "1d31696445697720527091754369082a6651bd49781b6005deb94e56753406f9"
+    },
+    {
+      "bytes": 2523218,
+      "path": "net/sf/trove4j/trove4j/3.0.3/trove4j-3.0.3.jar",
+      "sha256": "3c8616203d61a12a7e3487e8b34f3c198c2b5ba9e90da0c7ea32d99cd4958012"
+    },
+    {
+      "bytes": 2948486,
+      "path": "net/sourceforge/owlapi/owlapi-distribution/4.2.8/owlapi-distribution-4.2.8.jar",
+      "sha256": "ae5eb861d74fd5d10706477d23547f4c4a5c30d8c851acdbfadf9a31d0f26d23"
+    },
+    {
+      "bytes": 8776724,
+      "path": "net/sourceforge/owlapi/owlapi-osgidistribution/4.1.3/owlapi-osgidistribution-4.1.3.jar",
+      "sha256": "07fee6ccf9069cbabce99dc8a60a355cd996115b8c3676c3bdc6bb59e7e6529b"
+    },
+    {
+      "bytes": 526539,
+      "path": "org/apache/felix/org.apache.felix.framework/4.4.1/org.apache.felix.framework-4.4.1.jar",
+      "sha256": "fa5f7202f3af6bc7df913ed57cb5388acdf03630f337f01dc25dd841a167fbfc"
+    },
+    {
+      "bytes": 538830,
+      "path": "org/apache/felix/org.apache.felix.main/4.4.1/org.apache.felix.main-4.4.1.jar",
+      "sha256": "c75912b02d917a4df63bd461d54c0c730bf107343833030fb4035e04c31f62a2"
+    },
+    {
+      "bytes": 47465,
+      "path": "org/apache/geronimo/specs/geronimo-activation_1.1_spec/1.1/geronimo-activation_1.1_spec-1.1.jar",
+      "sha256": "3910d9f8b331b2ae573e16591ac246058e088cac97f3ec064f46b10a8801fcb9"
+    },
+    {
+      "bytes": 223298,
+      "path": "org/apache/geronimo/specs/geronimo-javamail_1.4_spec/1.7.1/geronimo-javamail_1.4_spec-1.7.1.jar",
+      "sha256": "6f1e85d9c66135f5a9dbc9f78cbf8132e52f8a85884d618ccf0dbe9344c5a330"
+    },
+    {
+      "bytes": 28804,
+      "path": "org/apache/geronimo/specs/geronimo-stax-api_1.0_spec/1.0.1/geronimo-stax-api_1.0_spec-1.0.1.jar",
+      "sha256": "124235815fba376b0c20ed37f79d691fa26b4e00297a4ab27b6ca05ceb591348"
+    },
+    {
+      "bytes": 158982,
+      "path": "org/apache/httpcomponents/httpclient-cache/4.5.1/httpclient-cache-4.5.1.jar",
+      "sha256": "5315c8ad696d3257f632c8f090ca79c04bbef4beb57b79b4108f9d5607a592c7"
+    },
+    {
+      "bytes": 732765,
+      "path": "org/apache/httpcomponents/httpclient/4.5.1/httpclient-4.5.1.jar",
+      "sha256": "0ba1a340188f33408632cedbe25d6fe17c1458bde17680a06cd6f6a69476ff74"
+    },
+    {
+      "bytes": 326594,
+      "path": "org/apache/httpcomponents/httpcore/4.4.3/httpcore-4.4.3.jar",
+      "sha256": "e4ce096fab656865f0d78d88887377111fb2f3bcd5004c1cddbc899987f32b5e"
+    },
+    {
+      "bytes": 95536,
+      "path": "org/apache/james/apache-mime4j-core/0.7.2/apache-mime4j-core-0.7.2.jar",
+      "sha256": "4d7434c68f94b81a253c12f28e6bbb4d6239c361d6086a46e22e594bb43ac660"
+    },
+    {
+      "bytes": 16513,
+      "path": "org/apache/servicemix/bundles/org.apache.servicemix.bundles.aopalliance/1.0_6/org.apache.servicemix.bundles.aopalliance-1.0_6.jar",
+      "sha256": "c4a1f9a48be3018c3fc4c817f9038d028a1960e671727caf6b89b8a2580cdcad"
+    },
+    {
+      "bytes": 10879,
+      "path": "org/apache/servicemix/bundles/org.apache.servicemix.bundles.javax-inject/1_2/org.apache.servicemix.bundles.javax-inject-1_2.jar",
+      "sha256": "3f0540bb6d56269b17fe4897a1197f48e07d63b993c8b73a48b63e0cdc76a4bb"
+    },
+    {
+      "bytes": 421631,
+      "path": "org/apache/ws/commons/axiom/axiom-api/1.2.14/axiom-api-1.2.14.jar",
+      "sha256": "c17b35199ff938240ac18f70e0750888269432375029e15d8e5d49ce294a654d"
+    },
+    {
+      "bytes": 59805,
+      "path": "org/apache/ws/commons/axiom/axiom-c14n/1.2.14/axiom-c14n-1.2.14.jar",
+      "sha256": "082da81c99890e2007452c6231483120c6c7d0374fcb4b8bfcc61ba858833a87"
+    },
+    {
+      "bytes": 212170,
+      "path": "org/apache/ws/commons/axiom/axiom-dom/1.2.14/axiom-dom-1.2.14.jar",
+      "sha256": "7f3aaf83dfbcfbec5d5ad915f77349d884323f6a28134e1a11e28de0d1792bb1"
+    },
+    {
+      "bytes": 170746,
+      "path": "org/apache/ws/commons/axiom/axiom-impl/1.2.14/axiom-impl-1.2.14.jar",
+      "sha256": "cfafc9dab48292b86932b29b1e3c08b4dd2fa1f1e2a7bc9cd0f0f88868edf222"
+    },
+    {
+      "bytes": 182112,
+      "path": "org/codehaus/woodstox/stax2-api/3.1.1/stax2-api-3.1.1.jar",
+      "sha256": "850bbbbaaa1e7ecc4ebecdb8a283ff36d1f2451c6797b0175bc40ae2ad9b31c4"
+    },
+    {
+      "bytes": 479104,
+      "path": "org/codehaus/woodstox/woodstox-core-asl/4.1.4/woodstox-core-asl-4.1.4.jar",
+      "sha256": "d24cf82fa3f2b30a847036ff4c198dde397e43c4599aef9e93fcbe1e49186bc2"
+    },
+    {
+      "bytes": 90837,
+      "path": "org/eclipse/core/org.eclipse.core.jobs/3.5.0.v20100515/org.eclipse.core.jobs-3.5.0.v20100515.jar",
+      "sha256": "c7c4b57cd78ebc45d54eba78dddf5bc097abbaf64566bfdd4e83b7a2b0f020ea"
+    },
+    {
+      "bytes": 101957,
+      "path": "org/eclipse/equinox/org.eclipse.equinox.common/3.6.0.v20100503/org.eclipse.equinox.common-3.6.0.v20100503.jar",
+      "sha256": "fa816ceb8eb7027badf733dbee5f6f1f9a6cdf706a193d2413676c245e40c51c"
+    },
+    {
+      "bytes": 182596,
+      "path": "org/eclipse/equinox/org.eclipse.equinox.registry/3.5.0.v20100503/org.eclipse.equinox.registry-3.5.0.v20100503.jar",
+      "sha256": "01419e6c05256191819d14462a7b5c612e6afb9e57b6e7972181c5ac83e20dc6"
+    },
+    {
+      "bytes": 1147220,
+      "path": "org/eclipse/osgi/org.eclipse.osgi/3.6.0.v20100517/org.eclipse.osgi-3.6.0.v20100517.jar",
+      "sha256": "0f7bb96eceea79416c46048f43745cfb937cfaab20619c02d57be022c7468339"
+    },
+    {
+      "bytes": 45024,
+      "path": "org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar",
+      "sha256": "66fdef91e9739348df7a096aa384a5685f4e875584cce89386a7a47251c4d8e9"
+    },
+    {
+      "bytes": 166715,
+      "path": "org/openrdf/sesame/sesame-model/2.7.16/sesame-model-2.7.16.jar",
+      "sha256": "fb74940f1082367b24860fa1c41b1e3cdeb553415b0ca3128dbd2fc4845664cc"
+    },
+    {
+      "bytes": 55758,
+      "path": "org/openrdf/sesame/sesame-rio-api/2.7.16/sesame-rio-api-2.7.16.jar",
+      "sha256": "67edbe5359a8e956db2d435b920f3091fb345e2f61a9a54a7110ba5583c2159d"
+    },
+    {
+      "bytes": 11627,
+      "path": "org/openrdf/sesame/sesame-rio-binary/2.7.16/sesame-rio-binary-2.7.16.jar",
+      "sha256": "b6fc03f5564293e31afae479879736700da828e3301df5e18de20e22342a708f"
+    },
+    {
+      "bytes": 8665,
+      "path": "org/openrdf/sesame/sesame-rio-datatypes/2.7.16/sesame-rio-datatypes-2.7.16.jar",
+      "sha256": "d0a16c24dcd57c2b9978aa7447bdfcd71231b86a4bc5820af64aa54a9b768d72"
+    },
+    {
+      "bytes": 3587,
+      "path": "org/openrdf/sesame/sesame-rio-languages/2.7.16/sesame-rio-languages-2.7.16.jar",
+      "sha256": "afdf5f5e964bf6e623d6321d0277192584a95f07408756da8fcd28dbc05d52c7"
+    },
+    {
+      "bytes": 4580,
+      "path": "org/openrdf/sesame/sesame-rio-n3/2.7.16/sesame-rio-n3-2.7.16.jar",
+      "sha256": "81f2b14cc98c8a8b34cbe8936c85676562d4c1962d64ac112529cff04076c4ac"
+    },
+    {
+      "bytes": 7447,
+      "path": "org/openrdf/sesame/sesame-rio-nquads/2.7.16/sesame-rio-nquads-2.7.16.jar",
+      "sha256": "16863e88b2dfc68b811d0f9bf8dad82d1300e7b9c0c2f50cb282a4158b8bd055"
+    },
+    {
+      "bytes": 15446,
+      "path": "org/openrdf/sesame/sesame-rio-ntriples/2.7.16/sesame-rio-ntriples-2.7.16.jar",
+      "sha256": "a38eb1be6aa25abfb8a5ba4ae97089adc31d74114d7311eea14a62947e515a46"
+    },
+    {
+      "bytes": 12970,
+      "path": "org/openrdf/sesame/sesame-rio-rdfjson/2.7.16/sesame-rio-rdfjson-2.7.16.jar",
+      "sha256": "6fd349b5206ecfda9ad922fedc62e22b5960ee0a8f83d235f135617429775b2a"
+    },
+    {
+      "bytes": 37726,
+      "path": "org/openrdf/sesame/sesame-rio-rdfxml/2.7.16/sesame-rio-rdfxml-2.7.16.jar",
+      "sha256": "b594ee00645c538ce928b9e46dd69716e17731dff386aeedf1fa39dc639adefe"
+    },
+    {
+      "bytes": 7417,
+      "path": "org/openrdf/sesame/sesame-rio-trig/2.7.16/sesame-rio-trig-2.7.16.jar",
+      "sha256": "0bd0d6f46b02508d58ed393cf18efda18ce838f328a7920ff10d551b539dddba"
+    },
+    {
+      "bytes": 11831,
+      "path": "org/openrdf/sesame/sesame-rio-trix/2.7.16/sesame-rio-trix-2.7.16.jar",
+      "sha256": "9e5b05394dd0ec9d476642067677c75b894ab1c2ac34d6de0d207a5b38b7be73"
+    },
+    {
+      "bytes": 22424,
+      "path": "org/openrdf/sesame/sesame-rio-turtle/2.7.16/sesame-rio-turtle-2.7.16.jar",
+      "sha256": "5980e4bc4e7c98fea08b55d3eefc2c45b9f78989e14803cecd81288b18a9e3fe"
+    },
+    {
+      "bytes": 80759,
+      "path": "org/openrdf/sesame/sesame-util/2.7.16/sesame-util-2.7.16.jar",
+      "sha256": "4cca4ec18c63d844fbf3afd52ab4f0408b848bd7d76d1ed87ef924207041c865"
+    },
+    {
+      "bytes": 21786,
+      "path": "org/semarglproject/semargl-core/0.6.1/semargl-core-0.6.1.jar",
+      "sha256": "52fb01e35f67e6965030d847858f44c7ce5340267703236cfa612a54c6e8a1af"
+    },
+    {
+      "bytes": 24728,
+      "path": "org/semarglproject/semargl-rdf/0.6.1/semargl-rdf-0.6.1.jar",
+      "sha256": "758180228feae7a65b5ed910f36046cf4a8343ce25630e6738b384d5e6fd8db2"
+    },
+    {
+      "bytes": 34994,
+      "path": "org/semarglproject/semargl-rdfa/0.6.1/semargl-rdfa-0.6.1.jar",
+      "sha256": "1af7df3b1da6d120e2dc2653f9cb3a401bde1116d6568914287f83ab4830c46e"
+    },
+    {
+      "bytes": 10102,
+      "path": "org/semarglproject/semargl-sesame/0.6.1/semargl-sesame-0.6.1.jar",
+      "sha256": "59f6f188b2aacaa56f3b1509e688e48bd8f6c20cddac26fdde1d54244c216ea6"
+    },
+    {
+      "bytes": 16519,
+      "path": "org/slf4j/jcl-over-slf4j/1.7.7/jcl-over-slf4j-1.7.7.jar",
+      "sha256": "c6472b5950e1c23202e567c6334e4832d1db46fad604b7a0d7af71d4a014bce2"
+    },
+    {
+      "bytes": 4736,
+      "path": "org/slf4j/jul-to-slf4j/1.7.12/jul-to-slf4j-1.7.12.jar",
+      "sha256": "00a25fcbec155c28152c2252aeadb0ace7947a519fe5d858dbb988de412b8529"
+    },
+    {
+      "bytes": 24567,
+      "path": "org/slf4j/log4j-over-slf4j/1.7.12/log4j-over-slf4j-1.7.12.jar",
+      "sha256": "59b0c933bb61f0a30f5ae16aa05e9eea120871f27619e67519bb568f20b29f23"
+    },
+    {
+      "bytes": 32119,
+      "path": "org/slf4j/slf4j-api/1.7.10/slf4j-api-1.7.10.jar",
+      "sha256": "3863e27005740d4d1289bf87b113efea115e9a22408a7d623be8004991232bfe"
+    },
+    {
+      "bytes": 99555,
+      "path": "org/tukaani/xz/1.5/xz-1.5.jar",
+      "sha256": "86f30fa8775fa3a62cdb39d1ed78a6019164c1058864048d42cbee244e26e840"
+    },
+    {
+      "bytes": 103112,
+      "path": "reference-worktree/lib/jautomata-core-2.0-alpha-1.jar",
+      "sha256": "7e2e574d61504b792296920d4756b655d5311b5ed2bf022e70b44b3194b3ef05"
+    },
+    {
+      "bytes": 84091,
+      "path": "xml-resolver/xml-resolver/1.2/xml-resolver-1.2.jar",
+      "sha256": "47dcde8986019314ef78ae7280a94973a21d2ed95075a40a000b42da956429e1"
+    }
+  ],
+  "java": {
+    "sha256": "f172fef0efafc193e527c6ab9d9dd10906e456d49153257e087456bd6f55f50f"
+  },
+  "javac": {
+    "sha256": "d6dbd1716aa0d581e3a1502b4139b68fc7010479eb2adbc0fe9b5ae2141e1338"
+  },
+  "maven": {
+    "sha256": "235e67d7e6b46c491f01d9a441b14b39a1fc05353d69fb529c874475bcbdaf37"
+  },
+  "reference_commit": "37ec30aced32ac81ebecc5e33fad255ddefcb4c3",
+  "schema_version": "1.0"
+}

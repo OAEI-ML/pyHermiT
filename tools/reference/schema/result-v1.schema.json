@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oaei-ml.org/pyhermit/reference/result-v1.schema.json",
+  "title": "pyHermiT reference oracle result",
+  "type": "object",
+  "required": ["schema_version", "request_id", "status", "identity", "evidence"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "request_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["LOGICAL", "ERROR", "TIMEOUT", "RESOURCE_LIMIT"]},
+    "outcome": {"enum": ["SAT", "UNSAT"]},
+    "value": {},
+    "error": {
+      "type": "object",
+      "required": ["category", "message"],
+      "properties": {
+        "category": {"enum": ["ERROR", "TIMEOUT", "RESOURCE_LIMIT"]},
+        "message": {"type": "string"},
+        "type": {"type": "string"}
+      }
+    },
+    "identity": {
+      "type": "object",
+      "required": ["reference", "jvm", "owlapi", "build", "config", "input", "generator"]
+    },
+    "raw": {"type": "object"},
+    "evidence": {
+      "type": "object",
+      "required": ["duration_ms", "stdout_sha256", "stderr_sha256", "returncode"]
+    }
+  }
+}

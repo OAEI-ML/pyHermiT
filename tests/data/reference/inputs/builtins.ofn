@@ -1,0 +1,8 @@
+Prefix(:=<urn:pyhermit:fixture:builtins#>)
+Ontology(<urn:pyhermit:fixture:builtins>
+  Declaration(Class(:A))
+  Declaration(Class(:B))
+  Declaration(Class(:C))
+  EquivalentClasses(:A :B)
+  SubClassOf(:A :C)
+)

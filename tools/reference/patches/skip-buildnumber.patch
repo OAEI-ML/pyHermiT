@@ -1,0 +1,44 @@
+diff --git a/pom.xml b/pom.xml
+index e6304426..a7eef1d3 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -152,39 +152,6 @@
+                     </execution>
+                 </executions>
+             </plugin>
+-            <plugin>
+-                <groupId>org.codehaus.mojo</groupId>
+-                <artifactId>buildnumber-maven-plugin</artifactId>
+-                <version>1.4</version>
+-                <executions>
+-                    <execution>
+-                        <phase>validate</phase>
+-                        <goals>
+-                            <goal>create</goal>
+-                        </goals>
+-                    </execution>
+-                </executions>
+-                <configuration>
+-                    <timestampFormat>{0,date,dd-MM-yyyy HH:mm:ss}</timestampFormat>
+-                    <doCheck>false</doCheck>
+-                    <doUpdate>false</doUpdate>
+-                    <providerImplementations>
+-                        <svn>javasvn</svn>
+-                    </providerImplementations>
+-                </configuration>
+-                <dependencies>
+-                    <dependency>
+-                        <groupId>com.google.code.maven-scm-provider-svnjava</groupId>
+-                        <artifactId>maven-scm-provider-svnjava</artifactId>
+-                        <version>2.1.1</version>
+-                    </dependency>
+-                    <dependency>
+-                        <groupId>org.tmatesoft.svnkit</groupId>
+-                        <artifactId>svnkit</artifactId>
+-                        <version>1.8.5</version>
+-                    </dependency>
+-                </dependencies>
+-            </plugin>
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-jar-plugin</artifactId>

@@ -1,0 +1,77 @@
+schema = 1
+policy = "No external ontology body is committed while redistribution rights are unresolved"
+
+[[artifact]]
+path = "tests/data/reference/inputs/empty.ofn"
+origin = "project-authored"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "159e88882972ea7ff88b071db060fcacbdadf21c1224c57505892f388cf1dbb5"
+
+[[artifact]]
+path = "tests/data/reference/inputs/inconsistent.ofn"
+origin = "project-authored"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "184bde7496fb1262c8c86665c1af0875e34ee8abd81fce0619b34db000e9b92c"
+
+[[artifact]]
+path = "tests/data/reference/inputs/builtins.ofn"
+origin = "project-authored"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "0e30420829cfdf079d67ad98c076d8f938d83ac2cb3e871e2c1e893678ad4cc9"
+
+[[artifact]]
+path = "tests/data/reference/inputs/malformed.ofn"
+origin = "project-authored"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "83d00a347663c5faa4806c5b5725329e2ca7d6a369800e49676b1dfc9c3e1692"
+
+[[artifact]]
+path = "tests/data/reference/api-shapes.json"
+origin = "project-authored"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "cbcd72321a2ce64a92d8e3112a0db0f93d1c21f131af916abe6eb71cfd0f8f53"
+
+[[artifact]]
+path = "tests/data/reference/requests-v1.jsonl"
+origin = "project-authored oracle requests"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "8079f66b1700e2dc7ec73befd3e18acc49c75079804b81bc8f085114bec84a65"
+
+[[artifact]]
+path = "tests/data/reference/goldens-v1.jsonl"
+origin = "generated HermiT results over project-authored inputs"
+license_expression = "project-generated factual output"
+sha256 = "d359e2881c001cbc05676782846ac205a8b0a43719d1f99b4bc50108a932caf3"
+contains_external_bodies = false
+
+[[artifact]]
+path = "tests/data/reference/upstream-test-inventory.json"
+origin = "generated-metadata from pinned fetch-only HermiT source"
+license_expression = "project-generated factual metadata"
+sha256 = "4f31509b536883bbdbac59dae0ddeabd93a3fedd8170198da02ece3bcfc936d9"
+contains_external_bodies = false
+
+[[artifact]]
+path = "tests/data/w3c/approved-direct-dl-inventory.json"
+origin = "generated metadata from pinned fetch-only all.rdf"
+license_expression = "project-generated factual metadata"
+sha256 = "d4e7a4c5a0b31ab5327b1404263da472759242ece7626e9d393354f4c9c6f1f9"
+contains_external_bodies = false
+
+[[source]]
+id = "hermit-37ec30a"
+url = "https://github.com/phillord/hermit-reasoner.git"
+commit = "37ec30aced32ac81ebecc5e33fad255ddefcb4c3"
+license_expression = "LGPL-3.0-or-later"
+decision = "fetch-only"
+
+[[source]]
+id = "w3c-owl2-test-export-in-hermit"
+sha256 = "a703d36b774f55f14c0758cf20f2bdd635677045f7ba55053199660c10d6fefc"
+decision = "fetch-only"
+reason = "rights for redistribution of embedded ontology bodies unresolved"
+
+[[source]]
+id = "historical-reports-and-known-failures"
+decision = "fetch-only observations"
+reason = "hashes and factual summaries only; known failures are not expected passes"

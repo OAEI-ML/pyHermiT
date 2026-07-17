@@ -76,6 +76,8 @@ addopts = [
 testpaths = [
   "tools/specs/tests",
   "tools/packaging_probe/tests",
+  "tests/conformance",
+  "tests/parity",
 ]
 xfail_strict = true
 markers = [
@@ -95,7 +97,7 @@ known-first-party = ["pyhermit", "tools"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["src", "tools/specs", "tools/packaging_probe"]
+files = ["src", "tools/specs", "tools/packaging_probe", "tools/reference"]
 strict = true
 warn_unreachable = true
 show_error_codes = true

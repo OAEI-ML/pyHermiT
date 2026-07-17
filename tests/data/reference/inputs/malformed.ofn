@@ -1,0 +1,4 @@
+Prefix(:=<urn:pyhermit:fixture:malformed#>)
+Ontology(<urn:pyhermit:fixture:malformed>
+  SubClassOf(:A
+)
