@@ -458,6 +458,50 @@ fn anywhere_nonancestor_indirect_blocking_and_unblocking_delta() -> Result<(), B
 }
 
 #[test]
+fn precise_late_invalidation_reuses_prefix_and_matches_forced_full() -> Result<(), BlockingError> {
+    let mut state = FakeState::default();
+    let root = state.root();
+    let mut nodes = Vec::new();
+    for _index in 0..128 {
+        let node = state.tree(root);
+        state.add_fact(1, &[node], false);
+        nodes.push(node);
+    }
+    let changed_node = *nodes
+        .last()
+        .ok_or_else(|| BlockingError::invariant("incremental fixture has no child"))?;
+    let mut incremental = new_manager(
+        BlockingMode::Anywhere,
+        BlockingRequirements::default(),
+        None,
+    );
+    incremental.compute_unbounded(&state, true)?;
+
+    let changed_row_id = state.add_fact(2, &[changed_node], false);
+    let changed_row = state
+        .fact(changed_row_id)
+        .cloned()
+        .ok_or_else(|| BlockingError::invariant("incremental fact is unavailable"))?;
+    incremental.notify_fact_change(&changed_row);
+    let mut forced = incremental.clone();
+
+    let incremental_result = incremental.compute_unbounded(&state, false)?;
+    let forced_result = forced.compute_unbounded(&state, true)?;
+    assert_eq!(
+        incremental_result.earliest_recomputed_creation_id,
+        Some(128)
+    );
+    assert_eq!(incremental_result.stats.nodes_visited, 1);
+    assert_eq!(forced_result.stats.nodes_visited, 129);
+    assert_eq!(
+        incremental.canonical_snapshot(),
+        forced.canonical_snapshot()
+    );
+    incremental.check_invariants(&NeverCancel)?;
+    Ok(())
+}
+
+#[test]
 fn ancestor_does_not_use_nonancestor_and_anywhere_does() -> Result<(), BlockingError> {
     let (state, blocker, blocked, _descendant) = branched_state();
     let mut ancestor = new_manager(

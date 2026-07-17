@@ -64,17 +64,41 @@ Throughput counts the named fixture elements, not every fact or allocation.
 | First-block validation repair, 256 | 4.1043–4.5047 ms | 4.4246 ms | 57.858 Kelem/s |
 | Pairwise anywhere cyclic, 5,000 | 124.77–134.32 ms | 132.41 ms | 37.761 Kelem/s |
 
+## Incremental optimization follow-up
+
+A second `--quick` slice at `2026-07-17T21:24:19Z`, based on
+`6633b1d7c93574120139790b5156f13e224f7cd3` plus the then-uncommitted blocking
+optimization, measured the same 1,024-element fixture after the manager began
+retaining its blocker index and reusing the unchanged prefix. Exhaustive
+full-recompute comparison remains available through `check_invariants` and the
+randomized parity lane, but it no longer executes inside the production hot
+path.
+
+| Probe | Reported time interval | Middle estimate | Point-estimate comparison |
+|---|---:|---:|---:|
+| Clean incremental compute, 1,024 | 6.5604–6.7858 ms | 6.7407 ms | 21.6% below the initial 8.6008 ms |
+| Dirty incremental compute, 1,024 | 13.909–14.572 ms | 14.042 ms | 50.1% below the initial 28.124 ms |
+| Dirty forced-full compute, 1,024 | 16.547–17.392 ms | 16.716 ms | dirty incremental 16.0% lower |
+
+Criterion's quick comparison reported `p = 0.10` for the dirty incremental/full
+changes, so these point estimates establish a promising local follow-up rather
+than a statistically stable release threshold. A focused regression test also
+asserts that invalidating the last of 128 children visits one recomputed node,
+while the forced oracle visits all 129 projected nodes, with identical canonical
+assignments.
+
 ## Interpretation and open performance work
 
 - Projection and canonical signature construction now have isolated baselines,
   as do cache hit and sound-promotion operations.
-- The clean incremental lane is a same-digest fast path. Its 8.6008 ms middle
-  estimate still includes rebuilding the read-only projection before the digest
-  comparison, so it is not a constant-time no-op.
-- The dirty incremental lane is not an optimized partial recomputation today. It
-  was about 25.6% slower than forced full recomputation in this quick run
-  (28.124 ms versus 22.399 ms), despite retaining the precise invalidation
-  frontier and exact semantic parity. No incremental speedup is claimed.
+- The clean incremental lane is a same-digest fast path. It still rebuilds the
+  read-only projection before comparing the digest, so it is not a constant-time
+  no-op.
+- The initial dirty lane was about 25.6% slower than forced full recomputation
+  because it recorded a frontier but recomputed every assignment and invoked a
+  second full oracle in the hot path. The follow-up implements genuine suffix
+  recomputation and records a 16.0% lower point estimate than forced full, while
+  retaining exact semantic parity. The quick sample is not a release claim.
 - The 5k cyclic/anywhere run demonstrates bounded, effectively linear candidate
   selection for this repeated-signature fixture, but its 132.41 ms middle value
   is only an initial local baseline. It is not evidence for all large-ontology

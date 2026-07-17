@@ -111,6 +111,7 @@ pub struct BlockingManager<N> {
     limits: BlockingLimits,
     cache: Option<BlockingSignatureCache>,
     assignments: BTreeMap<N, BlockingAssignment<N>>,
+    blocker_index: BTreeMap<BlockingKey, Vec<N>>,
     last_projection: Option<BlockingProjection<N>>,
     dirty_creation_id: Option<u32>,
     last_recomputed_from: Option<u32>,
@@ -124,6 +125,18 @@ pub struct BlockingManager<N> {
 pub struct BlockingCheckpoint<N> {
     manager: BlockingManager<N>,
 }
+
+type ReusablePrefix<N> = (
+    BTreeMap<N, BlockingAssignment<N>>,
+    BTreeMap<BlockingKey, Vec<N>>,
+    u32,
+);
+
+type RecomputeResult<N> = (
+    BTreeMap<N, BlockingAssignment<N>>,
+    BTreeMap<BlockingKey, Vec<N>>,
+    ComputeStats,
+);
 
 impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
     pub fn new(
@@ -167,6 +180,7 @@ impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
             limits,
             cache,
             assignments: BTreeMap::new(),
+            blocker_index: BTreeMap::new(),
             last_projection: None,
             dirty_creation_id: Some(0),
             last_recomputed_from: None,
@@ -307,16 +321,24 @@ impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
             let digest = projection.state_digest();
             self.rejected_blocks
                 .retain(|_pair, rejected_digest| *rejected_digest == digest);
-            let (assignments, metrics) = recompute_internal(
+            let previous_assignments = std::mem::take(&mut self.assignments);
+            let previous_blocker_index = std::mem::take(&mut self.blocker_index);
+            let reusable_prefix = (!force_full && earliest > 0).then_some((
+                previous_assignments,
+                previous_blocker_index,
+                earliest,
+            ));
+            let (assignments, blocker_index, metrics) = recompute_internal(
                 &projection,
                 &self.checker,
                 self.plan,
                 self.cache.as_mut(),
                 &self.rejected_blocks,
+                reusable_prefix,
                 self.limits,
                 control,
             )?;
-            let changes = assignment_changes(&self.assignments, &assignments);
+            let changes = assignment_changes(&before.assignments, &assignments);
             let mut reschedule_nodes = Vec::new();
             for change in &changes {
                 let was_blocked = change.before.is_some_and(BlockingAssignment::blocked);
@@ -337,6 +359,7 @@ impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
                 self.validated_digest = None;
             }
             self.assignments = assignments;
+            self.blocker_index = blocker_index;
             self.last_projection = Some(projection);
             self.dirty_creation_id = None;
             self.last_recomputed_from = Some(earliest);
@@ -377,7 +400,7 @@ impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
                     u64::try_from(metrics.candidate_checks).unwrap_or(u64::MAX),
                 ],
             );
-            self.check_invariants(control)?;
+            self.check_structural_invariants()?;
             Ok(ComputeResult {
                 changed: changes,
                 reschedule_nodes,
@@ -435,12 +458,13 @@ impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
             .as_ref()
             .ok_or_else(|| BlockingError::invalid("blocking manager has not computed a state"))?;
         let mut cache = self.cache.clone();
-        let (assignments, _stats) = recompute_internal(
+        let (assignments, _index, _stats) = recompute_internal(
             projection,
             &self.checker,
             self.plan,
             cache.as_mut(),
             &self.rejected_blocks,
+            None,
             self.limits,
             control,
         )?;
@@ -452,10 +476,7 @@ impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
     }
 
     pub fn check_invariants<C: BlockingControl>(&self, control: &C) -> Result<(), BlockingError> {
-        let projection = self
-            .last_projection
-            .as_ref()
-            .ok_or_else(|| BlockingError::invariant("blocking projection is unavailable"))?;
+        self.check_structural_invariants()?;
         let expected = self.reference_assignments(control)?;
         let actual = self.assignments();
         if actual != expected {
@@ -463,7 +484,20 @@ impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
                 "incremental blocking assignments differ from full recomputation",
             ));
         }
-        for assignment in actual {
+        Ok(())
+    }
+
+    fn check_structural_invariants(&self) -> Result<(), BlockingError> {
+        let projection = self
+            .last_projection
+            .as_ref()
+            .ok_or_else(|| BlockingError::invariant("blocking projection is unavailable"))?;
+        if self.assignments.len() != projection.ordered_nodes.len() {
+            return Err(BlockingError::invariant(
+                "blocking assignment count differs from the projected node count",
+            ));
+        }
+        for assignment in self.assignments() {
             let record = projection.node(assignment.node).ok_or_else(|| {
                 BlockingError::invariant("blocking assignment refers to a stale node")
             })?;
@@ -476,13 +510,16 @@ impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
                         "blocker does not precede blocked node",
                     ));
                 }
-                if assignment.directly
-                    && !self
-                        .checker
-                        .is_blocked_by(projection, blocker, assignment.node)?
-                {
+            }
+        }
+        for nodes in self.blocker_index.values() {
+            for node in nodes {
+                let assignment = self.assignments.get(node).ok_or_else(|| {
+                    BlockingError::invariant("blocking index refers to an unassigned node")
+                })?;
+                if assignment.blocked() || !self.checker.can_be_blocker(projection, *node) {
                     return Err(BlockingError::invariant(
-                        "direct blocker signature is invalid",
+                        "blocking index contains an ineligible or stale entry",
                     ));
                 }
             }
@@ -676,12 +713,13 @@ pub fn full_recompute<N: Copy + fmt::Debug + Eq + Ord, C: BlockingControl>(
     control: &C,
 ) -> Result<(Vec<BlockingAssignment<N>>, ComputeStats), BlockingError> {
     let mut cache = cache.cloned();
-    let (assignments, stats) = recompute_internal(
+    let (assignments, _index, stats) = recompute_internal(
         projection,
         checker,
         plan,
         cache.as_mut(),
         &BTreeMap::new(),
+        None,
         limits.validate()?,
         control,
     )?;
@@ -702,19 +740,47 @@ fn recompute_internal<N: Copy + fmt::Debug + Eq + Ord, C: BlockingControl>(
     plan: BlockingPlan,
     mut cache: Option<&mut BlockingSignatureCache>,
     rejected_blocks: &BTreeMap<(N, N), [u8; 32]>,
+    reusable_prefix: Option<ReusablePrefix<N>>,
     limits: BlockingLimits,
     control: &C,
-) -> Result<(BTreeMap<N, BlockingAssignment<N>>, ComputeStats), BlockingError> {
+) -> Result<RecomputeResult<N>, BlockingError> {
     if checker.kind() != plan.direct_checker_kind {
         return Err(BlockingError::invalid(
             "direct checker kind does not match blocking plan",
         ));
     }
-    let mut assignments = BTreeMap::new();
-    let mut index: BTreeMap<BlockingKey, Vec<N>> = BTreeMap::new();
+    let frontier = reusable_prefix
+        .as_ref()
+        .map(|(_previous, _previous_index, value)| *value);
+    let (mut assignments, mut index) = reusable_prefix.map_or_else(
+        || (BTreeMap::new(), BTreeMap::new()),
+        |(mut previous, mut previous_index, frontier)| {
+            previous.retain(|node, _assignment| {
+                projection
+                    .node(*node)
+                    .is_some_and(|record| record.creation_id < frontier)
+            });
+            previous_index.retain(|_key, nodes| {
+                nodes.retain(|node| {
+                    projection
+                        .node(*node)
+                        .is_some_and(|record| record.creation_id < frontier)
+                });
+                !nodes.is_empty()
+            });
+            (previous, previous_index)
+        },
+    );
+    let first_recomputed = frontier.map_or(0, |value| {
+        projection.ordered_nodes.partition_point(|node| {
+            projection
+                .node(*node)
+                .is_some_and(|record| record.creation_id < value)
+        })
+    });
     let mut stats = ComputeStats::default();
     let digest = projection.state_digest();
-    for node in &projection.ordered_nodes {
+    for node in &projection.ordered_nodes[first_recomputed..] {
         stats.nodes_visited = stats.nodes_visited.saturating_add(1);
         if stats.nodes_visited % limits.cancellation_poll_interval == 0 {
             control.poll()?;
@@ -779,7 +845,7 @@ fn recompute_internal<N: Copy + fmt::Debug + Eq + Ord, C: BlockingControl>(
         }
     }
     control.poll()?;
-    Ok((assignments, stats))
+    Ok((assignments, index, stats))
 }
 
 #[allow(clippy::too_many_arguments)]
