@@ -9,6 +9,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import Protocol, runtime_checkable
 
 from pyhermit.backends.python.branching import DisjunctionBrancher
 from pyhermit.backends.python.state import (
@@ -61,10 +62,22 @@ _NEGATION_PAIRS = (
 )
 
 
+@runtime_checkable
+class EqualityMergeAccess(Protocol):
+    def merge(
+        self,
+        left: NodeHandle,
+        right: NodeHandle,
+        dependency: DependencySet,
+        token: CancellationToken,
+    ) -> object: ...
+
+
 class HyperresolutionEngine:
     """Own query-local rule caches while borrowing immutable IR and mutable state."""
 
     __slots__ = (
+        "_active_token",
         "_atom_by_id",
         "_atom_ids",
         "_brancher",
@@ -78,6 +91,7 @@ class HyperresolutionEngine:
         "_join_program",
         "_limits",
         "_literal_payloads_by_identity",
+        "_merger",
         "_opposites",
         "_pending_annotated",
         "_pending_by_atom",
@@ -132,6 +146,8 @@ class HyperresolutionEngine:
             identity: tuple(values) for identity, values in literal_payloads.items()
         }
         self._limits = selected_limits
+        self._active_token = CancellationToken()
+        self._merger: EqualityMergeAccess | None = None
         self._join_program = compile_join_program(program)
         grouped: dict[int, list[ClauseJoinPlan]] = {}
         for plan in self._join_program.plans:
@@ -176,6 +192,13 @@ class HyperresolutionEngine:
     def initialized(self) -> bool:
         return self._initialized
 
+    def set_merging_manager(self, merger: EqualityMergeAccess) -> None:
+        if self._initialized:
+            raise ValueError("merging manager must be installed before initialization")
+        if not isinstance(merger, EqualityMergeAccess):
+            raise TypeError("merger must implement EqualityMergeAccess")
+        self._merger = merger
+
     def initialize(self, token: CancellationToken) -> None:
         """Install compiled ground input and unconditional rules at an operation root."""
 
@@ -183,6 +206,7 @@ class HyperresolutionEngine:
             raise TypeError("token must be CancellationToken")
         if self._initialized:
             raise ValueError("hyperresolution engine is already initialized")
+        self._active_token = token
         self._session.begin_operation()
 
         def operation() -> None:
@@ -206,6 +230,7 @@ class HyperresolutionEngine:
                     dependency,
                     provenance_ids=disjunction.provenance_ids,
                     participant_ids=(disjunction.disjunction_id,),
+                    canonical=True,
                 )
             self._fire_unconditional(token)
             self._session.check_invariants()
@@ -221,17 +246,20 @@ class HyperresolutionEngine:
             raise TypeError("token must be CancellationToken")
         if not self._initialized:
             raise ValueError("hyperresolution engine must be initialized first")
+        self._active_token = token
         return self._session.run_with_recovery(token, lambda: self._apply_next_delta(token))
 
     def _apply_next_delta(self, token: CancellationToken) -> int:
         token.check()
         self._session.extensions.prepare_next_delta()
         generation = self._session.extensions.read_generation
-        rows = tuple(
-            row
-            for row in self._session.extensions.active_rows()
-            if row.derivation_generation == generation
-        )
+        rows_list: list[FactRow] = []
+        for index, row in enumerate(self._session.extensions.iter_active_rows()):
+            if index % self._limits.cancellation_interval == 0:
+                token.check()
+            if row.derivation_generation == generation:
+                rows_list.append(row)
+        rows = tuple(rows_list)
         evaluator = self._indexed_evaluator(token)
         applied: set[tuple[int, tuple[object, ...], int]] = set()
         match_count = 0
@@ -320,6 +348,23 @@ class HyperresolutionEngine:
         predicate = self._program.predicates.predicate(atom.predicate_id)
         normalized, path = self._canonical_atom(atom)
         support = self._session.dependencies.union(dependency, path)
+        return self._dispatch_normalized_ground_atom(
+            normalized,
+            support,
+            predicate,
+            core=core,
+            provenance_ids=provenance_ids,
+        )
+
+    def _dispatch_normalized_ground_atom(
+        self,
+        normalized: GroundRuleAtom,
+        support: DependencySet,
+        predicate: Predicate,
+        *,
+        core: bool,
+        provenance_ids: tuple[int, ...],
+    ) -> bool:
         self._validate_ground_sorts(predicate, normalized.arguments)
         if predicate.kind is PredicateKind.ORDERING_GUARD:
             raise InternalInvariantError("ordering guards cannot be dispatched as heads")
@@ -492,8 +537,11 @@ class HyperresolutionEngine:
             raise InternalInvariantError("ground disjunction references an absent atom") from error
 
     def atom_is_satisfied(self, atom: GroundRuleAtom) -> bool:
-        predicate = self._program.predicates.predicate(atom.predicate_id)
         normalized, _path = self._canonical_atom(atom)
+        return self._normalized_atom_is_satisfied(normalized)
+
+    def _normalized_atom_is_satisfied(self, normalized: GroundRuleAtom) -> bool:
+        predicate = self._program.predicates.predicate(normalized.predicate_id)
         if predicate.kind is PredicateKind.EQUALITY:
             return normalized.arguments[0] == normalized.arguments[1]
         if predicate.kind is PredicateKind.INEQUALITY and self._fixed_data_values_differ(
@@ -505,31 +553,35 @@ class HyperresolutionEngine:
         return self._fact_dependency(normalized.predicate_id, normalized.arguments) is not None
 
     def atom_refutation_dependency(self, atom: GroundRuleAtom) -> DependencySet | None:
-        predicate = self._program.predicates.predicate(atom.predicate_id)
         normalized, path = self._canonical_atom(atom)
+        found = self._normalized_atom_refutation_dependency(normalized)
+        return None if found is None else self._session.dependencies.union(path, found)
+
+    def _normalized_atom_refutation_dependency(
+        self,
+        normalized: GroundRuleAtom,
+    ) -> DependencySet | None:
+        predicate = self._program.predicates.predicate(normalized.predicate_id)
         if predicate.kind is PredicateKind.EQUALITY:
             if self._fixed_data_values_differ(normalized.arguments):
-                return path
+                return self._session.dependencies.empty
             inequality = self._inequality_by_sort.get(predicate.argument_sorts[0])
-            found = (
+            return (
                 None
                 if inequality is None
                 else self._fact_dependency(inequality, normalized.arguments)
             )
-            return None if found is None else self._session.dependencies.union(path, found)
         if predicate.kind is PredicateKind.INEQUALITY:
             if normalized.arguments[0] == normalized.arguments[1]:
-                return path
+                return self._session.dependencies.empty
             equality = self._equality_by_sort.get(predicate.argument_sorts[0])
-            found = (
+            return (
                 None if equality is None else self._fact_dependency(equality, normalized.arguments)
             )
-            return None if found is None else self._session.dependencies.union(path, found)
         opposite = self._opposites.get(predicate.predicate_id)
         if opposite is None:
             return None
-        found = self._fact_dependency(opposite, normalized.arguments)
-        return None if found is None else self._session.dependencies.union(path, found)
+        return self._fact_dependency(opposite, normalized.arguments)
 
     def pending_annotated_equality(self, action_id: int) -> PendingAnnotatedEquality:
         try:
@@ -544,9 +596,11 @@ class HyperresolutionEngine:
         return None if action_id is None else self._pending_annotated[action_id]
 
     def process_next_disjunction(self, token: CancellationToken) -> BranchTransition:
+        self._active_token = token
         return self._brancher.process_next(token)
 
     def resolve_clash(self, token: CancellationToken) -> BranchTransition:
+        self._active_token = token
         return self._brancher.resolve_until_choice_or_unsat(token)
 
     def _indexed_evaluator(self, token: CancellationToken) -> IndexedJoinEvaluator:
@@ -573,6 +627,7 @@ class HyperresolutionEngine:
             self._session.dependencies.union(*dependencies),
             provenance_ids=clause.provenance_ids,
             participant_ids=match.premise_row_ids,
+            canonical=True,
         )
 
     def _apply_ground_head(
@@ -582,15 +637,20 @@ class HyperresolutionEngine:
         *,
         provenance_ids: tuple[int, ...],
         participant_ids: tuple[int, ...],
+        canonical: bool = False,
     ) -> bool:
-        canonicalized = tuple(self._canonical_atom(value) for value in atoms)
+        canonicalized = (
+            tuple((value, self._session.dependencies.empty) for value in atoms)
+            if canonical
+            else tuple(self._canonical_atom(value) for value in atoms)
+        )
         normalized = tuple(dict.fromkeys(value[0] for value in canonicalized))
-        if any(self.atom_is_satisfied(value) for value in normalized):
+        if any(self._normalized_atom_is_satisfied(value) for value in normalized):
             return False
         remaining: list[GroundRuleAtom] = []
         dependencies = [dependency, *(value[1] for value in canonicalized)]
         for atom in normalized:
-            refutation = self.atom_refutation_dependency(atom)
+            refutation = self._normalized_atom_refutation_dependency(atom)
             if refutation is None:
                 remaining.append(atom)
             else:
@@ -613,9 +673,13 @@ class HyperresolutionEngine:
                 )
             )
         if len(remaining) == 1:
-            return self.dispatch_ground_atom(
-                remaining[0],
+            atom = remaining[0]
+            predicate = self._program.predicates.predicate(atom.predicate_id)
+            return self._dispatch_normalized_ground_atom(
+                atom,
                 support,
+                predicate,
+                core=False,
                 provenance_ids=provenance_ids,
             )
         return self._install_disjunction(tuple(remaining), support)
@@ -704,8 +768,14 @@ class HyperresolutionEngine:
             )
         changed = False
         if left != right:
-            representative = self._session.merge_nodes(left, right, dependency)
+            if self._merger is None:
+                representative = self._session.merge_nodes(left, right, dependency)
+            else:
+                self._merger.merge(left, right, dependency, self._active_token)
+                representative, _path = self._session.nodes.representative(left)
             changed = True
+            if self._session.clashes.current is not None:
+                return True
         else:
             representative = left
         reflexive = GroundRuleAtom(atom.predicate_id, (representative, representative))

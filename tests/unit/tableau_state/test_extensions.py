@@ -54,3 +54,15 @@ def test_delta_partitions_indexes_deactivation_and_rollback_are_exact() -> None:
     trail.rollback(checkpoint)
     assert [row.row_id for row in store.retrieve(2, bindings={0: left})] == [first.row_id]
     store.check_invariants()
+
+
+def test_active_row_stream_matches_materialized_views_without_an_extra_store_copy() -> None:
+    _trail, _nodes, store, handles = _store()
+    left, right = handles
+    first = store.add(3, (left,), DependencySet())
+    store.prepare_next_delta()
+    second = store.add(3, (right,), DependencySet())
+    store.prepare_next_delta()
+    assert tuple(store.iter_active_rows()) == store.active_rows()
+    assert tuple(store.iter_active_rows(DeltaView.OLD)) == (store.row(first.row_id),)
+    assert tuple(store.iter_active_rows(DeltaView.NEW)) == (store.row(second.row_id),)

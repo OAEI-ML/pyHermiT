@@ -229,11 +229,14 @@ class TableauSession:
             raise TypeError("dependency must be DependencySet")
         return dependency.maximum
 
-    def reset_to_operation_root(self) -> None:
+    def reset_to_operation_root(self, *, validate: bool = True) -> None:
+        if not isinstance(validate, bool):
+            raise TypeError("validate must be bool")
         self.trail.rollback(self.operation_root)
         self.branches.clear()
-        self._compact_dependencies()
-        self.check_invariants()
+        if validate:
+            self._compact_dependencies()
+            self.check_invariants()
 
     def poll(self, token: CancellationToken) -> None:
         if not isinstance(token, CancellationToken):
@@ -241,7 +244,9 @@ class TableauSession:
         try:
             token.check()
         except ReasoningAbortedError:
-            self.reset_to_operation_root()
+            # Cancellation latency must not scale with the whole ontology. Trail
+            # rollback is exact; callers can request an explicit debug validation.
+            self.reset_to_operation_root(validate=False)
             raise
 
     def run_with_recovery(
@@ -257,7 +262,7 @@ class TableauSession:
             token.check()
             return result
         except ReasoningAbortedError:
-            self.reset_to_operation_root()
+            self.reset_to_operation_root(validate=False)
             raise
 
     def merge_nodes(

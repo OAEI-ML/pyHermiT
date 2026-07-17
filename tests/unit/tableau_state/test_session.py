@@ -111,6 +111,7 @@ def test_cancellation_is_not_a_clash_and_restores_the_operation_root() -> None:
         session.poll(source.token)
     assert session.canonical_snapshot() == baseline
     assert session.clashes.current is None
+    session.check_invariants()
 
 
 def test_stable_queue_rejects_ambiguous_priorities_and_rolls_back_pop() -> None:

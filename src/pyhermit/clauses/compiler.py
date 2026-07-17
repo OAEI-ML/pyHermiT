@@ -3254,7 +3254,9 @@ def _derive_expressivity(
                 bottom_properties = True
     kinds = {value.kind for value in registry.predicates}
     return Expressivity(
-        inverse_roles=any(isinstance(value, owl.ObjectInverseOf) for value in roles.object_roles),
+        # The role graph deliberately materializes an inverse partner for every role.
+        # Expressivity records source usage, not that internal closure.
+        inverse_roles=any(isinstance(value, owl.ObjectInverseOf) for value in nodes),
         nominals=any(isinstance(value, owl.ObjectOneOf) for value in nodes),
         datatypes=any(
             isinstance(

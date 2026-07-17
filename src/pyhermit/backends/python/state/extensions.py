@@ -390,9 +390,16 @@ class ExtensionStore:
             yield row
 
     def active_rows(self, view: DeltaView = DeltaView.TOTAL) -> tuple[FactRow, ...]:
+        return tuple(self.iter_active_rows(view))
+
+    def iter_active_rows(self, view: DeltaView = DeltaView.TOTAL) -> Iterator[FactRow]:
+        """Stream active rows without allocating a second ontology-scale tuple."""
+
         if not isinstance(view, DeltaView):
             raise TypeError("view must be DeltaView")
-        return tuple(row for row in self._rows if row.active and self._in_view(row, view))
+        for row in self._rows:
+            if row.active and self._in_view(row, view):
+                yield row
 
     def _in_view(self, row: FactRow, view: DeltaView) -> bool:
         if view is DeltaView.TOTAL:

@@ -567,6 +567,11 @@ class BlockingManager:
         )
 
     def ready_for_sat(self) -> bool:
+        if not any(
+            node.kind is NodeKind.TREE and node.lifecycle is NodeLifecycle.ACTIVE
+            for node in self.session.nodes.existing_nodes()
+        ):
+            return True
         self.compute()
         labels = self._last_labels
         if labels is None:

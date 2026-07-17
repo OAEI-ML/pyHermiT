@@ -624,6 +624,18 @@ def test_nominal_inverse_role_and_at_most_keep_ni_metadata() -> None:
     assert program.expressivity.inverse_roles
 
 
+def test_internal_inverse_role_closure_does_not_expand_source_expressivity() -> None:
+    concept = owl.Class(owl.IRI("urn:test:clauses:forward-only-concept"))
+    role = owl.ObjectProperty(owl.IRI("urn:test:clauses:forward-only-role"))
+    program = compile_normalized(
+        normalize_axioms(
+            (owl.SubClassOf(concept, owl.ObjectSomeValuesFrom(role, concept)),),
+            logical_fingerprint=FINGERPRINT,
+        )
+    )
+    assert not program.expressivity.inverse_roles
+
+
 def test_top_bottom_properties_and_complex_abox_are_not_erased() -> None:
     first = owl.Class(owl.IRI("urn:test:clauses:builtins-a"))
     second = owl.Class(owl.IRI("urn:test:clauses:builtins-b"))
