@@ -77,6 +77,20 @@ license_expression = "project-generated factual metadata"
 sha256 = "d4e7a4c5a0b31ab5327b1404263da472759242ece7626e9d393354f4c9c6f1f9"
 contains_external_bodies = false
 
+[[artifact]]
+path = "tests/data/datatypes/hermit-datatype-inventory-v1.json"
+origin = "generated coverage metadata selecting pinned HermiT datatype test method IDs"
+license_expression = "project-generated factual metadata"
+sha256 = "de8abe3e8e8c831299636cb3b642802a215579ff576785c1438fdc6d8e1db510"
+contains_external_bodies = false
+
+[[artifact]]
+path = "tests/data/datatypes/ontology-component-cases-v1.json"
+origin = "project-authored semantic projections of pinned HermiT and W3C datatype cases"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "97888e7ecb8f8f4176ef6c92c138dfccd495900309ea3dda045628cf1ca602db"
+contains_external_bodies = false
+
 [[source]]
 id = "hermit-37ec30a"
 url = "https://github.com/phillord/hermit-reasoner.git"

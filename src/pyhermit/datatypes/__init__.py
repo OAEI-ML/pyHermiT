@@ -25,6 +25,12 @@ from .facets import (
     restrict_datatype,
 )
 from .ieee_ranges import IEEEInterval, IEEERange, IEEEValue
+from .integration import (
+    SemanticDatatypeConstraintComponent,
+    SemanticFixedValueConstraint,
+    SemanticRangeConstraint,
+    compile_datatype_constraint_component,
+)
 from .literals import (
     NUMERIC_DATATYPES,
     OWL_NAMESPACE,
@@ -254,6 +260,9 @@ __all__ = [
     "PayloadScalar",
     "RangeConstraint",
     "RangeValue",
+    "SemanticDatatypeConstraintComponent",
+    "SemanticFixedValueConstraint",
+    "SemanticRangeConstraint",
     "SourceLiteralIdentity",
     "StringComparison",
     "StringDatatypeSpec",
@@ -273,6 +282,7 @@ __all__ = [
     "XSDRegex",
     "comparison_from_tagged",
     "compile_data_range_semantic_payload",
+    "compile_datatype_constraint_component",
     "compile_datatype_semantic_model",
     "compile_literal",
     "compile_literal_semantic_payload",

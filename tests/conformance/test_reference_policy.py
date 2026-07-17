@@ -43,6 +43,7 @@ def test_every_data_artifact_has_an_acquisition_decision() -> None:
         str(path.relative_to(ROOT))
         for directory in (
             ROOT / "tests/data/clauses",
+            ROOT / "tests/data/datatypes",
             ROOT / "tests/data/reference",
             ROOT / "tests/data/w3c",
         )

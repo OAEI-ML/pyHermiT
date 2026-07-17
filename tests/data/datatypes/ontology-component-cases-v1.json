@@ -1,0 +1,271 @@
+{
+  "schema_version": "1.0",
+  "description": "Project-authored datatype-component projections; no external ontology body is embedded.",
+  "cases": [
+    {
+      "id": "w3c-consistent-integer-filler",
+      "source": {"kind": "w3c", "identifier": "consistent-integer-filler", "iri": "http://owl.semanticweb.org/id/Consistent-2Dinteger-2Dfiller", "premise_sha256": "e02f7a68ffdbfe1c916ab7be676ef036bab432a2abd3b089d222bf67c3defa2a"},
+      "projection_kind": "datatype-component",
+      "expected": "SAT",
+      "variables": [0],
+      "assertions": [{"variable": 0, "range": {"kind": "datatype", "iri": "xsd:integer"}}],
+      "fixed_values": [{"variable": 0, "lexical": "18", "datatype": "xsd:integer"}]
+    },
+    {
+      "id": "w3c-contradicting-datatype-restrictions",
+      "source": {"kind": "w3c", "identifier": "Contradicting datatype Restrictions", "iri": "http://owl.semanticweb.org/id/Contradicting-2Ddatatype-2Drestrictions", "premise_sha256": "31ecccfd596df5b4b009c698f8cc5e5286d38f4b66c362e888138e497defc12d"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "3", "datatype": "xsd:integer"}, {"lexical": "4", "datatype": "xsd:integer"}]}},
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "2", "datatype": "xsd:integer"}, {"lexical": "3", "datatype": "xsd:integer"}]}},
+        {"variable": 0, "range": {"kind": "restriction", "datatype": "xsd:integer", "facets": [{"iri": "xsd:minInclusive", "value": {"lexical": "4", "datatype": "xsd:integer"}}]}}
+      ]
+    },
+    {
+      "id": "w3c-data-complement-plus-restrictions",
+      "source": {"kind": "w3c", "identifier": "Inconsistent Data Complement with the Restrictions", "iri": "http://owl.semanticweb.org/id/Datacomplement-2Dplus-2Drestrictions", "premise_sha256": "01962eda48fb5668e0714affca8091b17b2bdeea34916473bee562b1ead9355f"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "3", "datatype": "xsd:integer"}, {"lexical": "4", "datatype": "xsd:integer"}]}},
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "2", "datatype": "xsd:integer"}, {"lexical": "3", "datatype": "xsd:integer"}]}},
+        {"variable": 0, "range": {"kind": "complement", "operand": {"kind": "one_of", "values": [{"lexical": "3", "datatype": "xsd:integer"}]}}}
+      ]
+    },
+    {
+      "id": "w3c-datatype-data-complement",
+      "source": {"kind": "w3c", "identifier": "Datatype-DataComplementOf-001", "iri": "http://owl.semanticweb.org/id/Datatype-2DDataComplementOf-2D001", "premise_sha256": "5870db569a57a742aece0336e03c55fff2de2003c3b13f15b64053dba553b58c"},
+      "projection_kind": "datatype-component",
+      "expected": "SAT",
+      "variables": [0, 1],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "complement", "operand": {"kind": "datatype", "iri": "xsd:positiveInteger"}}},
+        {"variable": 1, "range": {"kind": "complement", "operand": {"kind": "datatype", "iri": "xsd:positiveInteger"}}}
+      ],
+      "fixed_values": [
+        {"variable": 0, "lexical": "-1", "datatype": "xsd:negativeInteger"},
+        {"variable": 1, "lexical": "A string", "datatype": "xsd:string"}
+      ]
+    },
+    {
+      "id": "w3c-float-discrete",
+      "source": {"kind": "w3c", "identifier": "Datatype-Float-Discrete-001", "iri": "http://owl.semanticweb.org/id/Datatype-2DFloat-2DDiscrete-2D001", "premise_sha256": "30176caccbe690136767092f97a95536706ec8fd330319772d8a27a1b77a4554"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [{"variable": 0, "range": {"kind": "restriction", "datatype": "xsd:float", "facets": [
+        {"iri": "xsd:minExclusive", "value": {"lexical": "0.0", "datatype": "xsd:float"}},
+        {"iri": "xsd:maxExclusive", "value": {"lexical": "1.401298464324817e-45", "datatype": "xsd:float"}}
+      ]}}]
+    },
+    {
+      "id": "w3c-min-max-inconsistency",
+      "source": {"kind": "w3c", "identifier": "datatype-restriction-min-max-inconsistency", "iri": "http://owl.semanticweb.org/id/Datatype-2Drestriction-2Dmin-2Dmax-2Dinconsistency", "premise_sha256": "284b0be343fa22f731fbf45436178702667624e48fbcac8dd4e8c1c062c64495"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "restriction", "datatype": "xsd:integer", "facets": [{"iri": "xsd:minInclusive", "value": {"lexical": "18", "datatype": "xsd:integer"}}]}},
+        {"variable": 0, "range": {"kind": "restriction", "datatype": "xsd:integer", "facets": [{"iri": "xsd:maxInclusive", "value": {"lexical": "10", "datatype": "xsd:integer"}}]}}
+      ]
+    },
+    {
+      "id": "w3c-different-datatype-aliases",
+      "source": {"kind": "w3c", "identifier": "Consistent Datatype restrictions with Different Types", "iri": "http://owl.semanticweb.org/id/Datatype-2Drestrictions-2Ddifferent-2Dtypes", "premise_sha256": "07bb3e2843a25752f9e5a7e0c6027a719c752a8c13da11c8f947d81177a9d97c"},
+      "projection_kind": "datatype-component",
+      "expected": "SAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "3", "datatype": "xsd:integer"}, {"lexical": "4", "datatype": "xsd:int"}]}},
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "2", "datatype": "xsd:short"}, {"lexical": "3", "datatype": "xsd:int"}]}},
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "3", "datatype": "xsd:integer"}]}}
+      ]
+    },
+    {
+      "id": "w3c-different-types-plus-complement",
+      "source": {"kind": "w3c", "identifier": "Different types in Datatype Restrictions and Complement", "iri": "http://owl.semanticweb.org/id/Different-2Dtypes-2Dplus-2Dcomplement", "premise_sha256": "863144af8c4c6923b448a0bb52f536b3712ddfceaf3a4457f5bb60b3b9093037"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "3", "datatype": "xsd:integer"}, {"lexical": "4", "datatype": "xsd:int"}]}},
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "2", "datatype": "xsd:short"}, {"lexical": "3", "datatype": "xsd:integer"}]}},
+        {"variable": 0, "range": {"kind": "complement", "operand": {"kind": "one_of", "values": [{"lexical": "3", "datatype": "xsd:integer"}]}}}
+      ]
+    },
+    {
+      "id": "w3c-inconsistent-integer-filler",
+      "source": {"kind": "w3c", "identifier": "inconsistent-integer-filler", "iri": "http://owl.semanticweb.org/id/Inconsistent-2Dinteger-2Dfiller", "premise_sha256": "24bf43d0c9bfc112aaba96dd2cd8da75fae6955836f41b9993188ebf5d81d1e0"},
+      "projection_kind": "tableau-only",
+      "expected": "UNSAT",
+      "reason": "The contradiction is class subsumption plus ObjectComplementOf; no contradictory datatype component exists before tableau propagation."
+    },
+    {
+      "id": "w3c-inconsistent-datatypes",
+      "source": {"kind": "w3c", "identifier": "inconsistent_datatypes", "iri": "http://owl.semanticweb.org/id/Inconsistent_datatypes", "premise_sha256": "59bb704c78a34dd30af69b09b8ef932da0558ddaea2e2a12a9167485a76771eb"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "datatype", "iri": "xsd:string"}},
+        {"variable": 0, "range": {"kind": "datatype", "iri": "xsd:integer"}}
+      ]
+    },
+    {
+      "id": "w3c-plus-minus-zero-integer",
+      "source": {"kind": "w3c", "identifier": "Plus and Minus Zero Integer", "iri": "http://owl.semanticweb.org/id/Plus-2Dand-2Dminus-2D0-2Dintegers", "premise_sha256": "2d2869aa2ac3dd28495c1002ebdf08b62f20c4d86bb735e4e1d2f9312ec98d62"},
+      "projection_kind": "datatype-component",
+      "expected": "SAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "0", "datatype": "xsd:integer"}]}},
+        {"variable": 0, "range": {"kind": "one_of", "values": [{"lexical": "-0", "datatype": "xsd:integer"}]}}
+      ]
+    },
+    {
+      "id": "w3c-string-integer-clash",
+      "source": {"kind": "w3c", "identifier": "string-integer-clash", "iri": "http://owl.semanticweb.org/id/String-2Dinteger-2Dclash", "premise_sha256": "cfc49a56c3b62ec30ffd414b6b43b854c0ba4e70f5b56901d163adea1eb5fae9"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [{"variable": 0, "range": {"kind": "datatype", "iri": "xsd:integer"}}],
+      "fixed_values": [{"variable": 0, "lexical": "aString", "datatype": "xsd:string"}]
+    },
+    {
+      "id": "hermit-numeric-int-minus-integer",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/NumericsTest.java::testIntegerRange1", "source_sha256": "a431d6adc1ae941ec1fd27c0568003960429030937b808f35d7f308c96853237"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "datatype", "iri": "xsd:int"}},
+        {"variable": 0, "positive": false, "range": {"kind": "datatype", "iri": "xsd:integer"}}
+      ]
+    },
+    {
+      "id": "hermit-numeric-outside-int",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/NumericsTest.java::testIntegerRange2_4", "source_sha256": "a431d6adc1ae941ec1fd27c0568003960429030937b808f35d7f308c96853237"},
+      "projection_kind": "datatype-component",
+      "expected": "SAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "positive": false, "range": {"kind": "datatype", "iri": "xsd:int"}},
+        {"variable": 0, "range": {"kind": "datatype", "iri": "xsd:integer"}}
+      ],
+      "fixed_values": [{"variable": 0, "lexical": "2147483648", "datatype": "xsd:integer"}]
+    },
+    {
+      "id": "hermit-decimal-not-integer",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/NumericsTest.java::testDecimalNotInteger_3", "source_sha256": "a431d6adc1ae941ec1fd27c0568003960429030937b808f35d7f308c96853237"},
+      "projection_kind": "datatype-component",
+      "expected": "SAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "datatype", "iri": "xsd:decimal"}},
+        {"variable": 0, "positive": false, "range": {"kind": "datatype", "iri": "xsd:integer"}}
+      ],
+      "fixed_values": [{"variable": 0, "lexical": "2147483648.1", "datatype": "xsd:decimal"}]
+    },
+    {
+      "id": "hermit-enumeration-exhausts-integer-interval",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/NumericsTest.java::testEnumInt_2", "source_sha256": "a431d6adc1ae941ec1fd27c0568003960429030937b808f35d7f308c96853237"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "restriction", "datatype": "xsd:integer", "facets": [
+          {"iri": "xsd:minInclusive", "value": {"lexical": "2.2", "datatype": "xsd:decimal"}},
+          {"iri": "xsd:maxInclusive", "value": {"lexical": "5.2", "datatype": "xsd:decimal"}}
+        ]}},
+        {"variable": 0, "positive": false, "range": {"kind": "one_of", "values": [
+          {"lexical": "3", "datatype": "xsd:integer"}, {"lexical": "4", "datatype": "xsd:integer"}, {"lexical": "5", "datatype": "xsd:integer"}
+        ]}}
+      ]
+    },
+    {
+      "id": "hermit-byte-cardinality-overflow",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/NumericsTest.java::testLargeRange1_3", "source_sha256": "a431d6adc1ae941ec1fd27c0568003960429030937b808f35d7f308c96853237"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [{"variable": 0, "range": {"kind": "datatype", "iri": "xsd:byte"}}],
+      "minimum_cardinalities": [{"variable": 0, "minimum": 257}]
+    },
+    {
+      "id": "hermit-empty-string-cardinality",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/RDFPlainLiteralTest.java::testSize_2", "source_sha256": "5027afc28ea4a07acb84d0c17027bfb4ea643a1ec2092cba7d85753a23062e39"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [{"variable": 0, "range": {"kind": "restriction", "datatype": "xsd:string", "facets": [{"iri": "xsd:length", "value": {"lexical": "0", "datatype": "xsd:integer"}}]}}],
+      "minimum_cardinalities": [{"variable": 0, "minimum": 2}]
+    },
+    {
+      "id": "hermit-uri-empty-cardinality",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/AnyURITest.java::testSize_2", "source_sha256": "88776c7950e875353be67e6c9ab7f1538c9cab7082eedbb413cad45df3b26276"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [{"variable": 0, "range": {"kind": "restriction", "datatype": "xsd:anyURI", "facets": [{"iri": "xsd:length", "value": {"lexical": "0", "datatype": "xsd:integer"}}]}}],
+      "minimum_cardinalities": [{"variable": 0, "minimum": 2}]
+    },
+    {
+      "id": "hermit-binary-membership",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/BinaryDataTest.java::testLength_1", "source_sha256": "8f5eed0d329031de686220a4c41aebab51fe3f45e93516162883d72299562537"},
+      "projection_kind": "datatype-component",
+      "expected": "SAT",
+      "variables": [0],
+      "assertions": [{"variable": 0, "range": {"kind": "restriction", "datatype": "xsd:hexBinary", "facets": [{"iri": "xsd:length", "value": {"lexical": "2", "datatype": "xsd:integer"}}]}}],
+      "fixed_values": [{"variable": 0, "lexical": "0AFF", "datatype": "xsd:hexBinary"}]
+    },
+    {
+      "id": "hermit-float-signed-zero-cardinality",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/FloatDoubleTest.java::testFloatZeroRange_3", "source_sha256": "ea724ef713905cdc30d8da0820401ff1d5eb154675edbaebc34d55a9171689c0"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [{"variable": 0, "range": {"kind": "restriction", "datatype": "xsd:float", "facets": [
+        {"iri": "xsd:minInclusive", "value": {"lexical": "+0", "datatype": "xsd:float"}},
+        {"iri": "xsd:maxInclusive", "value": {"lexical": "+0", "datatype": "xsd:float"}}
+      ]}}],
+      "minimum_cardinalities": [{"variable": 0, "minimum": 3}]
+    },
+    {
+      "id": "hermit-float-double-disjoint",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/FloatDoubleTest.java::testFloatAndDouble", "source_sha256": "ea724ef713905cdc30d8da0820401ff1d5eb154675edbaebc34d55a9171689c0"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "datatype", "iri": "xsd:float"}},
+        {"variable": 0, "range": {"kind": "datatype", "iri": "xsd:double"}}
+      ]
+    },
+    {
+      "id": "hermit-datetime-exact-interval-cardinality",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/DateTimeTest.java::testFinite1_2", "source_sha256": "c6b20c15ac9e223a19bc12b34ffbff07ecc86719510c14e268a729e0b2eac1cc"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [{"variable": 0, "range": {"kind": "restriction", "datatype": "xsd:dateTime", "facets": [
+        {"iri": "xsd:minInclusive", "value": {"lexical": "1965-04-15T00:00:00", "datatype": "xsd:dateTime"}},
+        {"iri": "xsd:maxInclusive", "value": {"lexical": "1965-04-15T00:00:00", "datatype": "xsd:dateTime"}}
+      ]}}],
+      "minimum_cardinalities": [{"variable": 0, "minimum": 3}]
+    },
+    {
+      "id": "hermit-xml-family-disjointness",
+      "source": {"kind": "hermit", "method_id": "src/test/java/org/semanticweb/HermiT/reasoner/XMLLiteralTest.java::testRange_3", "source_sha256": "706a2dbdceb4a39007740fc767f566aaeea070ba2be020c65a83f07f7f1fe125"},
+      "projection_kind": "datatype-component",
+      "expected": "UNSAT",
+      "variables": [0],
+      "assertions": [
+        {"variable": 0, "range": {"kind": "datatype", "iri": "rdf:XMLLiteral"}},
+        {"variable": 0, "range": {"kind": "datatype", "iri": "xsd:boolean"}}
+      ]
+    }
+  ]
+}
