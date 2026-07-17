@@ -405,9 +405,7 @@ def build_role_axiom_graph(
         subrole_dependencies[consumer].add(dependency)
     top_component = object_component_by_role[top_object]
     selected_automata = {top_component}
-    pending_components = [
-        component for component in non_simple if component != top_component
-    ]
+    pending_components = [component for component in non_simple if component != top_component]
     while pending_components:
         component = pending_components.pop()
         if component in selected_automata:

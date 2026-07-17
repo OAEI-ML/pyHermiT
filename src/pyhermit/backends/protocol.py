@@ -212,9 +212,7 @@ class CompiledOntology:
                 "clauses": [_ir_digest(item) for item in self.clauses],
                 "datatype_model": _ir_digest(self.datatype_model),
                 "expressivity": _ir_digest(self.expressivity),
-                "ground_disjunctions": [
-                    _ir_digest(item) for item in self.ground_disjunctions
-                ],
+                "ground_disjunctions": [_ir_digest(item) for item in self.ground_disjunctions],
                 "negative_facts": [_ir_digest(item) for item in self.negative_facts],
                 "positive_facts": [_ir_digest(item) for item in self.positive_facts],
                 "provenance": _ir_digest(self.provenance),
@@ -291,9 +289,7 @@ class CompiledDelta:
         if self.schema_version != COMPILED_IR_SCHEMA_VERSION:
             raise ValueError("compiled delta schema mismatch")
         _validate_hex_fingerprint(self.base_ontology_fingerprint, "base_ontology_fingerprint")
-        _validate_hex_fingerprint(
-            self.result_ontology_fingerprint, "result_ontology_fingerprint"
-        )
+        _validate_hex_fingerprint(self.result_ontology_fingerprint, "result_ontology_fingerprint")
         if not isinstance(self.kind, DeltaKind):
             raise TypeError("kind must be DeltaKind")
         for name in ("additions", "removals"):
@@ -428,9 +424,7 @@ class Hierarchy(Generic[T]):
             raise ValueError("top and bottom must reference hierarchy nodes")
         edges = frozenset(self.edges)
         if any(
-            child == parent
-            or not 0 <= child < len(nodes)
-            or not 0 <= parent < len(nodes)
+            child == parent or not 0 <= child < len(nodes) or not 0 <= parent < len(nodes)
             for child, parent in edges
         ):
             raise ValueError("invalid public hierarchy edge")

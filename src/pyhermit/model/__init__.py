@@ -12,4 +12,3 @@ from pyowl_core import model as _model
 
 globals().update({name: getattr(_model, name) for name in _model.__all__})
 __all__ = list(_model.__all__)
-
