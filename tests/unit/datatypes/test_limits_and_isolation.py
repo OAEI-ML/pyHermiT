@@ -155,3 +155,47 @@ print(json.dumps(values, sort_keys=True, separators=(',', ':')))
             ).stdout
         )
     assert outputs[0] == outputs[1]
+
+
+def test_nonnumeric_results_are_hash_seed_locale_and_timezone_independent() -> None:
+    script = """
+import json
+from pyowl_core.model import Datatype, IRI, Literal
+from pyhermit.datatypes import (
+    RDF_PLAIN_LITERAL, RDF_XML_LITERAL, XSD_BASE64_BINARY, XSD_DATE_TIME,
+    XSD_DOUBLE, XSD_TOKEN, compile_literal,
+)
+def lit(text, iri, language=None):
+    return Literal(text, Datatype(IRI(iri)), language)
+values = [
+    compile_literal(lit('-0', XSD_DOUBLE)).as_tagged(),
+    compile_literal(lit('  a\\tb  ', XSD_TOKEN)).as_tagged(),
+    compile_literal(lit('label', RDF_PLAIN_LITERAL, 'EN-gb')).as_tagged(),
+    compile_literal(lit('AAE=', XSD_BASE64_BINARY)).as_tagged(),
+    compile_literal(lit('2000-01-01T01:00:00+01:00', XSD_DATE_TIME)).as_tagged(),
+    compile_literal(lit('<a y="2" x="1"/>', RDF_XML_LITERAL)).as_tagged(),
+]
+print(json.dumps(values, sort_keys=True, separators=(',', ':')))
+"""
+    roots = [str(_ROOT / "src"), str(_ROOT.parent / "pyOWLCore" / "src")]
+    outputs = []
+    for seed, timezone in (("7", "UTC"), ("123456", "Pacific/Honolulu")):
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "LC_ALL": "C",
+                "PYTHONHASHSEED": seed,
+                "PYTHONPATH": os.pathsep.join(roots),
+                "TZ": timezone,
+            }
+        )
+        outputs.append(
+            subprocess.run(
+                [sys.executable, "-c", script],
+                check=True,
+                capture_output=True,
+                env=environment,
+                text=True,
+            ).stdout
+        )
+    assert outputs[0] == outputs[1]

@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cmp_to_key
-from typing import TypeAlias
+from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 from pyhermit.events import CancellationToken
 from pyhermit.exceptions import ResourceLimitError, UnsupportedDatatypeError
@@ -343,7 +343,17 @@ class BooleanRange:
         return tuple(BooleanComparison(value) for value in (False, True) if value in self.values)
 
 
-DatatypeRange: TypeAlias = NumericRange | BooleanRange
+@runtime_checkable
+class DatatypeRange(Protocol):
+    """Common structural surface of immutable datatype-family ranges.
+
+    Individual families expose narrower, statically checked value parameters and
+    concrete return types; ``Any`` here preserves those useful concrete signatures.
+    """
+
+    def contains(self, value: Any) -> bool: ...
+
+    def complement(self) -> Any: ...
 
 
 def range_for_datatype(datatype_iri: str) -> DatatypeRange:
@@ -354,19 +364,52 @@ def range_for_datatype(datatype_iri: str) -> DatatypeRange:
     if datatype_iri == XSD_BOOLEAN:
         return BooleanRange.all()
     spec = numeric_datatype_spec(datatype_iri)
-    if spec is None:
-        raise UnsupportedDatatypeError(
-            "datatype is outside the implemented WP07 numeric/Boolean tranche",
-            context={"datatype_iri": datatype_iri},
+    if spec is not None:
+        lower = None if spec.lower_inclusive is None else NumericComparison(spec.lower_inclusive)
+        upper = None if spec.upper_inclusive is None else NumericComparison(spec.upper_inclusive)
+        return NumericRange.between(
+            spec.domain,
+            lower=lower,
+            lower_inclusive=lower is not None,
+            upper=upper,
+            upper_inclusive=upper is not None,
         )
-    lower = None if spec.lower_inclusive is None else NumericComparison(spec.lower_inclusive)
-    upper = None if spec.upper_inclusive is None else NumericComparison(spec.upper_inclusive)
-    return NumericRange.between(
-        spec.domain,
-        lower=lower,
-        lower_inclusive=lower is not None,
-        upper=upper,
-        upper_inclusive=upper is not None,
+
+    # Local imports prevent the date/time range implementation, which reuses
+    # NumericRange internally, from creating a module cycle.
+    from .binary import XSD_BASE64_BINARY, XSD_HEX_BINARY
+    from .ieee_ranges import IEEERange
+    from .literals import RDFS_LITERAL, XSD_DOUBLE, XSD_FLOAT
+    from .model import BinaryKind, IEEEFormat
+    from .nonnumeric_ranges import BinaryRange, LiteralRange, StringRange, URIRange, XMLRange
+    from .temporal import XSD_DATE_TIME, XSD_DATE_TIME_STAMP
+    from .temporal_ranges import DateTimeRange
+    from .textual import STRING_DATATYPES, XSD_ANY_URI
+    from .xml_literal import RDF_XML_LITERAL
+
+    if datatype_iri == XSD_FLOAT:
+        return IEEERange.all(IEEEFormat.FLOAT32)
+    if datatype_iri == XSD_DOUBLE:
+        return IEEERange.all(IEEEFormat.FLOAT64)
+    if datatype_iri in STRING_DATATYPES:
+        return StringRange.all(datatype_iri)
+    if datatype_iri == XSD_HEX_BINARY:
+        return BinaryRange.all(BinaryKind.HEX)
+    if datatype_iri == XSD_BASE64_BINARY:
+        return BinaryRange.all(BinaryKind.BASE64)
+    if datatype_iri == XSD_ANY_URI:
+        return URIRange.all()
+    if datatype_iri == XSD_DATE_TIME:
+        return DateTimeRange.all()
+    if datatype_iri == XSD_DATE_TIME_STAMP:
+        return DateTimeRange.all(require_timezone=True)
+    if datatype_iri == RDF_XML_LITERAL:
+        return XMLRange.all()
+    if datatype_iri == RDFS_LITERAL:
+        return LiteralRange.all()
+    raise UnsupportedDatatypeError(
+        "datatype is outside the implemented OWL 2 datatype map",
+        context={"datatype_iri": datatype_iri},
     )
 
 

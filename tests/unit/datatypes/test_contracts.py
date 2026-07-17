@@ -35,6 +35,11 @@ def test_rational_identity_normalizes_sign_and_gcd_once() -> None:
         {"max_numeric_digits": -1},
         {"max_decimal_exponent": True},
         {"max_enumeration_values": 0},
+        {"max_binary_bytes": 0},
+        {"max_pattern_states": 0},
+        {"max_pattern_transitions": 0},
+        {"max_xml_depth": 0},
+        {"max_xml_nodes": 0},
         {"cancellation_poll_stride": 0},
     ],
 )

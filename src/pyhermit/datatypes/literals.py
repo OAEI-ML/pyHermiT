@@ -2,10 +2,9 @@
 # Modifications Copyright 2026 pyHermiT contributors
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
-"""Exact numeric and Boolean lexical/value compilation.
+"""Exact OWL 2 built-in lexical/value compilation.
 
-Source-guided compatibility references are HermiT ``OWLRealDatatypeHandler``,
-``Numbers``, and ``BooleanDatatypeHandler`` at commit
+Source-guided compatibility references are the pinned HermiT datatype handlers at commit
 ``37ec30aced32ac81ebecc5e33fad255ddefcb4c3``.  OWL2 mode follows the W3C
 datatype map; observed historical lexical quirks are isolated behind the explicit
 ``HERMIT_1_4`` compatibility key.
@@ -24,28 +23,46 @@ from pyowl_core.model import Literal
 from pyhermit.events import CancellationToken
 from pyhermit.exceptions import InvalidLiteralError, ResourceLimitError, UnsupportedDatatypeError
 
+from .binary import XSD_BASE64_BINARY, XSD_HEX_BINARY, compile_binary
+from .ieee754 import parse_ieee
 from .model import (
+    BinaryKind,
     BooleanComparison,
     BooleanIdentity,
     ComparisonValue,
     CompiledLiteral,
     DataIdentity,
     DatatypeLimits,
+    IEEEFormat,
     LexicalCompatibility,
     NumericComparison,
     NumericDomain,
     NumericIdentity,
     SourceLiteralIdentity,
 )
+from .temporal import XSD_DATE_TIME, XSD_DATE_TIME_STAMP, compile_date_time
+from .textual import (
+    RDF_NAMESPACE,
+    RDF_PLAIN_LITERAL,
+    STRING_DATATYPES,
+    XSD_ANY_URI,
+    compile_string,
+    compile_uri,
+)
+from .xml_literal import RDF_XML_LITERAL, compile_xml_literal
 
 XSD_NAMESPACE: Final = "http://www.w3.org/2001/XMLSchema#"
 OWL_NAMESPACE: Final = "http://www.w3.org/2002/07/owl#"
+RDFS_NAMESPACE: Final = "http://www.w3.org/2000/01/rdf-schema#"
 
 XSD_BOOLEAN: Final = XSD_NAMESPACE + "boolean"
 XSD_DECIMAL: Final = XSD_NAMESPACE + "decimal"
 XSD_INTEGER: Final = XSD_NAMESPACE + "integer"
+XSD_FLOAT: Final = XSD_NAMESPACE + "float"
+XSD_DOUBLE: Final = XSD_NAMESPACE + "double"
 OWL_RATIONAL: Final = OWL_NAMESPACE + "rational"
 OWL_REAL: Final = OWL_NAMESPACE + "real"
+RDFS_LITERAL: Final = RDFS_NAMESPACE + "Literal"
 
 _INTEGER = re.compile(r"[+-]?[0-9]+")
 _DECIMAL = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)")
@@ -104,7 +121,22 @@ def _numeric_specs() -> Mapping[str, NumericDatatypeSpec]:
 
 
 NUMERIC_DATATYPES: Final[Mapping[str, NumericDatatypeSpec]] = _numeric_specs()
-SUPPORTED_DATATYPES: Final[frozenset[str]] = frozenset((*NUMERIC_DATATYPES, XSD_BOOLEAN))
+SUPPORTED_DATATYPES: Final[frozenset[str]] = frozenset(
+    (
+        *NUMERIC_DATATYPES,
+        XSD_BOOLEAN,
+        XSD_FLOAT,
+        XSD_DOUBLE,
+        *STRING_DATATYPES,
+        XSD_HEX_BINARY,
+        XSD_BASE64_BINARY,
+        XSD_ANY_URI,
+        XSD_DATE_TIME,
+        XSD_DATE_TIME_STAMP,
+        RDF_XML_LITERAL,
+        RDFS_LITERAL,
+    )
+)
 
 
 def numeric_datatype_spec(datatype_iri: str) -> NumericDatatypeSpec | None:
@@ -147,11 +179,56 @@ def compile_literal(
         value = _parse_boolean(lexical, compatibility)
         identity = BooleanIdentity(value)
         comparison = BooleanComparison(value)
+    elif datatype_iri in {XSD_FLOAT, XSD_DOUBLE}:
+        identity, comparison = parse_ieee(
+            lexical,
+            IEEEFormat.FLOAT32 if datatype_iri == XSD_FLOAT else IEEEFormat.FLOAT64,
+            compatibility=compatibility,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+    elif datatype_iri in STRING_DATATYPES:
+        identity, comparison = compile_string(
+            literal,
+            compatibility=compatibility,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+    elif datatype_iri in {XSD_HEX_BINARY, XSD_BASE64_BINARY}:
+        identity, comparison = compile_binary(
+            lexical,
+            BinaryKind.HEX if datatype_iri == XSD_HEX_BINARY else BinaryKind.BASE64,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+    elif datatype_iri == XSD_ANY_URI:
+        identity, comparison = compile_uri(
+            lexical,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+    elif datatype_iri in {XSD_DATE_TIME, XSD_DATE_TIME_STAMP}:
+        identity, comparison = compile_date_time(
+            lexical,
+            require_timezone=datatype_iri == XSD_DATE_TIME_STAMP,
+            compatibility=compatibility,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+    elif datatype_iri == RDF_XML_LITERAL:
+        identity, comparison = compile_xml_literal(
+            lexical,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+    elif datatype_iri == RDFS_LITERAL:
+        # The universal data range has no direct lexical-to-value mapping.
+        _invalid_lexical(RDFS_LITERAL)
     else:
         spec = NUMERIC_DATATYPES.get(datatype_iri)
         if spec is None:
             raise UnsupportedDatatypeError(
-                "datatype is outside the implemented WP07 numeric/Boolean tranche",
+                "datatype is outside the implemented OWL 2 datatype map",
                 context={"datatype_iri": datatype_iri},
             )
         numerator, denominator = _parse_numeric(
@@ -343,9 +420,21 @@ __all__ = [
     "OWL_NAMESPACE",
     "OWL_RATIONAL",
     "OWL_REAL",
+    "RDFS_LITERAL",
+    "RDFS_NAMESPACE",
+    "RDF_NAMESPACE",
+    "RDF_PLAIN_LITERAL",
+    "RDF_XML_LITERAL",
     "SUPPORTED_DATATYPES",
+    "XSD_ANY_URI",
+    "XSD_BASE64_BINARY",
     "XSD_BOOLEAN",
+    "XSD_DATE_TIME",
+    "XSD_DATE_TIME_STAMP",
     "XSD_DECIMAL",
+    "XSD_DOUBLE",
+    "XSD_FLOAT",
+    "XSD_HEX_BINARY",
     "XSD_INTEGER",
     "XSD_NAMESPACE",
     "NumericDatatypeSpec",

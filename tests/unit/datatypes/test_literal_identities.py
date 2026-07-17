@@ -206,12 +206,13 @@ def test_exact_cross_datatype_numeric_values_never_pass_through_float() -> None:
     assert compile_literal(literal("+0/999", OWL_RATIONAL)).data_identity == NumericIdentity(0)
 
 
-def test_supported_inventory_is_exactly_this_declared_tranche() -> None:
-    assert len(SUPPORTED_DATATYPES) == 17
+def test_supported_inventory_covers_the_declared_builtin_map() -> None:
+    assert len(SUPPORTED_DATATYPES) == 34
     assert XSD_BOOLEAN in SUPPORTED_DATATYPES
     assert OWL_REAL in SUPPORTED_DATATYPES
+    assert compile_literal(literal("text", XSD_NAMESPACE + "string")).data_identity
     with pytest.raises(UnsupportedDatatypeError) as caught:
-        compile_literal(literal("text", XSD_NAMESPACE + "string"))
+        compile_literal(literal("text", "urn:unsupported"))
     assert caught.value.code == "UNSUPPORTED_DATATYPE"
 
 
