@@ -6,6 +6,7 @@ use std::sync::Arc;
 use _native::error::NativeResult;
 use _native::merging::MergingManager;
 use _native::model::{DependencySet, NodeKind};
+use _native::nominals::NominalIntroductionManager;
 use _native::rules::{
     GroundAtom, PredicateKind, RuleAtom, RuleClause, RuleEngine, RulePredicate, RuleProgram, Term,
     TermSort,
@@ -118,6 +119,59 @@ fn merge_input() -> NativeResult<MergeInput> {
     Ok((kernel, manager, source, target, cancellation()?))
 }
 
+fn nominal_input() -> NativeResult<(
+    TableauKernel,
+    RuleEngine,
+    NominalIntroductionManager,
+    Arc<CancellationState>,
+)> {
+    let predicates = vec![
+        concept(0)?,
+        RulePredicate::new(
+            1,
+            PredicateKind::Equality,
+            vec![TermSort::Object, TermSort::Object],
+        )?
+        .with_opposite(2),
+        RulePredicate::new(
+            2,
+            PredicateKind::Inequality,
+            vec![TermSort::Object, TermSort::Object],
+        )?
+        .with_opposite(1),
+        RulePredicate::new(
+            3,
+            PredicateKind::AnnotatedEquality,
+            vec![TermSort::Object; 3],
+        )?
+        .with_cardinality(4, 7, 0),
+    ];
+    let mut engine = RuleEngine::new(
+        RuleProgram::new(predicates, Vec::new())?,
+        BTreeMap::new(),
+        BTreeMap::new(),
+        true,
+    )?;
+    let mut kernel = TableauKernel::new();
+    let root = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+    let direct = kernel.create_node(NodeKind::Tree, Some(root), false, None, None, None)?;
+    let nested = kernel.create_node(NodeKind::Tree, Some(direct), false, None, None, None)?;
+    engine.dispatch_ground_atom(
+        &mut kernel,
+        GroundAtom::new(3, vec![direct, nested, root])?,
+        DependencySet::empty(),
+        false,
+        &[],
+    )?;
+    kernel.begin_operation()?;
+    Ok((
+        kernel,
+        engine,
+        NominalIntroductionManager::default(),
+        cancellation()?,
+    ))
+}
+
 fn rule_kernel(criterion: &mut Criterion) {
     let dependencies = [
         DependencySet::empty().add(0).add(2).add(4).add(6),
@@ -170,6 +224,19 @@ fn rule_kernel(criterion: &mut Criterion) {
                             DependencySet::empty(),
                             Some(&cancellation),
                         )
+                    });
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    criterion.bench_function("wpr2_nominal_cardinality_4", |bencher| {
+        bencher.iter_batched(
+            nominal_input,
+            |input| {
+                let result =
+                    input.and_then(|(mut kernel, mut engine, mut manager, cancellation)| {
+                        manager.process_next(&mut kernel, &mut engine, &cancellation)
                     });
                 black_box(result)
             },
