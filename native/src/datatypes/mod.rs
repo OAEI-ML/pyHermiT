@@ -11,11 +11,23 @@
     clippy::too_many_lines
 )]
 
+mod range;
+mod scheduler;
 mod solver;
 mod value;
 mod xsd_regex;
 mod xsd_unicode_3_2;
 
+pub use range::{
+    numeric_domain_contains, BinaryRange, BooleanRange, Cardinality, CardinalityClass,
+    IEEEInterval, IEEERange, LengthFacet, LengthInterval, LengthRange, NumericDomain,
+    NumericInterval, NumericRange, OrderedFacet, RangeLimits,
+};
+pub use scheduler::{
+    DatatypeConstraintHandle, DatatypeScheduler, DatatypeVariable, ScheduledComponentResult,
+    ScheduledConstraint, ScheduledConstraintRecord, ScheduledDatatypeClash, SchedulerCheckResult,
+    SchedulerCheckpoint, SchedulerDiagnostics, SchedulerLimits,
+};
 pub use solver::{
     solve_component, CardinalityConstraint, ClashKind, ConstraintComponent, DatatypeClash,
     DatatypeWitness, DomainConstraint, DomainKind, EqualityConstraint, FixedValueConstraint,
