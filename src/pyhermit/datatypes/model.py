@@ -87,6 +87,7 @@ class DatatypeLimits:
     max_pattern_transitions: int = 200_000
     max_data_range_depth: int = 512
     max_data_range_nodes: int = 100_000
+    max_solver_steps: int = 1_000_000
     max_semantic_payload_bytes: int = 16_000_000
     max_xml_depth: int = 256
     max_xml_nodes: int = 100_000
@@ -103,6 +104,7 @@ class DatatypeLimits:
             "max_pattern_transitions",
             "max_data_range_depth",
             "max_data_range_nodes",
+            "max_solver_steps",
             "max_semantic_payload_bytes",
             "max_xml_depth",
             "max_xml_nodes",

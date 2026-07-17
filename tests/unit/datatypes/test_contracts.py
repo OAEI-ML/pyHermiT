@@ -40,6 +40,7 @@ def test_rational_identity_normalizes_sign_and_gcd_once() -> None:
         {"max_pattern_transitions": 0},
         {"max_data_range_depth": 0},
         {"max_data_range_nodes": 0},
+        {"max_solver_steps": 0},
         {"max_semantic_payload_bytes": 0},
         {"max_xml_depth": 0},
         {"max_xml_nodes": 0},
