@@ -11,8 +11,14 @@
     clippy::too_many_lines
 )]
 
+mod solver;
 mod value;
 
+pub use solver::{
+    solve_component, CardinalityConstraint, ClashKind, ConstraintComponent, DatatypeClash,
+    DatatypeWitness, DomainConstraint, DomainKind, EqualityConstraint, FixedValueConstraint,
+    InequalityConstraint, SolveResult, SolverLimits,
+};
 pub use value::{
     decode_literal_semantic, BinaryKind, ComparisonOrder, ComparisonValue, DataIdentity,
     DatatypeControl, DatatypeError, DatatypeErrorKind, DatatypeLimits, DecodedLiteral,

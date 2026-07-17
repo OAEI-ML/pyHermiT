@@ -55,6 +55,10 @@ harness = false
 name = "role_kernel"
 harness = false
 
+[[bench]]
+name = "datatype_kernel"
+harness = false
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

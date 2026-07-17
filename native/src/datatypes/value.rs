@@ -117,7 +117,7 @@ impl Default for DatatypeLimits {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ExactRational {
     numerator: BigInt,
     denominator: BigInt,
@@ -191,7 +191,7 @@ impl ExactRational {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum IEEEFormat {
     Float32,
     Float64,
@@ -239,7 +239,7 @@ impl IEEEFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum IEEECategory {
     Finite,
     NegativeInfinity,
@@ -259,7 +259,7 @@ impl IEEECategory {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum BinaryKind {
     Hex,
     Base64,
@@ -275,7 +275,7 @@ impl BinaryKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum DataIdentity {
     Numeric(ExactRational),
     Boolean(bool),

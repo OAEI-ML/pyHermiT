@@ -1,5 +1,9 @@
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::datatypes::value::{tagged_comparison, tagged_identity};
+use crate::model::DependencySet;
+use num_bigint::BigInt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -399,6 +403,476 @@ fn shared_python_value_identity_and_comparison_matrix_matches_exactly(
             "comparison pair ({}, {})",
             pair.left, pair.right,
         );
+    }
+    Ok(())
+}
+
+fn number(value: i64) -> Result<DataIdentity, DatatypeError> {
+    Ok(DataIdentity::Numeric(ExactRational::new(
+        BigInt::from(value),
+        BigInt::from(1_u8),
+    )?))
+}
+
+fn dependencies(levels: &[u32]) -> Result<DependencySet, Box<dyn std::error::Error>> {
+    Ok(DependencySet::new(levels.to_vec())?)
+}
+
+fn finite(values: &[i64]) -> Result<DomainKind, DatatypeError> {
+    Ok(DomainKind::Finite(
+        values
+            .iter()
+            .map(|value| number(*value))
+            .collect::<Result<_, _>>()?,
+    ))
+}
+
+fn empty_component(variables: Vec<u32>) -> ConstraintComponent {
+    ConstraintComponent {
+        variables,
+        domains: Vec::new(),
+        fixed_values: Vec::new(),
+        equalities: Vec::new(),
+        inequalities: Vec::new(),
+        cardinalities: Vec::new(),
+    }
+}
+
+#[test]
+fn component_solver_reports_equality_fixed_and_domain_clashes_with_dependencies(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut component = empty_component(vec![0, 1]);
+    component.equalities.push(EqualityConstraint {
+        left: 0,
+        right: 1,
+        dependencies: dependencies(&[2])?,
+    });
+    component.inequalities.push(InequalityConstraint {
+        left: 0,
+        right: 1,
+        dependencies: dependencies(&[5])?,
+    });
+    let result = solve_component(&component, SolverLimits::default(), &NeverCancel)?;
+    let clash = result
+        .clash
+        .ok_or_else(|| DatatypeError::invalid("expected equality/inequality clash"))?;
+    assert_eq!(clash.kind, ClashKind::EqualityInequality);
+    assert_eq!(clash.dependencies.as_slice(), &[2, 5]);
+    assert_eq!(clash.variables, vec![0, 1]);
+
+    let mut component = empty_component(vec![0, 1]);
+    component.equalities.push(EqualityConstraint {
+        left: 0,
+        right: 1,
+        dependencies: dependencies(&[1])?,
+    });
+    component.fixed_values.extend([
+        FixedValueConstraint {
+            variable: 0,
+            value: number(1)?,
+            dependencies: dependencies(&[3])?,
+        },
+        FixedValueConstraint {
+            variable: 1,
+            value: number(2)?,
+            dependencies: dependencies(&[7])?,
+        },
+    ]);
+    let result = solve_component(&component, SolverLimits::default(), &NeverCancel)?;
+    let clash = result
+        .clash
+        .ok_or_else(|| DatatypeError::invalid("expected conflicting fixed values"))?;
+    assert_eq!(clash.kind, ClashKind::ConflictingFixedValues);
+    assert_eq!(clash.dependencies.as_slice(), &[1, 3, 7]);
+
+    let mut component = empty_component(vec![0]);
+    component.domains.push(DomainConstraint {
+        variable: 0,
+        domain: finite(&[1])?,
+        dependencies: dependencies(&[4])?,
+    });
+    component.fixed_values.push(FixedValueConstraint {
+        variable: 0,
+        value: number(2)?,
+        dependencies: dependencies(&[9])?,
+    });
+    let result = solve_component(&component, SolverLimits::default(), &NeverCancel)?;
+    let clash = result
+        .clash
+        .ok_or_else(|| DatatypeError::invalid("expected fixed-outside-domain clash"))?;
+    assert_eq!(clash.kind, ClashKind::FixedValueOutsideDomain);
+    assert_eq!(clash.dependencies.as_slice(), &[4, 9]);
+    Ok(())
+}
+
+#[test]
+fn finite_inequality_colouring_matches_sat_and_unsat_small_domains(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let triangle = |colours: &[i64]| -> Result<ConstraintComponent, Box<dyn std::error::Error>> {
+        let mut component = empty_component(vec![0, 1, 2]);
+        for variable in 0..3 {
+            component.domains.push(DomainConstraint {
+                variable,
+                domain: finite(colours)?,
+                dependencies: dependencies(&[variable + 1])?,
+            });
+        }
+        for (left, right, level) in [(0, 1, 10), (1, 2, 11), (0, 2, 12)] {
+            component.inequalities.push(InequalityConstraint {
+                left,
+                right,
+                dependencies: dependencies(&[level])?,
+            });
+        }
+        Ok(component)
+    };
+    let unsatisfiable =
+        solve_component(&triangle(&[0, 1])?, SolverLimits::default(), &NeverCancel)?;
+    assert!(!unsatisfiable.satisfiable);
+    let clash = unsatisfiable
+        .clash
+        .ok_or_else(|| DatatypeError::invalid("expected finite colouring clash"))?;
+    assert_eq!(clash.kind, ClashKind::UnsatisfiableInequalities);
+    assert_eq!(clash.variables, vec![0, 1, 2]);
+
+    let satisfiable = solve_component(
+        &triangle(&[0, 1, 2])?,
+        SolverLimits::default(),
+        &NeverCancel,
+    )?;
+    assert!(satisfiable.satisfiable);
+    let values = satisfiable
+        .assignments
+        .iter()
+        .map(|(_variable, value)| value)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(values.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn infinite_domains_use_private_symbolic_witnesses_and_respect_complement_and_cardinality(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut component = empty_component(vec![0, 1]);
+    component.domains.push(DomainConstraint {
+        variable: 0,
+        domain: DomainKind::ComplementFinite(BTreeSet::from([number(1)?])),
+        dependencies: dependencies(&[1])?,
+    });
+    component.inequalities.push(InequalityConstraint {
+        left: 0,
+        right: 1,
+        dependencies: dependencies(&[2])?,
+    });
+    component.cardinalities.push(CardinalityConstraint {
+        variable: 0,
+        minimum: u32::MAX,
+        dependencies: dependencies(&[3])?,
+    });
+    let result = solve_component(&component, SolverLimits::default(), &NeverCancel)?;
+    assert!(result.satisfiable);
+    assert_eq!(result.assignments.len(), 2);
+    assert!(result
+        .assignments
+        .iter()
+        .all(|(_variable, value)| matches!(value, DatatypeWitness::Symbolic { .. })));
+    assert_ne!(result.assignments[0].1, result.assignments[1].1);
+
+    let mut finite_component = empty_component(vec![0]);
+    finite_component.domains.push(DomainConstraint {
+        variable: 0,
+        domain: finite(&[1, 2])?,
+        dependencies: dependencies(&[4])?,
+    });
+    finite_component.cardinalities.push(CardinalityConstraint {
+        variable: 0,
+        minimum: 3,
+        dependencies: dependencies(&[5])?,
+    });
+    let result = solve_component(&finite_component, SolverLimits::default(), &NeverCancel)?;
+    let clash = result
+        .clash
+        .ok_or_else(|| DatatypeError::invalid("expected cardinality clash"))?;
+    assert_eq!(clash.kind, ClashKind::InsufficientCardinality);
+    assert_eq!(clash.dependencies.as_slice(), &[4, 5]);
+    Ok(())
+}
+
+#[test]
+fn solver_resource_and_cancellation_fail_without_partial_results() {
+    let mut component = empty_component(vec![0, 1]);
+    component.inequalities.push(InequalityConstraint {
+        left: 0,
+        right: 1,
+        dependencies: DependencySet::empty(),
+    });
+    let limits = SolverLimits {
+        max_steps: 1,
+        ..SolverLimits::default()
+    };
+    assert_eq!(
+        solve_component(&component, limits, &NeverCancel)
+            .err()
+            .map(|error| error.kind),
+        Some(DatatypeErrorKind::Resource)
+    );
+    assert_eq!(
+        solve_component(&component, SolverLimits::default(), &CancelImmediately,)
+            .err()
+            .map(|error| error.kind),
+        Some(DatatypeErrorKind::Cancelled)
+    );
+}
+
+#[derive(Debug, Deserialize)]
+struct SolverFixture {
+    schema_version: u32,
+    generator_seed: u64,
+    literal_count: usize,
+    case_count: usize,
+    literals: Vec<LiteralFixture>,
+    cases: Vec<SolverCaseFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SolverCaseFixture {
+    name: String,
+    variables: Vec<u32>,
+    domains: Vec<SolverDomainFixture>,
+    fixed_values: Vec<SolverFixedFixture>,
+    equalities: Vec<SolverBinaryFixture>,
+    inequalities: Vec<SolverBinaryFixture>,
+    cardinalities: Vec<SolverCardinalityFixture>,
+    expected: SolverExpectedFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct SolverDomainFixture {
+    variable: u32,
+    kind: String,
+    values: Vec<usize>,
+    dependencies: Vec<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SolverFixedFixture {
+    variable: u32,
+    value: usize,
+    dependencies: Vec<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SolverBinaryFixture {
+    left: u32,
+    right: u32,
+    dependencies: Vec<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SolverCardinalityFixture {
+    variable: u32,
+    minimum: u32,
+    dependencies: Vec<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SolverExpectedFixture {
+    satisfiable: bool,
+    clash: Option<SolverClashFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SolverClashFixture {
+    kind: String,
+    dependencies: Vec<u32>,
+    variables: Vec<u32>,
+}
+
+fn fixture_identity(
+    values: &[DecodedLiteral],
+    index: usize,
+) -> Result<DataIdentity, DatatypeError> {
+    values
+        .get(index)
+        .ok_or_else(|| DatatypeError::invalid("solver fixture literal index is absent"))
+        .and_then(semantic)
+        .map(|literal| literal.data_identity.clone())
+}
+
+#[test]
+fn shared_python_component_solver_fixture_matches_sat_clashes_and_dependencies(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture: SolverFixture = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/data/datatypes/wpr3-native-solver-v1.json"
+    )))?;
+    assert_eq!(fixture.schema_version, 1);
+    assert_eq!(fixture.generator_seed, 0x57A3_2026);
+    assert_eq!(fixture.literal_count, fixture.literals.len());
+    assert_eq!(fixture.case_count, fixture.cases.len());
+    assert_eq!(fixture.case_count, 366);
+    let values = fixture
+        .literals
+        .iter()
+        .map(|literal| {
+            decode_literal_semantic(
+                literal.source_literal_id,
+                literal.payload_json.as_bytes(),
+                DatatypeLimits::default(),
+                &NeverCancel,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for case in fixture.cases {
+        let mut component = empty_component(case.variables.clone());
+        for constraint in &case.domains {
+            let identities = constraint
+                .values
+                .iter()
+                .map(|index| fixture_identity(&values, *index))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let domain = match constraint.kind.as_str() {
+                "finite" => DomainKind::Finite(identities),
+                "complement-finite" => DomainKind::ComplementFinite(identities),
+                _ => {
+                    return Err(DatatypeError::invalid("unknown solver fixture domain kind").into())
+                }
+            };
+            component.domains.push(DomainConstraint {
+                variable: constraint.variable,
+                domain,
+                dependencies: dependencies(&constraint.dependencies)?,
+            });
+        }
+        for constraint in &case.fixed_values {
+            component.fixed_values.push(FixedValueConstraint {
+                variable: constraint.variable,
+                value: fixture_identity(&values, constraint.value)?,
+                dependencies: dependencies(&constraint.dependencies)?,
+            });
+        }
+        for constraint in &case.equalities {
+            component.equalities.push(EqualityConstraint {
+                left: constraint.left,
+                right: constraint.right,
+                dependencies: dependencies(&constraint.dependencies)?,
+            });
+        }
+        for constraint in &case.inequalities {
+            component.inequalities.push(InequalityConstraint {
+                left: constraint.left,
+                right: constraint.right,
+                dependencies: dependencies(&constraint.dependencies)?,
+            });
+        }
+        for constraint in &case.cardinalities {
+            component.cardinalities.push(CardinalityConstraint {
+                variable: constraint.variable,
+                minimum: constraint.minimum,
+                dependencies: dependencies(&constraint.dependencies)?,
+            });
+        }
+
+        let observed = solve_component(&component, SolverLimits::default(), &NeverCancel)?;
+        assert_eq!(
+            observed.satisfiable, case.expected.satisfiable,
+            "SAT result for {}",
+            case.name
+        );
+        match (observed.clash.as_ref(), case.expected.clash.as_ref()) {
+            (None, None) => validate_solver_assignment(&case, &values, &observed.assignments)?,
+            (Some(actual), Some(expected)) => {
+                assert_eq!(
+                    actual.kind.as_str(),
+                    expected.kind,
+                    "clash kind for {}",
+                    case.name
+                );
+                assert_eq!(
+                    actual.dependencies.as_slice(),
+                    expected.dependencies,
+                    "clash dependencies for {}",
+                    case.name
+                );
+                assert_eq!(
+                    actual.variables, expected.variables,
+                    "clash variables for {}",
+                    case.name
+                );
+            }
+            _ => {
+                return Err(DatatypeError::invalid(format!(
+                    "clash presence differs for {}",
+                    case.name
+                ))
+                .into())
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_solver_assignment(
+    case: &SolverCaseFixture,
+    values: &[DecodedLiteral],
+    assignments: &[(u32, DatatypeWitness)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(assignments.len(), case.variables.len(), "{}", case.name);
+    let assignment = assignments
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        assignment.keys().copied().collect::<Vec<_>>(),
+        case.variables,
+        "assignment variables for {}",
+        case.name
+    );
+    for constraint in &case.equalities {
+        assert_eq!(
+            assignment[&constraint.left], assignment[&constraint.right],
+            "equality for {}",
+            case.name
+        );
+    }
+    for constraint in &case.inequalities {
+        assert_ne!(
+            assignment[&constraint.left], assignment[&constraint.right],
+            "inequality for {}",
+            case.name
+        );
+    }
+    for constraint in &case.fixed_values {
+        assert_eq!(
+            assignment[&constraint.variable],
+            DatatypeWitness::Concrete(fixture_identity(values, constraint.value)?),
+            "fixed value for {}",
+            case.name
+        );
+    }
+    for constraint in &case.domains {
+        let allowed = constraint
+            .values
+            .iter()
+            .map(|index| fixture_identity(values, *index))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        match &assignment[&constraint.variable] {
+            DatatypeWitness::Concrete(value) => {
+                let contained = allowed.contains(value);
+                assert_eq!(
+                    contained,
+                    constraint.kind == "finite",
+                    "domain membership for {}",
+                    case.name
+                );
+            }
+            DatatypeWitness::Symbolic { .. } => assert_eq!(
+                constraint.kind, "complement-finite",
+                "symbolic witness in finite domain for {}",
+                case.name
+            ),
+        }
     }
     Ok(())
 }
