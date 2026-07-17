@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use _native::error::NativeResult;
+use _native::existentials::{
+    expansion_program_from_rules, expansion_to_native, AssertedOnlyDatatypes,
+    ExistentialExpansionManager, ExpansionLimits, ExpansionStrategy, NativeExpansionControl,
+    RuntimeExpansionAccess, RuntimeExpansionState, SpecialRoleIds,
+};
 use _native::merging::MergingManager;
 use _native::model::{DependencySet, NodeKind};
 use _native::nominals::NominalIntroductionManager;
@@ -172,6 +177,79 @@ fn nominal_input() -> NativeResult<(
     ))
 }
 
+fn existential_input(
+    cardinality: u32,
+) -> NativeResult<(
+    TableauKernel,
+    RuleEngine,
+    ExistentialExpansionManager,
+    Arc<CancellationState>,
+)> {
+    let predicates = vec![
+        concept(0)?,
+        RulePredicate::new(
+            1,
+            PredicateKind::Inequality,
+            vec![TermSort::Object, TermSort::Object],
+        )?,
+        RulePredicate::new(
+            2,
+            PredicateKind::ObjectRole,
+            vec![TermSort::Object, TermSort::Object],
+        )?
+        .with_role_id(10),
+        RulePredicate::new(3, PredicateKind::AtLeastObject, vec![TermSort::Object])?
+            .with_cardinality(cardinality, 10, 0),
+    ];
+    let program = RuleProgram::new(predicates, Vec::new())?;
+    let expansion = expansion_program_from_rules(
+        &program,
+        SpecialRoleIds {
+            top_object: 98,
+            bottom_object: 99,
+            top_data: 198,
+            bottom_data: 199,
+        },
+        &BTreeSet::new(),
+    )
+    .map_err(expansion_to_native)?;
+    let manager = ExistentialExpansionManager::new(
+        expansion,
+        ExpansionStrategy::CreationOrder,
+        ExpansionLimits::default(),
+    )
+    .map_err(expansion_to_native)?;
+    let mut engine = RuleEngine::new(program, BTreeMap::new(), BTreeMap::new(), true)?;
+    let mut kernel = TableauKernel::new();
+    let root = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+    engine.dispatch_ground_atom(
+        &mut kernel,
+        GroundAtom::new(3, vec![root])?,
+        DependencySet::empty(),
+        false,
+        &[],
+    )?;
+    kernel.begin_operation()?;
+    Ok((kernel, engine, manager, cancellation()?))
+}
+
+fn run_existential(
+    mut kernel: TableauKernel,
+    mut engine: RuleEngine,
+    manager: &ExistentialExpansionManager,
+    cancellation: &Arc<CancellationState>,
+) -> NativeResult<usize> {
+    let mut datatypes = AssertedOnlyDatatypes;
+    let mut state = RuntimeExpansionState::new(&mut kernel, None);
+    let mut access =
+        RuntimeExpansionAccess::new(&mut engine, &mut datatypes, cancellation.as_ref());
+    let mut control = NativeExpansionControl::new(cancellation.as_ref());
+    manager
+        .process_next(&mut state, &mut access, &mut control)
+        .map(|result| result.witnesses.len())
+        .map_err(expansion_to_native)
+}
+
 fn rule_kernel(criterion: &mut Criterion) {
     let dependencies = [
         DependencySet::empty().add(0).add(2).add(4).add(6),
@@ -243,6 +321,23 @@ fn rule_kernel(criterion: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    for cardinality in [1_u32, 8, 64] {
+        criterion.bench_function(
+            &format!("wpr2_existential_witnesses_{cardinality}"),
+            |bencher| {
+                bencher.iter_batched(
+                    || existential_input(cardinality),
+                    |input| {
+                        let result = input.and_then(|(kernel, engine, manager, cancellation)| {
+                            run_existential(kernel, engine, &manager, &cancellation)
+                        });
+                        black_box(result)
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
 }
 
 criterion_group!(benches, rule_kernel);

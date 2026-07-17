@@ -16,10 +16,16 @@
     clippy::too_many_lines
 )]
 
+mod adapter;
 mod distinct;
 mod manager;
 mod model;
 
+pub use adapter::{
+    expansion_program_from_rules, expansion_to_native, AssertedOnlyDatatypes,
+    NativeDatatypeExpansion, NativeExpansionControl, RuntimeExpansionAccess, RuntimeExpansionState,
+    SpecialRoleIds,
+};
 pub use distinct::{pairwise_distinct_subset, DistinctSearchResult};
 pub use manager::ExistentialExpansionManager;
 pub use model::{

@@ -180,6 +180,13 @@ pub(crate) struct Clash {
     pub(crate) provenance_id: Option<u32>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExistentialReuseRecord {
+    pub(crate) root: NodeHandle,
+    pub(crate) predicate_id: u32,
+    pub(crate) supports: Vec<DependencySet>,
+}
+
 impl Clash {
     fn logical_value(&self) -> Value {
         json!({
@@ -212,6 +219,9 @@ struct MutableState {
     disjunction_queue: StableQueue,
     datatype_components: StableQueue,
     blocking_invalidations: StableQueue,
+    existential_reuse_nodes: BTreeMap<u32, NodeHandle>,
+    existential_reuse_disabled: BTreeSet<u32>,
+    existential_reuse_branches: BTreeMap<u32, ExistentialReuseRecord>,
 }
 
 impl MutableState {
@@ -236,6 +246,9 @@ impl MutableState {
             disjunction_queue: StableQueue::default(),
             datatype_components: StableQueue::default(),
             blocking_invalidations: StableQueue::default(),
+            existential_reuse_nodes: BTreeMap::new(),
+            existential_reuse_disabled: BTreeSet::new(),
+            existential_reuse_branches: BTreeMap::new(),
         }
     }
 }
@@ -1272,6 +1285,176 @@ impl TableauKernel {
         Ok(())
     }
 
+    #[must_use]
+    pub(crate) fn existential_candidate_count(&self) -> usize {
+        self.state.existential_candidates.entries.len()
+    }
+
+    pub(crate) fn take_existential_candidate(&mut self) -> NativeResult<Option<NodeHandle>> {
+        let Some(value) = self.state.existential_candidates.pop() else {
+            return Ok(None);
+        };
+        self.record_mutation()?;
+        let QueueValue::Node(handle) = value else {
+            return Err(NativeError::invariant(
+                "existential queue contains an integer",
+            ));
+        };
+        Ok(Some(handle))
+    }
+
+    pub(crate) fn existential_reuse_node(&self, filler_predicate_id: u32) -> Option<NodeHandle> {
+        self.state
+            .existential_reuse_nodes
+            .get(&filler_predicate_id)
+            .copied()
+    }
+
+    pub(crate) fn set_existential_reuse_node(
+        &mut self,
+        filler_predicate_id: u32,
+        node: NodeHandle,
+    ) -> NativeResult<()> {
+        self.require_active(node)?;
+        if self
+            .state
+            .existential_reuse_nodes
+            .insert(filler_predicate_id, node)
+            != Some(node)
+        {
+            self.record_mutation()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remove_existential_reuse_node(
+        &mut self,
+        filler_predicate_id: u32,
+    ) -> NativeResult<()> {
+        if self
+            .state
+            .existential_reuse_nodes
+            .remove(&filler_predicate_id)
+            .is_some()
+        {
+            self.record_mutation()?;
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub(crate) fn existential_reuse_disabled(&self, predicate_id: u32) -> bool {
+        self.state
+            .existential_reuse_disabled
+            .contains(&predicate_id)
+    }
+
+    pub(crate) fn set_existential_reuse_disabled(
+        &mut self,
+        predicate_id: u32,
+        disabled: bool,
+    ) -> NativeResult<()> {
+        let changed = if disabled {
+            self.state.existential_reuse_disabled.insert(predicate_id)
+        } else {
+            self.state.existential_reuse_disabled.remove(&predicate_id)
+        };
+        if changed {
+            self.record_mutation()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn existential_reuse_branch(&self, level: u32) -> Option<&ExistentialReuseRecord> {
+        self.state.existential_reuse_branches.get(&level)
+    }
+
+    pub(crate) fn push_existential_reuse_branch(
+        &mut self,
+        root: NodeHandle,
+        predicate_id: u32,
+        mut supports: Vec<DependencySet>,
+        base_dependency: DependencySet,
+    ) -> NativeResult<u32> {
+        self.require_active(root)?;
+        if supports.is_empty() {
+            return Err(NativeError::wire(
+                "an existential reuse branch requires support",
+            ));
+        }
+        for support in &supports {
+            self.validate_dependency(support)?;
+        }
+        supports.sort();
+        supports.dedup();
+        self.validate_dependency(&base_dependency)?;
+        let level = u32::try_from(self.branches.len())
+            .map_err(|_| NativeError::invariant("branch count exceeds u32"))?;
+        if self.state.existential_reuse_branches.contains_key(&level) {
+            return Err(NativeError::invariant(
+                "existential reuse branch level is already occupied",
+            ));
+        }
+        let checkpoint = self.clone();
+        self.state.existential_reuse_branches.insert(
+            level,
+            ExistentialReuseRecord {
+                root,
+                predicate_id,
+                supports,
+            },
+        );
+        self.record_mutation()?;
+        match self.push_branch(
+            "merge".to_owned(),
+            vec![0, 1],
+            predicate_id,
+            base_dependency,
+        ) {
+            Ok(created) if created == level => Ok(created),
+            Ok(_) => {
+                self.restore_full_checkpoint(checkpoint);
+                Err(NativeError::invariant(
+                    "existential reuse branch received an unexpected level",
+                ))
+            }
+            Err(error) => {
+                self.restore_full_checkpoint(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn remove_existential_reuse_branch(&mut self, level: u32) -> NativeResult<()> {
+        if self
+            .state
+            .existential_reuse_branches
+            .remove(&level)
+            .is_some()
+        {
+            self.record_mutation()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_full_checkpoint(&mut self, checkpoint: Self) {
+        let current_sequence = self.checkpoint_sequence;
+        let Self {
+            state,
+            branches,
+            operation_root,
+            trail_length,
+            checkpoint_sequence,
+        } = checkpoint;
+        self.restore(StateCheckpoint {
+            state,
+            trail_length,
+        });
+        self.branches = branches;
+        self.operation_root = operation_root;
+        self.checkpoint_sequence = current_sequence.max(checkpoint_sequence);
+    }
+
     pub fn mark_existential(
         &mut self,
         handle: NodeHandle,
@@ -1531,6 +1714,24 @@ impl TableauKernel {
             {
                 return Err(NativeError::invariant(
                     "ground disjunction references a future branch level",
+                ));
+            }
+        }
+        for (level, record) in &self.state.existential_reuse_branches {
+            let branch = self.branch(*level);
+            if branch.as_ref().is_err()
+                || self.canonical_handle(record.root).is_err()
+                || record.supports.is_empty()
+                || record
+                    .supports
+                    .iter()
+                    .any(|support| support.maximum().is_some_and(|maximum| maximum >= *level))
+                || branch.as_ref().is_ok_and(|branch| {
+                    branch.choice_kind != "merge" || branch.source_id != record.predicate_id
+                })
+            {
+                return Err(NativeError::invariant(
+                    "existential reuse branch state is inconsistent",
                 ));
             }
         }
