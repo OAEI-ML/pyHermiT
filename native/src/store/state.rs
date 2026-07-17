@@ -2057,8 +2057,11 @@ const fn sort_name(value: NodeSort) -> &'static str {
 mod tests {
     use super::*;
     use crate::blocking::{
-        AssignmentChange, BlockingAssignment, BlockingError, BlockingStateMutate, BlockingStateRead,
+        select_blocking_plan, AssignmentChange, BlockingAssignment, BlockingError, BlockingLimits,
+        BlockingManager, BlockingMode, BlockingRequirements, BlockingStateMutate,
+        BlockingStateRead, BlockingVocabulary, DirectChecker,
     };
+    use crate::cancel::CancellationHandle;
 
     #[test]
     fn stale_handle_never_revives_after_slot_reuse() -> NativeResult<()> {
@@ -2269,5 +2272,43 @@ mod tests {
         assert!(outcome.is_err());
         assert_eq!(kernel.canonical_snapshot()?, before);
         Ok(())
+    }
+
+    #[test]
+    fn real_blocking_manager_updates_kernel_and_reschedules_exposed_work() -> NativeResult<()> {
+        let mut kernel = TableauKernel::new();
+        let root = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        let blocker = kernel.create_node(NodeKind::Tree, Some(root), false, None, None, None)?;
+        let blocked = kernel.create_node(NodeKind::Tree, Some(blocker), false, None, None, None)?;
+        kernel.add_fact(0, vec![blocker], DependencySet::empty(), false, None)?;
+        kernel.add_fact(0, vec![blocked], DependencySet::empty(), false, None)?;
+        kernel.mark_existential(blocked, 9, true)?;
+
+        let plan = select_blocking_plan(BlockingMode::Auto, BlockingRequirements::default())
+            .map_err(|error| NativeError::invariant(error.to_string()))?;
+        let vocabulary = BlockingVocabulary::new([0, 1], [])
+            .map_err(|error| NativeError::invariant(error.to_string()))?;
+        let checker = DirectChecker::new(plan.direct_checker_kind, vocabulary, false)
+            .map_err(|error| NativeError::invariant(error.to_string()))?;
+        let mut manager =
+            BlockingManager::new(plan, checker, None, BlockingLimits::default(), 1_000)
+                .map_err(|error| NativeError::invariant(error.to_string()))?;
+        let control = CancellationHandle::from_options(None, None)?.state();
+        manager
+            .compute_and_apply(&mut kernel, control.as_ref(), true)
+            .map_err(|error| NativeError::invariant(error.to_string()))?;
+        assert_eq!(kernel.active_node(blocked)?.blocker, Some(blocker));
+        assert!(kernel.active_node(blocked)?.directly_blocked);
+
+        kernel.add_fact(1, vec![blocked], DependencySet::empty(), false, None)?;
+        manager
+            .compute_and_apply(&mut kernel, control.as_ref(), false)
+            .map_err(|error| NativeError::invariant(error.to_string()))?;
+        assert_eq!(kernel.active_node(blocked)?.blocker, None);
+        assert_eq!(
+            node_queue_values(&kernel.state.existential_candidates),
+            vec![handle_value(blocked)]
+        );
+        kernel.check_invariants()
     }
 }
