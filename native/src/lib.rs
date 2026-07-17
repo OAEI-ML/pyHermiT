@@ -14,8 +14,8 @@
     clippy::too_many_lines
 )]
 
-mod branching;
 pub mod blocking;
+mod branching;
 mod cancel;
 pub mod error;
 pub mod merging;
