@@ -85,6 +85,9 @@ class DatatypeLimits:
     max_binary_bytes: int = 1_000_000
     max_pattern_states: int = 20_000
     max_pattern_transitions: int = 200_000
+    max_data_range_depth: int = 512
+    max_data_range_nodes: int = 100_000
+    max_semantic_payload_bytes: int = 16_000_000
     max_xml_depth: int = 256
     max_xml_nodes: int = 100_000
     cancellation_poll_stride: int = 64
@@ -98,6 +101,9 @@ class DatatypeLimits:
             "max_binary_bytes",
             "max_pattern_states",
             "max_pattern_transitions",
+            "max_data_range_depth",
+            "max_data_range_nodes",
+            "max_semantic_payload_bytes",
             "max_xml_depth",
             "max_xml_nodes",
             "cancellation_poll_stride",

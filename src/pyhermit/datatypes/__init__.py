@@ -3,8 +3,8 @@
 SPDX-License-Identifier: LGPL-3.0-or-later
 
 The package is independent of tableau state, Java, and native runtimes.  It exposes
-source-preserving literal compilation plus the completed built-in lexical/facet tranche;
-mixed-family data-domain algebra and the later component solver remain separate WP07 work.
+source-preserving literal compilation, built-in ranges/facets, and a canonical semantic
+payload boundary that Python and Rust backends can consume without lexical reparsing.
 """
 
 from __future__ import annotations
@@ -93,6 +93,27 @@ from .ranges import (
     numeric_domain_contains,
     range_for_datatype,
 )
+from .semantic import (
+    DATATYPE_SEMANTIC_SCHEMA_VERSION,
+    BackendLiteralSemanticPayload,
+    DataRangePayloadKind,
+    DataRangeSemanticPayload,
+    DatatypeDefinitionSemanticPayload,
+    DatatypeSemanticEvaluator,
+    DatatypeSemanticModelPayload,
+    FacetSemanticPayload,
+    LiteralSemanticPayload,
+    OpaqueLiteralSemanticPayload,
+    PayloadScalar,
+    TaggedSemanticValue,
+    comparison_from_tagged,
+    compile_data_range_semantic_payload,
+    compile_datatype_semantic_model,
+    compile_literal_semantic_payload,
+    data_identity_from_tagged,
+    decode_datatype_semantic_model,
+    decode_literal_semantic_payload,
+)
 from .temporal import XSD_DATE_TIME, XSD_DATE_TIME_STAMP
 from .temporal_ranges import DateTimeRange, DateTimeValue
 from .textual import (
@@ -114,6 +135,7 @@ from .xml_literal import RDF_XML_LITERAL
 from .xsd_regex import PINNED_UNICODE_VERSION, XML_CHARACTERS, CharSet, XSDRegex
 
 __all__ = [
+    "DATATYPE_SEMANTIC_SCHEMA_VERSION",
     "NUMERIC_DATATYPES",
     "OWL_NAMESPACE",
     "OWL_RATIONAL",
@@ -153,6 +175,7 @@ __all__ = [
     "XSD_PATTERN",
     "XSD_STRING",
     "XSD_TOKEN",
+    "BackendLiteralSemanticPayload",
     "BinaryComparison",
     "BinaryIdentity",
     "BinaryKind",
@@ -166,13 +189,19 @@ __all__ = [
     "ComparisonValue",
     "CompiledLiteral",
     "DataIdentity",
+    "DataRangePayloadKind",
+    "DataRangeSemanticPayload",
+    "DatatypeDefinitionSemanticPayload",
     "DatatypeLimits",
     "DatatypeRange",
+    "DatatypeSemanticEvaluator",
+    "DatatypeSemanticModelPayload",
     "DateTimeComparison",
     "DateTimeIdentity",
     "DateTimeRange",
     "DateTimeValue",
     "FacetRestriction",
+    "FacetSemanticPayload",
     "IEEECategory",
     "IEEEComparison",
     "IEEEFormat",
@@ -184,12 +213,15 @@ __all__ = [
     "LengthRange",
     "LexicalCompatibility",
     "LiteralRange",
+    "LiteralSemanticPayload",
     "NumericComparison",
     "NumericDatatypeSpec",
     "NumericDomain",
     "NumericIdentity",
     "NumericInterval",
     "NumericRange",
+    "OpaqueLiteralSemanticPayload",
+    "PayloadScalar",
     "RangeValue",
     "SourceLiteralIdentity",
     "StringComparison",
@@ -197,6 +229,7 @@ __all__ = [
     "StringIdentity",
     "StringRange",
     "StringValue",
+    "TaggedSemanticValue",
     "TextLanguageRectangle",
     "URIComparison",
     "URIIdentity",
@@ -207,7 +240,14 @@ __all__ = [
     "XMLRange",
     "XMLValue",
     "XSDRegex",
+    "comparison_from_tagged",
+    "compile_data_range_semantic_payload",
+    "compile_datatype_semantic_model",
     "compile_literal",
+    "compile_literal_semantic_payload",
+    "data_identity_from_tagged",
+    "decode_datatype_semantic_model",
+    "decode_literal_semantic_payload",
     "numeric_datatype_spec",
     "numeric_domain_contains",
     "range_for_datatype",
