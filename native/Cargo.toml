@@ -44,6 +44,10 @@ harness = false
 name = "rule_kernel"
 harness = false
 
+[[bench]]
+name = "blocking_kernel"
+harness = false
+
 [profile.release]
 codegen-units = 1
 lto = "thin"
