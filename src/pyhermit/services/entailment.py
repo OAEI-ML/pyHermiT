@@ -131,6 +131,24 @@ class EntailmentService:
             if isinstance(value.statement, owl.DatatypeDefinition)
         )
 
+    @property
+    def normalized(self) -> NormalizedOntology:
+        """The immutable normalized ontology captured by this service."""
+
+        return self._executor.normalized
+
+    @property
+    def source_signature(self) -> frozenset[owl.Entity]:
+        """Source-visible entities plus the required OWL/RDF built-ins."""
+
+        return self._signature
+
+    @property
+    def deterministic_program(self) -> bool:
+        """Whether the permanent clause program has no disjunctive choice points."""
+
+        return not self._executor.program.expressivity.non_horn
+
     def is_consistent(self) -> bool:
         retained = self._consistent
         if retained is None:
@@ -197,6 +215,67 @@ class EntailmentService:
         if anonymous:
             plans.extend(_roll_up_anonymous_forest(anonymous, self._witnesses_for_axioms(values)))
         return all(not result.satisfiable for result in self._executor.check_many(tuple(plans)))
+
+    def _entails_each(
+        self,
+        axioms: Sequence[owl.LogicalAxiom] | Iterable[owl.LogicalAxiom],
+    ) -> tuple[bool, ...]:
+        """Evaluate independent entailments through one isolated backend batch.
+
+        Classification uses this private vector operation so a hierarchy-search
+        frontier crosses the backend boundary once.  Anonymous individuals retain
+        their per-axiom existential scope; ``entails_all`` remains the separate API
+        for a jointly scoped conclusion ontology.
+        """
+
+        values = tuple(axioms)
+        if not all(isinstance(value, owl.LOGICAL_AXIOM_TYPES) for value in values):
+            raise TypeError("axioms must contain exact core logical axiom values")
+        if not values:
+            return ()
+        for value in values:
+            self._require_known(value)
+        self._require_consistent()
+
+        resolved: list[bool | None] = [None] * len(values)
+        plans: list[QueryPlan] = []
+        owners: list[int] = []
+        for index, axiom in enumerate(values):
+            anonymous, ordinary = _partition_anonymous_assertions((axiom,))
+            if anonymous:
+                reduction: Reduction = _roll_up_anonymous_forest(
+                    anonymous,
+                    self._witnesses_for_axioms((axiom,)),
+                )
+            else:
+                reduction = self._reduce(ordinary[0])
+            if isinstance(reduction, bool):
+                resolved[index] = reduction
+                continue
+            if not reduction:
+                resolved[index] = True
+                continue
+            plans.extend(reduction)
+            owners.extend((index,) * len(reduction))
+
+        if plans:
+            for owner, result in zip(
+                owners,
+                self._executor.check_many(tuple(plans)),
+                strict=True,
+            ):
+                entailed = not result.satisfiable
+                previous = resolved[owner]
+                resolved[owner] = entailed if previous is None else previous and entailed
+        if any(value is None for value in resolved):
+            raise RuntimeError("entailment batch left an unresolved result slot")
+        return tuple(bool(value) for value in resolved)
+
+    def _is_subclass_each(
+        self,
+        pairs: Sequence[tuple[owl.ClassExpression, owl.ClassExpression]],
+    ) -> tuple[bool, ...]:
+        return self._entails_each(tuple(owl.SubClassOf(sub, sup) for sub, sup in pairs))
 
     def supports_entailment(self, axiom_type: type[owl.AxiomNode]) -> bool:
         if not isinstance(axiom_type, type):
@@ -455,8 +534,7 @@ class EntailmentService:
         plans: list[QueryPlan] = []
         for index, (left, right) in enumerate(itertools.combinations(axiom.properties, 2)):
             source = witnesses.anonymous(f"disjoint-data:{index}:source")
-            datatype = witnesses.datatype(f"disjoint-data:{index}:anonymous-constant")
-            constant = owl.Literal(f"disjoint-data:{index}:value", datatype)
+            constant = witnesses.literal(f"disjoint-data:{index}:value")
             plans.append(
                 QueryPlan(
                     (
@@ -538,9 +616,8 @@ class EntailmentService:
                     owl.ObjectPropertyAssertion(object_property, second, shared),
                 )
             )
-        datatype = witnesses.datatype("anonymous-key-constants")
         for index, data_property in enumerate(axiom.data_properties):
-            shared_literal = owl.Literal(f"key-value-{index}", datatype)
+            shared_literal = witnesses.literal(f"key-value-{index}")
             axioms.extend(
                 (
                     owl.DataPropertyAssertion(data_property, first, shared_literal),
@@ -728,6 +805,12 @@ class _WitnessFactory:
     def datatype(self, name: str) -> owl.Datatype:
         return cast(owl.Datatype, self._entity(owl.Datatype, "datatype", name))
 
+    def literal(self, name: str) -> owl.Literal:
+        return owl.Literal(
+            f"pyhermit-query-{self.permanent_digest}-{self.purpose}-{name}",
+            owl.XSD_STRING,
+        )
+
     def _entity(
         self,
         constructor: Callable[[owl.IRI], owl.Entity],
@@ -828,8 +911,7 @@ def _data_inclusion_plan(
     label: str = "sub-data-property",
 ) -> QueryPlan:
     source = witnesses.anonymous(f"{label}:source")
-    datatype = witnesses.datatype(f"{label}:anonymous-constant")
-    constant = owl.Literal(f"{label}:value", datatype)
+    constant = witnesses.literal(f"{label}:value")
     negated_super = witnesses.data_property(f"{label}:negated-super")
     return QueryPlan(
         (
