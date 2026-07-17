@@ -15,6 +15,7 @@
 )]
 
 mod branching;
+pub mod blocking;
 mod cancel;
 pub mod error;
 pub mod merging;

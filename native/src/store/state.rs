@@ -1772,6 +1772,157 @@ impl TableauKernel {
     }
 }
 
+impl crate::blocking::BlockingStateRead for TableauKernel {
+    type Node = NodeHandle;
+
+    fn revision(&self) -> u64 {
+        self.trail_length
+    }
+
+    fn node_records(
+        &self,
+    ) -> Result<Vec<crate::blocking::NodeRecord<Self::Node>>, crate::blocking::BlockingError> {
+        Ok(self
+            .state
+            .nodes
+            .iter()
+            .flatten()
+            .map(|node| crate::blocking::NodeRecord {
+                node: node.handle,
+                key: crate::blocking::NodeKey::new(node.handle.slot, node.handle.generation),
+                creation_id: node.creation_id,
+                kind: match node.kind {
+                    NodeKind::Root => crate::blocking::NodeKind::Root,
+                    NodeKind::Tree => crate::blocking::NodeKind::Tree,
+                    NodeKind::Ni => crate::blocking::NodeKind::Ni,
+                    NodeKind::Concrete => crate::blocking::NodeKind::Concrete,
+                },
+                lifecycle: match node.lifecycle {
+                    NodeLifecycle::Active => crate::blocking::NodeLifecycle::Active,
+                    NodeLifecycle::Merged => crate::blocking::NodeLifecycle::Merged,
+                    NodeLifecycle::Pruned => crate::blocking::NodeLifecycle::Pruned,
+                    NodeLifecycle::Retired => crate::blocking::NodeLifecycle::Retired,
+                },
+                parent: node.parent,
+                has_pending_existentials: !node.unprocessed_existentials.is_empty(),
+            })
+            .collect())
+    }
+
+    fn active_fact_records(
+        &self,
+    ) -> Result<Vec<crate::blocking::FactRecord<Self::Node>>, crate::blocking::BlockingError> {
+        Ok(self
+            .state
+            .facts
+            .iter()
+            .filter(|row| row.active)
+            .map(|row| crate::blocking::FactRecord {
+                row_id: row.row_id,
+                predicate_id: row.key.predicate_id,
+                arguments: row.key.arguments.clone(),
+                core: row.core,
+                active: true,
+            })
+            .collect())
+    }
+}
+
+impl crate::blocking::BlockingStateMutate for TableauKernel {
+    fn blocking_atomic<T, F>(&mut self, operation: F) -> Result<T, crate::blocking::BlockingError>
+    where
+        F: FnOnce(&mut Self) -> Result<T, crate::blocking::BlockingError>,
+    {
+        let checkpoint = self.snapshot();
+        let result = operation(self);
+        if result.is_err() {
+            self.restore(checkpoint);
+        }
+        result
+    }
+
+    fn apply_assignment_change(
+        &mut self,
+        change: &crate::blocking::AssignmentChange<Self::Node>,
+    ) -> Result<(), crate::blocking::BlockingError> {
+        let (blocker, directly) = change.after.map_or((None, false), |assignment| {
+            if assignment.from_cache {
+                (None, false)
+            } else {
+                (assignment.blocker, assignment.directly)
+            }
+        });
+        self.set_blocked(change.node, blocker, directly)
+            .map_err(blocking_error)
+    }
+
+    fn promote_core_fact(&mut self, row_id: u32) -> Result<(), crate::blocking::BlockingError> {
+        let index = usize::try_from(row_id)
+            .map_err(|_| crate::blocking::BlockingError::invalid("fact row ID is too large"))?;
+        let row =
+            self.state.facts.get(index).ok_or_else(|| {
+                crate::blocking::BlockingError::invalid("fact row ID is unavailable")
+            })?;
+        if !row.active {
+            return Err(crate::blocking::BlockingError::invalid(
+                "cannot promote an inactive fact row",
+            ));
+        }
+        if row.core {
+            return Ok(());
+        }
+        self.state.facts[index].core = true;
+        self.record_mutation().map_err(blocking_error)
+    }
+
+    fn reschedule_existentials(
+        &mut self,
+        node: Self::Node,
+    ) -> Result<(), crate::blocking::BlockingError> {
+        if self
+            .require_active(node)
+            .map_err(blocking_error)?
+            .unprocessed_existentials
+            .is_empty()
+        {
+            return Ok(());
+        }
+        let rank = self.node_rank(node).map_err(blocking_error)?;
+        self.enqueue_node(
+            "existential_candidates",
+            node,
+            vec![i64::from(rank.0), i64::from(rank.1), i64::from(rank.2)],
+        )
+        .map_err(blocking_error)
+    }
+}
+
+fn blocking_error(error: NativeError) -> crate::blocking::BlockingError {
+    match error.kind {
+        crate::error::ErrorKind::Wire | crate::error::ErrorKind::Version => {
+            crate::blocking::BlockingError::invalid(error.message)
+        }
+        crate::error::ErrorKind::Cancelled | crate::error::ErrorKind::Timeout => {
+            crate::blocking::BlockingError::cancelled(error.message)
+        }
+        crate::error::ErrorKind::Resource => crate::blocking::BlockingError::resource(
+            error.message,
+            "native_resource",
+            error
+                .context
+                .get("observed")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default(),
+            error
+                .context
+                .get("allowed")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default(),
+        ),
+        _ => crate::blocking::BlockingError::invariant(error.message),
+    }
+}
+
 fn merge_rank(node: &Node) -> (u8, u32, u32) {
     let kind = if node.is_owl_named_individual {
         0
@@ -1905,6 +2056,9 @@ const fn sort_name(value: NodeSort) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocking::{
+        AssignmentChange, BlockingAssignment, BlockingError, BlockingStateMutate, BlockingStateRead,
+    };
 
     #[test]
     fn stale_handle_never_revives_after_slot_reuse() -> NativeResult<()> {
@@ -2034,5 +2188,86 @@ mod tests {
         assert_eq!(kernel.branch(1)?.base_dependency.as_slice(), &[0]);
         assert_eq!(kernel.branch(1)?.initial_base_dependency.as_slice(), &[0]);
         kernel.check_invariants()
+    }
+
+    #[test]
+    fn blocking_adapter_projects_and_applies_generation_safe_deltas() -> NativeResult<()> {
+        let mut kernel = TableauKernel::new();
+        let root = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        let child = kernel.create_node(NodeKind::Tree, Some(root), false, None, None, None)?;
+        kernel.mark_existential(child, 8, true)?;
+        let row_id = kernel.add_fact(7, vec![child], DependencySet::empty(), false, None)?;
+
+        let nodes = BlockingStateRead::node_records(&kernel)
+            .map_err(|error| NativeError::invariant(error.to_string()))?;
+        let child_record = nodes
+            .iter()
+            .find(|record| record.node == child)
+            .ok_or_else(|| NativeError::invariant("blocking projection omitted a live node"))?;
+        assert_eq!(child_record.key.slot, child.slot);
+        assert_eq!(child_record.key.generation, child.generation);
+        assert!(child_record.has_pending_existentials);
+        let facts = BlockingStateRead::active_fact_records(&kernel)
+            .map_err(|error| NativeError::invariant(error.to_string()))?;
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].arguments, vec![child]);
+
+        BlockingStateMutate::apply_assignment_change(
+            &mut kernel,
+            &AssignmentChange {
+                node: child,
+                before: None,
+                after: Some(BlockingAssignment::direct(child, root)),
+            },
+        )
+        .map_err(|error| NativeError::invariant(error.to_string()))?;
+        assert_eq!(kernel.active_node(child)?.blocker, Some(root));
+        assert!(kernel.active_node(child)?.directly_blocked);
+        BlockingStateMutate::promote_core_fact(&mut kernel, row_id)
+            .map_err(|error| NativeError::invariant(error.to_string()))?;
+        assert!(kernel.fact(row_id)?.core);
+        BlockingStateMutate::reschedule_existentials(&mut kernel, child)
+            .map_err(|error| NativeError::invariant(error.to_string()))?;
+        assert_eq!(
+            node_queue_values(&kernel.state.existential_candidates),
+            vec![handle_value(child)]
+        );
+
+        BlockingStateMutate::apply_assignment_change(
+            &mut kernel,
+            &AssignmentChange {
+                node: child,
+                before: Some(BlockingAssignment::direct(child, root)),
+                after: Some(BlockingAssignment::cached(child)),
+            },
+        )
+        .map_err(|error| NativeError::invariant(error.to_string()))?;
+        assert_eq!(kernel.active_node(child)?.blocker, None);
+        assert!(!kernel.active_node(child)?.directly_blocked);
+        assert!(BlockingStateRead::revision(&kernel) > 0);
+        kernel.check_invariants()
+    }
+
+    #[test]
+    fn blocking_adapter_atomic_error_restores_every_kernel_mutation() -> NativeResult<()> {
+        let mut kernel = TableauKernel::new();
+        let root = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        let child = kernel.create_node(NodeKind::Tree, Some(root), false, None, None, None)?;
+        let before = kernel.canonical_snapshot()?;
+        let outcome: Result<(), BlockingError> =
+            BlockingStateMutate::blocking_atomic(&mut kernel, |state| {
+                BlockingStateMutate::apply_assignment_change(
+                    state,
+                    &AssignmentChange {
+                        node: child,
+                        before: None,
+                        after: Some(BlockingAssignment::direct(child, root)),
+                    },
+                )?;
+                Err(BlockingError::invariant("forced adapter rollback"))
+            });
+        assert!(outcome.is_err());
+        assert_eq!(kernel.canonical_snapshot()?, before);
+        Ok(())
     }
 }

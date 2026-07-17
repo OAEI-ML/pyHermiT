@@ -143,6 +143,40 @@ impl CancellationHandle {
     }
 }
 
+impl crate::blocking::BlockingControl for CancellationState {
+    fn poll(&self) -> Result<(), crate::blocking::BlockingError> {
+        Self::poll(self).map_err(cancellation_blocking_error)
+    }
+
+    fn observe_memory(&self, bytes: u64) -> Result<(), crate::blocking::BlockingError> {
+        Self::observe_memory(self, bytes);
+        Self::poll(self).map_err(cancellation_blocking_error)
+    }
+}
+
+fn cancellation_blocking_error(error: NativeError) -> crate::blocking::BlockingError {
+    match error.kind {
+        ErrorKind::Cancelled | ErrorKind::Timeout => {
+            crate::blocking::BlockingError::cancelled(error.message)
+        }
+        ErrorKind::Resource => crate::blocking::BlockingError::resource(
+            error.message,
+            "max_memory_bytes",
+            error
+                .context
+                .get("observed")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default(),
+            error
+                .context
+                .get("allowed")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default(),
+        ),
+        _ => crate::blocking::BlockingError::invariant(error.message),
+    }
+}
+
 #[pymethods]
 impl CancellationHandle {
     #[new]
