@@ -47,6 +47,8 @@ class _View:
         self.logical_fingerprint = pyowl_core.Fingerprint("sha256", 1, b"l" * 32)
         self.signature_fingerprint = pyowl_core.Fingerprint("sha256", 1, b"g" * 32)
         self.report = object()
+        self.origin_index = pyowl_core.OriginIndex()
+        self.is_complete = True
 
     def iter_axioms(
         self,
@@ -69,6 +71,14 @@ class _View:
     def contains(self, axiom, *, scope=pyowl_core.AxiomScope.CLOSURE, document_key=None):
         return False
 
+    def ontology_annotations(
+        self,
+        *,
+        scope=pyowl_core.AxiomScope.CLOSURE,
+        document_key=None,
+    ):
+        return pyowl_core.CanonicalSet()
+
     def signature(
         self,
         kind=None,
@@ -90,6 +100,20 @@ def test_all_structural_model_exports_are_exact_core_objects() -> None:
     assert load_snapshot is pyowl_core.load_snapshot
     assert AdapterCompatibilityError is pyowl_core.AdapterCompatibilityError
     assert OptionConflictError is pyowl_core.OptionConflictError
+
+
+def test_all_shared_view_and_delta_exports_are_exact_core_objects() -> None:
+    import pyhermit.core as hermit_core
+
+    for name in (
+        "OntologyComposite",
+        "OntologyDelta",
+        "OntologyOverlay",
+        "apply_delta",
+        "compose_views",
+    ):
+        assert getattr(hermit_core, name) is getattr(pyowl_core, name)
+        assert name in hermit_core.__all__
 
 
 def test_capture_retains_exact_view_identity_and_fingerprints() -> None:

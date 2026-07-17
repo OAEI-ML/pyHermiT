@@ -29,14 +29,19 @@ from pyowl_core import (
     ImportPolicy,
     ImportResolver,
     LoadOptions,
+    OntologyComposite,
+    OntologyDelta,
     OntologyDocument,
     OntologyInput,
+    OntologyOverlay,
     OntologySnapshot,
     OntologyView,
     OptionConflictError,
     ParseLimits,
     Severity,
     SnapshotProvider,
+    apply_delta,
+    compose_views,
     load_snapshot,
 )
 
@@ -125,9 +130,7 @@ def require_core_compatibility(
         )
     major, minor, _patch = (int(value) for value in match.groups())
     if (major, minor) != (0, 1):
-        raise _compatibility_error(
-            "package_version", ">=0.1,<0.2", versions.package_version
-        )
+        raise _compatibility_error("package_version", ">=0.1,<0.2", versions.package_version)
     if versions.api_version != EXPECTED_API_VERSION:
         raise _compatibility_error(
             "API_VERSION", str(EXPECTED_API_VERSION), str(versions.api_version)
@@ -330,19 +333,6 @@ def assign_dense_ids(values: Iterable[tuple[bytes, T]]) -> tuple[DenseId[T], ...
     return tuple(DenseId(index, key, value) for index, (key, value) in enumerate(ordered))
 
 
-def __getattr__(name: str) -> object:
-    """Resolve later core view/delta exports without defining compatibility wrappers."""
-
-    if name in {"OntologyComposite", "OntologyDelta", "OntologyOverlay"}:
-        try:
-            return getattr(_core, name)
-        except AttributeError as exc:
-            raise AttributeError(
-                f"installed pyowl-core 0.1 does not yet provide required export {name}"
-            ) from exc
-    raise AttributeError(name)
-
-
 __all__ = [
     "ADAPTER_PROTOCOL_VERSION",
     "API_VERSION",
@@ -365,16 +355,21 @@ __all__ = [
     "ImportPolicy",
     "ImportResolver",
     "LoadOptions",
+    "OntologyComposite",
+    "OntologyDelta",
     "OntologyDocument",
     "OntologyInput",
+    "OntologyOverlay",
     "OntologySnapshot",
     "OntologyView",
     "OptionConflictError",
     "ParseLimits",
     "SnapshotProvider",
+    "apply_delta",
     "assign_dense_ids",
     "capture_compatible_view",
     "compiler_cache_key",
+    "compose_views",
     "current_core_versions",
     "generated_symbol_iri",
     "load_snapshot",
