@@ -69,6 +69,12 @@ pub struct RulePredicate {
     pub predicate_id: u32,
     pub kind: PredicateKind,
     pub argument_sorts: Vec<TermSort>,
+    pub symbol_id: Option<u32>,
+    pub role_id: Option<u32>,
+    pub cardinality: Option<u32>,
+    pub filler_predicate_id: Option<u32>,
+    pub annotation: Vec<u32>,
+    pub internal_key: Option<String>,
     /// Optional reciprocal link to the normalized logical opposite.
     pub opposite_predicate_id: Option<u32>,
 }
@@ -84,8 +90,51 @@ impl RulePredicate {
             predicate_id,
             kind,
             argument_sorts,
+            symbol_id: None,
+            role_id: None,
+            cardinality: None,
+            filler_predicate_id: None,
+            annotation: Vec::new(),
+            internal_key: None,
             opposite_predicate_id: None,
         })
+    }
+
+    #[must_use]
+    pub const fn with_symbol_id(mut self, symbol_id: u32) -> Self {
+        self.symbol_id = Some(symbol_id);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_role_id(mut self, role_id: u32) -> Self {
+        self.role_id = Some(role_id);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_cardinality(
+        mut self,
+        cardinality: u32,
+        role_id: u32,
+        filler_predicate_id: u32,
+    ) -> Self {
+        self.cardinality = Some(cardinality);
+        self.role_id = Some(role_id);
+        self.filler_predicate_id = Some(filler_predicate_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_annotation(mut self, annotation: Vec<u32>) -> Self {
+        self.annotation = annotation;
+        self
+    }
+
+    #[must_use]
+    pub fn with_internal_key(mut self, internal_key: impl Into<String>) -> Self {
+        self.internal_key = Some(internal_key.into());
+        self
     }
 
     #[must_use]
@@ -275,6 +324,7 @@ impl RuleProgram {
                 return Err(NativeError::wire("predicate IDs must be dense and ordered"));
             }
             validate_predicate_signature(predicate.kind, &predicate.argument_sorts)?;
+            validate_predicate_semantics(predicate)?;
         }
         for predicate in &predicates {
             let Some(opposite_id) = predicate.opposite_predicate_id else {
@@ -291,6 +341,8 @@ impl RuleProgram {
             if opposite.opposite_predicate_id != Some(predicate.predicate_id)
                 || opposite.argument_sorts != predicate.argument_sorts
                 || !opposite_kinds(predicate.kind, opposite.kind)
+                || predicate.symbol_id != opposite.symbol_id
+                || predicate.role_id != opposite.role_id
             {
                 return Err(NativeError::wire(
                     "opposite predicate links must be reciprocal and sort-compatible",
@@ -306,6 +358,7 @@ impl RuleProgram {
             predicates,
             clauses,
         };
+        program.validate_predicate_references()?;
         program.validate_clauses()?;
         Ok(program)
     }
@@ -371,6 +424,45 @@ impl RuleProgram {
                 ));
             }
             self.validate_clause(clause)?;
+        }
+        Ok(())
+    }
+
+    fn validate_predicate_references(&self) -> NativeResult<()> {
+        for predicate in &self.predicates {
+            let Some(filler_id) = predicate.filler_predicate_id else {
+                continue;
+            };
+            if filler_id == predicate.predicate_id {
+                return Err(NativeError::wire(
+                    "a cardinality predicate cannot be its own filler",
+                ));
+            }
+            let filler = self.predicate(filler_id)?;
+            let valid = match predicate.kind {
+                PredicateKind::AtLeastObject | PredicateKind::AnnotatedEquality => {
+                    filler.argument_sorts == [TermSort::Object]
+                        && matches!(
+                            filler.kind,
+                            PredicateKind::Concept
+                                | PredicateKind::NegatedConcept
+                                | PredicateKind::Nominal
+                                | PredicateKind::NegatedNominal
+                        )
+                }
+                PredicateKind::AtLeastData => {
+                    matches!(
+                        filler.kind,
+                        PredicateKind::DataRange | PredicateKind::NegatedDataRange
+                    ) && filler.argument_sorts.len() == predicate.annotation.len()
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(NativeError::wire(
+                    "cardinality predicate has an incompatible filler predicate",
+                ));
+            }
         }
         Ok(())
     }
@@ -588,6 +680,136 @@ fn validate_predicate_signature(kind: PredicateKind, sorts: &[TermSort]) -> Nati
     Ok(())
 }
 
+fn validate_predicate_semantics(predicate: &RulePredicate) -> NativeResult<()> {
+    let concept_kind = matches!(
+        predicate.kind,
+        PredicateKind::Concept
+            | PredicateKind::NegatedConcept
+            | PredicateKind::Nominal
+            | PredicateKind::NegatedNominal
+            | PredicateKind::DataRange
+            | PredicateKind::NegatedDataRange
+    );
+    let cardinality_kind = matches!(
+        predicate.kind,
+        PredicateKind::AtLeastObject
+            | PredicateKind::AtLeastData
+            | PredicateKind::AnnotatedEquality
+    );
+    let role_kind = matches!(
+        predicate.kind,
+        PredicateKind::ObjectRole
+            | PredicateKind::NegatedObjectRole
+            | PredicateKind::DataRole
+            | PredicateKind::NegatedDataRole
+    );
+    if concept_kind != predicate.symbol_id.is_some() {
+        return Err(NativeError::wire(
+            "symbol IDs are required exactly for concept, nominal, and data-range predicates",
+        ));
+    }
+    if cardinality_kind {
+        if predicate.cardinality == Some(0)
+            || predicate.cardinality.is_none()
+            || predicate.role_id.is_none()
+            || predicate.filler_predicate_id.is_none()
+        {
+            return Err(NativeError::wire(
+                "cardinality predicates require positive cardinality, role, and filler IDs",
+            ));
+        }
+    } else if predicate.cardinality.is_some() || predicate.filler_predicate_id.is_some() {
+        return Err(NativeError::wire(
+            "cardinality and filler IDs are reserved for cardinality predicates",
+        ));
+    }
+    if (cardinality_kind || role_kind) != predicate.role_id.is_some() {
+        return Err(NativeError::wire(
+            "role IDs are required exactly for role and cardinality predicates",
+        ));
+    }
+
+    let annotation_kind = matches!(
+        predicate.kind,
+        PredicateKind::Nominal
+            | PredicateKind::NegatedNominal
+            | PredicateKind::AtLeastData
+            | PredicateKind::AutomatonState
+            | PredicateKind::DisjointGuard
+    );
+    if !annotation_kind && !predicate.annotation.is_empty() {
+        return Err(NativeError::wire(
+            "predicate annotation is not valid for this predicate kind",
+        ));
+    }
+    match predicate.kind {
+        PredicateKind::Nominal | PredicateKind::NegatedNominal => {
+            if predicate.annotation.is_empty()
+                || predicate
+                    .annotation
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+            {
+                return Err(NativeError::wire(
+                    "nominal annotation IDs must be nonempty, sorted, and unique",
+                ));
+            }
+        }
+        PredicateKind::AtLeastData => {
+            if predicate.annotation.first().copied() != predicate.role_id
+                || predicate
+                    .annotation
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    != predicate.annotation.len()
+            {
+                return Err(NativeError::wire(
+                    "data at-least annotations must list unique role IDs beginning with role_id",
+                ));
+            }
+        }
+        PredicateKind::AutomatonState if predicate.annotation.len() != 2 => {
+            return Err(NativeError::wire(
+                "automaton-state annotation requires component and state IDs",
+            ));
+        }
+        PredicateKind::DisjointGuard if predicate.annotation.len() != 1 => {
+            return Err(NativeError::wire(
+                "disjoint-guard annotation requires one sequence ID",
+            ));
+        }
+        _ => {}
+    }
+
+    let internal_kind = matches!(
+        predicate.kind,
+        PredicateKind::AutomatonState
+            | PredicateKind::DisjointGuard
+            | PredicateKind::OrderingGuard
+            | PredicateKind::NamedIndividual
+    );
+    if internal_kind != predicate.internal_key.is_some() {
+        return Err(NativeError::wire(
+            "internal keys are required exactly for strategy predicates",
+        ));
+    }
+    if predicate.kind == PredicateKind::OrderingGuard {
+        let sort = match predicate.argument_sorts[0] {
+            TermSort::Data => "data",
+            TermSort::Object => "object",
+        };
+        let expected = format!("canonical-{sort}-order");
+        if predicate.internal_key.as_deref() != Some(expected.as_str()) {
+            return Err(NativeError::wire(
+                "ordering-guard internal key does not match its term sort",
+            ));
+        }
+    }
+    Ok(())
+}
+
 const fn opposite_kinds(left: PredicateKind, right: PredicateKind) -> bool {
     matches!(
         (left, right),
@@ -698,8 +920,10 @@ mod tests {
     #[test]
     fn programs_reject_wrong_sorts_and_non_range_restricted_heads() -> NativeResult<()> {
         let predicates = vec![
-            RulePredicate::new(0, PredicateKind::Concept, vec![TermSort::Object])?,
-            RulePredicate::new(1, PredicateKind::DataRange, vec![TermSort::Data])?,
+            RulePredicate::new(0, PredicateKind::Concept, vec![TermSort::Object])?
+                .with_symbol_id(0),
+            RulePredicate::new(1, PredicateKind::DataRange, vec![TermSort::Data])?
+                .with_symbol_id(1),
         ];
         let wrong = RuleClause::new(
             0,
@@ -727,7 +951,8 @@ mod tests {
             0,
             PredicateKind::DataRole,
             vec![TermSort::Object, TermSort::Data],
-        )?;
+        )?
+        .with_role_id(0);
         let program = RuleProgram::new(vec![predicate], Vec::new())?;
         assert_eq!(program.predicate_kind(0)?, PredicateKind::DataRole);
         assert_eq!(
@@ -740,10 +965,12 @@ mod tests {
 
     #[test]
     fn opposite_links_are_reciprocal_and_shape_checked() -> NativeResult<()> {
-        let positive =
-            RulePredicate::new(0, PredicateKind::Concept, vec![TermSort::Object])?.with_opposite(1);
+        let positive = RulePredicate::new(0, PredicateKind::Concept, vec![TermSort::Object])?
+            .with_symbol_id(0)
+            .with_opposite(1);
         let negative =
             RulePredicate::new(1, PredicateKind::NegatedConcept, vec![TermSort::Object])?
+                .with_symbol_id(0)
                 .with_opposite(0);
         let program = RuleProgram::new(vec![positive.clone(), negative], Vec::new())?;
         assert_eq!(
@@ -754,8 +981,73 @@ mod tests {
         );
 
         let malformed =
-            RulePredicate::new(1, PredicateKind::NegatedConcept, vec![TermSort::Object])?;
+            RulePredicate::new(1, PredicateKind::NegatedConcept, vec![TermSort::Object])?
+                .with_symbol_id(0);
         assert!(RuleProgram::new(vec![positive, malformed], Vec::new()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cardinality_metadata_and_fillers_match_the_python_ir_contract() -> NativeResult<()> {
+        let predicates = vec![
+            RulePredicate::new(0, PredicateKind::Concept, vec![TermSort::Object])?
+                .with_symbol_id(0),
+            RulePredicate::new(
+                1,
+                PredicateKind::ObjectRole,
+                vec![TermSort::Object, TermSort::Object],
+            )?
+            .with_role_id(7),
+            RulePredicate::new(2, PredicateKind::AtLeastObject, vec![TermSort::Object])?
+                .with_cardinality(3, 7, 0),
+            RulePredicate::new(
+                3,
+                PredicateKind::AnnotatedEquality,
+                vec![TermSort::Object; 3],
+            )?
+            .with_cardinality(3, 7, 0),
+            RulePredicate::new(
+                4,
+                PredicateKind::DataRange,
+                vec![TermSort::Data, TermSort::Data],
+            )?
+            .with_symbol_id(1),
+            RulePredicate::new(
+                5,
+                PredicateKind::DataRole,
+                vec![TermSort::Object, TermSort::Data],
+            )?
+            .with_role_id(9),
+            RulePredicate::new(6, PredicateKind::AtLeastData, vec![TermSort::Object])?
+                .with_cardinality(2, 9, 4)
+                .with_annotation(vec![9, 10]),
+        ];
+        let program = RuleProgram::new(predicates, Vec::new())?;
+        assert_eq!(program.predicate(2)?.cardinality, Some(3));
+        assert_eq!(program.predicate(6)?.annotation, [9, 10]);
+
+        let malformed = vec![
+            RulePredicate::new(0, PredicateKind::Concept, vec![TermSort::Object])?
+                .with_symbol_id(0),
+            RulePredicate::new(
+                1,
+                PredicateKind::ObjectRole,
+                vec![TermSort::Object, TermSort::Object],
+            )?
+            .with_role_id(7),
+            RulePredicate::new(2, PredicateKind::AtLeastObject, vec![TermSort::Object])?
+                .with_cardinality(2, 7, 1),
+        ];
+        assert!(RuleProgram::new(malformed, Vec::new()).is_err());
+        assert!(RuleProgram::new(
+            vec![RulePredicate::new(
+                0,
+                PredicateKind::Concept,
+                vec![TermSort::Object],
+            )?],
+            Vec::new(),
+        )
+        .is_err());
         Ok(())
     }
 }

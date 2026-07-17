@@ -1038,7 +1038,14 @@ mod tests {
             }
             _ => vec![TermSort::Object],
         };
-        RulePredicate::new(predicate_id, kind, sorts)
+        let predicate = RulePredicate::new(predicate_id, kind, sorts)?;
+        Ok(match kind {
+            PredicateKind::Concept | PredicateKind::NegatedConcept => {
+                predicate.with_symbol_id(predicate_id)
+            }
+            PredicateKind::ObjectRole => predicate.with_role_id(predicate_id),
+            _ => predicate,
+        })
     }
 
     fn root(kernel: &mut TableauKernel) -> NativeResult<NodeHandle> {
@@ -1222,7 +1229,8 @@ mod tests {
                     1,
                     PredicateKind::OrderingGuard,
                     vec![TermSort::Object, TermSort::Object],
-                )?,
+                )?
+                .with_internal_key("canonical-object-order"),
             ],
             vec![RuleClause::new(
                 0,

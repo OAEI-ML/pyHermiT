@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::branching::{BranchTransition, DisjunctionBrancher, GroundAtomAccess};
 use crate::cancel::CancellationState;
 use crate::error::{ErrorKind, NativeError, NativeResult};
+use crate::merging::MergingManager;
 use crate::model::{DependencySet, NodeHandle, NodeSort};
 use crate::store::TableauKernel;
 
@@ -29,6 +30,7 @@ pub struct RuleEngine {
     atoms: Vec<GroundAtom>,
     disjunction_keys: BTreeMap<Vec<GroundAtom>, u32>,
     brancher: DisjunctionBrancher,
+    merger: MergingManager,
     limits: RuleLimits,
     initialized: bool,
 }
@@ -62,6 +64,7 @@ impl RuleEngine {
             limits.cancellation_interval,
         )?;
         let join_program = compile_join_program(&program)?;
+        let merger = MergingManager::new(&program)?;
         Ok(Self {
             program,
             join_program,
@@ -71,6 +74,7 @@ impl RuleEngine {
             atoms: Vec::new(),
             disjunction_keys: BTreeMap::new(),
             brancher: DisjunctionBrancher::new(disjunction_learning),
+            merger,
             limits,
             initialized: false,
         })
@@ -728,6 +732,15 @@ impl RuleEngine {
     ) -> NativeResult<bool> {
         let left = atom.arguments[0];
         let right = atom.arguments[1];
+        if self.fixed_data_values_differ(kernel, left, right)? {
+            let atom_id = self.atom_id(atom)?;
+            return kernel.install_clash(
+                "equality_inequality".to_owned(),
+                dependency,
+                vec![atom_id],
+                provenance_ids.first().copied(),
+            );
+        }
         if let Some(opposite) = self
             .program
             .predicate(atom.predicate_id)?
@@ -745,7 +758,31 @@ impl RuleEngine {
         }
         let changed = left != right;
         let representative = if changed {
-            kernel.merge_nodes(left, right, dependency.clone())?
+            let result = self
+                .merger
+                .merge(kernel, left, right, dependency.clone(), None)?;
+            if result.clashed {
+                return Ok(true);
+            }
+            let representative = result.representative;
+            let rows = kernel.facts_for_node(representative)?;
+            for row in rows {
+                let provenance_ids = row.provenance_ids.iter().copied().collect::<Vec<_>>();
+                let ground = GroundAtom::new(row.key.predicate_id, row.key.arguments)?;
+                for support in row.supports {
+                    self.dispatch_ground_atom(
+                        kernel,
+                        ground.clone(),
+                        support,
+                        row.core,
+                        &provenance_ids,
+                    )?;
+                    if kernel.clash().is_some() {
+                        return Ok(true);
+                    }
+                }
+            }
+            representative
         } else {
             left
         };
@@ -1146,7 +1183,10 @@ mod tests {
     use super::*;
 
     fn concept(predicate_id: u32) -> NativeResult<RulePredicate> {
-        RulePredicate::new(predicate_id, PredicateKind::Concept, vec![TermSort::Object])
+        Ok(
+            RulePredicate::new(predicate_id, PredicateKind::Concept, vec![TermSort::Object])?
+                .with_symbol_id(predicate_id),
+        )
     }
 
     fn atom(predicate_id: u32, node: NodeHandle) -> NativeResult<GroundAtom> {
@@ -1223,6 +1263,7 @@ mod tests {
         let positive = concept(0)?.with_opposite(1);
         let negative =
             RulePredicate::new(1, PredicateKind::NegatedConcept, vec![TermSort::Object])?
+                .with_symbol_id(0)
                 .with_opposite(0);
         let equality = RulePredicate::new(
             2,
@@ -1296,12 +1337,14 @@ mod tests {
             PredicateKind::DataRole,
             vec![TermSort::Object, TermSort::Data],
         )?
+        .with_role_id(0)
         .with_opposite(1);
         let negative = RulePredicate::new(
             1,
             PredicateKind::NegatedDataRole,
             vec![TermSort::Object, TermSort::Data],
         )?
+        .with_role_id(0)
         .with_opposite(0);
         let inequality = RulePredicate::new(
             2,

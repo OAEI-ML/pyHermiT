@@ -18,7 +18,10 @@ fn cancellation() -> NativeResult<Arc<CancellationState>> {
 }
 
 fn concept(predicate_id: u32) -> NativeResult<RulePredicate> {
-    RulePredicate::new(predicate_id, PredicateKind::Concept, vec![TermSort::Object])
+    Ok(
+        RulePredicate::new(predicate_id, PredicateKind::Concept, vec![TermSort::Object])?
+            .with_symbol_id(predicate_id),
+    )
 }
 
 fn saturation_input() -> NativeResult<(TableauKernel, RuleEngine, Arc<CancellationState>)> {

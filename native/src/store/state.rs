@@ -10,25 +10,25 @@ use crate::error::{NativeError, NativeResult};
 use crate::model::{DependencySet, NodeHandle, NodeKind, NodeLifecycle, NodeSort};
 
 #[derive(Clone, Debug)]
-struct Node {
-    handle: NodeHandle,
-    creation_id: u32,
-    kind: NodeKind,
-    sort: NodeSort,
-    lifecycle: NodeLifecycle,
-    parent: Option<NodeHandle>,
-    tree_depth: u32,
-    creation_checkpoint: u32,
-    is_owl_named_individual: bool,
-    source_individual_id: Option<u32>,
-    representative: Option<NodeHandle>,
-    merge_dependency: DependencySet,
-    blocker: Option<NodeHandle>,
-    directly_blocked: bool,
-    blocking_generation: u32,
-    unprocessed_existentials: BTreeSet<u32>,
-    nominal_level: Option<u32>,
-    cardinality_tag: Option<u32>,
+pub(crate) struct Node {
+    pub(crate) handle: NodeHandle,
+    pub(crate) creation_id: u32,
+    pub(crate) kind: NodeKind,
+    pub(crate) sort: NodeSort,
+    pub(crate) lifecycle: NodeLifecycle,
+    pub(crate) parent: Option<NodeHandle>,
+    pub(crate) tree_depth: u32,
+    pub(crate) creation_checkpoint: u32,
+    pub(crate) is_owl_named_individual: bool,
+    pub(crate) source_individual_id: Option<u32>,
+    pub(crate) representative: Option<NodeHandle>,
+    pub(crate) merge_dependency: DependencySet,
+    pub(crate) blocker: Option<NodeHandle>,
+    pub(crate) directly_blocked: bool,
+    pub(crate) blocking_generation: u32,
+    pub(crate) unprocessed_existentials: BTreeSet<u32>,
+    pub(crate) nominal_level: Option<u32>,
+    pub(crate) cardinality_tag: Option<u32>,
 }
 
 impl Node {
@@ -336,6 +336,23 @@ impl TableauKernel {
             .ok_or_else(|| NativeError::invariant("checkpoint sequence overflow"))?;
         self.operation_root = self.snapshot();
         Ok(())
+    }
+
+    /// Execute one compound semantic mutation atomically. This is deliberately
+    /// crate-private: public callers use the coarse reasoner operation boundary,
+    /// while merge/expansion/blocking managers share this exact rollback primitive.
+    pub(crate) fn atomic<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> NativeResult<T>,
+    ) -> NativeResult<T> {
+        let checkpoint = self.snapshot();
+        match operation(self) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.restore(checkpoint);
+                Err(error)
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -662,6 +679,48 @@ impl TableauKernel {
     pub(crate) fn node_rank(&self, handle: NodeHandle) -> NativeResult<(u32, u32, u32)> {
         let node = self.require_active(handle)?;
         Ok((node.creation_id, handle.slot, handle.generation))
+    }
+
+    pub(crate) fn active_node(&self, handle: NodeHandle) -> NativeResult<&Node> {
+        self.require_active(handle)
+    }
+
+    pub(crate) fn direct_children(&self, parent: NodeHandle) -> NativeResult<Vec<NodeHandle>> {
+        self.require_active(parent)?;
+        let mut children: Vec<_> = self
+            .state
+            .nodes
+            .iter()
+            .flatten()
+            .filter(|node| node.lifecycle == NodeLifecycle::Active && node.parent == Some(parent))
+            .map(|node| (node.creation_id, node.handle))
+            .collect();
+        children.sort_unstable();
+        Ok(children
+            .into_iter()
+            .map(|(_creation_id, handle)| handle)
+            .collect())
+    }
+
+    pub(crate) fn merge_orientation(
+        &self,
+        left: NodeHandle,
+        right: NodeHandle,
+    ) -> NativeResult<(NodeHandle, NodeHandle)> {
+        let (target, source) =
+            self.merge_direction(self.require_active(left)?, self.require_active(right)?)?;
+        Ok((target.handle, source.handle))
+    }
+
+    pub(crate) fn facts_for_node(&self, handle: NodeHandle) -> NativeResult<Vec<FactRow>> {
+        self.require_active(handle)?;
+        self.state
+            .facts_by_node
+            .get(&handle)
+            .into_iter()
+            .flat_map(BTreeSet::iter)
+            .map(|row_id| self.fact(*row_id).cloned())
+            .collect()
     }
 
     #[must_use]

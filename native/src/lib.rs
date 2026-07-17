@@ -17,6 +17,7 @@
 mod branching;
 mod cancel;
 pub mod error;
+pub mod merging;
 pub mod model;
 pub mod rules;
 pub mod store;

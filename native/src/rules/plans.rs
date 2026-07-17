@@ -296,8 +296,10 @@ mod tests {
                 0,
                 PredicateKind::ObjectRole,
                 vec![TermSort::Object, TermSort::Object],
-            )?,
-            RulePredicate::new(1, PredicateKind::Concept, vec![TermSort::Object])?,
+            )?
+            .with_role_id(0),
+            RulePredicate::new(1, PredicateKind::Concept, vec![TermSort::Object])?
+                .with_symbol_id(1),
             RulePredicate::new(
                 2,
                 PredicateKind::Equality,
@@ -307,7 +309,8 @@ mod tests {
                 3,
                 PredicateKind::OrderingGuard,
                 vec![TermSort::Object, TermSort::Object],
-            )?,
+            )?
+            .with_internal_key("canonical-object-order"),
         ];
         let x0 = Term::variable(0, TermSort::Object);
         let x1 = Term::variable(1, TermSort::Object);
@@ -348,7 +351,8 @@ mod tests {
             0,
             PredicateKind::OrderingGuard,
             vec![TermSort::Object, TermSort::Object],
-        )?;
+        )?
+        .with_internal_key("canonical-object-order");
         let x0 = Term::variable(0, TermSort::Object);
         let x1 = Term::variable(1, TermSort::Object);
         let clauses = vec![
