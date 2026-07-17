@@ -952,4 +952,154 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn pruned_pending_arguments_are_ignored_without_creating_a_root() -> NativeResult<()> {
+        let (mut kernel, mut engine, _root, direct, _nested) = fixture(2)?;
+        let mut manager = NominalIntroductionManager::default();
+        let control = cancellation()?;
+        kernel.prune_subtree(direct)?;
+
+        assert_eq!(
+            manager.process_next(&mut kernel, &mut engine, &control)?,
+            BranchTransition::Satisfied
+        );
+        assert!(manager.root_keys().is_empty());
+        assert!(kernel.branch(0).is_err());
+        assert_eq!(manager.trace().len(), 1);
+        assert_eq!(manager.trace()[0].event, NominalEvent::IgnoredPruned);
+        kernel.check_invariants()
+    }
+
+    #[test]
+    fn target_merge_prunes_an_ancestor_before_the_other_argument() -> NativeResult<()> {
+        let mut kernel = TableauKernel::new();
+        let annotation_root =
+            kernel.create_node(NodeKind::Ni, None, false, None, Some(1), Some(90))?;
+        let host = kernel.create_node(NodeKind::Ni, None, false, None, Some(1), Some(91))?;
+        let ancestor = kernel.create_node(NodeKind::Tree, Some(host), false, None, None, None)?;
+        let descendant =
+            kernel.create_node(NodeKind::Tree, Some(ancestor), false, None, None, None)?;
+        let leaf = kernel.create_node(NodeKind::Tree, Some(descendant), false, None, None, None)?;
+        let mut engine = RuleEngine::new(program(1)?, BTreeMap::new(), BTreeMap::new(), true)?;
+        engine.dispatch_ground_atom(
+            &mut kernel,
+            GroundAtom::new(3, vec![ancestor, descendant, annotation_root])?,
+            DependencySet::empty(),
+            false,
+            &[5],
+        )?;
+        let mut manager = NominalIntroductionManager::default();
+        let control = cancellation()?;
+
+        assert_eq!(
+            manager.process_next(&mut kernel, &mut engine, &control)?,
+            BranchTransition::Deterministic
+        );
+        let introduced = manager
+            .root_for(
+                &kernel,
+                annotation_root,
+                &engine.program().predicate(3)?.clone(),
+                1,
+            )?
+            .ok_or_else(|| NativeError::invariant("nominal root was not created"))?;
+        assert_eq!(kernel.canonical_handle(ancestor)?.0, introduced);
+        assert_eq!(kernel.node(descendant)?.lifecycle, NodeLifecycle::Pruned);
+        assert_eq!(kernel.node(leaf)?.lifecycle, NodeLifecycle::Pruned);
+        assert!(!manager
+            .trace()
+            .iter()
+            .any(|event| event.event == NominalEvent::OtherMerged));
+        kernel.check_invariants()
+    }
+
+    #[test]
+    fn canonical_annotation_owner_and_stored_root_are_reused_after_merges() -> NativeResult<()> {
+        let (mut kernel, mut engine, root, _direct, _nested) = fixture(1)?;
+        let mut manager = NominalIntroductionManager::default();
+        let control = cancellation()?;
+        assert_eq!(
+            manager.process_next(&mut kernel, &mut engine, &control)?,
+            BranchTransition::Deterministic
+        );
+        let predicate = engine.program().predicate(3)?.clone();
+        let introduced = manager
+            .root_for(&kernel, root, &predicate, 1)?
+            .ok_or_else(|| NativeError::invariant("nominal root was not created"))?;
+
+        let owner_survivor =
+            kernel.create_node(NodeKind::Root, None, true, Some(100), None, None)?;
+        engine.merge_nodes_semantic(
+            &mut kernel,
+            root,
+            owner_survivor,
+            DependencySet::empty(),
+            Some(&control),
+        )?;
+        let root_survivor =
+            kernel.create_node(NodeKind::Root, None, true, Some(101), None, None)?;
+        engine.merge_nodes_semantic(
+            &mut kernel,
+            introduced,
+            root_survivor,
+            DependencySet::empty(),
+            Some(&control),
+        )?;
+
+        let host = kernel.create_node(NodeKind::Ni, None, false, None, Some(1), Some(92))?;
+        let target = kernel.create_node(NodeKind::Tree, Some(host), false, None, None, None)?;
+        engine.dispatch_ground_atom(
+            &mut kernel,
+            GroundAtom::new(3, vec![target, target, root])?,
+            DependencySet::empty(),
+            false,
+            &[6],
+        )?;
+        assert!(manager.process_all(&mut kernel, &mut engine, &control)? >= 1);
+
+        let expected = kernel.canonical_handle(introduced)?.0;
+        assert_eq!(
+            manager.root_for(&kernel, owner_survivor, &predicate, 1)?,
+            Some(expected)
+        );
+        assert_eq!(kernel.canonical_handle(target)?.0, expected);
+        assert_eq!(manager.root_keys().len(), 1);
+        assert_eq!(
+            manager
+                .trace()
+                .iter()
+                .filter(|event| event.event == NominalEvent::RootReused)
+                .count(),
+            1
+        );
+        kernel.check_invariants()
+    }
+
+    #[test]
+    fn branch_choice_limit_rolls_back_state_and_requeues_the_action() -> NativeResult<()> {
+        let (mut kernel, mut engine, _root, _direct, _nested) = fixture(2)?;
+        let mut manager = NominalIntroductionManager::new(NominalLimits::new(1, 10)?)?;
+        let control = cancellation()?;
+        let before = kernel.canonical_snapshot()?;
+
+        let error = match manager.process_next(&mut kernel, &mut engine, &control) {
+            Ok(_transition) => {
+                return Err(NativeError::invariant(
+                    "cardinality two did not exceed a one-choice limit",
+                ));
+            }
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ErrorKind::Resource);
+        assert_eq!(kernel.canonical_snapshot()?, before);
+        assert!(manager.root_keys().is_empty());
+        assert!(manager.trace().is_empty());
+
+        let pending = engine
+            .take_pending_annotated_equality(&mut kernel)?
+            .ok_or_else(|| NativeError::invariant("nominal action was not restored"))?;
+        assert_eq!(pending.atom.predicate_id, 3);
+        kernel.check_invariants()
+    }
 }
