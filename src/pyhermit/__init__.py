@@ -1,12 +1,107 @@
-"""Foundation marker for the future pyHermiT public API.
-
-WP00 intentionally exports no reasoner, ontology model, parser, or backend. Public OWL
-values and reasoning services are introduced only by their dependency-ordered work
-packages.
-"""
+"""Java-free OWL 2 DL reasoning over shared pyowl-core ontology views."""
 
 from __future__ import annotations
 
 __version__ = "0.1.0.dev0"
 
-__all__ = ["__version__"]
+from pyowl_core import (
+    IRI,
+    ImportResolver,
+    LoadOptions,
+    OntologyComposite,
+    OntologyDelta,
+    OntologyInput,
+    OntologyOverlay,
+    OntologySnapshot,
+    OntologyView,
+    apply_delta,
+    compose_views,
+    load_snapshot,
+)
+
+from .backends.protocol import BackendInfo, BackendStatus, Hierarchy
+from .config import (
+    BackendName,
+    BlockingMode,
+    ExistentialMode,
+    FreshEntityPolicy,
+    IndividualGrouping,
+    ReasonerConfig,
+    UnsupportedDatatypePolicy,
+)
+from .exceptions import (
+    BackendError,
+    BackendMismatchError,
+    BackendPoisonedError,
+    BackendVersionError,
+    ConcurrentMutationError,
+    DisposedReasonerError,
+    FeatureNotImplementedError,
+    FreshEntityError,
+    IncompleteImportClosureError,
+    InconsistentOntologyError,
+    InternalInvariantError,
+    InvalidLiteralError,
+    NativeBackendUnavailableError,
+    OntologyInputError,
+    OntologyProfileError,
+    PyHermiTError,
+    ReasonerInterruptedError,
+    ReasonerStateError,
+    ReasonerTimeoutError,
+    ReasoningAbortedError,
+    ResourceLimitError,
+    UnsupportedDatatypeError,
+)
+from .facade import InferenceType, Reasoner, backend_info
+
+__all__ = [
+    "IRI",
+    "BackendError",
+    "BackendInfo",
+    "BackendMismatchError",
+    "BackendName",
+    "BackendPoisonedError",
+    "BackendStatus",
+    "BackendVersionError",
+    "BlockingMode",
+    "ConcurrentMutationError",
+    "DisposedReasonerError",
+    "ExistentialMode",
+    "FeatureNotImplementedError",
+    "FreshEntityError",
+    "FreshEntityPolicy",
+    "Hierarchy",
+    "ImportResolver",
+    "IncompleteImportClosureError",
+    "InconsistentOntologyError",
+    "IndividualGrouping",
+    "InferenceType",
+    "InternalInvariantError",
+    "InvalidLiteralError",
+    "LoadOptions",
+    "NativeBackendUnavailableError",
+    "OntologyComposite",
+    "OntologyDelta",
+    "OntologyInput",
+    "OntologyInputError",
+    "OntologyOverlay",
+    "OntologyProfileError",
+    "OntologySnapshot",
+    "OntologyView",
+    "PyHermiTError",
+    "Reasoner",
+    "ReasonerConfig",
+    "ReasonerInterruptedError",
+    "ReasonerStateError",
+    "ReasonerTimeoutError",
+    "ReasoningAbortedError",
+    "ResourceLimitError",
+    "UnsupportedDatatypeError",
+    "UnsupportedDatatypePolicy",
+    "__version__",
+    "apply_delta",
+    "backend_info",
+    "compose_views",
+    "load_snapshot",
+]

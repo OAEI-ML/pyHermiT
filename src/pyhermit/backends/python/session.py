@@ -365,9 +365,13 @@ class PythonBackendFactory:
             complete_features=frozenset(
                 {
                     "blocking",
+                    "classification",
                     "datatypes",
+                    "full_reasoner",
+                    "incremental_updates",
                     "nominals",
                     "query-overlays",
+                    "realization",
                     "satisfiability",
                 }
             ),

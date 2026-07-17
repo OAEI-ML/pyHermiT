@@ -949,6 +949,23 @@ def compile_captured(
 ) -> CompiledOntology:
     """Compile a captured core view without flattening or copying its public model."""
 
+    return compile_captured_bundle(
+        captured,
+        config,
+        limits=limits,
+        cancelled=cancelled,
+    )[2]
+
+
+def compile_captured_bundle(
+    captured: CapturedOntology,
+    config: ReasonerConfig,
+    *,
+    limits: CompilationLimits | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[NormalizedOntology, ClauseProgram, CompiledOntology]:
+    """Compile once and retain every immutable layer needed by a reasoner session."""
+
     if not isinstance(captured, CapturedOntology):
         raise TypeError("captured must be CapturedOntology")
     if not isinstance(config, ReasonerConfig):
@@ -972,7 +989,7 @@ def compile_captured(
         for value in individual_domain.values
         if value.display.startswith("named_individual:")
     )
-    return CompiledOntology(
+    compiled = CompiledOntology(
         schema_version=COMPILED_IR_SCHEMA_VERSION,
         ontology_fingerprint=compiler_cache_key(captured, config),
         source_structural_fingerprint=cast(
@@ -1003,6 +1020,7 @@ def compile_captured(
         named_individuals=named,
         provenance=program.provenance,
     )
+    return normalized, program, compiled
 
 
 def _raise_if_cancelled(cancelled: Callable[[], bool] | None) -> None:

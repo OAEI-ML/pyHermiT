@@ -132,6 +132,23 @@ def test_cancellation_memory_limit_maps_to_stable_resource_error() -> None:
     }
 
 
+def test_cancellation_source_resets_the_same_token_between_operations() -> None:
+    source = CancellationSource()
+    token = source.token
+    source.interrupt("first")
+    with pytest.raises(ReasonerInterruptedError):
+        token.check()
+
+    retained = source.begin_operation(timeout=None, max_memory_bytes=5)
+
+    assert retained is token
+    assert not retained.interrupted
+    assert retained.reason is None
+    retained.observe_memory(6)
+    with pytest.raises(ResourceLimitError):
+        retained.check()
+
+
 def test_exception_taxonomy_and_canonical_diagnostic() -> None:
     error = FeatureNotImplementedError("keys are not available", feature_id="OWL_HAS_KEY")
     assert isinstance(error, (PyHermiTError, NotImplementedError))

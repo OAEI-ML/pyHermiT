@@ -243,6 +243,49 @@ def test_compile_captured_preserves_the_exact_view_boundary_and_dense_rule_order
     assert observed == [view_marker]
     assert compiled.clauses is program.clauses
     assert compiled.ground_disjunctions is program.ground_disjunctions
+
+
+def test_compile_captured_bundle_normalizes_and_compiles_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized = normalize_axioms(_logical_axioms()[:4], logical_fingerprint=FINGERPRINT)
+    program = compile_normalized(normalized)
+    view_marker = object()
+    fingerprint = pyowl_core.Fingerprint("sha256", 1, b"b" * 32)
+    captured = CapturedOntology(
+        view=view_marker,  # type: ignore[arg-type]
+        structural_fingerprint=fingerprint,
+        logical_fingerprint=fingerprint,
+        signature_fingerprint=fingerprint,
+        core_package_version="0.1.0",
+        core_api_version=(0, 1),
+        core_model_schema_version=1,
+        core_wire_format_version=(1, 0),
+        core_adapter_protocol_version=1,
+    )
+    normalized_calls: list[object] = []
+    compiled_calls: list[NormalizedOntology] = []
+
+    def normalize_once(view: object, **_options: object) -> NormalizedOntology:
+        normalized_calls.append(view)
+        return normalized
+
+    def compile_once(value: NormalizedOntology, **_options: object) -> ClauseProgram:
+        compiled_calls.append(value)
+        return program
+
+    monkeypatch.setattr(clause_compiler, "normalize_view", normalize_once)
+    monkeypatch.setattr(clause_compiler, "compile_normalized", compile_once)
+
+    retained_normalized, retained_program, compiled = (
+        clause_compiler.compile_captured_bundle(captured, ReasonerConfig())
+    )
+
+    assert normalized_calls == [view_marker]
+    assert compiled_calls == [normalized]
+    assert retained_normalized is normalized
+    assert retained_program is program
+    assert compiled.symbols is program.symbols
     assert tuple(value.clause_id for value in compiled.clauses) == tuple(
         range(len(compiled.clauses))
     )

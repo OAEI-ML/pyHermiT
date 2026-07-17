@@ -228,6 +228,26 @@ class CancellationToken:
             self._cancelled.set()
             return True
 
+    def _begin_operation(
+        self,
+        *,
+        timeout: float | None,
+        max_memory_bytes: int | None,
+    ) -> None:
+        """Reset this retained token at a serialized public-operation boundary."""
+
+        validated = CancellationToken(
+            timeout=timeout,
+            max_memory_bytes=max_memory_bytes,
+        )
+        with self._lock:
+            self._deadline = validated._deadline
+            self._max_memory_bytes = validated._max_memory_bytes
+            self._memory_bytes = 0
+            self._reason = None
+            self._work = 0
+            self._cancelled.clear()
+
 
 class CancellationSource:
     __slots__ = ("_token",)
@@ -246,6 +266,18 @@ class CancellationSource:
 
     def interrupt(self, reason: str | None = None) -> bool:
         return self._token._interrupt(reason)
+
+    def begin_operation(
+        self,
+        *,
+        timeout: float | None = None,
+        max_memory_bytes: int | None = None,
+    ) -> CancellationToken:
+        self._token._begin_operation(
+            timeout=timeout,
+            max_memory_bytes=max_memory_bytes,
+        )
+        return self._token
 
 
 __all__ = [

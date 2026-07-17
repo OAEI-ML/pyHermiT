@@ -201,7 +201,7 @@ def test_import_has_no_native_java_network_or_rdflib_side_effects() -> None:
     script = """
 import sys
 import pyhermit.core
-for name in ('rdflib', 'jpype', 'requests', 'pyhermit._native', 'pyhermit.backends.dispatch'):
+for name in ('rdflib', 'jpype', 'requests', 'pyhermit._native', 'pyhermit.backends.native'):
     assert name not in sys.modules, name
 """
     environment = dict(os.environ)
