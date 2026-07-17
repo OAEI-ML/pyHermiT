@@ -91,6 +91,13 @@ license_expression = "LGPL-3.0-or-later"
 sha256 = "97888e7ecb8f8f4176ef6c92c138dfccd495900309ea3dda045628cf1ca602db"
 contains_external_bodies = false
 
+[[artifact]]
+path = "tests/data/hyperresolution/trace-v1.json"
+origin = "project-authored language-neutral WP09/WPR1 transition fixture"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "e1b31962360bbafa8a134ca67d70d7653dfc98e07192f7b95223b4e05a51aea5"
+contains_external_bodies = false
+
 [[source]]
 id = "hermit-37ec30a"
 url = "https://github.com/phillord/hermit-reasoner.git"

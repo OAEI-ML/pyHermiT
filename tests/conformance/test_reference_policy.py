@@ -44,6 +44,7 @@ def test_every_data_artifact_has_an_acquisition_decision() -> None:
         for directory in (
             ROOT / "tests/data/clauses",
             ROOT / "tests/data/datatypes",
+            ROOT / "tests/data/hyperresolution",
             ROOT / "tests/data/reference",
             ROOT / "tests/data/w3c",
         )

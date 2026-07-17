@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .rules import HyperresolutionEngine
 from .state import TableauSession
 
-__all__ = ["TableauSession"]
+__all__ = ["HyperresolutionEngine", "TableauSession"]
