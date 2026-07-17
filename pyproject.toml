@@ -76,6 +76,7 @@ addopts = [
 testpaths = [
   "tools/specs/tests",
   "tools/packaging_probe/tests",
+  "tests/unit",
   "tests/conformance",
   "tests/parity",
 ]
