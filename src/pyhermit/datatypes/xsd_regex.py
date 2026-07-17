@@ -125,6 +125,11 @@ class CharSet:
     def is_empty(self) -> bool:
         return not self.intervals
 
+    def cardinality(self) -> int:
+        """Return the exact number of Unicode code points in this set."""
+
+        return sum(upper - lower + 1 for lower, upper in self.intervals)
+
 
 XML_CHARACTERS: Final = CharSet(XML_INTERVALS)
 _SPACE = CharSet(((0x9, 0xA), (0xD, 0xD), (0x20, 0x20)))
@@ -176,6 +181,18 @@ _Expr: TypeAlias = (
 
 _EMPTY = _Empty()
 _EPSILON = _Epsilon()
+
+
+@dataclass(frozen=True, slots=True)
+class _DFATransition:
+    target: int
+    characters: CharSet
+
+
+@dataclass(frozen=True, slots=True)
+class _DFA:
+    transitions: tuple[tuple[_DFATransition, ...], ...]
+    accepting: frozenset[int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +355,114 @@ class XSDRegex:
         """Alias retained for range-protocol consistency."""
 
         return self.is_empty_exact(limits=limits, cancellation=cancellation)
+
+    def finite_cardinality(
+        self,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> int | None:
+        """Return the exact language size, or ``None`` when it is infinite."""
+
+        selected_limits = _controls(limits, cancellation)
+        automaton = _determinize(
+            self._expression,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+        return _finite_dfa_cardinality(automaton)
+
+    def cardinality_at_least(
+        self,
+        minimum: int,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> bool:
+        """Decide an exact cardinality threshold without enumerating the language."""
+
+        if isinstance(minimum, bool) or not isinstance(minimum, int):
+            raise TypeError("minimum must be int")
+        if minimum < 0:
+            raise ValueError("minimum must be nonnegative")
+        return (
+            self.cardinality_up_to(
+                minimum,
+                limits=limits,
+                cancellation=cancellation,
+            )
+            == minimum
+        )
+
+    def cardinality_up_to(
+        self,
+        maximum: int,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> int:
+        """Return ``min(actual cardinality, maximum)`` using saturated counts."""
+
+        if isinstance(maximum, bool) or not isinstance(maximum, int):
+            raise TypeError("maximum must be int")
+        if maximum < 0:
+            raise ValueError("maximum must be nonnegative")
+        if maximum == 0:
+            return 0
+        selected_limits = _controls(limits, cancellation)
+        automaton = _determinize(
+            self._expression,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+        return _dfa_cardinality_up_to(automaton, maximum)
+
+    def enumerate_strings(
+        self,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> tuple[str, ...]:
+        """Materialize a finite language in deterministic code-point order."""
+
+        selected_limits = _controls(limits, cancellation)
+        automaton = _determinize(
+            self._expression,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+        cardinality = _finite_dfa_cardinality(automaton)
+        if cardinality is None:
+            raise ValueError("cannot enumerate an infinite regular language")
+        if cardinality > selected_limits.max_enumeration_values:
+            raise ResourceLimitError(
+                "regular-language enumeration exceeds the configured value limit",
+                limit="max_enumeration_values",
+                observed=cardinality,
+                allowed=selected_limits.max_enumeration_values,
+            )
+        pending: deque[tuple[int, str]] = deque(((0, ""),))
+        output: list[str] = []
+        productive = _productive_dfa_states(automaton)
+        work = 0
+        while pending:
+            state, prefix = pending.popleft()
+            if state in automaton.accepting:
+                output.append(prefix)
+            for transition in automaton.transitions[state]:
+                if transition.target not in productive:
+                    continue
+                for lower, upper in transition.characters.intervals:
+                    for codepoint in range(lower, upper + 1):
+                        pending.append((transition.target, prefix + chr(codepoint)))
+                        work += 1
+                        if work == selected_limits.cancellation_poll_stride:
+                            _poll(cancellation, work)
+                            work = 0
+        _poll(cancellation, work)
+        if len(output) != cardinality:
+            raise AssertionError("DFA cardinality and enumeration disagree")
+        return tuple(output)
 
 
 class _Parser:
@@ -710,14 +835,23 @@ def _complement(expression: _Expr) -> _Expr:
 
 
 def _representatives(expression: _Expr) -> tuple[int, ...]:
+    return tuple(value for value, _characters in _representative_classes(expression))
+
+
+def _representative_classes(expression: _Expr) -> tuple[tuple[int, CharSet], ...]:
     boundaries = {value for interval in XML_INTERVALS for value in (interval[0], interval[1] + 1)}
     _collect_boundaries(expression, boundaries)
     ordered = sorted(boundaries)
-    representatives: list[int] = []
+    representatives: list[tuple[int, CharSet]] = []
     for index in range(len(ordered) - 1):
         candidate = ordered[index]
         if candidate < ordered[index + 1] and XML_CHARACTERS.contains(candidate):
-            representatives.append(candidate)
+            representatives.append(
+                (
+                    candidate,
+                    CharSet(((candidate, ordered[index + 1] - 1),)).intersection(XML_CHARACTERS),
+                )
+            )
     return tuple(representatives)
 
 
@@ -731,6 +865,137 @@ def _collect_boundaries(expression: _Expr, output: set[int]) -> None:
             _collect_boundaries(part, output)
     elif isinstance(expression, (_Star, _Complement)):
         _collect_boundaries(expression.part, output)
+
+
+def _determinize(
+    expression: _Expr,
+    *,
+    limits: DatatypeLimits,
+    cancellation: CancellationToken | None,
+) -> _DFA:
+    states: list[_Expr] = [expression]
+    state_ids: dict[_Expr, int] = {expression: 0}
+    rows: list[tuple[_DFATransition, ...]] = []
+    accepting: set[int] = set()
+    transitions = 0
+    cursor = 0
+    while cursor < len(states):
+        state = states[cursor]
+        if _nullable(state):
+            accepting.add(cursor)
+        grouped: dict[int, CharSet] = {}
+        for representative, characters in _representative_classes(state):
+            derivative = _derivative(state, representative)
+            transitions += 1
+            if transitions > limits.max_pattern_transitions:
+                raise ResourceLimitError(
+                    "pattern determinization exceeds the configured transition limit",
+                    limit="max_pattern_transitions",
+                    observed=transitions,
+                    allowed=limits.max_pattern_transitions,
+                )
+            if derivative is _EMPTY:
+                continue
+            target = state_ids.get(derivative)
+            if target is None:
+                target = len(states)
+                if target >= limits.max_pattern_states:
+                    raise ResourceLimitError(
+                        "pattern determinization exceeds the configured state limit",
+                        limit="max_pattern_states",
+                        observed=target + 1,
+                        allowed=limits.max_pattern_states,
+                    )
+                state_ids[derivative] = target
+                states.append(derivative)
+            prior = grouped.get(target)
+            grouped[target] = characters if prior is None else prior.union(characters)
+        rows.append(
+            tuple(
+                _DFATransition(target, characters) for target, characters in sorted(grouped.items())
+            )
+        )
+        cursor += 1
+        _poll(cancellation, 1)
+    return _DFA(tuple(rows), frozenset(accepting))
+
+
+def _finite_dfa_cardinality(automaton: _DFA) -> int | None:
+    productive = _productive_dfa_states(automaton)
+    if 0 not in productive:
+        return 0
+    order = _productive_topological_order(automaton, productive)
+    if order is None:
+        return None
+
+    counts: dict[int, int] = {}
+    for source in reversed(order):
+        count = 1 if source in automaton.accepting else 0
+        for transition in automaton.transitions[source]:
+            if transition.target in productive:
+                count += transition.characters.cardinality() * counts[transition.target]
+        counts[source] = count
+    return counts[0]
+
+
+def _dfa_cardinality_up_to(automaton: _DFA, maximum: int) -> int:
+    productive = _productive_dfa_states(automaton)
+    if 0 not in productive:
+        return 0
+    order = _productive_topological_order(automaton, productive)
+    if order is None:
+        return maximum
+    counts: dict[int, int] = {}
+    for source in reversed(order):
+        count = 1 if source in automaton.accepting else 0
+        for transition in automaton.transitions[source]:
+            if transition.target in productive:
+                count += transition.characters.cardinality() * counts[transition.target]
+                if count >= maximum:
+                    count = maximum
+                    break
+        counts[source] = count
+    return counts[0]
+
+
+def _productive_topological_order(
+    automaton: _DFA,
+    productive: frozenset[int],
+) -> tuple[int, ...] | None:
+    indegree = {state: 0 for state in productive}
+    for source in productive:
+        for transition in automaton.transitions[source]:
+            if transition.target in productive:
+                indegree[transition.target] += 1
+    ready = deque(sorted(state for state, degree in indegree.items() if degree == 0))
+    order: list[int] = []
+    while ready:
+        source = ready.popleft()
+        order.append(source)
+        for transition in automaton.transitions[source]:
+            target = transition.target
+            if target not in productive:
+                continue
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                ready.append(target)
+    return tuple(order) if len(order) == len(productive) else None
+
+
+def _productive_dfa_states(automaton: _DFA) -> frozenset[int]:
+    reverse: list[set[int]] = [set() for _row in automaton.transitions]
+    for source, row in enumerate(automaton.transitions):
+        for transition in row:
+            reverse[transition.target].add(source)
+    productive = set(automaton.accepting)
+    pending = deque(automaton.accepting)
+    while pending:
+        target = pending.popleft()
+        for source in reverse[target]:
+            if source not in productive:
+                productive.add(source)
+                pending.append(source)
+    return frozenset(productive)
 
 
 _CATEGORY_CACHE: dict[str, CharSet] = {}

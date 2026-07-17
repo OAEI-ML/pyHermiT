@@ -194,6 +194,67 @@ class BinaryRange:
             total += ((1 << ((interval.upper + 1) * 8)) - (1 << (interval.lower * 8))) // 255
         return total
 
+    def cardinality_at_least(
+        self,
+        minimum: int,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> bool:
+        """Compare exactly while capping geometric byte-string counts."""
+
+        if isinstance(minimum, bool) or not isinstance(minimum, int):
+            raise TypeError("minimum must be int")
+        if minimum < 0:
+            raise ValueError("minimum must be nonnegative")
+        return (
+            self.cardinality_up_to(
+                minimum,
+                limits=limits,
+                cancellation=cancellation,
+            )
+            == minimum
+        )
+
+    def cardinality_up_to(
+        self,
+        maximum: int,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> int:
+        """Return ``min(actual cardinality, maximum)`` without giant integers."""
+
+        selected_limits = _controls(limits, cancellation)
+        if isinstance(maximum, bool) or not isinstance(maximum, int):
+            raise TypeError("maximum must be int")
+        if maximum < 0:
+            raise ValueError("maximum must be nonnegative")
+        if maximum == 0:
+            return 0
+        total = 0
+        work = 0
+        for interval in self.lengths.intervals:
+            if interval.upper is None:
+                return maximum
+            remaining_lengths = interval.upper - interval.lower + 1
+            exponent = interval.lower * 8
+            if exponent >= (maximum - total).bit_length():
+                return maximum
+            term = 1 << exponent
+            while remaining_lengths and total < maximum:
+                total += term
+                term <<= 8
+                remaining_lengths -= 1
+                work += 1
+                if work == selected_limits.cancellation_poll_stride:
+                    _poll(cancellation, work)
+                    work = 0
+            if total >= maximum:
+                return maximum
+        _poll(cancellation, work)
+        return total
+
     def enumerate_values(
         self,
         *,
@@ -432,13 +493,158 @@ class StringRange:
             ),
         )
 
-    def finite_cardinality(self) -> int | None:
-        return 0 if self.is_empty_exact() else None
+    def finite_cardinality(
+        self,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> int | None:
+        selected_limits = _controls(limits, cancellation)
+        absent = self.without_language.finite_cardinality(
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+        if absent is None:
+            return None
+        total = absent
+        for clause in _disjoint_text_language_rectangles(
+            self.with_language,
+            limits=selected_limits,
+            cancellation=cancellation,
+        ):
+            text_count = clause.text.finite_cardinality(
+                limits=selected_limits,
+                cancellation=cancellation,
+            )
+            language_count = clause.language.finite_cardinality(
+                limits=selected_limits,
+                cancellation=cancellation,
+            )
+            if text_count is None or language_count is None:
+                return None
+            total += text_count * language_count
+        return total
 
-    def enumerate_values(self) -> tuple[StringIdentity, ...]:
-        if self.is_empty_exact():
-            return ()
-        raise ValueError("finite symbolic string enumeration is not yet materialized")
+    def cardinality_at_least(
+        self,
+        minimum: int,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> bool:
+        if isinstance(minimum, bool) or not isinstance(minimum, int):
+            raise TypeError("minimum must be int")
+        if minimum < 0:
+            raise ValueError("minimum must be nonnegative")
+        return (
+            self.cardinality_up_to(
+                minimum,
+                limits=limits,
+                cancellation=cancellation,
+            )
+            == minimum
+        )
+
+    def cardinality_up_to(
+        self,
+        maximum: int,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> int:
+        if isinstance(maximum, bool) or not isinstance(maximum, int):
+            raise TypeError("maximum must be int")
+        if maximum < 0:
+            raise ValueError("maximum must be nonnegative")
+        if maximum == 0:
+            return 0
+        selected_limits = _controls(limits, cancellation)
+        total = self.without_language.cardinality_up_to(
+            maximum,
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+        if total == maximum:
+            return maximum
+        for clause in _disjoint_text_language_rectangles(
+            self.with_language,
+            limits=selected_limits,
+            cancellation=cancellation,
+        ):
+            remaining = maximum - total
+            text_count = clause.text.cardinality_up_to(
+                remaining,
+                limits=selected_limits,
+                cancellation=cancellation,
+            )
+            if text_count == 0:
+                continue
+            if text_count == remaining:
+                language_count = clause.language.cardinality_up_to(
+                    1,
+                    limits=selected_limits,
+                    cancellation=cancellation,
+                )
+                if language_count:
+                    return maximum
+                continue
+            language_limit = (remaining + text_count - 1) // text_count
+            language_count = clause.language.cardinality_up_to(
+                language_limit,
+                limits=selected_limits,
+                cancellation=cancellation,
+            )
+            total += min(remaining, text_count * language_count)
+            if total == maximum:
+                return maximum
+        return total
+
+    def enumerate_values(
+        self,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> tuple[StringIdentity, ...]:
+        selected_limits = _controls(limits, cancellation)
+        cardinality = self.finite_cardinality(
+            limits=selected_limits,
+            cancellation=cancellation,
+        )
+        if cardinality is None:
+            raise ValueError("cannot enumerate an infinite symbolic string range")
+        if cardinality > selected_limits.max_enumeration_values:
+            raise ResourceLimitError(
+                "string-range enumeration exceeds the configured value limit",
+                limit="max_enumeration_values",
+                observed=cardinality,
+                allowed=selected_limits.max_enumeration_values,
+            )
+        output = {
+            StringIdentity(text)
+            for text in self.without_language.enumerate_strings(
+                limits=selected_limits,
+                cancellation=cancellation,
+            )
+        }
+        for clause in _disjoint_text_language_rectangles(
+            self.with_language,
+            limits=selected_limits,
+            cancellation=cancellation,
+        ):
+            texts = clause.text.enumerate_strings(
+                limits=selected_limits,
+                cancellation=cancellation,
+            )
+            languages = clause.language.enumerate_strings(
+                limits=selected_limits,
+                cancellation=cancellation,
+            )
+            output.update(
+                StringIdentity(text, language) for text in texts for language in languages
+            )
+        if len(output) != cardinality:
+            raise AssertionError("string-range cardinality and enumeration disagree")
+        return tuple(sorted(output, key=lambda value: (value.text, value.language or "")))
 
     def _require_universe(self, other: StringRange) -> None:
         if not isinstance(other, StringRange):
@@ -495,8 +701,56 @@ class URIRange:
     def complement(self) -> URIRange:
         return URIRange(self.universe, self.universe.intersection(self.language.complement()))
 
-    def finite_cardinality(self) -> int | None:
-        return 0 if self.is_empty_exact() else None
+    def finite_cardinality(
+        self,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> int | None:
+        return self.language.finite_cardinality(
+            limits=limits,
+            cancellation=cancellation,
+        )
+
+    def cardinality_at_least(
+        self,
+        minimum: int,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> bool:
+        return self.language.cardinality_at_least(
+            minimum,
+            limits=limits,
+            cancellation=cancellation,
+        )
+
+    def cardinality_up_to(
+        self,
+        maximum: int,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> int:
+        return self.language.cardinality_up_to(
+            maximum,
+            limits=limits,
+            cancellation=cancellation,
+        )
+
+    def enumerate_values(
+        self,
+        *,
+        limits: DatatypeLimits | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> tuple[URIIdentity, ...]:
+        return tuple(
+            URIIdentity(value)
+            for value in self.language.enumerate_strings(
+                limits=limits,
+                cancellation=cancellation,
+            )
+        )
 
 
 XMLValue: TypeAlias = XMLIdentity | XMLComparison | CompiledLiteral
@@ -601,6 +855,51 @@ def length_regex(
             )
         )
     return result
+
+
+def _disjoint_text_language_rectangles(
+    clauses: tuple[TextLanguageRectangle, ...],
+    *,
+    limits: DatatypeLimits,
+    cancellation: CancellationToken | None,
+) -> tuple[TextLanguageRectangle, ...]:
+    output: list[TextLanguageRectangle] = []
+    for clause in clauses:
+        pending = [clause]
+        for excluded in output:
+            retained: list[TextLanguageRectangle] = []
+            for value in pending:
+                pieces = (
+                    TextLanguageRectangle(
+                        value.text.intersection(excluded.text.complement()),
+                        value.language,
+                    ),
+                    TextLanguageRectangle(
+                        value.text.intersection(excluded.text),
+                        value.language.intersection(excluded.language.complement()),
+                    ),
+                )
+                retained.extend(
+                    piece
+                    for piece in pieces
+                    if not piece.is_empty_exact(
+                        limits=limits,
+                        cancellation=cancellation,
+                    )
+                )
+            pending = retained
+            if not pending:
+                break
+        output.extend(pending)
+        if len(output) > limits.max_pattern_states:
+            raise ResourceLimitError(
+                "plain-literal disjointization exceeds the configured clause limit",
+                limit="max_pattern_states",
+                observed=len(output),
+                allowed=limits.max_pattern_states,
+            )
+        _poll(cancellation, 1)
+    return tuple(output)
 
 
 @cache

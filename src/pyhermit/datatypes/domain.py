@@ -283,18 +283,16 @@ class DataDomainRange:
         if minimum == 0:
             return True
         selected = _controls(limits, cancellation)
-        counts: list[int] = []
         for clause in self._clauses:
-            count = _clause_cardinality(clause, selected, cancellation)
-            if count is None or count >= minimum:
+            if _clause_cardinality_at_least(
+                clause,
+                minimum,
+                selected,
+                cancellation,
+            ):
                 return True
-            counts.append(count)
-        if sum(counts) < minimum:
-            return False
         identities: set[DataIdentity] = set()
-        for clause, count in zip(self._clauses, counts, strict=True):
-            if count == 0:
-                continue
+        for clause in self._clauses:
             for identity in _enumerate_clause(clause, selected, cancellation):
                 identities.add(identity)
                 if len(identities) >= minimum:
@@ -545,7 +543,7 @@ class _FamilySubset:
     ) -> int | None:
         if _range_empty(self.base, limits, cancellation):
             return 0
-        cardinality = _range_cardinality(self.base)
+        cardinality = _range_cardinality(self.base, limits, cancellation)
         if cardinality is None:
             # A proper nested numeric domain cannot cover a non-singleton member of
             # its broader dense OWL domain; finite explicit exclusions cannot either.
@@ -570,6 +568,44 @@ class _FamilySubset:
             if _identity_family(identity) is self.family and _range_contains(self.base, identity)
         )
         return cardinality - removed
+
+    def cardinality_up_to(
+        self,
+        maximum: int,
+        limits: DatatypeLimits,
+        cancellation: CancellationToken | None,
+    ) -> int:
+        if maximum == 0 or _range_empty(self.base, limits, cancellation):
+            return 0
+        if self.numeric_exclusions:
+            cardinality = _range_cardinality(self.base, limits, cancellation)
+            if cardinality is None:
+                return maximum
+            values = _range_enumerate(self.base, limits, cancellation)
+            retained = sum(
+                not any(
+                    exclusion.contains(_identity_numeric_comparison(identity))
+                    for exclusion in self.numeric_exclusions
+                )
+                and identity not in self.finite_exclusions
+                for identity in values
+            )
+            return min(retained, maximum)
+        exclusion_bound = len(self.finite_exclusions)
+        base_count = _range_cardinality_up_to(
+            self.base,
+            maximum + exclusion_bound,
+            limits,
+            cancellation,
+        )
+        if base_count == maximum + exclusion_bound:
+            return maximum
+        removed = sum(
+            1
+            for identity in self.finite_exclusions
+            if _identity_family(identity) is self.family and _range_contains(self.base, identity)
+        )
+        return min(base_count - removed, maximum)
 
     def contains(self, identity: DataIdentity) -> bool:
         if _identity_family(identity) is not self.family:
@@ -621,6 +657,23 @@ def _clause_cardinality(
             return None
         total += cardinality
     return total
+
+
+def _clause_cardinality_at_least(
+    clause: _Clause,
+    minimum: int,
+    limits: DatatypeLimits,
+    cancellation: CancellationToken | None,
+) -> bool:
+    explicit = _explicit_candidates(clause)
+    if explicit is not None:
+        return len(explicit) >= minimum
+    total = 0
+    for subset in _clause_family_subsets(clause):
+        total += subset.cardinality_up_to(minimum - total, limits, cancellation)
+        if total >= minimum:
+            return True
+    return False
 
 
 def _enumerate_clause(
@@ -864,8 +917,30 @@ def _range_empty(
     return value.is_empty_exact()
 
 
-def _range_cardinality(value: _FamilyRange) -> int | None:
+def _range_cardinality(
+    value: _FamilyRange,
+    limits: DatatypeLimits,
+    cancellation: CancellationToken | None,
+) -> int | None:
+    if isinstance(value, (StringRange, URIRange)):
+        return value.finite_cardinality(limits=limits, cancellation=cancellation)
     return value.finite_cardinality()
+
+
+def _range_cardinality_up_to(
+    value: _FamilyRange,
+    maximum: int,
+    limits: DatatypeLimits,
+    cancellation: CancellationToken | None,
+) -> int:
+    if isinstance(value, (BinaryRange, StringRange, URIRange)):
+        return value.cardinality_up_to(
+            maximum,
+            limits=limits,
+            cancellation=cancellation,
+        )
+    cardinality = _range_cardinality(value, limits, cancellation)
+    return maximum if cardinality is None else min(cardinality, maximum)
 
 
 def _range_contains(value: _FamilyRange, identity: DataIdentity) -> bool:
@@ -908,6 +983,10 @@ def _range_enumerate(
     if isinstance(value, IEEERange):
         return value.enumerate_values(limits=limits, cancellation=cancellation)
     if isinstance(value, BinaryRange):
+        return value.enumerate_values(limits=limits, cancellation=cancellation)
+    if isinstance(value, StringRange):
+        return value.enumerate_values(limits=limits, cancellation=cancellation)
+    if isinstance(value, URIRange):
         return value.enumerate_values(limits=limits, cancellation=cancellation)
     if isinstance(value, DateTimeRange):
         return tuple(
