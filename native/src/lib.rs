@@ -14,9 +14,11 @@
     clippy::too_many_lines
 )]
 
+mod branching;
 mod cancel;
 pub mod error;
 pub mod model;
+pub mod rules;
 pub mod store;
 pub mod wire;
 
@@ -28,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PySequence};
 
-use cancel::{CancellationHandle, CancellationState};
+pub use cancel::{CancellationHandle, CancellationState};
 use error::{ErrorKind, NativeError, NativeResult};
 use model::{
     CoreMetadata, ABI_VERSION, CORE_ADAPTER_PROTOCOL_VERSION, CORE_API_VERSION,

@@ -110,6 +110,27 @@ impl DependencySet {
     }
 
     #[must_use]
+    pub fn add(&self, level: u32) -> Self {
+        let mut levels = self.0.clone();
+        match levels.binary_search(&level) {
+            Ok(_) => Self(levels),
+            Err(position) => {
+                levels.insert(position, level);
+                Self(levels)
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn without(&self, level: u32) -> Self {
+        let mut levels = self.0.clone();
+        if let Ok(position) = levels.binary_search(&level) {
+            levels.remove(position);
+        }
+        Self(levels)
+    }
+
+    #[must_use]
     pub fn is_subset_of(&self, other: &Self) -> bool {
         self.0
             .iter()
@@ -172,6 +193,10 @@ mod tests {
             &[0, 1, 3, 8]
         );
         assert!(left.is_subset_of(&DependencySet::union(&[&left, &right])));
+        assert_eq!(left.add(1).as_slice(), &[0, 1, 3]);
+        assert_eq!(left.add(3), left);
+        assert_eq!(left.without(0).as_slice(), &[3]);
+        assert_eq!(left.without(9), left);
         assert!(DependencySet::new(vec![1, 1]).is_err());
         Ok(())
     }

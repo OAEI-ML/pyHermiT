@@ -56,24 +56,31 @@ impl Node {
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct FactKey {
-    predicate_id: u32,
-    arguments: Vec<NodeHandle>,
+pub(crate) struct FactKey {
+    pub(crate) predicate_id: u32,
+    pub(crate) arguments: Vec<NodeHandle>,
 }
 
 #[derive(Clone, Debug)]
-struct FactRow {
-    row_id: u32,
-    key: FactKey,
-    supports: Vec<DependencySet>,
-    core: bool,
-    active: bool,
-    derivation_generation: u32,
-    provenance_ids: BTreeSet<u32>,
+pub(crate) struct FactRow {
+    pub(crate) row_id: u32,
+    pub(crate) key: FactKey,
+    pub(crate) supports: Vec<DependencySet>,
+    pub(crate) core: bool,
+    pub(crate) active: bool,
+    pub(crate) derivation_generation: u32,
+    pub(crate) provenance_ids: BTreeSet<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FactAddOutcome {
+    pub(crate) row_id: u32,
+    pub(crate) created: bool,
+    pub(crate) support_changed: bool,
 }
 
 impl FactRow {
-    fn minimal_dependency(&self) -> NativeResult<&DependencySet> {
+    pub(crate) fn minimal_dependency(&self) -> NativeResult<&DependencySet> {
         self.supports
             .iter()
             .min_by(|left, right| dependency_rank(left).cmp(&dependency_rank(right)))
@@ -143,13 +150,13 @@ impl StableQueue {
 }
 
 #[derive(Clone, Debug)]
-struct GroundDisjunction {
-    disjunction_id: u32,
-    disjunct_ids: Vec<u32>,
-    base_dependency: DependencySet,
-    creation_checkpoint: u32,
-    active: bool,
-    processed: bool,
+pub(crate) struct GroundDisjunction {
+    pub(crate) disjunction_id: u32,
+    pub(crate) disjunct_ids: Vec<u32>,
+    pub(crate) base_dependency: DependencySet,
+    pub(crate) creation_checkpoint: u32,
+    pub(crate) active: bool,
+    pub(crate) processed: bool,
 }
 
 impl GroundDisjunction {
@@ -166,11 +173,11 @@ impl GroundDisjunction {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Clash {
-    kind: String,
-    dependency: DependencySet,
-    participants: Vec<u32>,
-    provenance_id: Option<u32>,
+pub(crate) struct Clash {
+    pub(crate) kind: String,
+    pub(crate) dependency: DependencySet,
+    pub(crate) participants: Vec<u32>,
+    pub(crate) provenance_id: Option<u32>,
 }
 
 impl Clash {
@@ -193,6 +200,8 @@ struct MutableState {
     facts: Vec<FactRow>,
     facts_by_key: BTreeMap<FactKey, u32>,
     facts_by_node: BTreeMap<NodeHandle, BTreeSet<u32>>,
+    facts_by_predicate: BTreeMap<u32, BTreeSet<u32>>,
+    facts_by_position: BTreeMap<(u32, u32, NodeHandle), BTreeSet<u32>>,
     read_generation: u32,
     write_generation: u32,
     disjunctions: Vec<GroundDisjunction>,
@@ -215,6 +224,8 @@ impl MutableState {
             facts: Vec::new(),
             facts_by_key: BTreeMap::new(),
             facts_by_node: BTreeMap::new(),
+            facts_by_predicate: BTreeMap::new(),
+            facts_by_position: BTreeMap::new(),
             read_generation: 0,
             write_generation: 0,
             disjunctions: Vec::new(),
@@ -253,16 +264,17 @@ impl CheckpointMeta {
 }
 
 #[derive(Clone, Debug)]
-struct Branch {
-    level: u32,
+pub(crate) struct Branch {
+    pub(crate) level: u32,
     choice_kind: String,
     checkpoint: CheckpointMeta,
     snapshot: StateCheckpoint,
-    alternatives: Vec<u32>,
-    source_id: u32,
-    base_dependency: DependencySet,
-    next_alternative: usize,
-    learned_dependency: DependencySet,
+    pub(crate) alternatives: Vec<u32>,
+    pub(crate) source_id: u32,
+    pub(crate) base_dependency: DependencySet,
+    pub(crate) initial_base_dependency: DependencySet,
+    pub(crate) next_alternative: usize,
+    pub(crate) learned_dependency: DependencySet,
 }
 
 impl Branch {
@@ -445,9 +457,23 @@ impl TableauKernel {
         core: bool,
         provenance_id: Option<u32>,
     ) -> NativeResult<u32> {
+        self.add_fact_detailed(predicate_id, arguments, dependency, core, provenance_id)
+            .map(|outcome| outcome.row_id)
+    }
+
+    pub(crate) fn add_fact_detailed(
+        &mut self,
+        predicate_id: u32,
+        arguments: Vec<NodeHandle>,
+        dependency: DependencySet,
+        core: bool,
+        provenance_id: Option<u32>,
+    ) -> NativeResult<FactAddOutcome> {
         if arguments.is_empty() {
             return Err(NativeError::wire("fact rows must have positive arity"));
         }
+        u32::try_from(arguments.len())
+            .map_err(|_| NativeError::wire("fact arity exceeds u32 positions"))?;
         self.validate_dependency(&dependency)?;
         let mut canonical = Vec::new();
         let mut dependencies = vec![dependency];
@@ -487,10 +513,15 @@ impl TableauKernel {
             row.core |= core;
             let provenance_changed =
                 provenance_id.is_some_and(|value| row.provenance_ids.insert(value));
-            if row.supports != old_supports || row.core != old_core || provenance_changed {
+            let support_changed = row.supports != old_supports;
+            if support_changed || row.core != old_core || provenance_changed {
                 self.record_mutation()?;
             }
-            return Ok(row_id);
+            return Ok(FactAddOutcome {
+                row_id,
+                created: false,
+                support_changed,
+            });
         }
         let row_id = u32::try_from(self.state.facts.len())
             .map_err(|_| NativeError::invariant("fact store exceeds u32 rows"))?;
@@ -509,6 +540,20 @@ impl TableauKernel {
         };
         self.state.facts.push(row);
         self.state.facts_by_key.insert(key.clone(), row_id);
+        self.state
+            .facts_by_predicate
+            .entry(predicate_id)
+            .or_default()
+            .insert(row_id);
+        for (position, argument) in key.arguments.iter().copied().enumerate() {
+            let position = u32::try_from(position)
+                .map_err(|_| NativeError::invariant("fact arity exceeds u32 positions"))?;
+            self.state
+                .facts_by_position
+                .entry((predicate_id, position, argument))
+                .or_default()
+                .insert(row_id);
+        }
         let unique_arguments: BTreeSet<_> = key.arguments.iter().copied().collect();
         for argument in unique_arguments {
             self.state
@@ -518,7 +563,11 @@ impl TableauKernel {
                 .insert(row_id);
         }
         self.record_mutation()?;
-        Ok(row_id)
+        Ok(FactAddOutcome {
+            row_id,
+            created: true,
+            support_changed: true,
+        })
     }
 
     pub fn prepare_next_delta(&mut self) -> NativeResult<()> {
@@ -537,6 +586,167 @@ impl TableauKernel {
                 .ok_or_else(|| NativeError::invariant("delta generation overflow"))?;
         }
         self.record_mutation()
+    }
+
+    #[must_use]
+    pub(crate) const fn read_generation(&self) -> u32 {
+        self.state.read_generation
+    }
+
+    pub(crate) fn candidate_fact_ids(
+        &self,
+        predicate_id: u32,
+        bindings: &BTreeMap<u32, NodeHandle>,
+    ) -> NativeResult<Vec<u32>> {
+        let Some(predicate_rows) = self.state.facts_by_predicate.get(&predicate_id) else {
+            return Ok(Vec::new());
+        };
+        let mut smallest = predicate_rows;
+        for (position, handle) in bindings {
+            self.require_active(*handle)?;
+            let Some(rows) = self
+                .state
+                .facts_by_position
+                .get(&(predicate_id, *position, *handle))
+            else {
+                return Ok(Vec::new());
+            };
+            if rows.len() < smallest.len() {
+                smallest = rows;
+            }
+        }
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(smallest.len())
+            .map_err(|_| NativeError::invariant("fact candidate allocation failed"))?;
+        'rows: for row_id in smallest {
+            let row = self.fact(*row_id)?;
+            if !row.active || row.key.predicate_id != predicate_id {
+                continue;
+            }
+            for (position, handle) in bindings {
+                let index = usize::try_from(*position)
+                    .map_err(|_| NativeError::wire("fact position cannot fit this platform"))?;
+                if row.key.arguments.get(index) != Some(handle) {
+                    continue 'rows;
+                }
+            }
+            result.push(*row_id);
+        }
+        Ok(result)
+    }
+
+    #[must_use]
+    pub(crate) fn active_fact_ids(&self) -> Vec<u32> {
+        self.state
+            .facts
+            .iter()
+            .filter(|row| row.active)
+            .map(|row| row.row_id)
+            .collect()
+    }
+
+    pub(crate) fn canonical_handle(
+        &self,
+        handle: NodeHandle,
+    ) -> NativeResult<(NodeHandle, DependencySet)> {
+        let result = self.representative(handle)?;
+        self.require_active(result.0)?;
+        Ok(result)
+    }
+
+    pub(crate) fn node_sort(&self, handle: NodeHandle) -> NativeResult<NodeSort> {
+        Ok(self.require_active(handle)?.sort)
+    }
+
+    pub(crate) fn node_rank(&self, handle: NodeHandle) -> NativeResult<(u32, u32, u32)> {
+        let node = self.require_active(handle)?;
+        Ok((node.creation_id, handle.slot, handle.generation))
+    }
+
+    #[must_use]
+    pub(crate) fn active_node_handles(&self) -> Vec<NodeHandle> {
+        let mut values: Vec<_> = self
+            .state
+            .nodes
+            .iter()
+            .flatten()
+            .filter(|node| node.lifecycle == NodeLifecycle::Active)
+            .map(|node| (node.creation_id, node.handle))
+            .collect();
+        values.sort_unstable();
+        values
+            .into_iter()
+            .map(|(_creation_id, handle)| handle)
+            .collect()
+    }
+
+    pub(crate) fn disjunction(&self, disjunction_id: u32) -> NativeResult<&GroundDisjunction> {
+        self.state
+            .disjunctions
+            .get(
+                usize::try_from(disjunction_id).map_err(|_| {
+                    NativeError::wire("ground-disjunction ID cannot fit this platform")
+                })?,
+            )
+            .ok_or_else(|| NativeError::wire("ground-disjunction ID is unavailable"))
+    }
+
+    pub(crate) fn strengthen_disjunction(
+        &mut self,
+        disjunction_id: u32,
+        dependency: DependencySet,
+    ) -> NativeResult<bool> {
+        self.validate_dependency(&dependency)?;
+        let index = usize::try_from(disjunction_id)
+            .map_err(|_| NativeError::wire("ground-disjunction ID cannot fit this platform"))?;
+        let current = self
+            .state
+            .disjunctions
+            .get(index)
+            .ok_or_else(|| NativeError::wire("ground-disjunction ID is unavailable"))?;
+        if !current.active
+            || dependency_rank(&current.base_dependency) <= dependency_rank(&dependency)
+        {
+            return Ok(false);
+        }
+        self.record_mutation()?;
+        self.state.disjunctions[index].base_dependency = dependency.clone();
+        for branch in &mut self.branches {
+            if branch.choice_kind == "ground_disjunction" && branch.source_id == disjunction_id {
+                branch.base_dependency = dependency.clone();
+            }
+        }
+        Ok(true)
+    }
+
+    #[must_use]
+    pub(crate) fn branch_choices_for_source(&self, source_id: u32) -> Vec<(u32, u32)> {
+        self.branches
+            .iter()
+            .filter(|branch| branch.source_id == source_id)
+            .filter_map(|branch| {
+                branch
+                    .alternatives
+                    .get(branch.next_alternative)
+                    .copied()
+                    .map(|current| (branch.level, current))
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub(crate) const fn clash(&self) -> Option<&Clash> {
+        self.state.clash.as_ref()
+    }
+
+    pub(crate) fn branch(&self, level: u32) -> NativeResult<&Branch> {
+        self.branches
+            .get(
+                usize::try_from(level)
+                    .map_err(|_| NativeError::wire("branch level cannot fit this platform"))?,
+            )
+            .ok_or_else(|| NativeError::wire("branch level is unavailable"))
     }
 
     pub fn push_branch(
@@ -587,6 +797,7 @@ impl TableauKernel {
             snapshot: self.snapshot(),
             alternatives,
             source_id,
+            initial_base_dependency: base_dependency.clone(),
             base_dependency,
             next_alternative: 0,
             learned_dependency: DependencySet::empty(),
@@ -620,6 +831,7 @@ impl TableauKernel {
             .branches
             .get_mut(index)
             .ok_or_else(|| NativeError::invariant("branch disappeared after backtrack"))?;
+        branch.base_dependency = branch.initial_base_dependency.clone();
         branch.learned_dependency =
             DependencySet::union(&[&branch.learned_dependency, &learned_dependency]);
         branch.next_alternative = branch
@@ -1087,6 +1299,8 @@ impl TableauKernel {
 
         let mut by_key = BTreeMap::new();
         let mut by_node: BTreeMap<NodeHandle, BTreeSet<u32>> = BTreeMap::new();
+        let mut by_predicate: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut by_position: BTreeMap<(u32, u32, NodeHandle), BTreeSet<u32>> = BTreeMap::new();
         for (index, row) in self.state.facts.iter().enumerate() {
             if usize::try_from(row.row_id).ok() != Some(index) || !row.active {
                 if usize::try_from(row.row_id).ok() != Some(index) {
@@ -1105,6 +1319,18 @@ impl TableauKernel {
                 return Err(NativeError::invariant(
                     "fact derivation generation exceeds the current delta generation",
                 ));
+            }
+            by_predicate
+                .entry(row.key.predicate_id)
+                .or_default()
+                .insert(row.row_id);
+            for (position, argument) in row.key.arguments.iter().copied().enumerate() {
+                let position = u32::try_from(position)
+                    .map_err(|_| NativeError::invariant("fact position exceeds u32"))?;
+                by_position
+                    .entry((row.key.predicate_id, position, argument))
+                    .or_default()
+                    .insert(row.row_id);
             }
             for left in &row.supports {
                 if left
@@ -1135,7 +1361,11 @@ impl TableauKernel {
                 by_node.entry(*argument).or_default().insert(row.row_id);
             }
         }
-        if by_key != self.state.facts_by_key || by_node != self.state.facts_by_node {
+        if by_key != self.state.facts_by_key
+            || by_node != self.state.facts_by_node
+            || by_predicate != self.state.facts_by_predicate
+            || by_position != self.state.facts_by_position
+        {
             return Err(NativeError::invariant(
                 "fact indexes differ from exact reconstruction",
             ));
@@ -1275,7 +1505,7 @@ impl TableauKernel {
         self.trail_length = snapshot.trail_length;
     }
 
-    fn highest_branch_level(&self) -> Option<u32> {
+    pub(crate) fn highest_branch_level(&self) -> Option<u32> {
         self.branches.last().map(|branch| branch.level)
     }
 
@@ -1338,7 +1568,7 @@ impl TableauKernel {
         Ok((node.handle, DependencySet::union(&refs)))
     }
 
-    fn fact(&self, row_id: u32) -> NativeResult<&FactRow> {
+    pub(crate) fn fact(&self, row_id: u32) -> NativeResult<&FactRow> {
         self.state
             .facts
             .get(
@@ -1354,6 +1584,31 @@ impl TableauKernel {
             return Ok(());
         }
         self.state.facts_by_key.remove(&row.key);
+        let predicate_rows = self
+            .state
+            .facts_by_predicate
+            .get_mut(&row.key.predicate_id)
+            .ok_or_else(|| NativeError::invariant("fact row is absent from predicate index"))?;
+        predicate_rows.remove(&row_id);
+        if predicate_rows.is_empty() {
+            self.state.facts_by_predicate.remove(&row.key.predicate_id);
+        }
+        for (position, argument) in row.key.arguments.iter().copied().enumerate() {
+            let position = u32::try_from(position)
+                .map_err(|_| NativeError::invariant("fact position exceeds u32"))?;
+            let index_key = (row.key.predicate_id, position, argument);
+            let position_rows = self
+                .state
+                .facts_by_position
+                .get_mut(&index_key)
+                .ok_or_else(|| {
+                    NativeError::invariant("fact row is absent from positional index")
+                })?;
+            position_rows.remove(&row_id);
+            if position_rows.is_empty() {
+                self.state.facts_by_position.remove(&index_key);
+            }
+        }
         let unique_arguments: BTreeSet<_> = row.key.arguments.iter().copied().collect();
         for argument in unique_arguments {
             let values = self.state.facts_by_node.get_mut(&argument).ok_or_else(|| {
@@ -1582,5 +1837,89 @@ mod tests {
         assert!(kernel.retire_node(left).is_err());
         assert_eq!(kernel.canonical_snapshot()?, before);
         Ok(())
+    }
+
+    #[test]
+    fn predicate_and_position_indexes_track_creation_and_deactivation() -> NativeResult<()> {
+        let mut kernel = TableauKernel::new();
+        let left = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        let right = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        let first = kernel.add_fact(7, vec![left, right], DependencySet::empty(), false, None)?;
+        let second = kernel.add_fact(7, vec![right, left], DependencySet::empty(), false, None)?;
+        kernel.add_fact(8, vec![left], DependencySet::empty(), false, None)?;
+
+        assert_eq!(
+            kernel.candidate_fact_ids(7, &BTreeMap::new())?,
+            vec![first, second]
+        );
+        assert_eq!(
+            kernel.candidate_fact_ids(7, &BTreeMap::from([(0, left)]))?,
+            vec![first]
+        );
+        assert_eq!(
+            kernel.candidate_fact_ids(7, &BTreeMap::from([(1, left)]))?,
+            vec![second]
+        );
+        assert!(kernel
+            .candidate_fact_ids(8, &BTreeMap::from([(0, right)]))?
+            .is_empty());
+
+        kernel.deactivate_fact(first)?;
+        assert_eq!(
+            kernel.candidate_fact_ids(7, &BTreeMap::new())?,
+            vec![second]
+        );
+        kernel.check_invariants()
+    }
+
+    #[test]
+    fn stronger_disjunction_support_tracks_live_branch_and_rolls_back() -> NativeResult<()> {
+        let mut kernel = TableauKernel::new();
+        kernel.push_branch("merge".to_owned(), vec![10, 11], 90, DependencySet::empty())?;
+        let disjunction_id = kernel.add_disjunction(vec![20, 21], DependencySet::new(vec![0])?)?;
+        kernel.take_disjunction()?;
+        kernel.push_branch(
+            "ground_disjunction".to_owned(),
+            vec![20, 21],
+            disjunction_id,
+            DependencySet::new(vec![0])?,
+        )?;
+
+        assert!(kernel.strengthen_disjunction(disjunction_id, DependencySet::empty())?);
+        assert!(kernel.branch(1)?.base_dependency.as_slice().is_empty());
+        assert_eq!(
+            kernel.branch_choices_for_source(disjunction_id),
+            vec![(1, 20)]
+        );
+
+        assert_eq!(kernel.advance_branch(1, DependencySet::empty())?, Some(21));
+        assert_eq!(
+            kernel
+                .disjunction(disjunction_id)?
+                .base_dependency
+                .as_slice(),
+            &[0]
+        );
+        assert_eq!(kernel.branch(1)?.base_dependency.as_slice(), &[0]);
+        kernel.check_invariants()
+    }
+
+    #[test]
+    fn ground_branch_advance_retains_non_disjunction_base_support() -> NativeResult<()> {
+        let mut kernel = TableauKernel::new();
+        kernel.push_branch("merge".to_owned(), vec![10, 11], 90, DependencySet::empty())?;
+        let disjunction_id = kernel.add_disjunction(vec![20, 21, 22], DependencySet::empty())?;
+        kernel.take_disjunction()?;
+        kernel.push_branch(
+            "ground_disjunction".to_owned(),
+            vec![20, 21],
+            disjunction_id,
+            DependencySet::new(vec![0])?,
+        )?;
+
+        assert_eq!(kernel.advance_branch(1, DependencySet::empty())?, Some(21));
+        assert_eq!(kernel.branch(1)?.base_dependency.as_slice(), &[0]);
+        assert_eq!(kernel.branch(1)?.initial_base_dependency.as_slice(), &[0]);
+        kernel.check_invariants()
     }
 }

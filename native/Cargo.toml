@@ -40,6 +40,10 @@ clap = { version = "=4.5.21", default-features = false, features = ["std"] }
 name = "state_kernel"
 harness = false
 
+[[bench]]
+name = "rule_kernel"
+harness = false
+
 [profile.release]
 codegen-units = 1
 lto = "thin"
