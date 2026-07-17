@@ -1,0 +1,22 @@
+name: Release blocked by LIC-001
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  licensing-gate:
+    name: Refuse publication until LIC-001 closes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Require completed licensing and provenance review
+        run: python -m tools.specs.check_release_gate --require-publishable
+
+      # No upload permission or publishing action is present. WPP0 replaces this workflow
+      # only after the machine-readable gate and complete artifact matrix pass.

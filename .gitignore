@@ -206,6 +206,9 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Hash-verified upstream reference checkouts are development-only and never vendored.
+.reference/
+
 # PyPI configuration file
 .pypirc
 

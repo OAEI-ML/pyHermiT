@@ -1,0 +1,13 @@
+[workspace]
+members = []
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2021"
+rust-version = "1.83"
+license = "LGPL-3.0-or-later"
+repository = "https://github.com/OAEI-ML/pyHermiT"
+
+# WPR0 adds the private native crate and lockfile after the Python state/wire contracts
+# are frozen. An empty workspace is deliberate: WP00 must not ship a fake reasoner.

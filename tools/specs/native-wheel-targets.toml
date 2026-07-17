@@ -1,0 +1,43 @@
+schema = 1
+owner = "WPP0"
+status = "planned-not-implemented"
+
+[[target]]
+platform = "manylinux_2_17"
+architecture = "x86_64"
+status = "planned"
+
+[[target]]
+platform = "manylinux_2_17"
+architecture = "aarch64"
+status = "planned"
+
+[[target]]
+platform = "musllinux_1_2"
+architecture = "x86_64"
+status = "planned"
+
+[[target]]
+platform = "musllinux_1_2"
+architecture = "aarch64"
+status = "planned"
+
+[[target]]
+platform = "macos"
+architecture = "x86_64"
+status = "planned"
+
+[[target]]
+platform = "macos"
+architecture = "arm64"
+status = "planned"
+
+[[target]]
+platform = "windows"
+architecture = "AMD64"
+status = "planned"
+
+[[target]]
+platform = "windows"
+architecture = "ARM64"
+status = "planned"

@@ -1,0 +1,73 @@
+schema = 1
+
+[[allow]]
+owners = ["WP00", "WPP0"]
+left = "pyproject.toml"
+right = "pyproject.toml"
+reason = "WP00 creates foundation metadata; WPP0 finalizes release metadata."
+
+[[allow]]
+owners = ["WP00", "WPP0"]
+left = "setup.py"
+right = "setup.py"
+reason = "WP00 proves build modes; WPP0 finalizes native packaging."
+
+[[allow]]
+owners = ["WP00", "WPP0"]
+left = "Cargo.toml"
+right = "Cargo.toml"
+reason = "WP00 creates the empty workspace; WPP0 finalizes release settings."
+
+[[allow]]
+owners = ["WP00", "WPP0"]
+left = "MANIFEST.in"
+right = "MANIFEST.in"
+reason = "WP00 creates the source manifest; WPP0 owns its final artifact form."
+
+[[allow]]
+owners = ["WP00", "WP16"]
+left = "src/pyhermit/__init__.py"
+right = "src/pyhermit/__init__.py"
+reason = "WP00 creates an empty marker; WP16 owns the public facade exports."
+
+[[allow]]
+owners = ["WP00", "WP17"]
+left = "README.md"
+right = "README.md"
+reason = "WP00 records reproducible foundation commands; WP17 owns final user documentation."
+
+[[allow]]
+owners = ["WP00", "WPP0"]
+left = ".github/"
+right = ".github/workflows/wheels.yml"
+reason = "WP00 creates foundation CI; WPP0 adds the wheel matrix."
+
+[[allow]]
+owners = ["WP00", "WPP0"]
+left = ".github/"
+right = ".github/workflows/release.yml"
+reason = "WP00 creates a blocking gate; WPP0 replaces it with the audited release workflow."
+
+[[allow]]
+owners = ["WP00", "WPP0"]
+left = "tools/specs/"
+right = "tools/specs/dependencies.toml"
+reason = "WP00 records provisional dependencies; WPP0 performs the final Python/Rust audit."
+
+[[allow]]
+owners = ["WP00", "WPP0"]
+left = "tools/specs/"
+right = "tools/specs/index-names.toml"
+reason = "WP00 checks availability; WPP0 must recheck the normalized name before upload."
+
+[[allow]]
+owners = ["WP00", "WPP0"]
+left = "tools/specs/"
+right = "tools/specs/native-wheel-targets.toml"
+reason = "WP00 records planned targets; WPP0 may mark only verified targets complete."
+
+[[allow]]
+owners = ["WP00", "WP17"]
+left = "tools/specs/"
+right = "tools/specs/licensing.toml"
+reason = "WP00 creates the fail-closed LIC-001 gate; WP17 closes it only with final evidence."

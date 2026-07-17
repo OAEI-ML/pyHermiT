@@ -1,0 +1,78 @@
+schema = 1
+
+[reference]
+compatibility_label = "hermit-master-37ec30a"
+repository = "https://github.com/phillord/hermit-reasoner"
+branch = "master"
+commit = "37ec30aced32ac81ebecc5e33fad255ddefcb4c3"
+commit_date_utc = "2017-10-04T08:39:39Z"
+subject = "minor fix, do not affect functionality"
+svn_origin_revision = 1200
+maven_coordinate = "com.hermit-reasoner:org.semanticweb.hermit:1.4.0.0-SNAPSHOT"
+upstream_version = "1.4.0.0-SNAPSHOT"
+upstream_license = "LGPL-3.0-or-later"
+production_java_files = 200
+source_checkout_policy = "ignored-hash-verified-cache"
+source_in_distribution = false
+acquisition_status = "not-acquired-by-wp00"
+fate_map = "specs/reference-scope.md"
+
+[[area]]
+path = "Reasoner.java"
+fate = "retain-semantics-redesign"
+owner = "WP16"
+
+[[area]]
+path = "Configuration.java"
+fate = "retain-semantics-redesign"
+owner = "WP01"
+
+[[area]]
+path = "blocking/"
+fate = "retain-semantics"
+owner = "WP11,WPR2"
+
+[[area]]
+path = "datatypes/"
+fate = "retain-semantics"
+owner = "WP07,WPR3"
+
+[[area]]
+path = "existentials/"
+fate = "retain-semantics"
+owner = "WP10,WPR2"
+
+[[area]]
+path = "hierarchy/"
+fate = "split-core-from-output-utilities"
+owner = "WP14,WP15,WPR4"
+
+[[area]]
+path = "model/"
+fate = "retain-private-ir-exclude-description-graphs"
+owner = "WP01,WP06"
+
+[[area]]
+path = "structural/"
+fate = "retain-semantics"
+owner = "WP02,WP04,WP05,WP06"
+
+[[area]]
+path = "tableau/"
+fate = "retain-core-exclude-description-graph-manager"
+owner = "WP08,WP09,WP10,WP12,WPR0,WPR1,WPR2"
+
+[[area]]
+path = "OWLAPI/public parsing boundary"
+fate = "replace-with-pyowl-core"
+owner = "WP01,WP02"
+
+[[area]]
+path = "cli/, debugger/, ProtegeReasonerFactory.java"
+fate = "exclude-integration"
+owner = "none"
+
+[[area]]
+path = "datalog/, description graphs"
+fate = "exclude-extension"
+owner = "none"

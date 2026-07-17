@@ -1,0 +1,26 @@
+schema = 1
+checked_at_utc = "2026-07-17T00:49:20Z"
+method = "official-json-api-http-status"
+selected_distribution = "pyHermiT"
+normalized_name = "pyhermit"
+import_namespace = "pyhermit"
+availability_is_not_a_reservation = true
+
+[pypi]
+url = "https://pypi.org/pypi/pyhermit/json"
+http_status = 404
+project_found = false
+
+[testpypi]
+url = "https://test.pypi.org/pypi/pyhermit/json"
+http_status = 404
+project_found = false
+
+[[known_collision]]
+normalized_name = "hermit-reasoner"
+url = "https://pypi.org/pypi/hermit-reasoner/json"
+http_status = 200
+selected = false
+note = "Existing OWL reasoner distribution; do not use this distribution name."
+
+decision = "Retain distribution pyHermiT and import pyhermit; recheck before any upload."

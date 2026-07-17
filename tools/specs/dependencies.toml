@@ -1,0 +1,144 @@
+schema = 1
+
+[[dependency]]
+name = "pyowl-core"
+requirement = "pyowl-core>=0.1,<0.2"
+scope = "runtime"
+license = "Apache-2.0"
+source = "https://github.com/OAEI-ML/pyowl-core"
+purpose = "shared OWL structural model, parsers, immutable views, and adapters"
+shipped = false
+linkage = "python-import"
+audit_owner = "WP01,WPP0"
+
+[[dependency]]
+name = "setuptools"
+requirement = "setuptools>=77"
+scope = "build"
+license = "MIT"
+source = "https://pypi.org/project/setuptools/"
+purpose = "PEP 517 build backend and package metadata"
+shipped = false
+linkage = "build-only"
+audit_owner = "WP00,WPP0"
+
+[[dependency]]
+name = "setuptools-rust"
+requirement = "setuptools-rust>=1.13,<2"
+scope = "build"
+license = "MIT"
+source = "https://pypi.org/project/setuptools-rust/"
+purpose = "optional and forced Rust extension builds"
+shipped = false
+linkage = "build-only"
+audit_owner = "WP00,WPP0"
+
+[[dependency]]
+name = "build"
+requirement = "build>=1.2,<2"
+scope = "development"
+license = "MIT"
+source = "https://pypi.org/project/build/"
+purpose = "isolated wheel and sdist construction"
+shipped = false
+linkage = "development-only"
+audit_owner = "WP00,WPP0"
+
+[[dependency]]
+name = "hypothesis"
+requirement = "hypothesis>=6.100,<7"
+scope = "development"
+license = "MPL-2.0"
+source = "https://pypi.org/project/hypothesis/"
+purpose = "property and state-machine testing"
+shipped = false
+linkage = "development-only"
+audit_owner = "WP00,WP17"
+
+[[dependency]]
+name = "import-linter"
+requirement = "import-linter>=2.1,<3"
+scope = "development"
+license = "BSD-2-Clause"
+source = "https://pypi.org/project/import-linter/"
+purpose = "runtime dependency-boundary enforcement"
+shipped = false
+linkage = "development-only"
+audit_owner = "WP00,WP17"
+
+[[dependency]]
+name = "mypy"
+requirement = "mypy>=1.10,<3"
+scope = "development"
+license = "MIT"
+source = "https://pypi.org/project/mypy/"
+purpose = "strict static type checking"
+shipped = false
+linkage = "development-only"
+audit_owner = "WP00,WP17"
+
+[[dependency]]
+name = "packaging"
+requirement = "packaging>=24,<27"
+scope = "development"
+license = "Apache-2.0 OR BSD-2-Clause"
+source = "https://pypi.org/project/packaging/"
+purpose = "wheel tag and resolver-strategy probe"
+shipped = false
+linkage = "development-only"
+audit_owner = "WP00,WPP0"
+
+[[dependency]]
+name = "pytest"
+requirement = "pytest>=8.2,<10"
+scope = "development"
+license = "MIT"
+source = "https://pypi.org/project/pytest/"
+purpose = "test runner"
+shipped = false
+linkage = "development-only"
+audit_owner = "WP00,WP17"
+
+[[dependency]]
+name = "pytest-cov"
+requirement = "pytest-cov>=5,<8"
+scope = "development"
+license = "MIT"
+source = "https://pypi.org/project/pytest-cov/"
+purpose = "test coverage reporting"
+shipped = false
+linkage = "development-only"
+audit_owner = "WP00,WP17"
+
+[[dependency]]
+name = "ruff"
+requirement = "ruff>=0.5,<1"
+scope = "development"
+license = "MIT"
+source = "https://pypi.org/project/ruff/"
+purpose = "formatting and linting"
+shipped = false
+linkage = "development-only"
+audit_owner = "WP00,WP17"
+
+[[dependency]]
+name = "tomli"
+requirement = "tomli>=2.0,<3; python_version < '3.11'"
+scope = "development"
+license = "MIT"
+source = "https://pypi.org/project/tomli/"
+purpose = "TOML parsing for specification checks on Python 3.10"
+shipped = false
+linkage = "development-only"
+audit_owner = "WP00"
+
+[[dependency]]
+name = "pyo3"
+requirement = "pyo3==0.28.3"
+scope = "development-probe"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/pyo3"
+purpose = "dummy abi3 extension used only to prove optional Rust build behavior"
+shipped = false
+linkage = "excluded-packaging-probe"
+audit_owner = "WP00,WPR0,WPP0"

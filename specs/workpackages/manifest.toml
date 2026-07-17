@@ -9,7 +9,7 @@ id = "WP00"
 brief = "WP00-scaffold-reference.md"
 wave = 0
 depends = []
-owns = ["pyproject.toml", "setup.py", "Cargo.toml", "MANIFEST.in", ".github/", "tools/specs/", "tools/packaging_probe/", "src/pyhermit/__init__.py"]
+owns = ["pyproject.toml", "setup.py", "Cargo.toml", "MANIFEST.in", ".gitignore", "README.md", ".github/", "tools/__init__.py", "tools/specs/", "tools/packaging_probe/", "src/pyhermit/__init__.py", "src/pyhermit/py.typed"]
 
 [[package]]
 id = "WP01"
@@ -163,11 +163,11 @@ id = "WPP0"
 brief = "WPP0-packaging.md"
 wave = 11
 depends = ["WP16", "WPR4"]
-owns = ["pyproject.toml", "setup.py", "Cargo.toml", "MANIFEST.in", ".github/workflows/wheels.yml", ".github/workflows/release.yml", "tests/packaging/"]
+owns = ["pyproject.toml", "setup.py", "Cargo.toml", "MANIFEST.in", ".github/workflows/wheels.yml", ".github/workflows/release.yml", "tools/specs/dependencies.toml", "tools/specs/index-names.toml", "tools/specs/native-wheel-targets.toml", "tests/packaging/"]
 
 [[package]]
 id = "WP17"
 brief = "WP17-release-integration.md"
 wave = 12
 depends = ["WP16", "WPR4", "WPP0"]
-owns = ["benchmarks/", "docs/", "README.md", "NOTICE.md", "tests/release/", "tests/data/deviations/", "reports/"]
+owns = ["benchmarks/", "docs/", "README.md", "NOTICE.md", "tools/specs/licensing.toml", "tests/release/", "tests/data/deviations/", "reports/"]

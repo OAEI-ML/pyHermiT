@@ -1,0 +1,63 @@
+schema = 1
+gate_id = "LIC-001"
+gate_status = "open"
+decision_status = "recorded"
+decision_date = "2026-07-17"
+implementation_mode = "source-guided"
+project_license = "LGPL-3.0-or-later"
+publish_allowed = false
+authority = "specs/deviations.md#lic-001--release-blocking-projectderivative-license-decision"
+
+[[requirement]]
+id = "owner-license-decision"
+status = "complete"
+evidence = "specs/deviations.md"
+expected_evidence = ["specs/deviations.md"]
+
+[[requirement]]
+id = "license-texts"
+status = "complete"
+evidence = "LICENSE,COPYING"
+expected_evidence = ["LICENSE", "COPYING"]
+
+[[requirement]]
+id = "initial-upstream-notice"
+status = "complete"
+evidence = "NOTICE.md"
+expected_evidence = ["NOTICE.md"]
+
+[[requirement]]
+id = "python-and-workspace-spdx"
+status = "complete"
+evidence = "pyproject.toml,Cargo.toml"
+expected_evidence = ["pyproject.toml", "Cargo.toml"]
+
+[[requirement]]
+id = "adapted-file-provenance-inventory"
+status = "pending"
+evidence = ""
+expected_evidence = ["reports/licensing/adapted-files.toml"]
+
+[[requirement]]
+id = "adapted-file-headers-and-modification-notices"
+status = "pending"
+evidence = ""
+expected_evidence = ["reports/licensing/adapted-file-header-audit.md"]
+
+[[requirement]]
+id = "wheel-sdist-license-layout-and-source-obligations"
+status = "pending"
+evidence = ""
+expected_evidence = ["reports/licensing/package-license-audit.md"]
+
+[[requirement]]
+id = "artifact-audit"
+status = "pending"
+evidence = ""
+expected_evidence = ["reports/release/artifact-audit.md"]
+
+[[requirement]]
+id = "owner-legal-review-signoff"
+status = "pending"
+evidence = ""
+expected_evidence = ["reports/licensing/owner-legal-review-signoff.md"]
