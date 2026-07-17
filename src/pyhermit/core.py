@@ -62,6 +62,7 @@ _REQUIRED_VIEW_FEATURES = frozenset(
         "document-boundaries",
         "document-scoped-anonymous",
         "import-manifest",
+        "ontology-identity-index",
         "owl2-structural",
     }
 )

@@ -16,17 +16,20 @@ resolver, ontology model, or import store.
 ## Deliverables
 
 - `load_snapshot` convenience and one-call `coerce_snapshot` capture for paths, bytes,
-  streams, documents, snapshots, overlays, composites, and `SnapshotProvider`.
+  streams (with the core-required root document IRI/format), documents, snapshots, overlays,
+  composites, and `SnapshotProvider`, including acquisition cancellation passthrough.
 - Exact-OM handshake solely through `owl_snapshot()` with identity/lifetime and counting
   tests; no Exact-OM import or legacy-record conversion.
-- Complete-import-manifest enforcement before validation (`RESOLVE_STRICT` normally, or a
-  proven-complete local policy); rejection uses the core resolution manifest and never
+- Complete-import-manifest enforcement through the cached core `OntologyIdentityIndex`
+  before validation (`RESOLVE_STRICT` normally, or a proven-complete local policy);
+  rejection carries the core import-manifest and loader-diagnostic digests and never
   silently reasons over partial data.
 - Complete OWL 2 DL entity typing, reserved vocabulary, declarations/punning, property
   simplicity/regularity, datatype, key, anonymous-individual, and global-restriction report.
 - Shared private `RoleAxiomGraph` contract with role preprocessing, built directly from core
   closure/index views without copying the public ontology.
-- Core fingerprint/version/cache capture plus overlay/import/provenance diagnostics.
+- Core fingerprint/version/cache capture plus zero-copy document identities and stable
+  overlay/import/provenance digests from `OntologyIdentityIndex`.
 - Zero-copy `compose_views` support for source/target/bridge inputs with strict resolution
   validation of every component and preserved component roles.
 - Adapter/profile property, malformed-provider, strict-import, conformance, memory, ownership,

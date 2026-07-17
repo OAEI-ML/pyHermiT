@@ -54,8 +54,10 @@ OntologyInput = (
 def load_snapshot(
     source: DocumentInput,
     *,
+    document_iri: IRI | str | None = None,
     options: LoadOptions | None = None,
     resolver: ImportResolver | None = None,
+    cancellation_token: pyowl_core.CancellationToken | None = None,
 ) -> OntologySnapshot: ...
 ```
 
@@ -70,9 +72,10 @@ document IRI handling, import acquisition, and stream ownership are exclusively 
 contracts. pyHermiT MUST NOT pre-read and rewind a source, parse it into RDF, or serialize it
 to another OWL syntax before core loading.
 
-A plain `str` is a filesystem path, never inline ontology text or a URL. Inline text uses an
-explicit `TextIO` with core-required format/document IRI; URL acquisition belongs to an
-explicitly configured `ImportResolver`.
+A plain `str` is a filesystem path, never inline ontology text or a URL. Caller-owned binary
+streams require `document_iri`; text streams require both `document_iri` and an explicit
+format, exactly as in core. Inline text therefore uses an explicit `TextIO` rather than an
+ambiguous string. URL acquisition belongs to an explicitly configured `ImportResolver`.
 
 Core's `parse_document` parses exactly one document and records direct import IRIs without
 resolving them. HermiT reasoning requires a closure and therefore uses `load_snapshot` or
@@ -82,7 +85,13 @@ Standalone users can pass a path/stream directly to `Reasoner`. Shared callers p
 existing ontology view/provider. All paths converge once at:
 
 ```python
-captured = pyowl_core.coerce_snapshot(source, options=options, resolver=resolver)
+captured = pyowl_core.coerce_snapshot(
+    source,
+    document_iri=document_iri,
+    options=options,
+    resolver=resolver,
+    cancellation_token=cancellation_token,
+)
 ```
 
 Options incompatible with an existing view propagate core `OptionConflictError`; pyHermiT
@@ -119,12 +128,15 @@ consume HermiT clauses/tableau state.
 ## 4. Strict import closure
 
 HermiT validates and reasons over the complete imports closure. `Reasoner` requires every
-view component's core report/import manifest to prove a complete resolved closure. A
-complete `RESOLVE_LOCAL` view is valid; `RESOLVE_STRICT` is normally used when additional
+view component's cached core `OntologyIdentityIndex` and report to prove a complete resolved
+closure. The index supplies document keys, declared ontology/version IRIs, the exact
+import-manifest digest, and loader-diagnostic digest without materializing a second manifest.
+A complete `RESOLVE_LOCAL` view is valid; `RESOLVE_STRICT` is normally used when additional
 configured resolvers are intended. A view with ignored, missing, failed, policy-blocked, or
 otherwise unresolved imports is rejected
 before OWL 2 DL validation with the appropriate core import error or a stable
-`IncompleteImportClosureError` carrying the core resolution manifest.
+`IncompleteImportClosureError` carrying stable core import-manifest and loader-diagnostic
+digests plus the report's diagnostic codes.
 
 Network access is never implicit. A standalone caller must explicitly supply a resolver and
 load options that permit it. Cycles are legal and represented once per resolved document;

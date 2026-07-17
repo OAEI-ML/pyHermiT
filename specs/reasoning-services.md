@@ -42,6 +42,7 @@ No empty node/group is returned.
 class Reasoner:
     def __init__(self, ontology: OntologyInput, *,
                  config: ReasonerConfig | None = None,
+                 document_iri: IRI | str | None = None,
                  load_options: LoadOptions | None = None,
                  resolver: ImportResolver | None = None) -> None: ...
     @property
@@ -58,6 +59,8 @@ class Reasoner:
 
 Construction calls `pyowl_core.coerce_snapshot` once, requires an already proven or newly
 loaded strict import closure, validates, compiles private HermiT IR, and selects a backend.
+`document_iri` follows the core source contract: it is required for caller-owned streams and
+is rejected for an already parsed document/view/provider.
 Compatible core views are captured by identity; a provider is called once and never
 reparsed. Construction MAY defer tableau allocation and classification. `dispose` is idempotent,
 releases native memory/caches, and makes subsequent semantic/update calls raise

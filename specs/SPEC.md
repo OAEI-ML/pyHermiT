@@ -288,7 +288,8 @@ from pyhermit import (
 )
 ```
 
-`Reasoner(ontology_input, config=..., load_options=..., resolver=...)` coerces exactly once,
+`Reasoner(ontology_input, config=..., document_iri=..., load_options=..., resolver=...)`
+coerces exactly once,
 requires a strict core import closure, and captures the core view by identity plus its
 fingerprints. Query methods and exact return shapes are specified in
 `reasoning-services.md`. OWL expressions are exact immutable core values; updates create a

@@ -15,8 +15,8 @@ lifecycle around all pure-Python services.
 ## Deliverables
 
 - Stable `pyhermit` exports, `Reasoner` context/dispose/interrupt/config/backend/ontology
-  properties, exact core OWL/view re-exports, `load_snapshot`, and every method signature in
-  `reasoning-services.md`.
+  properties, exact core OWL/view re-exports, `load_snapshot`, core-compatible stream
+  `document_iri` handling, and every method signature in `reasoning-services.md`.
 - Backend dispatcher with constructor-over-environment precedence,
   auto/python/native/verify modes, handshake/version/feature checks, and diagnostic
   `backend_info`; no eager native import in Python mode.

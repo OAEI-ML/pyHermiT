@@ -39,6 +39,7 @@ class _View:
                     "document-boundaries",
                     "document-scoped-anonymous",
                     "import-manifest",
+                    "ontology-identity-index",
                     "owl2-structural",
                 }
             ),
