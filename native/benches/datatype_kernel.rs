@@ -3,7 +3,8 @@ use std::hint::black_box;
 
 use _native::datatypes::{
     solve_component, ConstraintComponent, DataIdentity, DatatypeError, DomainConstraint,
-    DomainKind, EqualityConstraint, ExactRational, InequalityConstraint, NeverCancel, SolverLimits,
+    DomainKind, EqualityConstraint, ExactRational, InequalityConstraint, NeverCancel, RegexLimits,
+    SolverLimits, XsdRegex,
 };
 use _native::model::DependencySet;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -120,5 +121,75 @@ fn datatype_solver(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, datatype_solver);
+fn xsd_regex(c: &mut Criterion) {
+    let mut group = c.benchmark_group("datatype_xsd_regex");
+    group.bench_function("compile/subtraction_quantifier", |b| {
+        b.iter(|| {
+            black_box(require(XsdRegex::compile_default(
+                black_box("[a-z-[aeiou]]{1,32}"),
+                &NeverCancel,
+            )))
+        });
+    });
+    group.bench_function("compile/unicode_category_quantifier", |b| {
+        b.iter(|| {
+            black_box(require(XsdRegex::compile_default(
+                black_box(r"\p{Lu}\p{Ll}{0,31}"),
+                &NeverCancel,
+            )))
+        });
+    });
+    let consonants = require(XsdRegex::compile_default(
+        "[a-z-[aeiou]]{1,32}",
+        &NeverCancel,
+    ));
+    group.bench_function("fullmatch/32_ascii", |b| {
+        b.iter(|| {
+            black_box(require(consonants.fullmatch(
+                black_box("bcdfghjklmnpqrstvwxyzbcdfghjklmn"),
+                RegexLimits::default(),
+                &NeverCancel,
+            )))
+        });
+    });
+    let letters = require(XsdRegex::compile_default("[a-z]+", &NeverCancel));
+    let digits = require(XsdRegex::compile_default(r"\d+", &NeverCancel));
+    let disjoint = letters.intersection(&digits);
+    group.bench_function("exact_empty/disjoint_infinite", |b| {
+        b.iter(|| {
+            black_box(require(
+                disjoint.is_empty_exact(RegexLimits::default(), &NeverCancel),
+            ))
+        });
+    });
+    let unicode = require(XsdRegex::compile_default(
+        r"\p{Lu}\p{Ll}{0,31}",
+        &NeverCancel,
+    ));
+    group.bench_function("fullmatch/unicode_category", |b| {
+        b.iter(|| {
+            black_box(require(unicode.fullmatch(
+                black_box("Δelta"),
+                RegexLimits::default(),
+                &NeverCancel,
+            )))
+        });
+    });
+    group.bench_function("compile_and_fullmatch/unicode_category", |b| {
+        b.iter(|| {
+            let pattern = require(XsdRegex::compile_default(
+                black_box(r"\p{Lu}\p{Ll}{0,31}"),
+                &NeverCancel,
+            ));
+            black_box(require(pattern.fullmatch(
+                black_box("Δelta"),
+                RegexLimits::default(),
+                &NeverCancel,
+            )))
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, datatype_solver, xsd_regex);
 criterion_main!(benches);

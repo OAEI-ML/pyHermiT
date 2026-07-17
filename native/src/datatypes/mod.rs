@@ -13,6 +13,8 @@
 
 mod solver;
 mod value;
+mod xsd_regex;
+mod xsd_unicode_3_2;
 
 pub use solver::{
     solve_component, CardinalityConstraint, ClashKind, ConstraintComponent, DatatypeClash,
@@ -25,6 +27,7 @@ pub use value::{
     ExactRational, IEEECategory, IEEEFormat, NativeLiteral, NeverCancel, OpaqueLiteral,
     SourceLiteral,
 };
+pub use xsd_regex::{CharSet, RegexLimits, XsdRegex, XSD_REGEX_UNICODE_VERSION};
 
 #[cfg(test)]
 mod tests;

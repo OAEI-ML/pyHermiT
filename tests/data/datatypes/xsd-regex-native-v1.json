@@ -1,0 +1,706 @@
+{
+  "algebra": [
+    {
+      "cardinality": null,
+      "empty": false,
+      "finite": false,
+      "left": "[a-z]+",
+      "name": "overlapping-intersection",
+      "operation": "intersection",
+      "right": "[a-f]+",
+      "samples": [
+        {
+          "matches": true,
+          "value": "a"
+        },
+        {
+          "matches": true,
+          "value": "fade"
+        },
+        {
+          "matches": true,
+          "value": "face"
+        },
+        {
+          "matches": false,
+          "value": "z"
+        },
+        {
+          "matches": false,
+          "value": "ag"
+        },
+        {
+          "matches": false,
+          "value": ""
+        }
+      ]
+    },
+    {
+      "cardinality": "0",
+      "empty": true,
+      "enumeration": [],
+      "finite": true,
+      "left": "a+",
+      "name": "disjoint-intersection",
+      "operation": "intersection",
+      "right": "b+",
+      "samples": [
+        {
+          "matches": false,
+          "value": "a"
+        },
+        {
+          "matches": false,
+          "value": "b"
+        },
+        {
+          "matches": false,
+          "value": "ab"
+        },
+        {
+          "matches": false,
+          "value": ""
+        }
+      ]
+    },
+    {
+      "cardinality": "3",
+      "empty": false,
+      "enumeration": [
+        "a",
+        "b",
+        "c"
+      ],
+      "finite": true,
+      "left": "[ab]",
+      "name": "finite-union",
+      "operation": "union",
+      "right": "[bc]",
+      "samples": [
+        {
+          "matches": true,
+          "value": "a"
+        },
+        {
+          "matches": true,
+          "value": "b"
+        },
+        {
+          "matches": true,
+          "value": "c"
+        },
+        {
+          "matches": false,
+          "value": "d"
+        },
+        {
+          "matches": false,
+          "value": ""
+        }
+      ]
+    },
+    {
+      "cardinality": null,
+      "empty": false,
+      "finite": false,
+      "left": "[a-c]",
+      "name": "language-complement",
+      "operation": "complement",
+      "right": null,
+      "samples": [
+        {
+          "matches": true,
+          "value": ""
+        },
+        {
+          "matches": false,
+          "value": "a"
+        },
+        {
+          "matches": false,
+          "value": "c"
+        },
+        {
+          "matches": true,
+          "value": "z"
+        },
+        {
+          "matches": true,
+          "value": "aa"
+        },
+        {
+          "matches": true,
+          "value": "\n"
+        },
+        {
+          "matches": false,
+          "value": "\u0000"
+        }
+      ]
+    },
+    {
+      "cardinality": "21",
+      "empty": false,
+      "enumeration": [
+        "b",
+        "c",
+        "d",
+        "f",
+        "g",
+        "h",
+        "j",
+        "k",
+        "l",
+        "m",
+        "n",
+        "p",
+        "q",
+        "r",
+        "s",
+        "t",
+        "v",
+        "w",
+        "x",
+        "y",
+        "z"
+      ],
+      "finite": true,
+      "left": "[a-z]",
+      "name": "finite-set-difference",
+      "operation": "difference",
+      "right": "[aeiou]",
+      "samples": [
+        {
+          "matches": false,
+          "value": "a"
+        },
+        {
+          "matches": true,
+          "value": "b"
+        },
+        {
+          "matches": false,
+          "value": "u"
+        },
+        {
+          "matches": true,
+          "value": "z"
+        },
+        {
+          "matches": false,
+          "value": "bb"
+        },
+        {
+          "matches": false,
+          "value": ""
+        }
+      ]
+    }
+  ],
+  "invalid": [
+    {
+      "exception": "OntologyProfileError",
+      "message": "Unicode block escapes await the pinned OWL Unicode block inventory",
+      "name": "unicode-block-awaits-pinned-inventory",
+      "pattern": "\\p{IsBasicLatin}"
+    },
+    {
+      "exception": "OntologyProfileError",
+      "message": "character range is reversed",
+      "name": "reversed-character-range",
+      "pattern": "[z-a]"
+    },
+    {
+      "exception": "OntologyProfileError",
+      "message": "quantifier minimum exceeds maximum",
+      "name": "decreasing-quantifier",
+      "pattern": "a{3,2}"
+    },
+    {
+      "exception": "OntologyProfileError",
+      "message": "unknown XML Schema character escape",
+      "name": "unknown-escape",
+      "pattern": "\\q"
+    },
+    {
+      "exception": "OntologyProfileError",
+      "message": "unclosed regular-expression group",
+      "name": "unclosed-group",
+      "pattern": "(abc"
+    },
+    {
+      "exception": "OntologyProfileError",
+      "message": "metacharacter must be escaped",
+      "name": "trailing-metacharacter",
+      "pattern": "abc]"
+    }
+  ],
+  "membership": [
+    {
+      "cardinality": "1",
+      "enumeration": [
+        ""
+      ],
+      "finite": true,
+      "name": "empty-pattern",
+      "pattern": "",
+      "samples": [
+        {
+          "matches": true,
+          "value": ""
+        },
+        {
+          "matches": false,
+          "value": "a"
+        },
+        {
+          "matches": false,
+          "value": "\n"
+        }
+      ]
+    },
+    {
+      "cardinality": "2",
+      "enumeration": [
+        "ab",
+        "cd"
+      ],
+      "finite": true,
+      "name": "implicitly-anchored-alternative",
+      "pattern": "ab|cd",
+      "samples": [
+        {
+          "matches": true,
+          "value": "ab"
+        },
+        {
+          "matches": true,
+          "value": "cd"
+        },
+        {
+          "matches": false,
+          "value": ""
+        },
+        {
+          "matches": false,
+          "value": "a"
+        },
+        {
+          "matches": false,
+          "value": "xab"
+        },
+        {
+          "matches": false,
+          "value": "abcd"
+        }
+      ]
+    },
+    {
+      "cardinality": "6",
+      "enumeration": [
+        "aa",
+        "aaa",
+        "aab",
+        "aaab",
+        "aaaa",
+        "aaaab"
+      ],
+      "finite": true,
+      "name": "bounded-quantifiers",
+      "pattern": "a{2,4}b?",
+      "samples": [
+        {
+          "matches": true,
+          "value": "aa"
+        },
+        {
+          "matches": true,
+          "value": "aab"
+        },
+        {
+          "matches": true,
+          "value": "aaaa"
+        },
+        {
+          "matches": true,
+          "value": "aaaab"
+        },
+        {
+          "matches": false,
+          "value": "a"
+        },
+        {
+          "matches": false,
+          "value": "aaaaa"
+        }
+      ]
+    },
+    {
+      "cardinality": null,
+      "finite": false,
+      "name": "xsd-character-class-subtraction",
+      "pattern": "[a-z-[aeiou]]+",
+      "samples": [
+        {
+          "matches": true,
+          "value": "b"
+        },
+        {
+          "matches": true,
+          "value": "bcdf"
+        },
+        {
+          "matches": true,
+          "value": "z"
+        },
+        {
+          "matches": false,
+          "value": "a"
+        },
+        {
+          "matches": false,
+          "value": "bed"
+        },
+        {
+          "matches": false,
+          "value": "b\u00e9"
+        },
+        {
+          "matches": false,
+          "value": ""
+        }
+      ]
+    },
+    {
+      "cardinality": null,
+      "finite": false,
+      "name": "xml-name-without-colon",
+      "pattern": "[\\i-[:]][\\c-[:]]*",
+      "samples": [
+        {
+          "matches": true,
+          "value": "Alpha"
+        },
+        {
+          "matches": true,
+          "value": "_x"
+        },
+        {
+          "matches": true,
+          "value": "\u00e9clair"
+        },
+        {
+          "matches": true,
+          "value": "a-b"
+        },
+        {
+          "matches": false,
+          "value": "a:b"
+        },
+        {
+          "matches": false,
+          "value": "1a"
+        },
+        {
+          "matches": false,
+          "value": ""
+        }
+      ]
+    },
+    {
+      "cardinality": null,
+      "finite": false,
+      "name": "xsd-space",
+      "pattern": "\\s+",
+      "samples": [
+        {
+          "matches": true,
+          "value": " "
+        },
+        {
+          "matches": true,
+          "value": "\t\r\n"
+        },
+        {
+          "matches": true,
+          "value": "\n"
+        },
+        {
+          "matches": false,
+          "value": "\u00a0"
+        },
+        {
+          "matches": false,
+          "value": "a"
+        },
+        {
+          "matches": false,
+          "value": ""
+        }
+      ]
+    },
+    {
+      "cardinality": null,
+      "finite": false,
+      "name": "unicode-decimal",
+      "pattern": "\\d+",
+      "samples": [
+        {
+          "matches": true,
+          "value": "0"
+        },
+        {
+          "matches": true,
+          "value": "\u0665"
+        },
+        {
+          "matches": true,
+          "value": "\u0967\u0968"
+        },
+        {
+          "matches": false,
+          "value": "\u00b2"
+        },
+        {
+          "matches": false,
+          "value": "A"
+        },
+        {
+          "matches": false,
+          "value": ""
+        }
+      ]
+    },
+    {
+      "cardinality": null,
+      "finite": false,
+      "name": "xsd-word",
+      "pattern": "\\w+",
+      "samples": [
+        {
+          "matches": true,
+          "value": "abc"
+        },
+        {
+          "matches": true,
+          "value": "\u03b12"
+        },
+        {
+          "matches": true,
+          "value": "$"
+        },
+        {
+          "matches": false,
+          "value": "_"
+        },
+        {
+          "matches": false,
+          "value": "a b"
+        },
+        {
+          "matches": false,
+          "value": ""
+        }
+      ]
+    },
+    {
+      "cardinality": null,
+      "finite": false,
+      "name": "unicode-categories",
+      "pattern": "\\p{Lu}\\p{Ll}*",
+      "samples": [
+        {
+          "matches": true,
+          "value": "Abc"
+        },
+        {
+          "matches": true,
+          "value": "\u0394elta"
+        },
+        {
+          "matches": true,
+          "value": "A"
+        },
+        {
+          "matches": false,
+          "value": "abc"
+        },
+        {
+          "matches": false,
+          "value": "A2"
+        }
+      ]
+    },
+    {
+      "cardinality": "879373",
+      "finite": true,
+      "name": "ucd-3-2-unassigned",
+      "pattern": "\\p{Cn}",
+      "samples": [
+        {
+          "matches": true,
+          "value": "\ud83d\ude00"
+        },
+        {
+          "matches": true,
+          "value": "\u20ba"
+        },
+        {
+          "matches": false,
+          "value": "A"
+        },
+        {
+          "matches": false,
+          "value": "\uffff"
+        },
+        {
+          "matches": false,
+          "value": ""
+        }
+      ]
+    },
+    {
+      "cardinality": "2496",
+      "finite": true,
+      "name": "ucd-3-2-symbol",
+      "pattern": "\\p{So}",
+      "samples": [
+        {
+          "matches": true,
+          "value": "\u00a9"
+        },
+        {
+          "matches": true,
+          "value": "\u2122"
+        },
+        {
+          "matches": false,
+          "value": "\ud83d\ude00"
+        },
+        {
+          "matches": false,
+          "value": "\u20ba"
+        },
+        {
+          "matches": false,
+          "value": "A"
+        }
+      ]
+    },
+    {
+      "cardinality": "1112033",
+      "finite": true,
+      "name": "dot-is-an-xml-character",
+      "pattern": ".",
+      "samples": [
+        {
+          "matches": true,
+          "value": "A"
+        },
+        {
+          "matches": true,
+          "value": "\n"
+        },
+        {
+          "matches": true,
+          "value": "\t"
+        },
+        {
+          "matches": false,
+          "value": "\u0000"
+        },
+        {
+          "matches": false,
+          "value": ""
+        },
+        {
+          "matches": false,
+          "value": "AB"
+        }
+      ]
+    },
+    {
+      "cardinality": null,
+      "finite": false,
+      "name": "negated-decimal-class",
+      "pattern": "[^\\d]+",
+      "samples": [
+        {
+          "matches": true,
+          "value": "abc"
+        },
+        {
+          "matches": true,
+          "value": "_"
+        },
+        {
+          "matches": false,
+          "value": "\u0663"
+        },
+        {
+          "matches": false,
+          "value": "a\u0663"
+        },
+        {
+          "matches": false,
+          "value": ""
+        },
+        {
+          "matches": true,
+          "value": "\n"
+        }
+      ]
+    },
+    {
+      "cardinality": "7",
+      "enumeration": [
+        "",
+        "a",
+        "b",
+        "aa",
+        "ab",
+        "ba",
+        "bb"
+      ],
+      "finite": true,
+      "name": "finite-breadth-first-order",
+      "pattern": "[ab]{0,2}",
+      "samples": [
+        {
+          "matches": true,
+          "value": ""
+        },
+        {
+          "matches": true,
+          "value": "a"
+        },
+        {
+          "matches": true,
+          "value": "b"
+        },
+        {
+          "matches": true,
+          "value": "aa"
+        },
+        {
+          "matches": true,
+          "value": "ab"
+        },
+        {
+          "matches": true,
+          "value": "ba"
+        },
+        {
+          "matches": true,
+          "value": "bb"
+        },
+        {
+          "matches": false,
+          "value": "aaa"
+        }
+      ]
+    }
+  ],
+  "schema": "pyhermit.xsd-regex.native-parity.v1",
+  "unicode_version": "3.2.0"
+}
