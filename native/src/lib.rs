@@ -17,6 +17,7 @@
 pub mod blocking;
 mod branching;
 mod cancel;
+pub mod datatypes;
 pub mod error;
 pub mod existentials;
 pub mod merging;
