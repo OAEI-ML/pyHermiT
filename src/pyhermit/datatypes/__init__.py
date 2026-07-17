@@ -10,6 +10,7 @@ payload boundary that Python and Rust backends can consume without lexical repar
 from __future__ import annotations
 
 from .binary import XSD_BASE64_BINARY, XSD_HEX_BINARY
+from .domain import DataDomainRange, DataValueFamily
 from .facets import (
     RDF_LANG_RANGE,
     XSD_LENGTH,
@@ -188,9 +189,11 @@ __all__ = [
     "ComparisonOrder",
     "ComparisonValue",
     "CompiledLiteral",
+    "DataDomainRange",
     "DataIdentity",
     "DataRangePayloadKind",
     "DataRangeSemanticPayload",
+    "DataValueFamily",
     "DatatypeDefinitionSemanticPayload",
     "DatatypeLimits",
     "DatatypeRange",
