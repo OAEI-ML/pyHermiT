@@ -45,8 +45,8 @@ class FactKey:
         ):
             raise ValueError("predicate_id must be a nonnegative integer")
         arguments = tuple(self.arguments)
-        if len(arguments) not in (1, 2):
-            raise ValueError("fact rows must have unary or binary arity")
+        if not arguments:
+            raise ValueError("fact rows must have positive arity")
         if not all(isinstance(argument, NodeHandle) for argument in arguments):
             raise TypeError("fact arguments must be NodeHandle values")
         object.__setattr__(self, "arguments", arguments)
@@ -103,6 +103,7 @@ class ExtensionStore:
 
     __slots__ = (
         "_by_key",
+        "_by_node",
         "_dependencies",
         "_index_data",
         "_nodes",
@@ -118,6 +119,7 @@ class ExtensionStore:
         self._dependencies = dependencies
         self._rows: list[FactRow] = []
         self._by_key: dict[FactKey, int] = {}
+        self._by_node: dict[NodeHandle, set[int]] = {}
         self._index_data: dict[IndexPattern, dict[IndexKey, set[int]]] = {}
         self._read_generation = 0
         self._write_generation = 0
@@ -285,7 +287,11 @@ class ExtensionStore:
     ) -> None:
         """Copy affected rows to a representative and deactivate their old keys."""
 
-        affected = [row for row in self._rows if row.active and source in row.key.arguments]
+        affected = [
+            self._rows[row_id]
+            for row_id in sorted(self._by_node.get(source, ()))
+            if self._rows[row_id].active
+        ]
         for row in affected:
             arguments = tuple(target if item == source else item for item in row.key.arguments)
             for support in row.supports:
@@ -306,9 +312,21 @@ class ExtensionStore:
             self.deactivate(row.row_id)
 
     def deactivate_for_nodes(self, handles: frozenset[NodeHandle]) -> None:
-        for row in tuple(self._rows):
-            if row.active and any(argument in handles for argument in row.key.arguments):
-                self.deactivate(row.row_id)
+        row_ids = {row_id for handle in handles for row_id in self._by_node.get(handle, ())}
+        for row_id in sorted(row_ids):
+            if self._rows[row_id].active:
+                self.deactivate(row_id)
+
+    def rows_for_node(self, handle: NodeHandle) -> tuple[FactRow, ...]:
+        """Return active rows incident on the canonical node in row-ID order."""
+
+        representative, _path = self._nodes.representative(handle)
+        self._nodes.require_active(representative)
+        return tuple(
+            self._rows[row_id]
+            for row_id in sorted(self._by_node.get(representative, ()))
+            if self._rows[row_id].active
+        )
 
     def row(self, row_id: int) -> FactRow:
         if isinstance(row_id, bool) or not isinstance(row_id, int):
@@ -388,11 +406,20 @@ class ExtensionStore:
         return key.predicate_id, tuple(key.arguments[position] for position in pattern)
 
     def _index_insert(self, row: FactRow) -> None:
+        for argument in set(row.key.arguments):
+            self._by_node.setdefault(argument, set()).add(row.row_id)
         for pattern, index in self._index_data.items():
             if all(position < len(row.key.arguments) for position in pattern):
                 index.setdefault(self._index_key(row.key, pattern), set()).add(row.row_id)
 
     def _index_remove(self, row: FactRow) -> None:
+        for argument in set(row.key.arguments):
+            node_rows = self._by_node.get(argument)
+            if node_rows is None or row.row_id not in node_rows:
+                raise InternalInvariantError("fact row missing from node incidence index")
+            node_rows.remove(row.row_id)
+            if not node_rows:
+                del self._by_node[argument]
         for pattern, index in self._index_data.items():
             if not all(position < len(row.key.arguments) for position in pattern):
                 continue
@@ -406,6 +433,7 @@ class ExtensionStore:
 
     def check_invariants(self, *, highest_branch_level: int | None = None) -> None:
         expected_by_key: dict[FactKey, int] = {}
+        expected_by_node: dict[NodeHandle, set[int]] = {}
         for row_id, row in enumerate(self._rows):
             if row.row_id != row_id:
                 raise InternalInvariantError("fact row ID disagrees with storage position")
@@ -414,6 +442,8 @@ class ExtensionStore:
             if row.key in expected_by_key:
                 raise InternalInvariantError("duplicate active fact key")
             expected_by_key[row.key] = row.row_id
+            for argument in set(row.key.arguments):
+                expected_by_node.setdefault(argument, set()).add(row.row_id)
             if not row.supports:
                 raise InternalInvariantError("active fact has no supports")
             if row.supports != tuple(sorted(set(row.supports), key=lambda item: item.bits)):
@@ -432,6 +462,8 @@ class ExtensionStore:
                     raise InternalInvariantError("active fact references an inactive node")
         if expected_by_key != self._by_key:
             raise InternalInvariantError("fact key map does not match active rows")
+        if expected_by_node != self._by_node:
+            raise InternalInvariantError("node incidence index does not match active rows")
         for pattern, actual in self._index_data.items():
             rebuilt: dict[IndexKey, set[int]] = {}
             for row in self._rows:

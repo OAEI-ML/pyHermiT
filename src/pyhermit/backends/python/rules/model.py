@@ -88,8 +88,8 @@ class GroundRuleAtom:
         ):
             raise ValueError("ground predicate ID must be a nonnegative integer")
         arguments = tuple(self.arguments)
-        if not 1 <= len(arguments) <= 3:
-            raise ValueError("ground rule atoms must have arity one, two, or three")
+        if not arguments:
+            raise ValueError("ground rule atoms must have positive arity")
         if not all(isinstance(value, NodeHandle) for value in arguments):
             raise TypeError("ground rule arguments must be NodeHandle values")
         object.__setattr__(self, "arguments", arguments)

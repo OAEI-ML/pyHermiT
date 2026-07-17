@@ -33,6 +33,12 @@ from pyhermit.clauses import (
     Variable,
 )
 from pyhermit.clauses.model import GroundTerm
+from pyhermit.datatypes import (
+    BackendLiteralSemanticPayload,
+    DatatypeSemanticEvaluator,
+    decode_datatype_semantic_model,
+    decode_literal_semantic_payload,
+)
 from pyhermit.events import CancellationToken
 from pyhermit.exceptions import InternalInvariantError, ResourceLimitError
 
@@ -64,12 +70,14 @@ class HyperresolutionEngine:
         "_brancher",
         "_data_identities_by_handle",
         "_data_nodes",
+        "_datatype_evaluator",
         "_disjunction_keys",
         "_equality_by_sort",
         "_inequality_by_sort",
         "_initialized",
         "_join_program",
         "_limits",
+        "_literal_payloads_by_identity",
         "_opposites",
         "_pending_annotated",
         "_pending_by_atom",
@@ -107,6 +115,21 @@ class HyperresolutionEngine:
             identities_by_handle.setdefault(handle, set()).add(identity)
         self._data_identities_by_handle = {
             handle: frozenset(identities) for handle, identities in identities_by_handle.items()
+        }
+        self._datatype_evaluator = DatatypeSemanticEvaluator(
+            decode_datatype_semantic_model(
+                program.datatype_model.semantic_payload_json.encode("utf-8")
+            )
+        )
+        literal_payloads: dict[int, list[BackendLiteralSemanticPayload]] = {}
+        for literal_record in program.datatype_model.literal_identities:
+            literal_payloads.setdefault(literal_record.data_identity_id, []).append(
+                decode_literal_semantic_payload(
+                    literal_record.semantic_payload_json.encode("utf-8")
+                )
+            )
+        self._literal_payloads_by_identity = {
+            identity: tuple(values) for identity, values in literal_payloads.items()
         }
         self._limits = selected_limits
         self._join_program = compile_join_program(program)
@@ -285,12 +308,15 @@ class HyperresolutionEngine:
         atom: GroundRuleAtom,
         dependency: DependencySet,
         *,
+        core: bool = False,
         provenance_ids: tuple[int, ...] = (),
     ) -> bool:
         if not isinstance(atom, GroundRuleAtom):
             raise TypeError("atom must be GroundRuleAtom")
         if not isinstance(dependency, DependencySet):
             raise TypeError("dependency must be DependencySet")
+        if not isinstance(core, bool):
+            raise TypeError("core must be bool")
         predicate = self._program.predicates.predicate(atom.predicate_id)
         normalized, path = self._canonical_atom(atom)
         support = self._session.dependencies.union(dependency, path)
@@ -298,10 +324,10 @@ class HyperresolutionEngine:
         if predicate.kind is PredicateKind.ORDERING_GUARD:
             raise InternalInvariantError("ordering guards cannot be dispatched as heads")
         if predicate.kind is PredicateKind.EQUALITY:
-            return self._dispatch_equality(normalized, support, provenance_ids)
+            return self._dispatch_equality(normalized, support, core, provenance_ids)
         if predicate.kind is PredicateKind.ANNOTATED_EQUALITY:
             return self._dispatch_annotated_equality(normalized, support, provenance_ids)
-        changed = self._add_extension_atom(normalized, support, provenance_ids)
+        changed = self._add_extension_atom(normalized, support, provenance_ids, core=core)
         if predicate.kind is PredicateKind.INEQUALITY and (
             normalized.arguments[0] == normalized.arguments[1]
         ):
@@ -332,6 +358,7 @@ class HyperresolutionEngine:
                     opposite,
                     support,
                     provenance_ids,
+                    core=core,
                 )
         if predicate.kind in {PredicateKind.AT_LEAST_OBJECT, PredicateKind.AT_LEAST_DATA}:
             root = normalized.arguments[0]
@@ -342,6 +369,82 @@ class HyperresolutionEngine:
                 (node.creation_id, root.slot, root.generation),
             )
         return changed
+
+    def register_node(
+        self,
+        handle: NodeHandle,
+        dependency: DependencySet | None = None,
+    ) -> None:
+        """Register runtime-created nodes with virtual/reflexive rule predicates."""
+
+        if not isinstance(handle, NodeHandle):
+            raise TypeError("handle must be NodeHandle")
+        selected = self._session.dependencies.empty if dependency is None else dependency
+        if not isinstance(selected, DependencySet):
+            raise TypeError("dependency must be DependencySet or None")
+        node = self._session.nodes.require_active(handle)
+        sort = TermSort.OBJECT if node.sort is NodeSort.OBJECT else TermSort.DATA
+        equality = self._equality_by_sort.get(sort)
+        if equality is not None:
+            self.dispatch_ground_atom(
+                GroundRuleAtom(equality, (handle, handle)),
+                selected,
+                core=True,
+            )
+
+    def data_values_known_different(self, left: NodeHandle, right: NodeHandle) -> bool:
+        if not isinstance(left, NodeHandle) or not isinstance(right, NodeHandle):
+            raise TypeError("data values must be NodeHandle values")
+        left_rep, _left_path = self._session.nodes.representative(left)
+        right_rep, _right_path = self._session.nodes.representative(right)
+        for handle in (left_rep, right_rep):
+            if self._session.nodes.require_active(handle).sort is not NodeSort.DATA:
+                raise TypeError("data-values-known-different requires concrete nodes")
+        return self._fixed_data_values_differ((left_rep, right_rep))
+
+    def data_value_satisfies(
+        self,
+        handle: NodeHandle,
+        predicate_id: int,
+        token: CancellationToken,
+    ) -> bool:
+        """Evaluate a fixed literal value against a compiled unary data range."""
+
+        if not isinstance(handle, NodeHandle):
+            raise TypeError("handle must be NodeHandle")
+        if isinstance(predicate_id, bool) or not isinstance(predicate_id, int):
+            raise TypeError("predicate_id must be int")
+        if not isinstance(token, CancellationToken):
+            raise TypeError("token must be CancellationToken")
+        representative, _path = self._session.nodes.representative(handle)
+        if self._session.nodes.require_active(representative).sort is not NodeSort.DATA:
+            raise TypeError("data-value satisfaction requires a concrete node")
+        predicate = self._program.predicates.predicate(predicate_id)
+        if predicate.kind not in {
+            PredicateKind.DATA_RANGE,
+            PredicateKind.NEGATED_DATA_RANGE,
+        }:
+            raise ValueError("predicate must be a unary data range")
+        if len(predicate.argument_sorts) != 1 or predicate.symbol_id is None:
+            raise ValueError("predicate must be a unary data range")
+        identities = sorted(
+            identifier
+            for identifier, value in self._data_nodes.items()
+            if self._session.nodes.representative(value)[0] == representative
+        )
+        for identity in identities:
+            for payload in self._literal_payloads_by_identity.get(identity, ()):
+                contained = self._datatype_evaluator.contains(
+                    predicate.symbol_id,
+                    payload,
+                    cancellation=token,
+                )
+                return (
+                    not contained
+                    if predicate.kind is PredicateKind.NEGATED_DATA_RANGE
+                    else contained
+                )
+        return False
 
     def apply_ground_head(
         self,
@@ -574,6 +677,7 @@ class HyperresolutionEngine:
         self,
         atom: GroundRuleAtom,
         dependency: DependencySet,
+        core: bool,
         provenance_ids: tuple[int, ...],
     ) -> bool:
         left, right = atom.arguments
@@ -605,7 +709,7 @@ class HyperresolutionEngine:
         else:
             representative = left
         reflexive = GroundRuleAtom(atom.predicate_id, (representative, representative))
-        return self._add_extension_atom(reflexive, dependency, provenance_ids) or changed
+        return self._add_extension_atom(reflexive, dependency, provenance_ids, core=core) or changed
 
     def _dispatch_annotated_equality(
         self,
@@ -650,14 +754,17 @@ class HyperresolutionEngine:
         atom: GroundRuleAtom,
         dependency: DependencySet,
         provenance_ids: tuple[int, ...],
+        *,
+        core: bool = False,
     ) -> bool:
-        if len(atom.arguments) not in (1, 2):
-            raise InternalInvariantError("extension rows must be unary or binary")
+        if not atom.arguments:
+            raise InternalInvariantError("extension rows must have positive arity")
         provenance = tuple(sorted(set(provenance_ids)))
         outcome = self._session.extensions.add(
             atom.predicate_id,
             atom.arguments,
             dependency,
+            core=core,
             provenance_id=None if not provenance else provenance[0],
         )
         for provenance_id in provenance[1:]:
@@ -665,6 +772,7 @@ class HyperresolutionEngine:
                 atom.predicate_id,
                 atom.arguments,
                 dependency,
+                core=core,
                 provenance_id=provenance_id,
             )
         return outcome.created or outcome.support_changed
@@ -675,6 +783,8 @@ class HyperresolutionEngine:
         opposite_predicate_id: int,
         dependency: DependencySet,
         provenance_ids: tuple[int, ...],
+        *,
+        core: bool,
     ) -> None:
         """Materialize value inequality implied by positive/negative data-role pairs."""
 
@@ -695,6 +805,7 @@ class HyperresolutionEngine:
                 self.dispatch_ground_atom(
                     GroundRuleAtom(inequality_id, (target, other)),
                     self._session.dependencies.union(dependency, opposite_support),
+                    core=core or row.core,
                     provenance_ids=provenance_ids,
                 )
 

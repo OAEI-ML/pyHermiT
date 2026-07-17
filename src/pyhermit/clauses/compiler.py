@@ -328,6 +328,7 @@ def compile_normalized(
     _emit_builtin_facts_and_clashes(state)
     _emit_complement_clashes(state)
     _emit_pending_nominal_semantics(state)
+    _retain_runtime_predicates(state)
     state.checkpoint()
     registry, predicate_ids = _freeze_predicates(state.predicates, cancelled=cancelled)
     clauses, positive, negative, disjunctions = _freeze_rules(state, registry, predicate_ids)
@@ -444,6 +445,7 @@ def compile_query_program(
     )
     _emit_complement_clashes(state, base_predicates=set(base_specs))
     _emit_pending_nominal_semantics(state)
+    _retain_runtime_predicates(state)
     registry, predicate_ids = _freeze_predicates(
         state.predicates,
         permanent_program.predicates,
@@ -2557,6 +2559,47 @@ def _emit_complement_clashes(
                 (state.atom(positive, variable), state.atom(negative, variable)),
                 provenance,
             )
+
+
+def _retain_runtime_predicates(state: _CompilationState) -> None:
+    """Retain extension predicates needed only by runtime-created consequences."""
+
+    predicates = tuple(state.predicates)
+    for predicate in predicates:
+        if predicate.kind is PredicateKind.AT_LEAST_OBJECT:
+            state.retain_predicate(
+                _PredicateSpec(
+                    PredicateKind.OBJECT_ROLE,
+                    (TermSort.OBJECT, TermSort.OBJECT),
+                    role_id=predicate.role_id,
+                )
+            )
+        elif predicate.kind is PredicateKind.AT_LEAST_DATA:
+            for role_id in predicate.annotation:
+                state.retain_predicate(
+                    _PredicateSpec(
+                        PredicateKind.DATA_ROLE,
+                        (TermSort.OBJECT, TermSort.DATA),
+                        role_id=role_id,
+                    )
+                )
+    if any(
+        predicate.kind is PredicateKind.AT_LEAST_OBJECT
+        and predicate.cardinality is not None
+        and predicate.cardinality > 1
+        for predicate in predicates
+    ):
+        state.retain_predicate(_equality(TermSort.OBJECT, inequality=True))
+    if any(
+        (
+            predicate.kind is PredicateKind.AT_LEAST_DATA
+            and predicate.cardinality is not None
+            and predicate.cardinality > 1
+        )
+        or predicate.kind is PredicateKind.NEGATED_DATA_ROLE
+        for predicate in predicates
+    ):
+        state.retain_predicate(_equality(TermSort.DATA, inequality=True))
 
 
 def _predicate_spec_key(predicate: _PredicateSpec) -> bytes:
