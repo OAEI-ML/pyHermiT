@@ -7,13 +7,14 @@ use std::sync::Arc;
 use crate::branching::{BranchTransition, DisjunctionBrancher, GroundAtomAccess};
 use crate::cancel::CancellationState;
 use crate::error::{ErrorKind, NativeError, NativeResult};
-use crate::merging::MergingManager;
+use crate::merging::{MergeResult, MergingManager};
 use crate::model::{DependencySet, NodeHandle, NodeSort};
 use crate::store::TableauKernel;
 
 use super::joins::{IndexedJoinEvaluator, NaiveJoinEvaluator};
 use super::model::{
-    GroundAtom, JoinMatch, PredicateKind, RuleAtom, RuleLimits, RuleProgram, Term, TermSort,
+    GroundAtom, JoinMatch, PendingAnnotatedEquality, PredicateKind, RuleAtom, RuleLimits,
+    RuleProgram, Term, TermSort,
 };
 use super::plans::{compile_join_program, JoinProgram};
 
@@ -428,6 +429,69 @@ impl RuleEngine {
         Ok(identifier)
     }
 
+    pub fn take_pending_annotated_equality(
+        &self,
+        kernel: &mut TableauKernel,
+    ) -> NativeResult<Option<PendingAnnotatedEquality>> {
+        let Some(action_id) = kernel.take_integer("annotated_equalities")? else {
+            return Ok(None);
+        };
+        let atom = self.atom_for_id(action_id)?.clone();
+        if self.program.predicate_kind(atom.predicate_id)? != PredicateKind::AnnotatedEquality {
+            return Err(NativeError::invariant(
+                "annotated-equality queue references a different predicate kind",
+            ));
+        }
+        let rows = kernel.fact_history(atom.predicate_id, &atom.arguments);
+        let mut supports = Vec::new();
+        let mut provenance_ids = Vec::new();
+        for row in rows {
+            supports.extend(row.supports);
+            provenance_ids.extend(row.provenance_ids);
+        }
+        PendingAnnotatedEquality::new(action_id, atom, supports, provenance_ids).map(Some)
+    }
+
+    /// Apply the full merge protocol and re-dispatch survivor rows so semantic
+    /// clashes and work queues are updated in the same coarse Rust operation.
+    pub fn merge_nodes_semantic(
+        &mut self,
+        kernel: &mut TableauKernel,
+        left: NodeHandle,
+        right: NodeHandle,
+        dependency: DependencySet,
+        cancellation: Option<&CancellationState>,
+    ) -> NativeResult<MergeResult> {
+        let mut result = self
+            .merger
+            .merge(kernel, left, right, dependency, cancellation)?;
+        if result.clashed || result.merged.is_none() {
+            return Ok(result);
+        }
+        let rows = kernel.facts_for_node(result.representative)?;
+        for row in rows {
+            if let Some(control) = cancellation {
+                control.poll()?;
+            }
+            let provenance_ids = row.provenance_ids.iter().copied().collect::<Vec<_>>();
+            let ground = GroundAtom::new(row.key.predicate_id, row.key.arguments)?;
+            for support in row.supports {
+                self.dispatch_ground_atom(
+                    kernel,
+                    ground.clone(),
+                    support,
+                    row.core,
+                    &provenance_ids,
+                )?;
+                if kernel.clash().is_some() {
+                    result.clashed = true;
+                    return Ok(result);
+                }
+            }
+        }
+        Ok(result)
+    }
+
     pub fn dispatch_ground_atom(
         &mut self,
         kernel: &mut TableauKernel,
@@ -758,31 +822,12 @@ impl RuleEngine {
         }
         let changed = left != right;
         let representative = if changed {
-            let result = self
-                .merger
-                .merge(kernel, left, right, dependency.clone(), None)?;
+            let result =
+                self.merge_nodes_semantic(kernel, left, right, dependency.clone(), None)?;
             if result.clashed {
                 return Ok(true);
             }
-            let representative = result.representative;
-            let rows = kernel.facts_for_node(representative)?;
-            for row in rows {
-                let provenance_ids = row.provenance_ids.iter().copied().collect::<Vec<_>>();
-                let ground = GroundAtom::new(row.key.predicate_id, row.key.arguments)?;
-                for support in row.supports {
-                    self.dispatch_ground_atom(
-                        kernel,
-                        ground.clone(),
-                        support,
-                        row.core,
-                        &provenance_ids,
-                    )?;
-                    if kernel.clash().is_some() {
-                        return Ok(true);
-                    }
-                }
-            }
-            representative
+            result.representative
         } else {
             left
         };
@@ -1526,6 +1571,43 @@ mod tests {
         assert!(!has_fact(&kernel, 1, &[second])?);
         assert!(has_fact(&kernel, 0, &[first])?);
         assert!(has_fact(&kernel, 0, &[second])?);
+        kernel.check_invariants()
+    }
+
+    #[test]
+    fn annotated_equalities_remain_queued_actions_with_historical_support() -> NativeResult<()> {
+        let filler = concept(0)?;
+        let annotated = RulePredicate::new(
+            1,
+            PredicateKind::AnnotatedEquality,
+            vec![TermSort::Object; 3],
+        )?
+        .with_cardinality(2, 4, 0);
+        let program = RuleProgram::new(vec![filler, annotated], Vec::new())?;
+        let mut engine = RuleEngine::new(program, BTreeMap::new(), BTreeMap::new(), true)?;
+        let mut kernel = TableauKernel::new();
+        let first = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        let second = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        let root = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        let atom = GroundAtom::new(1, vec![first, second, root])?;
+
+        assert!(engine.dispatch_ground_atom(
+            &mut kernel,
+            atom.clone(),
+            DependencySet::empty(),
+            false,
+            &[7, 9],
+        )?);
+        let pending = engine
+            .take_pending_annotated_equality(&mut kernel)?
+            .ok_or_else(|| NativeError::invariant("annotated equality was not queued"))?;
+        assert_eq!(pending.action_id, 0);
+        assert_eq!(pending.atom, atom);
+        assert_eq!(pending.supports, vec![DependencySet::empty()]);
+        assert_eq!(pending.provenance_ids, vec![7, 9]);
+        assert!(engine
+            .take_pending_annotated_equality(&mut kernel)?
+            .is_none());
         kernel.check_invariants()
     }
 }

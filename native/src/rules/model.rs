@@ -244,6 +244,41 @@ pub struct GroundAtom {
     pub arguments: Vec<NodeHandle>,
 }
 
+/// One queued annotated equality with its exact historical supports. The action
+/// remains distinct from ordinary equality until nominal introduction consumes it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAnnotatedEquality {
+    pub action_id: u32,
+    pub atom: GroundAtom,
+    pub supports: Vec<DependencySet>,
+    pub provenance_ids: Vec<u32>,
+}
+
+impl PendingAnnotatedEquality {
+    pub fn new(
+        action_id: u32,
+        atom: GroundAtom,
+        mut supports: Vec<DependencySet>,
+        mut provenance_ids: Vec<u32>,
+    ) -> NativeResult<Self> {
+        if supports.is_empty() {
+            return Err(NativeError::invariant(
+                "annotated equality action has no dependency support",
+            ));
+        }
+        supports.sort();
+        supports.dedup();
+        provenance_ids.sort_unstable();
+        provenance_ids.dedup();
+        Ok(Self {
+            action_id,
+            atom,
+            supports,
+            provenance_ids,
+        })
+    }
+}
+
 impl GroundAtom {
     pub fn new(predicate_id: u32, arguments: Vec<NodeHandle>) -> NativeResult<Self> {
         if arguments.is_empty() {

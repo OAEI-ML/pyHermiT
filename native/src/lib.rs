@@ -19,6 +19,7 @@ mod cancel;
 pub mod error;
 pub mod merging;
 pub mod model;
+pub mod nominals;
 pub mod rules;
 pub mod store;
 pub mod wire;

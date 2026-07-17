@@ -266,7 +266,7 @@ impl CheckpointMeta {
 #[derive(Clone, Debug)]
 pub(crate) struct Branch {
     pub(crate) level: u32,
-    choice_kind: String,
+    pub(crate) choice_kind: String,
     checkpoint: CheckpointMeta,
     snapshot: StateCheckpoint,
     pub(crate) alternatives: Vec<u32>,
@@ -685,6 +685,10 @@ impl TableauKernel {
         self.require_active(handle)
     }
 
+    pub(crate) fn node(&self, handle: NodeHandle) -> NativeResult<&Node> {
+        self.require_node(handle)
+    }
+
     pub(crate) fn direct_children(&self, parent: NodeHandle) -> NativeResult<Vec<NodeHandle>> {
         self.require_active(parent)?;
         let mut children: Vec<_> = self
@@ -720,6 +724,15 @@ impl TableauKernel {
             .into_iter()
             .flat_map(BTreeSet::iter)
             .map(|row_id| self.fact(*row_id).cloned())
+            .collect()
+    }
+
+    pub(crate) fn fact_history(&self, predicate_id: u32, arguments: &[NodeHandle]) -> Vec<FactRow> {
+        self.state
+            .facts
+            .iter()
+            .filter(|row| row.key.predicate_id == predicate_id && row.key.arguments == arguments)
+            .cloned()
             .collect()
     }
 
@@ -1220,6 +1233,25 @@ impl TableauKernel {
             self.record_mutation()?;
         }
         Ok(())
+    }
+
+    pub(crate) fn take_integer(&mut self, queue: &str) -> NativeResult<Option<u32>> {
+        let selected = match queue {
+            "delta_rows" => &mut self.state.delta_rows,
+            "annotated_equalities" => &mut self.state.annotated_equalities,
+            "datatype_components" => &mut self.state.datatype_components,
+            _ => return Err(NativeError::wire("native integer queue is unknown")),
+        };
+        let Some(value) = selected.pop() else {
+            return Ok(None);
+        };
+        self.record_mutation()?;
+        let QueueValue::Integer(value) = value else {
+            return Err(NativeError::invariant(
+                "integer queue contains a node handle",
+            ));
+        };
+        Ok(Some(value))
     }
 
     pub fn enqueue_node(

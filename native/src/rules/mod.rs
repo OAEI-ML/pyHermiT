@@ -10,7 +10,7 @@ pub use crate::branching::BranchTransition;
 pub use engine::RuleEngine;
 pub use joins::{IndexedJoinEvaluator, NaiveJoinEvaluator};
 pub use model::{
-    GroundAtom, JoinMatch, PredicateKind, RuleAtom, RuleClause, RuleLimits, RulePredicate,
-    RuleProgram, Term, TermSort, VariableBinding,
+    GroundAtom, JoinMatch, PendingAnnotatedEquality, PredicateKind, RuleAtom, RuleClause,
+    RuleLimits, RulePredicate, RuleProgram, Term, TermSort, VariableBinding,
 };
 pub use plans::{compile_join_program, ClauseJoinPlan, JoinProgram, JoinStep};
