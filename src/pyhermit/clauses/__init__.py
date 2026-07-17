@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from .compiler import (
     CLAUSIFICATION_HANDLER_TABLE,
+    QueryCompilationContext,
     compile_captured,
     compile_delta_plan,
     compile_normalized,
     compile_query_program,
     compiled_schema_manifest,
+    prepare_query_compilation,
 )
 from .model import (
     Atom,
@@ -67,6 +69,7 @@ __all__ = [
     "PredicateRegistry",
     "ProvenanceEntry",
     "ProvenanceTable",
+    "QueryCompilationContext",
     "RoleAutomatonIR",
     "RoleModelIR",
     "RoleTransitionIR",
@@ -81,5 +84,6 @@ __all__ = [
     "compile_normalized",
     "compile_query_program",
     "compiled_schema_manifest",
+    "prepare_query_compilation",
     "term_sort",
 ]

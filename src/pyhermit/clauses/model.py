@@ -503,6 +503,65 @@ class PredicateRegistry(CanonicalRecord):
         except IndexError as error:
             raise ValueError("predicate ID is dangling") from error
 
+    @classmethod
+    def _from_validated_extension(
+        cls,
+        prefix: PredicateRegistry,
+        suffix: tuple[Predicate, ...],
+    ) -> PredicateRegistry:
+        """Extend an already validated registry without revalidating its prefix.
+
+        This is an internal compiler fast path.  Its caller must have excluded
+        structural duplicates between ``prefix`` and ``suffix`` before assigning
+        IDs.  New predicates and every cross-reference they introduce are still
+        validated here; the immutable prefix retains the invariants established by
+        its public constructor.
+        """
+
+        if not isinstance(prefix, PredicateRegistry):
+            raise TypeError("prefix must be PredicateRegistry")
+        values = tuple(suffix)
+        if not all(isinstance(value, Predicate) for value in values):
+            raise TypeError("suffix must contain Predicate values")
+        first_identifier = len(prefix.predicates)
+        if tuple(value.predicate_id for value in values) != tuple(
+            range(first_identifier, first_identifier + len(values))
+        ):
+            raise ValueError("suffix predicate IDs must densely extend the prefix")
+        keys = tuple(_canonical_json(value.identity_payload()) for value in values)
+        if len(keys) != len(set(keys)):
+            raise ValueError("suffix predicates must have unique structural identities")
+
+        combined = prefix.predicates + values
+        for predicate in values:
+            if predicate.filler_predicate_id is None:
+                continue
+            if predicate.filler_predicate_id >= len(combined):
+                raise ValueError("cardinality filler predicate ID is dangling")
+            if predicate.filler_predicate_id == predicate.predicate_id:
+                raise ValueError("cardinality predicates cannot be their own filler")
+            filler = combined[predicate.filler_predicate_id]
+            if predicate.kind in {
+                PredicateKind.AT_LEAST_OBJECT,
+                PredicateKind.ANNOTATED_EQUALITY,
+            } and filler.kind not in {
+                PredicateKind.CONCEPT,
+                PredicateKind.NEGATED_CONCEPT,
+                PredicateKind.NOMINAL,
+                PredicateKind.NEGATED_NOMINAL,
+            }:
+                raise ValueError("object-cardinality filler must be an object concept literal")
+            if predicate.kind is PredicateKind.AT_LEAST_DATA and (
+                filler.kind not in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
+                or filler.argument_sorts != (TermSort.DATA,) * len(predicate.annotation)
+            ):
+                raise ValueError("data at-least filler must be a matching data-range literal")
+
+        result = object.__new__(cls)
+        object.__setattr__(result, "predicates", combined)
+        object.__setattr__(result, "schema_version", prefix.schema_version)
+        return result
+
 
 @dataclass(frozen=True, slots=True)
 class Atom(CanonicalRecord):

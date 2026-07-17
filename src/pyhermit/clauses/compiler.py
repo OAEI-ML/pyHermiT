@@ -11,7 +11,8 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
-from collections.abc import Callable, Iterable, Mapping
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import cast
@@ -158,7 +159,7 @@ class _FactSpec:
 @dataclass(frozen=True, slots=True)
 class _SymbolIndex:
     table: SymbolTable
-    by_kind: dict[SymbolKind, dict[bytes, int]]
+    by_kind: Mapping[SymbolKind, Mapping[bytes, int]]
     individuals: tuple[owl.Individual, ...]
     data_ranges: tuple[owl.DataRange, ...]
     source_literals: tuple[owl.Literal, ...]
@@ -169,6 +170,127 @@ class _SymbolIndex:
             return self.by_kind[kind][value.canonical_bytes()]
         except KeyError as error:
             raise ValueError(f"missing {kind.value} symbol during clausification") from error
+
+
+@dataclass(frozen=True, slots=True)
+class _OverlayIndex(Mapping[bytes, int]):
+    local: Mapping[bytes, int]
+    permanent: Mapping[bytes, int]
+
+    def __getitem__(self, key: bytes) -> int:
+        try:
+            return self.local[key]
+        except KeyError:
+            return self.permanent[key]
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield from self.local
+        yield from (key for key in self.permanent if key not in self.local)
+
+    def __len__(self) -> int:
+        return len(self.local) + sum(key not in self.local for key in self.permanent)
+
+
+@dataclass(frozen=True, slots=True)
+class QueryCompilationContext:
+    """Reusable permanent indexes for O(query-size) overlay preparation."""
+
+    normalized_digest: str
+    permanent_program_sha256: str
+    role_model: RoleAxiomGraph
+    domain_by_kind: Mapping[SymbolKind, Mapping[bytes, int]]
+    by_kind: Mapping[SymbolKind, Mapping[bytes, int]]
+    individuals: tuple[owl.Individual, ...]
+    data_ranges: tuple[owl.DataRange, ...]
+    source_literals: tuple[owl.Literal, ...]
+    predicate_specs: tuple[_PredicateSpec, ...]
+    predicate_set: frozenset[_PredicateSpec]
+
+
+def prepare_query_compilation(
+    permanent_program: ClauseProgram,
+    permanent_normalized: NormalizedOntology,
+    *,
+    permanent_program_sha256: str | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> QueryCompilationContext:
+    """Index immutable permanent objects once for repeated query compilation."""
+
+    if not isinstance(permanent_program, ClauseProgram):
+        raise TypeError("permanent_program must be ClauseProgram")
+    if not isinstance(permanent_normalized, NormalizedOntology):
+        raise TypeError("permanent_normalized must be NormalizedOntology")
+    if cancelled is not None and not callable(cancelled):
+        raise TypeError("cancelled must be callable or None")
+    if permanent_program_sha256 is not None and (
+        not isinstance(permanent_program_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", permanent_program_sha256) is None
+    ):
+        raise ValueError("permanent_program_sha256 must be a lowercase SHA-256 digest or None")
+    digest = permanent_program_sha256
+    if digest is None:
+        digest = hashlib.sha256(permanent_program.canonical_bytes()).hexdigest()
+    _raise_if_cancelled(cancelled)
+    roles = build_role_axiom_graph(
+        _role_source_axioms(permanent_normalized, cancelled),
+        cancelled=cancelled,
+    )
+    nodes = _normalized_nodes(permanent_normalized, cancelled=cancelled)
+    individual_nodes = {
+        node.canonical_bytes(): node
+        for node in itertools.chain(permanent_normalized.declared_entities, nodes)
+        if isinstance(node, (owl.NamedIndividual, owl.AnonymousIndividual))
+    }
+    data_range_nodes = {
+        node.canonical_bytes(): node
+        for node in itertools.chain(
+            (owl.RDFS_LITERAL,),
+            permanent_normalized.declared_entities,
+            nodes,
+        )
+        if isinstance(node, owl.DATA_RANGE_TYPES)
+    }
+    literal_nodes = {
+        node.canonical_bytes(): node for node in nodes if isinstance(node, owl.Literal)
+    }
+    domain_by_kind: dict[SymbolKind, Mapping[bytes, int]] = {}
+    for kind in SymbolKind:
+        domain = permanent_program.symbols.domain(kind)
+        domain_by_kind[kind] = MappingProxyType(
+            {bytes.fromhex(value.key_hex): value.identifier for value in domain.values}
+        )
+    by_kind = dict(domain_by_kind)
+    source_literals = tuple(
+        literal_nodes[bytes.fromhex(value.key_hex)]
+        for value in permanent_program.symbols.domain(SymbolKind.SOURCE_LITERAL).values
+    )
+    data_ranges = tuple(
+        cast(owl.DataRange, data_range_nodes[bytes.fromhex(value.key_hex)])
+        for value in permanent_program.symbols.domain(SymbolKind.DATA_RANGE).values
+    )
+    individuals = tuple(
+        individual_nodes[bytes.fromhex(value.key_hex)]
+        for value in permanent_program.symbols.domain(SymbolKind.INDIVIDUAL).values
+    )
+    by_kind[SymbolKind.DATA_VALUE] = MappingProxyType(
+        {
+            source_literals[value.source_literal_id].canonical_bytes(): value.data_identity_id
+            for value in permanent_program.datatype_model.literal_identities
+        }
+    )
+    predicate_specs = _predicate_specs_from_registry(permanent_program.predicates)
+    return QueryCompilationContext(
+        normalized_digest=permanent_normalized.digest,
+        permanent_program_sha256=digest,
+        role_model=roles,
+        domain_by_kind=MappingProxyType(domain_by_kind),
+        by_kind=MappingProxyType(by_kind),
+        individuals=individuals,
+        data_ranges=data_ranges,
+        source_literals=source_literals,
+        predicate_specs=predicate_specs,
+        predicate_set=frozenset(predicate_specs),
+    )
 
 
 class _CompilationState:
@@ -365,6 +487,9 @@ def compile_query_program(
     role_model: RoleAxiomGraph | None = None,
     limits: CompilationLimits | None = None,
     cancelled: Callable[[], bool] | None = None,
+    permanent_program_sha256: str | None = None,
+    verify_immutable: bool = True,
+    query_context: QueryCompilationContext | None = None,
 ) -> CompiledQuery:
     """Compile a safe query overlay while preserving every permanent byte and ID."""
 
@@ -376,19 +501,55 @@ def compile_query_program(
         raise TypeError("query must be NormalizedQuery")
     if query.permanent_normalization_digest != permanent_normalized.digest:
         raise ValueError("query was normalized against a different permanent ontology")
+    if query_context is not None:
+        if not isinstance(query_context, QueryCompilationContext):
+            raise TypeError("query_context must be QueryCompilationContext or None")
+        if query_context.normalized_digest != permanent_normalized.digest:
+            raise ValueError("query context belongs to a different normalized ontology")
     selected_limits = limits or CompilationLimits()
     if not isinstance(selected_limits, CompilationLimits):
         raise TypeError("limits must be CompilationLimits or None")
-    before = permanent_program.canonical_bytes()
-    permanent_digest = hashlib.sha256(before).hexdigest()
+    contextual_digest = (
+        None if query_context is None else query_context.permanent_program_sha256
+    )
+    if (
+        permanent_program_sha256 is not None
+        and contextual_digest is not None
+        and permanent_program_sha256 != contextual_digest
+    ):
+        raise ValueError("permanent_program_sha256 disagrees with query_context")
+    selected_permanent_digest = permanent_program_sha256 or contextual_digest
+    if selected_permanent_digest is not None and (
+        not isinstance(selected_permanent_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", selected_permanent_digest) is None
+    ):
+        raise ValueError("permanent_program_sha256 must be a lowercase SHA-256 digest or None")
+    if not isinstance(verify_immutable, bool):
+        raise TypeError("verify_immutable must be bool")
+    before = permanent_program.canonical_bytes() if verify_immutable else None
+    computed_digest = hashlib.sha256(before).hexdigest() if before is not None else None
+    if (
+        selected_permanent_digest is not None
+        and computed_digest is not None
+        and selected_permanent_digest != computed_digest
+    ):
+        raise ValueError("permanent_program_sha256 does not match permanent_program")
+    permanent_digest = selected_permanent_digest or computed_digest
+    if permanent_digest is None:
+        # The fast service path always supplies a digest computed once at construction.
+        raise ValueError("permanent_program_sha256 is required when verify_immutable is false")
     first_local_symbols = tuple(
         (domain.kind.value, len(domain.values)) for domain in permanent_program.symbols.domains
     )
     first_local_predicate = len(permanent_program.predicates.predicates)
     _raise_if_cancelled(cancelled)
-    roles = role_model or build_role_axiom_graph(
-        _role_source_axioms(permanent_normalized, cancelled),
-        cancelled=cancelled,
+    roles = role_model or (
+        query_context.role_model
+        if query_context is not None
+        else build_role_axiom_graph(
+            _role_source_axioms(permanent_normalized, cancelled),
+            cancelled=cancelled,
+        )
     )
     if query.requires_rebuild:
         return CompiledQuery(
@@ -416,7 +577,12 @@ def compile_query_program(
         roles,
         selected_limits,
         base_table=permanent_program.symbols,
-        seed_nodes=_normalized_nodes(permanent_normalized, cancelled=cancelled),
+        seed_nodes=(
+            ()
+            if query_context is not None
+            else _normalized_nodes(permanent_normalized, cancelled=cancelled)
+        ),
+        query_context=query_context,
         cancelled=cancelled,
     )
     provenance, provenance_ids, provenance_by_sha = _build_provenance(
@@ -433,7 +599,14 @@ def compile_query_program(
         selected_limits,
         cancelled,
     )
-    base_specs = _predicate_specs_from_registry(permanent_program.predicates)
+    base_specs = (
+        query_context.predicate_specs
+        if query_context is not None
+        else _predicate_specs_from_registry(permanent_program.predicates)
+    )
+    base_set = (
+        query_context.predicate_set if query_context is not None else frozenset(base_specs)
+    )
     state.predicates.update(base_specs)
     for record in query.records:
         state.checkpoint()
@@ -443,12 +616,14 @@ def compile_query_program(
         state,
         first_local_individual_id=first_local_individual,
     )
-    _emit_complement_clashes(state, base_predicates=set(base_specs))
+    _emit_complement_clashes(state, base_predicates=base_set)
     _emit_pending_nominal_semantics(state)
     _retain_runtime_predicates(state)
     registry, predicate_ids = _freeze_predicates(
         state.predicates,
         permanent_program.predicates,
+        base_specs=base_specs,
+        base_set=base_set,
         cancelled=cancelled,
     )
     clauses, positive, negative, disjunctions = _freeze_rules(
@@ -466,6 +641,7 @@ def compile_query_program(
             for record in permanent_normalized.records
             if isinstance(record.statement, owl.DatatypeDefinition)
         ),
+        first_local_symbols=dict(first_local_symbols),
         cancelled=cancelled,
     )
     query_expressivity = _derive_expressivity(
@@ -492,7 +668,7 @@ def compile_query_program(
         expressivity=merged_expressivity,
         provenance=provenance,
     )
-    if permanent_program.canonical_bytes() != before:
+    if before is not None and permanent_program.canonical_bytes() != before:
         raise RuntimeError("query compilation mutated the permanent compiled IR")
     expanded_strategy = _strategy_expansions(
         permanent_program.expressivity,
@@ -980,10 +1156,13 @@ def _build_symbol_index(
     *,
     base_table: SymbolTable | None = None,
     seed_nodes: tuple[owl.StructuralNode, ...] = (),
+    query_context: QueryCompilationContext | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> _SymbolIndex:
     if base_table is not None and not isinstance(base_table, SymbolTable):
         raise TypeError("base_table must be SymbolTable or None")
+    if query_context is not None and base_table is None:
+        raise ValueError("query_context requires base_table")
     retained: dict[SymbolKind, dict[bytes, tuple[str, bool, bool]]] = {
         kind: {} for kind in SymbolKind
     }
@@ -1004,15 +1183,16 @@ def _build_symbol_index(
             encoded in query_symbols,
         )
 
-    for builtin_class in (owl.OWL_THING, owl.OWL_NOTHING):
-        retain(SymbolKind.ENTITY, builtin_class, _display_entity(builtin_class))
-        retain(SymbolKind.CLASS_EXPRESSION, builtin_class)
-    retain(SymbolKind.ENTITY, owl.RDFS_LITERAL, _display_entity(owl.RDFS_LITERAL))
-    retain(SymbolKind.DATA_RANGE, owl.RDFS_LITERAL)
-    for role in roles.object_roles:
-        retain(SymbolKind.OBJECT_ROLE, role)
-    for property in roles.data_properties:
-        retain(SymbolKind.DATA_PROPERTY, property)
+    if base_table is None or query_context is None:
+        for builtin_class in (owl.OWL_THING, owl.OWL_NOTHING):
+            retain(SymbolKind.ENTITY, builtin_class, _display_entity(builtin_class))
+            retain(SymbolKind.CLASS_EXPRESSION, builtin_class)
+        retain(SymbolKind.ENTITY, owl.RDFS_LITERAL, _display_entity(owl.RDFS_LITERAL))
+        retain(SymbolKind.DATA_RANGE, owl.RDFS_LITERAL)
+        for role in roles.object_roles:
+            retain(SymbolKind.OBJECT_ROLE, role)
+        for property in roles.data_properties:
+            retain(SymbolKind.DATA_PROPERTY, property)
     for entity in getattr(normalized, "declared_entities", ()):
         retain(SymbolKind.ENTITY, entity, _display_entity(entity))
         if isinstance(entity, owl.Class):
@@ -1084,7 +1264,7 @@ def _build_symbol_index(
             False,
         )
     domains: list[SymbolDomain] = []
-    indexes: dict[SymbolKind, dict[bytes, int]] = {}
+    indexes: dict[SymbolKind, Mapping[bytes, int]] = {}
     source_literals: list[owl.Literal] = []
     individuals: list[owl.Individual] = []
     data_ranges: list[owl.DataRange] = []
@@ -1101,7 +1281,11 @@ def _build_symbol_index(
         _raise_if_cancelled(cancelled)
         values = retained[kind]
         base_values = () if base_table is None else base_table.domain(kind).values
-        base_keys = {bytes.fromhex(value.key_hex) for value in base_values}
+        base_keys: Mapping[bytes, int] | set[bytes]
+        if query_context is None:
+            base_keys = {bytes.fromhex(value.key_hex) for value in base_values}
+        else:
+            base_keys = query_context.domain_by_kind[kind]
         new_values = tuple(
             sorted(
                 (
@@ -1130,15 +1314,29 @@ def _build_symbol_index(
             )
             for index, (encoded, (display, generated, query_local)) in enumerate(new_values)
         )
-        indexes[kind] = {
-            bytes.fromhex(value.key_hex): value.identifier for value in combined_values
-        }
+        if query_context is None:
+            domain_index: Mapping[bytes, int] = {
+                bytes.fromhex(value.key_hex): value.identifier for value in combined_values
+            }
+        else:
+            domain_index = _OverlayIndex(
+                {
+                    encoded: len(base_values) + index
+                    for index, (encoded, _metadata) in enumerate(new_values)
+                },
+                query_context.domain_by_kind[kind],
+            )
+        indexes[kind] = domain_index
         if kind is SymbolKind.DATA_VALUE:
-            identity_ids = indexes[kind]
-            indexes[kind] = {
-                source_key: identity_ids[identity_key]
+            local_source_ids = {
+                source_key: domain_index[identity_key]
                 for source_key, identity_key in data_value_key_by_source.items()
             }
+            indexes[kind] = (
+                local_source_ids
+                if query_context is None
+                else _OverlayIndex(local_source_ids, query_context.by_kind[kind])
+            )
         domains.append(
             SymbolDomain(
                 kind,
@@ -1146,23 +1344,44 @@ def _build_symbol_index(
             )
         )
         if kind is SymbolKind.SOURCE_LITERAL:
-            source_literals = [
-                literal_nodes[bytes.fromhex(value.key_hex)] for value in combined_values
-            ]
+            if query_context is None:
+                source_literals = [
+                    literal_nodes[bytes.fromhex(value.key_hex)] for value in combined_values
+                ]
+            else:
+                source_literals = list(query_context.source_literals)
+                source_literals.extend(
+                    literal_nodes[bytes.fromhex(value.key_hex)]
+                    for value in combined_values[len(base_values) :]
+                )
         if kind is SymbolKind.DATA_RANGE:
-            data_ranges = [
-                cast(owl.DataRange, data_range_nodes[bytes.fromhex(value.key_hex)])
-                for value in combined_values
-            ]
+            if query_context is None:
+                data_ranges = [
+                    cast(owl.DataRange, data_range_nodes[bytes.fromhex(value.key_hex)])
+                    for value in combined_values
+                ]
+            else:
+                data_ranges = list(query_context.data_ranges)
+                data_ranges.extend(
+                    cast(owl.DataRange, data_range_nodes[bytes.fromhex(value.key_hex)])
+                    for value in combined_values[len(base_values) :]
+                )
         if kind is SymbolKind.INDIVIDUAL:
             by_key_individual = {
                 node.canonical_bytes(): node
                 for node in itertools.chain(getattr(normalized, "declared_entities", ()), nodes)
                 if isinstance(node, (owl.NamedIndividual, owl.AnonymousIndividual))
             }
-            individuals = [
-                by_key_individual[bytes.fromhex(value.key_hex)] for value in combined_values
-            ]
+            if query_context is None:
+                individuals = [
+                    by_key_individual[bytes.fromhex(value.key_hex)] for value in combined_values
+                ]
+            else:
+                individuals = list(query_context.individuals)
+                individuals.extend(
+                    by_key_individual[bytes.fromhex(value.key_hex)]
+                    for value in combined_values[len(base_values) :]
+                )
     return _SymbolIndex(
         SymbolTable(tuple(domains)),
         indexes,
@@ -2470,7 +2689,7 @@ def _emit_pending_nominal_semantics(state: _CompilationState) -> None:
 def _emit_complement_clashes(
     state: _CompilationState,
     *,
-    base_predicates: set[_PredicateSpec] | None = None,
+    base_predicates: set[_PredicateSpec] | frozenset[_PredicateSpec] | None = None,
 ) -> None:
     provenance = state.provenance_for_sha(None)
     opposite_kinds = {
@@ -2624,19 +2843,37 @@ def _freeze_predicates(
     predicates: set[_PredicateSpec],
     base_registry: PredicateRegistry | None = None,
     *,
+    base_specs: tuple[_PredicateSpec, ...] | None = None,
+    base_set: frozenset[_PredicateSpec] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[PredicateRegistry, dict[_PredicateSpec, int]]:
     _raise_if_cancelled(cancelled)
-    base_specs = () if base_registry is None else _predicate_specs_from_registry(base_registry)
-    base_set = set(base_specs)
-    ordered = base_specs + tuple(
+    if base_registry is None:
+        if base_specs is not None or base_set is not None:
+            raise ValueError("base_specs and base_set require base_registry")
+        selected_base_specs: tuple[_PredicateSpec, ...] = ()
+        selected_base_set: frozenset[_PredicateSpec] = frozenset()
+    else:
+        selected_base_specs = (
+            _predicate_specs_from_registry(base_registry) if base_specs is None else base_specs
+        )
+        if len(selected_base_specs) != len(base_registry.predicates):
+            raise ValueError("base_specs must align with base_registry")
+        selected_base_set = (
+            frozenset(selected_base_specs) if base_set is None else base_set
+        )
+        if len(selected_base_set) != len(selected_base_specs):
+            raise ValueError("base predicate specs must be structurally unique")
+    local_specs = tuple(
         sorted(
-            (predicate for predicate in predicates if predicate not in base_set),
+            (predicate for predicate in predicates if predicate not in selected_base_set),
             key=_predicate_spec_key,
         )
     )
+    ordered = selected_base_specs + local_specs
     identifiers = {predicate: index for index, predicate in enumerate(ordered)}
     _raise_if_cancelled(cancelled)
+    first_local = len(selected_base_specs)
     values = tuple(
         Predicate(
             predicate_id=index,
@@ -2651,10 +2888,15 @@ def _freeze_predicates(
             annotation=predicate.annotation,
             internal_key=predicate.internal_key,
         )
-        for index, predicate in enumerate(ordered)
+        for index, predicate in enumerate(local_specs, start=first_local)
     )
     _raise_if_cancelled(cancelled)
-    return PredicateRegistry(values), identifiers
+    registry = (
+        PredicateRegistry(values)
+        if base_registry is None
+        else PredicateRegistry._from_validated_extension(base_registry, values)
+    )
+    return registry, identifiers
 
 
 def _predicate_specs_from_registry(
@@ -3064,11 +3306,32 @@ def _freeze_datatype_model(
     *,
     base_model: DatatypeModelIR | None = None,
     base_definitions: tuple[owl.DatatypeDefinition, ...] = (),
+    first_local_symbols: Mapping[str, int] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> DatatypeModelIR:
-    identities: list[LiteralIdentityIR] = []
+    if base_model is not None and first_local_symbols is not None:
+        unchanged_domains = all(
+            len(symbols.table.domain(kind).values)
+            == first_local_symbols.get(kind.value)
+            for kind in (
+                SymbolKind.DATA_RANGE,
+                SymbolKind.SOURCE_LITERAL,
+                SymbolKind.DATA_VALUE,
+            )
+        )
+        has_local_definition = any(
+            isinstance(record.statement, owl.DatatypeDefinition)
+            for record in normalized.records
+        )
+        if unchanged_domains and not has_local_definition:
+            return base_model
+    identities: list[LiteralIdentityIR] = list(
+        () if base_model is None else base_model.literal_identities
+    )
     unknown_datatypes = set(() if base_model is None else base_model.unknown_datatype_ids)
     for index, literal in enumerate(symbols.source_literals):
+        if base_model is not None and index < len(base_model.literal_identities):
+            continue
         if index & 0x3F == 0:
             _raise_if_cancelled(cancelled)
         source_key = literal.canonical_bytes()
