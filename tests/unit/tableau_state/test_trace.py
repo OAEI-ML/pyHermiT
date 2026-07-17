@@ -10,7 +10,7 @@ from pyhermit.backends.python.state import StateOperation, StateTrace, StateTrac
 
 TRACE = Path(__file__).parents[2] / "data" / "state" / "trace-v1.json"
 TRACE_SHA256 = "501e99b619d88567fe22dfc155f9929e2f980c6ddccdb052c529f17bf479690f"
-SNAPSHOTS_SHA256 = "c50db3510ac32b605741731e54ef8fc7ca5a98926e47b607e29a107f21fc8196"
+SNAPSHOTS_SHA256 = "0ba539d31e8e6d274711af380f669ad6723515950e35c694f88c6371e03753c9"
 
 
 def test_golden_trace_is_canonical_round_trippable_and_replayable() -> None:

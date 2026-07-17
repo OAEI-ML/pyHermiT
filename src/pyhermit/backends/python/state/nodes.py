@@ -260,6 +260,9 @@ class NodeArena:
             source_node.lifecycle,
             source_node.representative,
             source_node.merge_dependency,
+            source_node.blocker,
+            source_node.directly_blocked,
+            source_node.blocking_generation,
         )
 
         def undo() -> None:
@@ -267,18 +270,41 @@ class NodeArena:
                 source_node.lifecycle,
                 source_node.representative,
                 source_node.merge_dependency,
+                source_node.blocker,
+                source_node.directly_blocked,
+                source_node.blocking_generation,
             ) = previous
 
         self._trail.record("node.merge", undo)
         source_node.lifecycle = NodeLifecycle.MERGED
         source_node.representative = target_node.handle
         source_node.merge_dependency = combined
+        source_node.blocker = None
+        source_node.directly_blocked = False
+        source_node.blocking_generation += 1
 
     def prune(self, handle: NodeHandle) -> None:
         node = self.require_active(handle)
-        previous = node.lifecycle
-        self._trail.record("node.prune", lambda: setattr(node, "lifecycle", previous))
+        previous = (
+            node.lifecycle,
+            node.blocker,
+            node.directly_blocked,
+            node.blocking_generation,
+        )
+
+        def undo() -> None:
+            (
+                node.lifecycle,
+                node.blocker,
+                node.directly_blocked,
+                node.blocking_generation,
+            ) = previous
+
+        self._trail.record("node.prune", undo)
         node.lifecycle = NodeLifecycle.PRUNED
+        node.blocker = None
+        node.directly_blocked = False
+        node.blocking_generation += 1
 
     def retire(self, handle: NodeHandle) -> None:
         node = self.get(handle)

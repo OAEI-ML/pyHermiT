@@ -25,13 +25,16 @@ Date: 2026-07-17
 | Trace | `tests/data/state/trace-v1.json` |
 | Operations/snapshots | 14 |
 | Canonical trace SHA-256 | `501e99b619d88567fe22dfc155f9929e2f980c6ddccdb052c529f17bf479690f` |
-| Newline-joined snapshot SHA-256 | `c50db3510ac32b605741731e54ef8fc7ca5a98926e47b607e29a107f21fc8196` |
+| Newline-joined snapshot SHA-256 | `0ba539d31e8e6d274711af380f669ad6723515950e35c694f88c6371e03753c9` |
 | Snapshot bytes (excluding separators) | 19,373 |
 
 The fixture includes roots/named guards, facts, delta-neutral setup, a ground-
 disjunction branch, tree-node creation, branch-supported binary fact/provenance,
 existential queue/mark, disjunction, clash, backtrack/alternative advance, fact-copying
 merge, and invariant check.
+
+The snapshot digest was updated by WP11 when merge/prune began clearing blocking
+references atomically; the trace bytes and operation sequence are unchanged.
 
 ## Verification
 
@@ -48,8 +51,7 @@ merge, and invariant check.
 - No Java, JNI, JPype, native compiler, network, or oracle is imported or invoked by
   this runtime/test layer.
 
-The repository-wide suite was also run during implementation. Its only HermiT failures
-were the pre-existing WP01 mock `OntologyView` falling behind the concurrently changing
-local pyowl-core WP04 runtime protocol; WP08's isolated tests remained green. The full
-cross-package suite is rerun when that dependency checkpoint is committed, before the
-WP01 compatibility checkpoint is finalized.
+After pyowl-core WP04 and the matching WP01 compatibility aliases were finalized, the
+repository-wide suite passed on both supported interpreters: `146 passed; 4 subtests
+passed`. This confirms the state changes coexist with the live shared `OntologyView`
+protocol rather than only an isolated mock.

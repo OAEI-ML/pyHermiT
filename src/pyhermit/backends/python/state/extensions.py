@@ -262,6 +262,21 @@ class ExtensionStore:
         self._by_key.pop(row.key, None)
         row.active = False
 
+    def set_core(self, row_id: int, core: bool = True) -> bool:
+        """Change a row's blocking/expansion core flag with exact rollback."""
+
+        if not isinstance(core, bool):
+            raise TypeError("core must be bool")
+        row = self.row(row_id)
+        if not row.active:
+            raise ValueError("cannot change the core flag of an inactive fact")
+        if row.core == core:
+            return False
+        previous = row.core
+        self._trail.record("fact.core", lambda: setattr(row, "core", previous))
+        row.core = core
+        return True
+
     def rewrite_node(
         self,
         source: NodeHandle,

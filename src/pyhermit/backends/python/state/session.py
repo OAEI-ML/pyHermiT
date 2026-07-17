@@ -282,6 +282,7 @@ class TableauSession:
         target, source = self._merge_direction(left_node, right_node)
         checkpoint = self.trail.checkpoint("merge-atomic")
         try:
+            self._clear_blocking_references(frozenset({source.handle}))
             self.extensions.rewrite_node(source.handle, target.handle, combined)
             self.nodes.merge(source.handle, target.handle, combined)
         except Exception:
@@ -301,6 +302,7 @@ class TableauSession:
         handles = frozenset(node.handle for node in affected)
         checkpoint = self.trail.checkpoint("prune-atomic")
         try:
+            self._clear_blocking_references(handles)
             self.extensions.deactivate_for_nodes(handles)
             for node in affected:
                 self.nodes.prune(node.handle)
@@ -465,6 +467,13 @@ class TableauSession:
         if self.clashes.current is not None:
             live.append(self.clashes.current.dependency)
         self.dependencies.compact(live)
+
+    def _clear_blocking_references(self, handles: frozenset[NodeHandle]) -> None:
+        for node in self.nodes.existing_nodes():
+            if node.lifecycle is not NodeLifecycle.ACTIVE:
+                continue
+            if node.blocker in handles:
+                self.nodes.set_blocked(node.handle, None, directly=False)
 
 
 __all__ = ["BranchChoiceKind", "BranchingPoint", "TableauSession"]
