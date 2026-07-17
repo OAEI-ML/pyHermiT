@@ -107,12 +107,12 @@ impl MergingManager {
         let mut pruned = Vec::new();
         for child in children {
             poll(cancellation)?;
-            pruned.extend(kernel.prune_subtree(child)?);
+            pruned.extend(kernel.prune_subtree_in_transaction(child)?);
         }
         for existential_id in pending {
             kernel.mark_existential(target, existential_id, true)?;
         }
-        let representative = kernel.merge_nodes(source, target, support)?;
+        let representative = kernel.merge_nodes_in_transaction(source, target, support)?;
         if representative != target {
             return Err(NativeError::invariant(
                 "state merge orientation changed after it was selected",

@@ -923,6 +923,18 @@ impl TableauKernel {
         }
     }
 
+    /// Merge inside an already established [`Self::atomic`] transaction.
+    /// Semantic managers use this to avoid cloning the full state twice.
+    pub(crate) fn merge_nodes_in_transaction(
+        &mut self,
+        left: NodeHandle,
+        right: NodeHandle,
+        dependency: DependencySet,
+    ) -> NativeResult<NodeHandle> {
+        self.validate_dependency(&dependency)?;
+        self.merge_nodes_inner(left, right, dependency)
+    }
+
     fn merge_nodes_inner(
         &mut self,
         left: NodeHandle,
@@ -1031,6 +1043,16 @@ impl TableauKernel {
                 Err(error)
             }
         }
+    }
+
+    /// Prune inside an already established [`Self::atomic`] transaction.
+    /// Semantic managers use this to keep multi-child pruning one rollback unit.
+    pub(crate) fn prune_subtree_in_transaction(
+        &mut self,
+        root: NodeHandle,
+    ) -> NativeResult<Vec<NodeHandle>> {
+        self.require_active(root)?;
+        self.prune_subtree_inner(root)
     }
 
     fn prune_subtree_inner(&mut self, root: NodeHandle) -> NativeResult<Vec<NodeHandle>> {
