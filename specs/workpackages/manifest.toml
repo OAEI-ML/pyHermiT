@@ -1,0 +1,173 @@
+schema = 2
+reference = "hermit-master-37ec30a"
+shared_ontology_distribution = "pyowl-core>=0.1,<0.2"
+shared_ontology_import = "pyowl_core"
+python_requires = ">=3.10"
+
+[[package]]
+id = "WP00"
+brief = "WP00-scaffold-reference.md"
+wave = 0
+depends = []
+owns = ["pyproject.toml", "setup.py", "Cargo.toml", "MANIFEST.in", ".github/", "tools/specs/", "tools/packaging_probe/", "src/pyhermit/__init__.py"]
+
+[[package]]
+id = "WP01"
+brief = "WP01-contracts-model.md"
+wave = 1
+depends = ["WP00"]
+owns = ["src/pyhermit/core.py", "src/pyhermit/model/__init__.py", "src/pyhermit/config.py", "src/pyhermit/exceptions.py", "src/pyhermit/events.py", "src/pyhermit/backends/protocol.py", "tests/unit/core/", "tests/unit/contracts/"]
+
+[[package]]
+id = "WP02"
+brief = "WP02-input-profile.md"
+wave = 3
+depends = ["WP01", "WP05"]
+owns = ["src/pyhermit/inputs.py", "src/pyhermit/io/__init__.py", "src/pyhermit/profile/", "tests/unit/inputs/", "tests/unit/profile/", "tests/integration/shared_snapshot/"]
+
+[[package]]
+id = "WP03"
+brief = "WP03-oracle-conformance.md"
+wave = 1
+depends = ["WP00"]
+owns = ["tools/reference/", "tests/conformance/", "tests/parity/", "tests/data/PROVENANCE.toml", "tests/data/reference/", "tests/data/w3c/"]
+
+[[package]]
+id = "WP04"
+brief = "WP04-normalization.md"
+wave = 2
+depends = ["WP01"]
+owns = ["src/pyhermit/normalize/", "tests/unit/normalize/"]
+
+[[package]]
+id = "WP05"
+brief = "WP05-roles.md"
+wave = 2
+depends = ["WP01"]
+owns = ["src/pyhermit/roles/", "tests/unit/roles/"]
+
+[[package]]
+id = "WP06"
+brief = "WP06-clausification.md"
+wave = 3
+depends = ["WP04", "WP05"]
+owns = ["src/pyhermit/clauses/", "tests/unit/clauses/"]
+
+[[package]]
+id = "WP07"
+brief = "WP07-datatypes.md"
+wave = 2
+depends = ["WP01"]
+owns = ["src/pyhermit/datatypes/", "tests/unit/datatypes/"]
+
+[[package]]
+id = "WP08"
+brief = "WP08-python-state.md"
+wave = 2
+depends = ["WP01"]
+owns = ["src/pyhermit/backends/python/state/", "tests/unit/tableau_state/"]
+
+[[package]]
+id = "WP09"
+brief = "WP09-python-hyperresolution.md"
+wave = 4
+depends = ["WP06", "WP08"]
+owns = ["src/pyhermit/backends/python/rules/", "src/pyhermit/backends/python/branching.py", "tests/unit/hyperresolution/"]
+
+[[package]]
+id = "WP10"
+brief = "WP10-python-existentials-ni.md"
+wave = 5
+depends = ["WP09"]
+owns = ["src/pyhermit/backends/python/merging.py", "src/pyhermit/backends/python/existentials.py", "src/pyhermit/backends/python/nominals.py", "tests/unit/expansion/"]
+
+[[package]]
+id = "WP11"
+brief = "WP11-blocking.md"
+wave = 3
+depends = ["WP08"]
+owns = ["src/pyhermit/backends/python/blocking/", "tests/unit/blocking/"]
+
+[[package]]
+id = "WP12"
+brief = "WP12-python-tableau.md"
+wave = 6
+depends = ["WP07", "WP09", "WP10", "WP11"]
+owns = ["src/pyhermit/backends/python/session.py", "src/pyhermit/backends/python/datatype_manager.py", "src/pyhermit/backends/python/__init__.py", "tests/integration/python_tableau/"]
+
+[[package]]
+id = "WP13"
+brief = "WP13-entailment-services.md"
+wave = 7
+depends = ["WP02", "WP03", "WP06", "WP12"]
+owns = ["src/pyhermit/services/checks.py", "src/pyhermit/services/entailment.py", "tests/integration/entailment/"]
+
+[[package]]
+id = "WP14"
+brief = "WP14-classification.md"
+wave = 8
+depends = ["WP13"]
+owns = ["src/pyhermit/hierarchy/", "src/pyhermit/services/classification.py", "tests/integration/classification/"]
+
+[[package]]
+id = "WP15"
+brief = "WP15-realization.md"
+wave = 9
+depends = ["WP13", "WP14"]
+owns = ["src/pyhermit/services/realization.py", "tests/integration/realization/"]
+
+[[package]]
+id = "WP16"
+brief = "WP16-api-updates.md"
+wave = 10
+depends = ["WP02", "WP13", "WP14", "WP15"]
+owns = ["src/pyhermit/api.py", "src/pyhermit/__init__.py", "src/pyhermit/backends/dispatch.py", "src/pyhermit/services/updates.py", "tests/integration/api/", "tests/integration/updates/"]
+
+[[package]]
+id = "WPR0"
+brief = "WPR0-rust-wire-state.md"
+wave = 3
+depends = ["WP01", "WP08"]
+owns = ["native/Cargo.toml", "native/src/lib.rs", "native/src/error.rs", "native/src/wire.rs", "native/src/cancel.rs", "native/src/model/", "native/src/store/", "src/pyhermit/_native.pyi", "tests/native/wire/", "tests/native/state/"]
+
+[[package]]
+id = "WPR1"
+brief = "WPR1-rust-hyperresolution.md"
+wave = 5
+depends = ["WP09", "WPR0"]
+owns = ["native/src/rules/", "native/src/branching/", "tests/native/hyperresolution/"]
+
+[[package]]
+id = "WPR2"
+brief = "WPR2-rust-existentials-blocking.md"
+wave = 6
+depends = ["WP10", "WP11", "WPR0", "WPR1"]
+owns = ["native/src/merging/", "native/src/existentials/", "native/src/nominals/", "native/src/blocking/", "tests/native/expansion/"]
+
+[[package]]
+id = "WPR3"
+brief = "WPR3-rust-roles-datatypes.md"
+wave = 4
+depends = ["WP05", "WP07", "WPR0"]
+owns = ["native/src/roles/", "native/src/datatypes/", "tests/native/roles/", "tests/native/datatypes/"]
+
+[[package]]
+id = "WPR4"
+brief = "WPR4-rust-services.md"
+wave = 10
+depends = ["WP13", "WP14", "WP15", "WPR1", "WPR2", "WPR3"]
+owns = ["native/src/session.rs", "native/src/classify/", "native/src/realize/", "src/pyhermit/backends/native.py", "tests/native/services/", "tests/differential/"]
+
+[[package]]
+id = "WPP0"
+brief = "WPP0-packaging.md"
+wave = 11
+depends = ["WP16", "WPR4"]
+owns = ["pyproject.toml", "setup.py", "Cargo.toml", "MANIFEST.in", ".github/workflows/wheels.yml", ".github/workflows/release.yml", "tests/packaging/"]
+
+[[package]]
+id = "WP17"
+brief = "WP17-release-integration.md"
+wave = 12
+depends = ["WP16", "WPR4", "WPP0"]
+owns = ["benchmarks/", "docs/", "README.md", "NOTICE.md", "tests/release/", "tests/data/deviations/", "reports/"]
