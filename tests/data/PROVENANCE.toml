@@ -64,6 +64,13 @@ sha256 = "4f31509b536883bbdbac59dae0ddeabd93a3fedd8170198da02ece3bcfc936d9"
 contains_external_bodies = false
 
 [[artifact]]
+path = "tests/data/clauses/java-semantic-shapes-v1.json"
+origin = "project-generated semantic projection from pinned HermiT clausification shapes"
+license_expression = "project-generated factual metadata"
+sha256 = "dd0d5bb9101a96944107723efa6104813ebfa9441e05ea73a2d3398b1755bc68"
+contains_external_bodies = false
+
+[[artifact]]
 path = "tests/data/w3c/approved-direct-dl-inventory.json"
 origin = "generated metadata from pinned fetch-only all.rdf"
 license_expression = "project-generated factual metadata"

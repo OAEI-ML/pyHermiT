@@ -38,12 +38,6 @@ class DeltaOutcome(_StringEnum):
     REBUILD_REQUIRED = "rebuild_required"
 
 
-class DeltaKind(_StringEnum):
-    ASSERTION_ONLY = "assertion_only"
-    DECLARATION_ONLY = "declaration_only"
-    REBUILD = "rebuild"
-
-
 @runtime_checkable
 class FingerprintLike(Protocol):
     algorithm: str
@@ -186,8 +180,8 @@ class CompiledOntology:
             ):
                 raise TypeError("compiled IR collections must be tuples of CanonicalIR values")
             digests = tuple(_ir_digest(item) for item in values)
-            if digests != tuple(sorted(digests)) or len(digests) != len(set(digests)):
-                raise ValueError("compiled IR collections must be canonically sorted and unique")
+            if len(digests) != len(set(digests)):
+                raise ValueError("compiled IR collections must contain unique canonical records")
 
         entities = tuple(self.declared_entities)
         if not all(isinstance(item, EntityRef) for item in entities):
@@ -249,55 +243,32 @@ class CompiledOntology:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class CompiledQuery:
-    schema_version: int
-    ontology_fingerprint: str
-    query_fingerprint: str
-    first_local_id: int
-    clauses: tuple[CanonicalIR, ...] = ()
-    positive_facts: tuple[CanonicalIR, ...] = ()
-    negative_facts: tuple[CanonicalIR, ...] = ()
-    interpretation: tuple[str, ...] = ()
+@runtime_checkable
+class CompiledQuery(CanonicalIR, Protocol):
+    """Backend view of the single concrete clauses.CompiledQuery wire record."""
 
-    def __post_init__(self) -> None:
-        if self.schema_version != COMPILED_IR_SCHEMA_VERSION:
-            raise ValueError("compiled query schema mismatch")
-        _validate_hex_fingerprint(self.ontology_fingerprint, "ontology_fingerprint")
-        _validate_hex_fingerprint(self.query_fingerprint, "query_fingerprint")
-        _validate_u32(self.first_local_id, "first_local_id")
-        for name in ("clauses", "positive_facts", "negative_facts"):
-            values = getattr(self, name)
-            if not isinstance(values, tuple) or not all(
-                isinstance(item, CanonicalIR) for item in values
-            ):
-                raise TypeError(f"{name} must be a tuple of CanonicalIR values")
-        if not all(isinstance(item, str) and item for item in self.interpretation):
-            raise TypeError("interpretation must contain nonempty strings")
+    permanent_program_sha256: str
+    query_hash: str
+    first_local_predicate_id: int
+    first_local_symbols: tuple[tuple[str, int], ...]
+    requires_rebuild: bool
+    program: CanonicalIR | None
+    reason: str | None
+    interpretation: tuple[str, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class CompiledDelta:
-    schema_version: int
-    base_ontology_fingerprint: str
-    result_ontology_fingerprint: str
-    kind: DeltaKind
-    additions: tuple[CanonicalIR, ...] = ()
-    removals: tuple[CanonicalIR, ...] = ()
+@runtime_checkable
+class CompiledDelta(CanonicalIR, Protocol):
+    """Backend view of the single concrete clauses.CompiledDelta wire record."""
 
-    def __post_init__(self) -> None:
-        if self.schema_version != COMPILED_IR_SCHEMA_VERSION:
-            raise ValueError("compiled delta schema mismatch")
-        _validate_hex_fingerprint(self.base_ontology_fingerprint, "base_ontology_fingerprint")
-        _validate_hex_fingerprint(self.result_ontology_fingerprint, "result_ontology_fingerprint")
-        if not isinstance(self.kind, DeltaKind):
-            raise TypeError("kind must be DeltaKind")
-        for name in ("additions", "removals"):
-            values = getattr(self, name)
-            if not isinstance(values, tuple) or not all(
-                isinstance(item, CanonicalIR) for item in values
-            ):
-                raise TypeError(f"{name} must be a tuple of CanonicalIR values")
+    base_program_sha256: str
+    result_program_sha256: str
+    compatibility: str
+    addition_sha256: tuple[str, ...]
+    removal_sha256: tuple[str, ...]
+    fact_additions: tuple[CanonicalIR, ...]
+    fact_removals: tuple[CanonicalIR, ...]
+    reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,7 +647,6 @@ __all__ = [
     "CompiledDelta",
     "CompiledOntology",
     "CompiledQuery",
-    "DeltaKind",
     "DeltaOutcome",
     "EntityRef",
     "FingerprintLike",

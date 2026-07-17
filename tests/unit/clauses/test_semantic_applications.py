@@ -22,6 +22,12 @@ from pyhermit.clauses import (
     compile_normalized,
     compile_query_program,
 )
+from pyhermit.datatypes import (
+    DatatypeSemanticEvaluator,
+    compile_literal_semantic_payload,
+    decode_datatype_semantic_model,
+    decode_literal_semantic_payload,
+)
 from pyhermit.normalize import normalize_axioms, normalize_query
 
 FINGERPRINT = "39" * 32
@@ -488,6 +494,20 @@ def test_custom_data_range_definition_applies_to_property_values() -> None:
     assert not closure.clashed
     assert (custom_predicate, (value,)) in closure.facts
     assert (restricted_predicate, (value,)) in closure.facts
+    semantic_model = decode_datatype_semantic_model(
+        program.datatype_model.semantic_payload_json.encode("utf-8")
+    )
+    source_id = _symbol_id(program, SymbolKind.SOURCE_LITERAL, literal)
+    compiled_value = decode_literal_semantic_payload(
+        program.datatype_model.literal_identities[source_id].semantic_payload_json.encode("utf-8")
+    )
+    evaluator = DatatypeSemanticEvaluator(semantic_model)
+    custom_id = _symbol_id(program, SymbolKind.DATA_RANGE, custom)
+    assert evaluator.contains(custom_id, compiled_value)
+    assert not evaluator.contains(
+        custom_id,
+        compile_literal_semantic_payload(owl.Literal("x", owl.XSD_STRING)),
+    )
 
 
 def test_negative_object_abox_clashes_after_subproperty_application() -> None:

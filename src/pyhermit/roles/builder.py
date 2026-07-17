@@ -10,7 +10,7 @@ Source-guided behavior: pinned HermiT ``ObjectPropertyInclusionManager``,
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
@@ -35,6 +35,8 @@ from pyowl_core.model import (
     inverse_property,
     walk,
 )
+
+from pyhermit.exceptions import ReasonerInterruptedError
 
 from .automata import AutomatonProduction, build_role_automata
 from .graph import (
@@ -121,6 +123,7 @@ def build_role_axiom_graph(
     *,
     limits: RoleBuildLimits | None = None,
     require_regular: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> RoleAxiomGraph:
     """Build the shared role/profile/clausification graph in one canonical pass."""
 
@@ -129,15 +132,28 @@ def build_role_axiom_graph(
         raise TypeError("limits must be RoleBuildLimits or None")
     if not isinstance(require_regular, bool):
         raise TypeError("require_regular must be bool")
-    supplied = tuple(axioms)
+    if cancelled is not None and not callable(cancelled):
+        raise TypeError("cancelled must be callable or None")
+
+    def checkpoint() -> None:
+        if cancelled is not None and cancelled():
+            raise ReasonerInterruptedError("role preprocessing cancelled")
+
+    supplied_values: list[AxiomNode] = []
+    for index, axiom in enumerate(axioms):
+        if index & 0x3F == 0:
+            checkpoint()
+        supplied_values.append(axiom)
+    supplied = tuple(supplied_values)
     if not all(isinstance(axiom, AxiomNode) for axiom in supplied):
         raise TypeError("axioms must contain pyowl_core AxiomNode values")
-    encoded_values = tuple(
-        sorted(
-            ((axiom.canonical_bytes(), axiom) for axiom in supplied),
-            key=lambda item: item[0],
-        )
-    )
+    encoded_items: list[tuple[bytes, AxiomNode]] = []
+    for index, axiom in enumerate(supplied):
+        if index & 0x3F == 0:
+            checkpoint()
+        encoded_items.append((axiom.canonical_bytes(), axiom))
+    encoded_values = tuple(sorted(encoded_items, key=lambda item: item[0]))
+    checkpoint()
     values = tuple(axiom for _encoded, axiom in encoded_values)
 
     object_values: dict[bytes, ObjectPropertyExpression] = {}
@@ -240,7 +256,9 @@ def build_role_axiom_graph(
     retain_data(OWL_TOP_DATA_PROPERTY)
     retain_data(OWL_BOTTOM_DATA_PROPERTY)
 
-    for encoded_axiom, axiom in encoded_values:
+    for index, (encoded_axiom, axiom) in enumerate(encoded_values):
+        if index & 0x3F == 0:
+            checkpoint()
         provenance = hashlib.sha256(encoded_axiom).hexdigest()
         for node in walk(axiom):
             if isinstance(node, (ObjectProperty, ObjectInverseOf)):
@@ -285,6 +303,7 @@ def build_role_axiom_graph(
     object_id = {key: index for index, key in enumerate(sorted(object_values))}
     data_properties = tuple(data_values[key] for key in sorted(data_values))
     data_id = {key: index for index, key in enumerate(sorted(data_values))}
+    checkpoint()
 
     top_object = object_id[OWL_TOP_OBJECT_PROPERTY.canonical_bytes()]
     bottom_object = object_id[OWL_BOTTOM_OBJECT_PROPERTY.canonical_bytes()]
@@ -383,6 +402,7 @@ def build_role_axiom_graph(
         len(object_components),
         top_object,
     )
+    checkpoint()
     seeds = {object_component_by_role[inclusion.super_role_id] for inclusion in chain_records} | {
         object_component_by_role[top_object],
         object_component_by_role[bottom_object],
@@ -451,6 +471,7 @@ def build_role_axiom_graph(
         bottom_data_property_id=bottom_data,
         source_axiom_count=len(values),
     )
+    checkpoint()
     if require_regular:
         graph.require_regular()
     return graph

@@ -81,11 +81,14 @@ def test_compiled_manifest_is_canonical_and_contains_no_source_path_or_owl_text(
     assert "Ontology(" not in first
 
 
-def test_compiled_collections_require_digest_order_and_uniqueness() -> None:
+def test_compiled_collections_preserve_native_order_and_require_uniqueness() -> None:
     compiled = _compiled()
     values = {field: getattr(compiled, field) for field in compiled.__dataclass_fields__}
     values["clauses"] = tuple(reversed(compiled.clauses))
-    with pytest.raises(ValueError, match="canonically sorted"):
+    reordered = CompiledOntology(**values)
+    assert reordered.clauses == tuple(reversed(compiled.clauses))
+    values["clauses"] = (compiled.clauses[0], compiled.clauses[0])
+    with pytest.raises(ValueError, match="unique canonical"):
         CompiledOntology(**values)
 
 

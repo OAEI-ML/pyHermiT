@@ -41,7 +41,11 @@ def test_every_data_artifact_has_an_acquisition_decision() -> None:
     artifacts = {artifact["path"]: artifact for artifact in provenance["artifact"]}
     data_files = {
         str(path.relative_to(ROOT))
-        for directory in (ROOT / "tests/data/reference", ROOT / "tests/data/w3c")
+        for directory in (
+            ROOT / "tests/data/clauses",
+            ROOT / "tests/data/reference",
+            ROOT / "tests/data/w3c",
+        )
         for path in directory.rglob("*")
         if path.is_file()
     }

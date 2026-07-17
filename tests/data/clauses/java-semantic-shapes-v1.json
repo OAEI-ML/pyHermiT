@@ -1,0 +1,35 @@
+{
+  "cases": {
+    "has_key_object_and_data": {
+      "body_kind_counts": {
+        "concept": 2,
+        "data_role": 2,
+        "named_individual": 3,
+        "object_role": 2,
+        "ordering_guard": 1
+      },
+      "head_kind_counts": {
+        "equality": 1,
+        "inequality": 1
+      }
+    },
+    "qualified_at_most_2": {
+      "annotated_equality_cardinality": 2,
+      "body_kind_counts": {
+        "concept": 4,
+        "object_role": 3,
+        "ordering_guard": 2
+      },
+      "head_kind_counts": {
+        "annotated_equality": 3
+      }
+    }
+  },
+  "reference": {
+    "commit": "37ec30aced32ac81ebecc5e33fad255ddefcb4c3",
+    "control_fixture": "src/test/resources/org/semanticweb/HermiT/structural/res/nominals-2-control.txt",
+    "key_source": "src/main/java/org/semanticweb/HermiT/structural/OWLClausification.java:264-326",
+    "max_source": "src/main/java/org/semanticweb/HermiT/structural/OWLClausification.java:547-598"
+  },
+  "schema_version": "1.0"
+}
