@@ -29,6 +29,7 @@ struct DomainProblem {
     top: u32,
     bottom: u32,
     known: Vec<(u32, u32)>,
+    known_complete: bool,
 }
 
 /// Classify one public compiled-ID domain and atomically retain the complete hierarchy.
@@ -65,10 +66,7 @@ pub fn classify_domain(
         top: input.top,
         bottom: input.bottom,
         known: &input.known,
-        // The compiled told relation is a sound seed, but arbitrary OWL axioms can imply
-        // additional class or property inclusions. Missing pairs therefore always use an
-        // isolated native counterexample check.
-        known_complete: false,
+        known_complete: input.known_complete,
         mode,
         limits,
     };
@@ -126,11 +124,14 @@ fn class_problem(program: &DecodedProgram) -> NativeResult<DomainProblem> {
     }
     known.sort_unstable();
     known.dedup();
+    let known_complete =
+        told_relation_is_complete(program, ClassificationDomain::Classes, &element_set);
     Ok(DomainProblem {
         elements,
         top,
         bottom,
         known,
+        known_complete,
     })
 }
 
@@ -155,11 +156,17 @@ fn object_property_problem(program: &DecodedProgram) -> NativeResult<DomainProbl
     )?;
     let element_set = elements.iter().copied().collect::<BTreeSet<_>>();
     let known = canonical_relations(&roles.simple_inclusions, &element_set);
+    let known_complete = told_relation_is_complete(
+        program,
+        ClassificationDomain::ObjectProperties,
+        &element_set,
+    );
     Ok(DomainProblem {
         elements,
         top: roles.top_object_role_id,
         bottom: roles.bottom_object_role_id,
         known,
+        known_complete,
     })
 }
 
@@ -181,12 +188,118 @@ fn data_property_problem(program: &DecodedProgram) -> NativeResult<DomainProblem
     )?;
     let element_set = elements.iter().copied().collect::<BTreeSet<_>>();
     let known = canonical_relations(&roles.data_inclusions, &element_set);
+    let known_complete =
+        told_relation_is_complete(program, ClassificationDomain::DataProperties, &element_set);
     Ok(DomainProblem {
         elements,
         top: roles.top_data_property_id,
         bottom: roles.bottom_data_property_id,
         known,
+        known_complete,
     })
+}
+
+/// Return true only when every source-derived rule is an ordinary inclusion in this domain.
+///
+/// The compiler's built-in top/bottom rules are identified by their stable provenance digest.
+/// If all remaining clauses are positive single-body/single-head inclusions and there are no
+/// `ABox` facts or disjunctions, their graph closure is the complete taxonomy.  This is the same
+/// fast path used by the Python service, recovered from the language-neutral compiled program so
+/// the native session does not need to retain normalized Python objects.
+fn told_relation_is_complete(
+    program: &DecodedProgram,
+    domain: ClassificationDomain,
+    elements: &BTreeSet<u32>,
+) -> bool {
+    if !program.positive_facts.is_empty()
+        || !program.negative_facts.is_empty()
+        || !program.ground_disjunctions.is_empty()
+    {
+        return false;
+    }
+    let builtin = builtin_provenance_ids(&program.provenance);
+    !builtin.is_empty()
+        && program.clauses.iter().all(|clause| {
+            clause_is_builtin(clause, &builtin)
+                || clause_is_domain_inclusion(program, clause, domain, elements)
+        })
+}
+
+fn builtin_provenance_ids(entries: &[DecodedProvenanceEntry]) -> BTreeSet<u32> {
+    let digest: [u8; 32] = Sha256::digest(b"pyhermit:clausification:builtins:v1").into();
+    entries
+        .iter()
+        .filter(|entry| {
+            entry.generated
+                && entry.source_sha256.len() == 1
+                && entry.source_sha256.first() == Some(&digest)
+        })
+        .map(|entry| entry.provenance_id)
+        .collect()
+}
+
+fn clause_is_builtin(clause: &DecodedClause, builtin: &BTreeSet<u32>) -> bool {
+    !clause.provenance_ids.is_empty()
+        && clause
+            .provenance_ids
+            .iter()
+            .all(|identifier| builtin.contains(identifier))
+}
+
+fn clause_is_domain_inclusion(
+    program: &DecodedProgram,
+    clause: &DecodedClause,
+    domain: ClassificationDomain,
+    elements: &BTreeSet<u32>,
+) -> bool {
+    if clause.body.len() != 1
+        || clause.head.len() != 1
+        || clause.body[0].arguments != clause.head[0].arguments
+    {
+        return false;
+    }
+    positive_domain_identifier(program, &clause.body[0], domain)
+        .zip(positive_domain_identifier(program, &clause.head[0], domain))
+        .is_some_and(|(child, parent)| elements.contains(&child) && elements.contains(&parent))
+}
+
+fn positive_domain_identifier(
+    program: &DecodedProgram,
+    atom: &DecodedAtom,
+    domain: ClassificationDomain,
+) -> Option<u32> {
+    let predicate = program
+        .predicates
+        .get(usize::try_from(atom.predicate_id).ok()?)?;
+    let expected = match domain {
+        ClassificationDomain::Classes => PredicateKind::Concept,
+        ClassificationDomain::ObjectProperties => PredicateKind::ObjectRole,
+        ClassificationDomain::DataProperties => PredicateKind::DataRole,
+    };
+    if predicate.kind != expected
+        || atom.arguments != predicate_variables(&predicate.argument_sorts)
+    {
+        return None;
+    }
+    match domain {
+        ClassificationDomain::Classes => predicate.symbol_id,
+        ClassificationDomain::ObjectProperties | ClassificationDomain::DataProperties => {
+            predicate.role_id
+        }
+    }
+}
+
+fn predicate_variables(sorts: &[TermSort]) -> Vec<DecodedTerm> {
+    sorts
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(index, sort)| {
+            u32::try_from(index)
+                .ok()
+                .map(|index| DecodedTerm::Variable { index, sort })
+        })
+        .collect()
 }
 
 fn symbol_domain(
@@ -666,4 +779,232 @@ fn classification_query_hash(
     digest.update(child.to_le_bytes());
     digest.update(parent.to_le_bytes());
     digest.finalize().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input_wire::{DecodedDatatypeModel, DecodedExpressivity, DecodedRoleModel};
+
+    fn concept(predicate_id: u32, symbol_id: u32, kind: PredicateKind) -> DecodedPredicate {
+        DecodedPredicate {
+            predicate_id,
+            kind,
+            argument_sorts: vec![TermSort::Object],
+            symbol_id: Some(symbol_id),
+            role_id: None,
+            cardinality: None,
+            filler_predicate_id: None,
+            annotation: Vec::new(),
+            internal_key: None,
+        }
+    }
+
+    fn role(
+        predicate_id: u32,
+        role_id: u32,
+        kind: PredicateKind,
+        argument_sorts: Vec<TermSort>,
+    ) -> DecodedPredicate {
+        DecodedPredicate {
+            predicate_id,
+            kind,
+            argument_sorts,
+            symbol_id: None,
+            role_id: Some(role_id),
+            cardinality: None,
+            filler_predicate_id: None,
+            annotation: Vec::new(),
+            internal_key: None,
+        }
+    }
+
+    fn variable() -> DecodedTerm {
+        DecodedTerm::Variable {
+            index: 0,
+            sort: TermSort::Object,
+        }
+    }
+
+    fn atom(predicate_id: u32) -> DecodedAtom {
+        DecodedAtom {
+            predicate_id,
+            arguments: vec![variable()],
+        }
+    }
+
+    fn binary_atom(predicate_id: u32, second_sort: TermSort) -> DecodedAtom {
+        DecodedAtom {
+            predicate_id,
+            arguments: vec![
+                variable(),
+                DecodedTerm::Variable {
+                    index: 1,
+                    sort: second_sort,
+                },
+            ],
+        }
+    }
+
+    fn program() -> DecodedProgram {
+        let builtin: [u8; 32] = Sha256::digest(b"pyhermit:clausification:builtins:v1").into();
+        DecodedProgram {
+            symbol_domains: Vec::new(),
+            predicates: vec![
+                concept(0, 10, PredicateKind::Concept),
+                concept(1, 11, PredicateKind::Concept),
+            ],
+            clauses: vec![
+                // Built-in clauses do not constrain whether the source relation is complete.
+                DecodedClause {
+                    clause_id: 0,
+                    body: vec![atom(0), atom(1)],
+                    head: Vec::new(),
+                    provenance_ids: vec![7],
+                    join_order: vec![0, 1],
+                },
+                DecodedClause {
+                    clause_id: 1,
+                    body: vec![atom(0)],
+                    head: vec![atom(1)],
+                    provenance_ids: vec![8],
+                    join_order: vec![0],
+                },
+            ],
+            positive_facts: Vec::new(),
+            negative_facts: Vec::new(),
+            ground_disjunctions: Vec::new(),
+            role_model: DecodedRoleModel {
+                object_role_count: 0,
+                data_property_count: 0,
+                inverse_role_ids: Vec::new(),
+                simple_inclusions: Vec::new(),
+                data_inclusions: Vec::new(),
+                complex_inclusions: Vec::new(),
+                non_simple_components: Vec::new(),
+                automata: Vec::new(),
+                top_object_role_id: 0,
+                bottom_object_role_id: 1,
+                top_data_property_id: 0,
+                bottom_data_property_id: 1,
+            },
+            datatype_model: DecodedDatatypeModel {
+                literal_identities: Vec::new(),
+                datatype_definitions: Vec::new(),
+                unknown_datatype_ids: Vec::new(),
+                semantic_payload_json: String::new(),
+            },
+            expressivity: DecodedExpressivity {
+                inverse_roles: false,
+                nominals: false,
+                datatypes: false,
+                unknown_datatypes: false,
+                complex_roles: false,
+                number_restrictions: false,
+                keys: false,
+                non_horn: false,
+                bottom_properties: false,
+                abox: false,
+            },
+            provenance: vec![
+                DecodedProvenanceEntry {
+                    provenance_id: 7,
+                    source_sha256: vec![builtin],
+                    generated: true,
+                },
+                DecodedProvenanceEntry {
+                    provenance_id: 8,
+                    source_sha256: vec![[8; 32]],
+                    generated: false,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn exact_told_graph_is_a_complete_classification_relation() {
+        let source = program();
+        let elements = BTreeSet::from([10, 11]);
+
+        assert!(told_relation_is_complete(
+            &source,
+            ClassificationDomain::Classes,
+            &elements,
+        ));
+        assert!(!told_relation_is_complete(
+            &source,
+            ClassificationDomain::ObjectProperties,
+            &elements,
+        ));
+
+        let mut object_roles = program();
+        object_roles.predicates = vec![
+            role(
+                0,
+                10,
+                PredicateKind::ObjectRole,
+                vec![TermSort::Object, TermSort::Object],
+            ),
+            role(
+                1,
+                11,
+                PredicateKind::ObjectRole,
+                vec![TermSort::Object, TermSort::Object],
+            ),
+        ];
+        object_roles.clauses[1].body = vec![binary_atom(0, TermSort::Object)];
+        object_roles.clauses[1].head = vec![binary_atom(1, TermSort::Object)];
+        assert!(told_relation_is_complete(
+            &object_roles,
+            ClassificationDomain::ObjectProperties,
+            &elements,
+        ));
+
+        let mut data_roles = program();
+        data_roles.predicates = vec![
+            role(
+                0,
+                10,
+                PredicateKind::DataRole,
+                vec![TermSort::Object, TermSort::Data],
+            ),
+            role(
+                1,
+                11,
+                PredicateKind::DataRole,
+                vec![TermSort::Object, TermSort::Data],
+            ),
+        ];
+        data_roles.clauses[1].body = vec![binary_atom(0, TermSort::Data)];
+        data_roles.clauses[1].head = vec![binary_atom(1, TermSort::Data)];
+        assert!(told_relation_is_complete(
+            &data_roles,
+            ClassificationDomain::DataProperties,
+            &elements,
+        ));
+    }
+
+    #[test]
+    fn complex_or_abox_source_payload_disables_the_complete_relation_fast_path() {
+        let elements = BTreeSet::from([10, 11]);
+        let mut complex = program();
+        complex.clauses[1].body.push(atom(1));
+        assert!(!told_relation_is_complete(
+            &complex,
+            ClassificationDomain::Classes,
+            &elements,
+        ));
+
+        let mut abox = program();
+        abox.positive_facts.push(DecodedGroundAtom {
+            predicate_id: 0,
+            arguments: vec![DecodedTerm::Individual { individual_id: 0 }],
+            provenance_ids: vec![8],
+        });
+        assert!(!told_relation_is_complete(
+            &abox,
+            ClassificationDomain::Classes,
+            &elements,
+        ));
+    }
 }
