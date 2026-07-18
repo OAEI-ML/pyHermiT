@@ -1117,6 +1117,10 @@ def _strategy_expansions(
     permanent: Expressivity,
     combined: Expressivity,
 ) -> tuple[str, ...]:
+    # Non-Horn query clauses do not change a session-wide strategy: both backends build an
+    # isolated combined tableau for every overlay and their branchers are always available.
+    # Keeping ``non_horn`` out of this list avoids recompiling the full ontology for ordinary
+    # counterexample queries such as ``A and not B``.
     strategy_fields = (
         "inverse_roles",
         "nominals",
@@ -1125,7 +1129,6 @@ def _strategy_expansions(
         "complex_roles",
         "number_restrictions",
         "keys",
-        "non_horn",
         "bottom_properties",
     )
     return tuple(

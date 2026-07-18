@@ -164,6 +164,7 @@ def test_classification_cache_is_atomic_and_progress_is_observable(
     second = harness.classification.class_hierarchy()
 
     assert second is first
+    assert query_count == 0
     assert len(harness.temporary_queries) == query_count
     classification_events = [event for event in events if event.kind.startswith("classification-")]
     assert [event.kind for event in classification_events] == [

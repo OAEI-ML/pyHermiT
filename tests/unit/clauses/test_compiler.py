@@ -496,7 +496,7 @@ def test_query_compilation_preserves_permanent_bytes_and_uses_local_ranges() -> 
     assert rebuild.program is None
 
 
-def test_query_strategy_expansion_requests_rebuild_without_mutating_permanent_ir() -> None:
+def test_query_local_non_horn_overlay_does_not_mutate_permanent_ir() -> None:
     concept = owl.Class(owl.IRI("urn:test:clauses:query-negative"))
     other = owl.Class(owl.IRI("urn:test:clauses:query-negative-other"))
     individual = owl.NamedIndividual(owl.IRI("urn:test:clauses:query-negative-i"))
@@ -515,9 +515,10 @@ def test_query_strategy_expansion_requests_rebuild_without_mutating_permanent_ir
     )
     assert not query.requires_rebuild
     compiled = compile_query_program(permanent, normalized, query)
-    assert compiled.requires_rebuild
-    assert compiled.program is None
-    assert compiled.reason is not None and "non_horn" in compiled.reason
+    assert not compiled.requires_rebuild
+    assert compiled.reason is None
+    assert compiled.program is not None
+    assert compiled.program.expressivity.non_horn
     assert permanent.canonical_bytes() == before
 
 
