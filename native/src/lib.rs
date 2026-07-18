@@ -17,6 +17,7 @@
 pub mod blocking;
 mod branching;
 mod cancel;
+mod datatype_tableau;
 pub mod datatypes;
 pub mod error;
 pub mod event_wire;

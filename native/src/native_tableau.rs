@@ -9,12 +9,12 @@ use crate::branching::BranchTransition;
 use crate::cancel::CancellationState;
 use crate::error::{NativeError, NativeResult};
 use crate::existentials::{
-    expansion_to_native, AssertedOnlyDatatypes, BranchTransition as ExpansionBranchTransition,
-    ExpansionStatus, NativeExpansionControl, RuntimeExpansionAccess, RuntimeExpansionState,
+    expansion_to_native, BranchTransition as ExpansionBranchTransition, ExpansionStatus,
+    NativeExpansionControl, RuntimeExpansionAccess, RuntimeExpansionState,
 };
 use crate::input_wire::{
-    DecodedConfig, DecodedExpressivity, DecodedGroundAtom, DecodedGroundDisjunction,
-    DecodedOntology, DecodedProgram, DecodedProvenanceEntry, DecodedQuery, PredicateKind,
+    DecodedConfig, DecodedGroundAtom, DecodedGroundDisjunction, DecodedOntology, DecodedProgram,
+    DecodedProvenanceEntry, DecodedQuery, PredicateKind,
 };
 use crate::model::NodeHandle;
 use crate::nominals::NominalIntroductionManager;
@@ -30,17 +30,15 @@ use crate::store::TableauKernel;
 /// The currently integrated production tableau.
 ///
 /// Rule saturation, equality merging, and ground disjunction search execute natively. Owners for
-/// role automata and datatype semantics are loaded once with the permanent state, but their
-/// remaining scheduler adapters are deliberately capability-gated until their full semantics are
-/// connected. Consequently this type is usable by Rust integration tests without making the
-/// extension advertise WPR4's `full_reasoner` handshake prematurely.
+/// role automata and datatype semantics are loaded once with the permanent state. Consequently
+/// this type is usable by Rust integration tests without making the extension advertise WPR4's
+/// `full_reasoner` handshake prematurely while its remaining service adapters are completed.
 pub struct ProductionTableau {
     ontology: Arc<DecodedOntology>,
     config: DecodedConfig,
     cancellation: Arc<CancellationState>,
     permanent: LoadedRuleState,
     query: Option<LoadedRuleState>,
-    query_expressivity: Option<DecodedExpressivity>,
 }
 
 pub struct ProductionCheckpoint {
@@ -48,6 +46,7 @@ pub struct ProductionCheckpoint {
     engine: RuleEngineCheckpoint,
     nominals: NominalIntroductionManager,
     blocking: BlockingCheckpoint<NodeHandle>,
+    datatype_signature: Option<[u8; 32]>,
 }
 
 impl ProductionTableau {
@@ -65,7 +64,6 @@ impl ProductionTableau {
             cancellation,
             permanent,
             query: None,
-            query_expressivity: None,
         })
     }
 
@@ -75,13 +73,6 @@ impl ProductionTableau {
 
     fn active_mut(&mut self) -> &mut LoadedRuleState {
         self.query.as_mut().unwrap_or(&mut self.permanent)
-    }
-
-    fn active_expressivity(&self) -> DecodedExpressivity {
-        match self.query_expressivity {
-            Some(value) => value,
-            None => self.ontology.program.expressivity,
-        }
     }
 
     #[must_use]
@@ -116,6 +107,7 @@ impl NativeTableau for ProductionTableau {
         let kernel = self.permanent.kernel.clone();
         let nominals = self.permanent.nominals.clone();
         let blocking = self.permanent.blocking.checkpoint();
+        let datatype_signature = self.permanent.datatypes.signature_checkpoint();
         let engine = self.permanent.engine.checkpoint(control)?;
         control.poll()?;
         Ok(ProductionCheckpoint {
@@ -123,6 +115,7 @@ impl NativeTableau for ProductionTableau {
             engine,
             nominals,
             blocking,
+            datatype_signature,
         })
     }
 
@@ -145,7 +138,6 @@ impl NativeTableau for ProductionTableau {
         }
         control.poll()?;
         let combined = combine_query_ontology(&self.ontology, query.payload())?;
-        let expressivity = combined.program.expressivity;
         let loaded = load_permanent_rule_state(
             &combined,
             Arc::clone(&self.cancellation),
@@ -155,7 +147,6 @@ impl NativeTableau for ProductionTableau {
         )?;
         control.poll()?;
         self.query = Some(loaded);
-        self.query_expressivity = Some(expressivity);
         Ok(())
     }
 
@@ -165,7 +156,6 @@ impl NativeTableau for ProductionTableau {
         disposition: OperationDisposition,
     ) -> NativeResult<()> {
         let had_query = self.query.take().is_some();
-        self.query_expressivity = None;
         if had_query && disposition == OperationDisposition::CommitPermanent {
             return Err(NativeError::invariant(
                 "query tableau cannot be committed as the permanent root",
@@ -183,6 +173,9 @@ impl NativeTableau for ProductionTableau {
                 .map(|()| {
                     self.permanent.nominals = checkpoint.nominals;
                     self.permanent.blocking.restore(checkpoint.blocking);
+                    self.permanent
+                        .datatypes
+                        .restore_signature(checkpoint.datatype_signature);
                 }),
             OperationDisposition::CommitPermanent => {
                 self.permanent
@@ -195,7 +188,6 @@ impl NativeTableau for ProductionTableau {
 
     fn reset_to_permanent(&mut self) -> NativeResult<()> {
         self.query = None;
-        self.query_expressivity = None;
         self.permanent.kernel.check_invariants()?;
         self.permanent
             .engine
@@ -256,13 +248,8 @@ impl NativeTableau for ProductionTableau {
         &mut self,
         control: &dyn OperationControl,
     ) -> NativeResult<DatatypePhaseResult> {
-        control.poll()?;
-        if self.active_expressivity().datatypes
-            || self.active().kernel.datatype_component_count() != 0
-        {
-            return Err(NativeError::feature("native_datatypes"));
-        }
-        Ok(DatatypePhaseResult::default())
+        let active = self.active_mut();
+        active.datatypes.check(&mut active.kernel, control)
     }
 
     fn has_existential_candidates(&self) -> bool {
@@ -286,13 +273,10 @@ impl NativeTableau for ProductionTableau {
         control: &dyn OperationControl,
     ) -> NativeResult<PhaseProgress> {
         control.poll()?;
-        if self.active_expressivity().datatypes {
-            return Err(NativeError::feature("native_datatypes"));
-        }
         let active = self.active_mut();
-        let mut datatypes = AssertedOnlyDatatypes;
         let mut state = RuntimeExpansionState::new(&mut active.kernel, Some(&active.blocking));
-        let mut access = RuntimeExpansionAccess::new(&mut active.engine, &mut datatypes, control);
+        let mut access =
+            RuntimeExpansionAccess::new(&mut active.engine, &mut active.datatypes, control);
         let mut expansion_control = NativeExpansionControl::new(control);
         let result = active
             .existentials
@@ -350,11 +334,13 @@ impl NativeTableau for ProductionTableau {
                         .map_err(expansion_to_native)?
                 };
                 if owns_branch {
-                    let mut datatypes = AssertedOnlyDatatypes;
                     let mut state =
                         RuntimeExpansionState::new(&mut active.kernel, Some(&active.blocking));
-                    let mut access =
-                        RuntimeExpansionAccess::new(&mut active.engine, &mut datatypes, control);
+                    let mut access = RuntimeExpansionAccess::new(
+                        &mut active.engine,
+                        &mut active.datatypes,
+                        control,
+                    );
                     let mut expansion_control = NativeExpansionControl::new(control);
                     match active
                         .existentials
@@ -410,6 +396,7 @@ impl NativeTableau for ProductionTableau {
     fn invalidate_after_backtrack(&mut self) -> NativeResult<()> {
         let active = self.active_mut();
         active.blocking.invalidate_all();
+        active.datatypes.invalidate();
         active.kernel.check_invariants()
     }
 
@@ -604,6 +591,8 @@ fn remap_disjunction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
     use crate::cancel::CancellationHandle;
     use crate::input_wire::{
         decode_config, decode_ontology, DecodeLimits, DecodedAtom, DecodedClause,
@@ -778,6 +767,110 @@ mod tests {
         assert!(result.satisfiable);
         assert_eq!(result.statistics.existential_actions, 2);
         assert!(result.statistics.blocking_checks >= 1);
+        Ok(())
+    }
+
+    #[test]
+    fn production_tableau_checks_fixed_literals_with_the_native_datatype_solver() -> NativeResult<()>
+    {
+        let limits = DecodeLimits::default();
+        let mut ontology = decode_ontology(golden_document("ontology_datatype"), &limits)
+            .map_err(|error| NativeError::wire(error.message))?;
+        let int_range_id = ontology
+            .program
+            .domain(SymbolKind::DataRange)
+            .and_then(|domain| {
+                domain
+                    .values
+                    .iter()
+                    .find(|value| value.display.ends_with("#int"))
+            })
+            .map(|value| value.identifier)
+            .ok_or_else(|| NativeError::invariant("golden xsd:int data range is absent"))?;
+        let existing_datatype_predicates = ontology
+            .program
+            .predicates
+            .iter()
+            .filter(|predicate| {
+                matches!(
+                    predicate.kind,
+                    PredicateKind::DataRange | PredicateKind::NegatedDataRange
+                )
+            })
+            .map(|predicate| predicate.predicate_id)
+            .collect::<BTreeSet<_>>();
+        ontology
+            .program
+            .positive_facts
+            .retain(|fact| !existing_datatype_predicates.contains(&fact.predicate_id));
+        ontology
+            .program
+            .negative_facts
+            .retain(|fact| !existing_datatype_predicates.contains(&fact.predicate_id));
+        let predicate_id = ontology
+            .program
+            .predicates
+            .iter()
+            .find(|predicate| {
+                predicate.kind == PredicateKind::NegatedDataRange
+                    && predicate.symbol_id == Some(int_range_id)
+            })
+            .map_or_else(
+                || {
+                    u32::try_from(ontology.program.predicates.len())
+                        .map_err(|_| NativeError::invariant("test predicate count exceeds u32"))
+                },
+                |predicate| Ok(predicate.predicate_id),
+            )?;
+        if usize::try_from(predicate_id)
+            .ok()
+            .is_some_and(|value| value == ontology.program.predicates.len())
+        {
+            ontology.program.predicates.push(DecodedPredicate {
+                predicate_id,
+                kind: PredicateKind::NegatedDataRange,
+                argument_sorts: vec![TermSort::Data],
+                symbol_id: Some(int_range_id),
+                role_id: None,
+                cardinality: None,
+                filler_predicate_id: None,
+                annotation: Vec::new(),
+                internal_key: None,
+            });
+        }
+        let literal = ontology
+            .program
+            .datatype_model
+            .literal_identities
+            .first()
+            .ok_or_else(|| NativeError::invariant("golden datatype literal is absent"))?;
+        ontology.program.positive_facts.push(DecodedGroundAtom {
+            predicate_id,
+            arguments: vec![DecodedTerm::Data {
+                source_literal_id: literal.source_literal_id,
+                data_identity_id: literal.data_identity_id,
+            }],
+            provenance_ids: Vec::new(),
+        });
+        ontology.program.expressivity.datatypes = true;
+        let ontology = Arc::new(ontology);
+        let config = decode_config(golden_document("config"), &limits)
+            .map_err(|error| NativeError::wire(error.message))?;
+        let cancellation = CancellationHandle::from_options(None, None)?.state();
+        let loaded = load_permanent_rule_state(
+            &ontology,
+            Arc::clone(&cancellation),
+            config.disjunction_learning,
+            config.existentials,
+            config.blocking,
+        )?;
+        let tableau = ProductionTableau::new(ontology, config, cancellation, loaded)?;
+        let session = SessionScheduler::new(tableau, SessionLimits::default())?;
+
+        let result = session.check_permanent(&NeverAbort)?;
+
+        assert!(!result.satisfiable);
+        assert_eq!(result.statistics.datatype_components, 1);
         Ok(())
     }
 }

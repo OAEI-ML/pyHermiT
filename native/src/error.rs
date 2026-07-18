@@ -20,6 +20,7 @@ pub enum ErrorKind {
     Cancelled,
     Timeout,
     Resource,
+    UnsupportedDatatype,
     Poisoned,
     Fork,
     Feature,
@@ -67,6 +68,19 @@ impl NativeError {
     }
 
     #[must_use]
+    pub fn unsupported_datatype(
+        message: impl Into<String>,
+        datatype_iri: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            ErrorKind::UnsupportedDatatype,
+            "UNSUPPORTED_DATATYPE",
+            message,
+        )
+        .with_context("datatype_iri", datatype_iri)
+    }
+
+    #[must_use]
     pub fn feature(feature: &'static str) -> Self {
         Self::new(
             ErrorKind::Feature,
@@ -97,6 +111,7 @@ impl NativeError {
             ErrorKind::Cancelled => "ReasonerInterruptedError",
             ErrorKind::Timeout => "ReasonerTimeoutError",
             ErrorKind::Resource => "ResourceLimitError",
+            ErrorKind::UnsupportedDatatype => "UnsupportedDatatypeError",
             ErrorKind::Poisoned => "BackendPoisonedError",
             ErrorKind::Fork => "ReasonerStateError",
             ErrorKind::Feature => "FeatureNotImplementedError",

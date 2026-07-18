@@ -9,10 +9,7 @@ use crate::blocking::{
     BlockingVocabulary, DirectChecker,
 };
 use crate::cancel::CancellationState;
-use crate::datatypes::{
-    decode_datatype_range_model, decode_literal_semantic, DataIdentity, DatatypeLimits,
-    DecodedLiteral, NativeDatatypeRangeModel, OpaqueRangePolicy, RangeWireLimits,
-};
+use crate::datatype_tableau::TableauDatatypeRuntime;
 use crate::error::{NativeError, NativeResult};
 use crate::existentials::{
     expansion_program_from_rules, expansion_to_native, ExistentialExpansionManager,
@@ -25,9 +22,7 @@ use crate::input_wire::{
 };
 use crate::model::{DependencySet, NodeHandle, NodeKind};
 use crate::nominals::NominalIntroductionManager;
-use crate::operation_bridge::{
-    blocking_error_to_native, datatype_error_to_native, role_error_to_native,
-};
+use crate::operation_bridge::{blocking_error_to_native, role_error_to_native};
 use crate::roles::{RoleAutomatonWire, RoleLimits, RoleRuntime, RoleTransition};
 use crate::rules::{
     GroundAtom, PredicateKind, RuleAtom, RuleClause, RuleEngine, RulePredicate, RuleProgram, Term,
@@ -40,17 +35,10 @@ pub struct LoadedRuleState {
     pub kernel: TableauKernel,
     pub engine: RuleEngine,
     pub roles: RoleRuntime,
-    pub datatypes: LoadedDatatypeState,
+    pub datatypes: TableauDatatypeRuntime,
     pub nominals: NominalIntroductionManager,
     pub existentials: ExistentialExpansionManager,
     pub blocking: BlockingManager<NodeHandle>,
-}
-
-/// Canonical datatype owners decoded once for the complete native session lifetime.
-pub struct LoadedDatatypeState {
-    pub ranges: NativeDatatypeRangeModel,
-    pub literals: Vec<DecodedLiteral>,
-    pub identities: BTreeMap<u32, DataIdentity>,
 }
 
 /// Convert the one fully validated input program into the checked rule-engine model.
@@ -84,7 +72,6 @@ pub fn load_permanent_rule_state(
 ) -> NativeResult<LoadedRuleState> {
     cancellation.poll()?;
     let role_runtime = load_role_runtime(&ontology.program, cancellation.as_ref())?;
-    let datatypes = load_datatype_state(&ontology.program, cancellation.as_ref())?;
     let mut kernel = TableauKernel::new();
     let named: BTreeSet<_> = ontology.named_individuals.iter().copied().collect();
     let individual_count =
@@ -106,13 +93,24 @@ pub fn load_permanent_rule_state(
         );
     }
     let mut data_nodes = BTreeMap::new();
+    let mut datatype_nodes = Vec::new();
+    datatype_nodes
+        .try_reserve_exact(
+            usize::try_from(data_count)
+                .map_err(|_| NativeError::wire("data-value count cannot fit this platform"))?,
+        )
+        .map_err(|_| NativeError::invariant("datatype source-node allocation failed"))?;
     for data_identity_id in 0..data_count {
         cancellation.poll()?;
-        data_nodes.insert(
-            data_identity_id,
-            kernel.create_node(NodeKind::Concrete, None, false, None, None, None)?,
-        );
+        let node = kernel.create_node(NodeKind::Concrete, None, false, None, None, None)?;
+        data_nodes.insert(data_identity_id, node);
+        datatype_nodes.push(node);
     }
+    let datatypes = TableauDatatypeRuntime::from_program(
+        &ontology.program,
+        datatype_nodes,
+        cancellation.as_ref(),
+    )?;
     let rule_program = compile_rule_program(&ontology.program)?;
     let reusable_fillers = reusable_atomic_fillers(&ontology.program)?;
     let expansion_program = expansion_program_from_rules(
@@ -342,55 +340,6 @@ fn load_role_runtime(
         cancellation,
     )
     .map_err(role_error_to_native)
-}
-
-fn load_datatype_state(
-    program: &DecodedProgram,
-    cancellation: &CancellationState,
-) -> NativeResult<LoadedDatatypeState> {
-    let source = &program.datatype_model;
-    let range_limits = RangeWireLimits::default();
-    let ranges = decode_datatype_range_model(
-        source.semantic_payload_json.as_bytes(),
-        range_limits,
-        OpaqueRangePolicy::Preserve,
-        cancellation,
-    )
-    .map_err(datatype_error_to_native)?;
-    let literal_limits = DatatypeLimits::default();
-    let mut literals = Vec::new();
-    literals
-        .try_reserve_exact(source.literal_identities.len())
-        .map_err(|_| NativeError::invariant("datatype literal registry allocation failed"))?;
-    let mut identities = BTreeMap::new();
-    for literal in &source.literal_identities {
-        cancellation.poll()?;
-        let decoded = decode_literal_semantic(
-            literal.source_literal_id,
-            literal.semantic_payload_json.as_bytes(),
-            literal_limits,
-            cancellation,
-        )
-        .map_err(datatype_error_to_native)?;
-        if let DecodedLiteral::Semantic(value) = &decoded {
-            if let Some(previous) =
-                identities.insert(literal.data_identity_id, value.data_identity.clone())
-            {
-                if previous != value.data_identity {
-                    return Err(NativeError::wire(
-                        "datatype identity ID maps to inconsistent semantic values",
-                    ));
-                }
-            }
-        }
-        literals.push(decoded);
-    }
-    cancellation.poll()?;
-    Ok(LoadedDatatypeState {
-        ranges,
-        literals,
-        identities,
-    })
 }
 
 fn domain_count(

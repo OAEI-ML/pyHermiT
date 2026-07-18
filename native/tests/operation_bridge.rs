@@ -235,6 +235,16 @@ fn component_errors_map_to_stable_native_kinds_codes_and_limits() {
     let datatype = datatype_error_to_native(DatatypeError::resource("digits", 11, 10));
     assert_resource_context(&datatype, "digits", "11", "10");
 
+    let unsupported = datatype_error_to_native(DatatypeError::invalid(
+        "opaque or unsupported datatype semantics cannot be evaluated: urn:test",
+    ));
+    assert_eq!(unsupported.kind, ErrorKind::UnsupportedDatatype);
+    assert_eq!(unsupported.code, "UNSUPPORTED_DATATYPE");
+    assert_eq!(
+        unsupported.context.get("datatype_iri").map(String::as_str),
+        Some("urn:test")
+    );
+
     let role_resource = role_error_to_native(RoleError::resource("states", 9, 8));
     assert_resource_context(&role_resource, "states", "9", "8");
 

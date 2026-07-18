@@ -114,19 +114,34 @@ impl ExpansionControl for OperationControlBridge<'_> {
 
 #[must_use]
 pub fn datatype_error_to_native(error: DatatypeError) -> NativeError {
+    const UNSUPPORTED_PREFIX: &str =
+        "opaque or unsupported datatype semantics cannot be evaluated:";
+    let unsupported_iri = (error.kind == DatatypeErrorKind::Invalid)
+        .then(|| error.message.strip_prefix(UNSUPPORTED_PREFIX))
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
     let (kind, code) = match error.kind {
+        DatatypeErrorKind::Invalid if unsupported_iri.is_some() => {
+            (ErrorKind::UnsupportedDatatype, "UNSUPPORTED_DATATYPE")
+        }
         DatatypeErrorKind::Invalid => (ErrorKind::Wire, "NATIVE_DATATYPE_INVALID"),
         DatatypeErrorKind::Resource => (ErrorKind::Resource, "RESOURCE_LIMIT"),
         DatatypeErrorKind::Cancelled => (ErrorKind::Cancelled, "NATIVE_DATATYPE_CANCELLED"),
     };
-    component_error(
+    let native = component_error(
         kind,
         code,
         error.message,
         error.limit,
         error.observed,
         error.allowed,
-    )
+    );
+    match unsupported_iri {
+        Some(iri) => native.with_context("datatype_iri", iri),
+        None => native,
+    }
 }
 
 #[must_use]

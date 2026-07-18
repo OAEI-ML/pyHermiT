@@ -1044,19 +1044,16 @@ impl RuleEngine {
                         PredicateKind::DataRole | PredicateKind::NegatedDataRole
                     )
                 {
-                    let opposite = predicate.opposite_predicate_id.ok_or_else(|| {
-                        NativeError::invariant(
-                            "compiled data-role negation lacks its opposite predicate",
-                        )
-                    })?;
-                    self.derive_concrete_role_inequalities(
-                        kernel,
-                        &atom,
-                        opposite,
-                        &dependency,
-                        core,
-                        provenance_ids,
-                    )?;
+                    if let Some(opposite) = predicate.opposite_predicate_id {
+                        self.derive_concrete_role_inequalities(
+                            kernel,
+                            &atom,
+                            opposite,
+                            &dependency,
+                            core,
+                            provenance_ids,
+                        )?;
+                    }
                 }
                 if matches!(
                     predicate.kind,
