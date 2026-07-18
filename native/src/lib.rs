@@ -30,6 +30,7 @@ pub mod native_tableau;
 pub mod nominals;
 pub mod operation_bridge;
 pub mod program_bridge;
+mod realization_bridge;
 pub mod result_wire;
 pub mod roles;
 pub mod rules;
@@ -64,10 +65,10 @@ use model::{
 use native_tableau::ProductionTableau;
 use program_bridge::load_permanent_rule_state;
 use result_wire::{
-    encode_check, encode_check_many, encode_delta, encode_hierarchy, CheckStatistics,
-    CheckWireResult, DeltaWireOutcome,
+    encode_check, encode_check_many, encode_delta, encode_hierarchy, encode_realization,
+    CheckStatistics, CheckWireResult, DeltaWireOutcome,
 };
-use services::{ClassificationCache, ClassificationDomain};
+use services::{ClassificationCache, ClassificationDomain, RealizationCache};
 use session::{QueryKey, SessionCheckResult, SessionLimits, SessionQuery, SessionScheduler};
 use store::{replay_state_trace, TableauKernel, STATE_TRACE_MAGIC, STATE_TRACE_VERSION};
 
@@ -79,9 +80,10 @@ struct SessionOwned {
     ontology: Arc<DecodedOntology>,
     // Retained beside the ontology so all effective native configuration is owned
     // and immutable for the complete session lifetime.
-    _config: DecodedConfig,
+    config: DecodedConfig,
     scheduler: SessionScheduler<ProductionTableau>,
     classification: ClassificationCache,
+    realization: RealizationCache,
     events: VecDeque<(String, u64)>,
 }
 
@@ -286,7 +288,22 @@ impl NativeSession {
     }
 
     fn realize(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
-        self.unsupported(py, "realization")
+        let control = Arc::clone(&self.control);
+        let result = control.run(|owned| {
+            py.detach(|| {
+                let realization = realization_bridge::realize_ontology(
+                    &owned.ontology,
+                    &owned.config,
+                    &owned.scheduler,
+                    &mut owned.classification,
+                    &mut owned.realization,
+                    &control.cancellation,
+                )?;
+                control.cancellation.poll()?;
+                encode_realization(&realization.to_wire_result())
+            })
+        });
+        result.map_err(|error| error.into_pyerr(py))
     }
 
     fn apply_delta(&self, py: Python<'_>, delta: &Bound<'_, PyBytes>) -> PyResult<Vec<u8>> {
@@ -432,7 +449,7 @@ impl NativeSession {
             py.detach(|| {
                 let hierarchy = classification_bridge::classify_domain(
                     &owned.ontology,
-                    &owned._config,
+                    &owned.config,
                     &owned.scheduler,
                     &mut owned.classification,
                     &control.cancellation,
@@ -443,12 +460,6 @@ impl NativeSession {
             })
         });
         result.map_err(|error| error.into_pyerr(py))
-    }
-
-    fn unsupported<T>(&self, py: Python<'_>, feature: &'static str) -> PyResult<T> {
-        self.control
-            .run(|_owned| Err(NativeError::feature(feature)))
-            .map_err(|error| error.into_pyerr(py))
     }
 }
 
@@ -533,9 +544,10 @@ fn create_session(
                     cancellation: cancellation_state,
                     owned: Mutex::new(Some(SessionOwned {
                         ontology,
-                        _config: config,
+                        config,
                         scheduler,
                         classification: ClassificationCache::new(),
+                        realization: RealizationCache::new(),
                         events: VecDeque::with_capacity(EVENT_CAPACITY),
                     })),
                 }),
@@ -676,6 +688,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
             "state-trace-v1",
             "cancellable-mock-work",
             "classification",
+            "realization",
         ),
     )?;
     module.add_class::<CancellationHandle>()?;

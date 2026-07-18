@@ -44,7 +44,7 @@ def make_session() -> native.NativeSession:
     return native.create_session(ontology, config, native.CancellationHandle())
 
 
-def test_private_abi_handshake_is_versioned_and_does_not_claim_reasoning() -> None:
+def test_private_abi_handshake_is_versioned_and_does_not_claim_full_reasoner() -> None:
     native.self_test()
     assert native.ABI_VERSION == 1
     assert native.IR_SCHEMA_VERSION == 1
@@ -55,6 +55,7 @@ def test_private_abi_handshake_is_versioned_and_does_not_claim_reasoning() -> No
         "state-trace-v1",
         "cancellable-mock-work",
         "classification",
+        "realization",
     )
     assert "full_reasoner" not in native.FEATURES
     assert API_VERSION == (0, 1)
@@ -75,21 +76,6 @@ def test_session_owns_wire_bytes_and_exposes_only_core_fingerprint() -> None:
     session.close()
     with pytest.raises(DisposedReasonerError):
         _ = session.ontology_fingerprint
-
-
-@pytest.mark.parametrize(
-    ("method", "feature_id"),
-    ((lambda session: session.realize(), "realization"),),
-)
-def test_forced_native_semantic_calls_raise_a_typed_feature_error(
-    method: object,
-    feature_id: str,
-) -> None:
-    session = make_session()
-    with pytest.raises(FeatureNotImplementedError) as captured:
-        method(session)  # type: ignore[operator]
-    assert captured.value.feature_id == feature_id
-    session.close()
 
 
 def test_rule_only_checks_use_the_transactional_scheduler_and_compact_wires() -> None:
