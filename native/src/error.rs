@@ -21,6 +21,7 @@ pub enum ErrorKind {
     Timeout,
     Resource,
     UnsupportedDatatype,
+    Inconsistent,
     Poisoned,
     Fork,
     Feature,
@@ -81,6 +82,11 @@ impl NativeError {
     }
 
     #[must_use]
+    pub fn inconsistent(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Inconsistent, "INCONSISTENT_ONTOLOGY", message)
+    }
+
+    #[must_use]
     pub fn feature(feature: &'static str) -> Self {
         Self::new(
             ErrorKind::Feature,
@@ -112,6 +118,7 @@ impl NativeError {
             ErrorKind::Timeout => "ReasonerTimeoutError",
             ErrorKind::Resource => "ResourceLimitError",
             ErrorKind::UnsupportedDatatype => "UnsupportedDatatypeError",
+            ErrorKind::Inconsistent => "InconsistentOntologyError",
             ErrorKind::Poisoned => "BackendPoisonedError",
             ErrorKind::Fork => "ReasonerStateError",
             ErrorKind::Feature => "FeatureNotImplementedError",

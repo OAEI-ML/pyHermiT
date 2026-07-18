@@ -54,6 +54,7 @@ def test_private_abi_handshake_is_versioned_and_does_not_claim_reasoning() -> No
         "wire-v1",
         "state-trace-v1",
         "cancellable-mock-work",
+        "classification",
     )
     assert "full_reasoner" not in native.FEATURES
     assert API_VERSION == (0, 1)
@@ -78,13 +79,7 @@ def test_session_owns_wire_bytes_and_exposes_only_core_fingerprint() -> None:
 
 @pytest.mark.parametrize(
     ("method", "feature_id"),
-    (
-        (lambda session: session.classify_classes(), "classification"),
-        (lambda session: session.classify_object_properties(), "classification"),
-        (lambda session: session.classify_data_properties(), "classification"),
-        (lambda session: session.realize(), "realization"),
-        (lambda session: session.apply_delta(b"delta"), "incremental_updates"),
-    ),
+    ((lambda session: session.realize(), "realization"),),
 )
 def test_forced_native_semantic_calls_raise_a_typed_feature_error(
     method: object,

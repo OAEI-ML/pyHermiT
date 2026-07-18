@@ -70,7 +70,10 @@ class CompiledResultMapper:
             *(value for value in signature_values if isinstance(value, owl.Class)),
         }
         source_object_properties = {
-            value for value in signature_values if isinstance(value, owl.ObjectProperty)
+            value
+            for value in signature_values
+            if isinstance(value, owl.ObjectProperty)
+            and value not in (owl.OWL_TOP_OBJECT_PROPERTY, owl.OWL_BOTTOM_OBJECT_PROPERTY)
         }
         object_properties: set[owl.ObjectPropertyExpression] = {
             owl.OWL_TOP_OBJECT_PROPERTY,

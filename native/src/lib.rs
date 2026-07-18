@@ -17,6 +17,7 @@
 pub mod blocking;
 mod branching;
 mod cancel;
+mod classification_bridge;
 mod datatype_tableau;
 pub mod datatypes;
 pub mod error;
@@ -63,9 +64,10 @@ use model::{
 use native_tableau::ProductionTableau;
 use program_bridge::load_permanent_rule_state;
 use result_wire::{
-    encode_check, encode_check_many, encode_delta, CheckStatistics, CheckWireResult,
-    DeltaWireOutcome,
+    encode_check, encode_check_many, encode_delta, encode_hierarchy, CheckStatistics,
+    CheckWireResult, DeltaWireOutcome,
 };
+use services::{ClassificationCache, ClassificationDomain};
 use session::{QueryKey, SessionCheckResult, SessionLimits, SessionQuery, SessionScheduler};
 use store::{replay_state_trace, TableauKernel, STATE_TRACE_MAGIC, STATE_TRACE_VERSION};
 
@@ -79,6 +81,7 @@ struct SessionOwned {
     // and immutable for the complete session lifetime.
     _config: DecodedConfig,
     scheduler: SessionScheduler<ProductionTableau>,
+    classification: ClassificationCache,
     events: VecDeque<(String, u64)>,
 }
 
@@ -271,15 +274,15 @@ impl NativeSession {
     }
 
     fn classify_classes(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
-        self.unsupported(py, "classification")
+        self.classify(py, ClassificationDomain::Classes)
     }
 
     fn classify_object_properties(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
-        self.unsupported(py, "classification")
+        self.classify(py, ClassificationDomain::ObjectProperties)
     }
 
     fn classify_data_properties(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
-        self.unsupported(py, "classification")
+        self.classify(py, ClassificationDomain::DataProperties)
     }
 
     fn realize(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
@@ -423,6 +426,25 @@ impl NativeSession {
 }
 
 impl NativeSession {
+    fn classify(&self, py: Python<'_>, domain: ClassificationDomain) -> PyResult<Vec<u8>> {
+        let control = Arc::clone(&self.control);
+        let result = control.run(|owned| {
+            py.detach(|| {
+                let hierarchy = classification_bridge::classify_domain(
+                    &owned.ontology,
+                    &owned._config,
+                    &owned.scheduler,
+                    &mut owned.classification,
+                    &control.cancellation,
+                    domain,
+                )?;
+                control.cancellation.poll()?;
+                encode_hierarchy(hierarchy.as_ref())
+            })
+        });
+        result.map_err(|error| error.into_pyerr(py))
+    }
+
     fn unsupported<T>(&self, py: Python<'_>, feature: &'static str) -> PyResult<T> {
         self.control
             .run(|_owned| Err(NativeError::feature(feature)))
@@ -513,6 +535,7 @@ fn create_session(
                         ontology,
                         _config: config,
                         scheduler,
+                        classification: ClassificationCache::new(),
                         events: VecDeque::with_capacity(EVENT_CAPACITY),
                     })),
                 }),
@@ -652,6 +675,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
             "wire-v1",
             "state-trace-v1",
             "cancellable-mock-work",
+            "classification",
         ),
     )?;
     module.add_class::<CancellationHandle>()?;

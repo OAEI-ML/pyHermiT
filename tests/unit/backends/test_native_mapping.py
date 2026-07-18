@@ -42,7 +42,17 @@ def _runtime() -> tuple[
     )
     normalized = normalize_axioms(axioms, logical_fingerprint="ab" * 32)
     program = compile_normalized(normalized)
-    signature = (class_, object_property, data_property, left, right)
+    # EntailmentService retains OWL built-ins in its source signature. Their inverses are
+    # semantic aliases of the same compiled top/bottom role IDs, not separate symbols.
+    signature = (
+        class_,
+        object_property,
+        owl.OWL_TOP_OBJECT_PROPERTY,
+        owl.OWL_BOTTOM_OBJECT_PROPERTY,
+        data_property,
+        left,
+        right,
+    )
     return (
         CompiledResultMapper(program, signature=signature, source_literals=(literal,)),
         class_,
