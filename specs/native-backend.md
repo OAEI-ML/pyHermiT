@@ -57,8 +57,9 @@ forbidden.
 
 The workspace commits `Cargo.lock`, declares a tested minimum Rust version, uses Rust
 2024 edition when supported by that MSRV, denies warnings in release CI, and audits
-dependencies/licenses/advisories. The initial implementation pins PyO3 0.28.3 and its
-Rust 1.83 MSRV; later updates require the normal lockfile, ABI, wheel, and parity lanes.
+dependencies/licenses/advisories. The implementation pins PyO3 0.29.0, the first line
+that resolves RUSTSEC-2026-0176 and RUSTSEC-2026-0177, while retaining its Rust 1.83
+MSRV; later updates require the normal lockfile, ABI, wheel, and parity lanes.
 Default features are minimal and deterministic.
 
 ## 3. Wire boundary
@@ -177,7 +178,7 @@ workers are optional, off in deterministic debugging, bounded by config, and mus
 oversubscribe callers running multiple reasoners.
 
 The session records its creating process ID. Use after `fork()` raises a stable state
-error; callers create a new reasoner in the child. With the initial PyO3 0.28.3 pin,
+error; callers create a new reasoner in the child. With the PyO3 0.29.0 pin,
 native operation in unsupported CPython subinterpreters is disabled and `auto` selects
 Python before session creation. Free-threaded CPython uses the universal Python wheel
 until a dedicated thread-safety audit and compatible `abi3t`/version-specific wheels

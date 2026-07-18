@@ -134,7 +134,7 @@ audit_owner = "WP00"
 
 [[dependency]]
 name = "pyo3"
-requirement = "pyo3==0.28.3"
+requirement = "pyo3==0.29.0"
 scope = "development-probe"
 license = "Apache-2.0 OR MIT"
 source = "https://crates.io/crates/pyo3"
