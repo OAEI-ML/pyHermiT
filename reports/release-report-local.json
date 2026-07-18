@@ -10,7 +10,7 @@
       "runtime": "CPython 3.10.11",
       "backend": "python",
       "status": "pass",
-      "tests": 916,
+      "tests": 919,
       "subtests": 4,
       "evidence": ["benchmarks/evidence/WP17-local-audit.md"]
     },
@@ -19,7 +19,7 @@
       "runtime": "CPython 3.12.3",
       "backend": "python",
       "status": "pass",
-      "tests": 916,
+      "tests": 919,
       "subtests": 4,
       "evidence": ["benchmarks/evidence/WP17-local-audit.md"]
     },
@@ -28,7 +28,7 @@
       "runtime": "CPython 3.10.11",
       "backend": "native",
       "status": "pass",
-      "tests": 916,
+      "tests": 919,
       "subtests": 4,
       "evidence": ["benchmarks/evidence/WP17-local-audit.md"]
     },
@@ -37,7 +37,7 @@
       "runtime": "CPython 3.12.3",
       "backend": "native",
       "status": "pass",
-      "tests": 916,
+      "tests": 919,
       "subtests": 4,
       "evidence": ["benchmarks/evidence/WP17-local-audit.md"]
     },

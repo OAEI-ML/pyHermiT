@@ -14,6 +14,13 @@ The committed examples are validated without a new runtime dependency by
 unexpected fields are rejected, and any blocked or failed external gate prevents an
 overall `pass`.
 
+Evidence paths are repository-relative at the report's `revision`. They are not a promise
+that every development test, hosted workflow, or reference-oracle path is copied into the
+release sdist; resolve them in the source repository at that revision. The sdist retains
+the reports, schemas, specifications, documentation, and benchmark evidence while its
+artifact policy deliberately excludes test trees, hosted workflow files, and development
+reference runners.
+
 Artifact digests in the local report are the previously completed WPP0 artifacts named
 by their linked evidence and explicit `source_revision`, not hashes of an archive
 containing the report itself. A

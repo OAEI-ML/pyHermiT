@@ -7,6 +7,7 @@
   "required": [
     "schema",
     "status",
+    "outcome",
     "environment",
     "workload",
     "backend",
@@ -19,7 +20,18 @@
   ],
   "properties": {
     "schema": {"const": "pyhermit.release-benchmark/1"},
-    "status": {"enum": ["informational-local", "accepted-dedicated"]},
+    "status": {"const": "informational-local"},
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "error_type", "error_code", "message"],
+      "properties": {
+        "kind": {"enum": ["success", "timeout", "resource-limit", "interrupted", "error"]},
+        "error_type": {"type": ["string", "null"]},
+        "error_code": {"type": ["string", "null"]},
+        "message": {"type": ["string", "null"]}
+      }
+    },
     "environment": {
       "type": "object",
       "additionalProperties": false,
@@ -50,13 +62,13 @@
       "required": ["requested", "selected", "accelerated", "implementation_version"],
       "properties": {
         "requested": {"enum": ["python", "native", "verify"]},
-        "selected": {"enum": ["python", "native", "verify"]},
-        "accelerated": {"type": "boolean"},
-        "implementation_version": {"type": "string", "minLength": 1}
+        "selected": {"enum": ["python", "native", "verify", null]},
+        "accelerated": {"type": ["boolean", "null"]},
+        "implementation_version": {"type": ["string", "null"]}
       }
     },
     "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "result_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "result_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
     "samples": {
       "type": "array",
       "minItems": 1,
@@ -65,11 +77,11 @@
         "additionalProperties": false,
         "required": ["load_seconds", "compile_seconds", "consistency_seconds", "classification_seconds", "realization_seconds"],
         "properties": {
-          "load_seconds": {"type": "number", "minimum": 0},
-          "compile_seconds": {"type": "number", "minimum": 0},
-          "consistency_seconds": {"type": "number", "minimum": 0},
-          "classification_seconds": {"type": "number", "minimum": 0},
-          "realization_seconds": {"type": "number", "minimum": 0}
+          "load_seconds": {"type": ["number", "null"], "minimum": 0},
+          "compile_seconds": {"type": ["number", "null"], "minimum": 0},
+          "consistency_seconds": {"type": ["number", "null"], "minimum": 0},
+          "classification_seconds": {"type": ["number", "null"], "minimum": 0},
+          "realization_seconds": {"type": ["number", "null"], "minimum": 0}
         }
       }
     },
@@ -78,11 +90,11 @@
       "additionalProperties": false,
       "required": ["load_seconds", "compile_seconds", "consistency_seconds", "classification_seconds", "realization_seconds"],
       "properties": {
-        "load_seconds": {"type": "number", "minimum": 0},
-        "compile_seconds": {"type": "number", "minimum": 0},
-        "consistency_seconds": {"type": "number", "minimum": 0},
-        "classification_seconds": {"type": "number", "minimum": 0},
-        "realization_seconds": {"type": "number", "minimum": 0}
+        "load_seconds": {"type": ["number", "null"], "minimum": 0},
+        "compile_seconds": {"type": ["number", "null"], "minimum": 0},
+        "consistency_seconds": {"type": ["number", "null"], "minimum": 0},
+        "classification_seconds": {"type": ["number", "null"], "minimum": 0},
+        "realization_seconds": {"type": ["number", "null"], "minimum": 0}
       }
     },
     "peak_python_bytes": {"type": "integer", "minimum": 0},

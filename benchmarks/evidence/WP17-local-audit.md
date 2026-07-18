@@ -27,10 +27,10 @@ suite. The complete forced-backend results were:
 
 | Runtime / forced default | Result | Wall time |
 |---|---:|---:|
-| CPython 3.10.11 / Python | 916 passed + 4 subtests | 176.37 s |
-| CPython 3.12.3 / Python | 916 passed + 4 subtests | 151.62 s |
-| CPython 3.10.11 / native | 916 passed + 4 subtests | 174.58 s |
-| CPython 3.12.3 / native | 916 passed + 4 subtests | 150.11 s |
+| CPython 3.10.11 / Python | 919 passed + 4 subtests | 207.91 s |
+| CPython 3.12.3 / Python | 919 passed + 4 subtests | 183.77 s |
+| CPython 3.10.11 / native | 919 passed + 4 subtests | 206.23 s |
+| CPython 3.12.3 / native | 919 passed + 4 subtests | 181.88 s |
 
 Each run emitted the same four expected `OverlayPerformanceWarning` records from tests that
 deliberately construct a delta above the ten-percent advisory threshold. There were no failures,
@@ -65,19 +65,20 @@ audit, while hosted target revalidation remains blocked rather than inferred.
 Both backends ran three samples over the same generated eight-class/eight-individual taxonomy.
 The input SHA-256 was
 `71025acfc32b25e93f5c171599bfa187da5fd6b1a689ce2ffa305dd364e14e2a`; both produced result
-SHA-256 `d01d0a30c4cf412b37bc4b1dc37ea6ade921c37efc8bd2bffe7cc2755b830b2d` while retaining the
+SHA-256 `e02aaf197a5da6513aa0bee925ad314647742c2c60f028e6885760a0f6e3a0e4` while retaining the
 same loaded core snapshot by identity.
 
 | Median phase | Python | Native |
 |---|---:|---:|
-| load | 0.0516 s | 0.0532 s |
-| compile/session | 0.1526 s | 0.1930 s |
-| consistency | 0.0320 s | 0.00872 s |
-| class classification | 1.9181 s | 0.1653 s |
-| realization query | 0.4938 s | 0.3425 s |
+| load | 0.0648 s | 0.0607 s |
+| compile/session | 0.2240 s | 0.1955 s |
+| consistency | 0.0410 s | 0.0102 s |
+| class classification | 2.5360 s | 0.1985 s |
+| realization query | 0.7092 s | 0.4711 s |
 
-The native classification median was about 11.6 times faster for this tiny local workload. Native
-compile/session time was slower, and peak process RSS was 53.3 MB versus 51.8 MB. These values are
+The native classification median was about 12.8 times faster for this tiny local workload. Native
+compile/session had a slightly faster median but a slower first sample, and peak process RSS was
+54.0 MB versus 52.6 MB. These values are
 profiling evidence only: the process was not isolated, the workload is tiny, and three warm-process
 samples cannot satisfy `specs/performance.md`.
 

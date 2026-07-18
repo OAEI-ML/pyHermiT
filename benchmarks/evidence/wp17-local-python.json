@@ -14,36 +14,42 @@
   },
   "input_sha256": "71025acfc32b25e93f5c171599bfa187da5fd6b1a689ce2ffa305dd364e14e2a",
   "medians": {
-    "classification_seconds": 1.9180708180065267,
-    "compile_seconds": 0.15255018504103646,
-    "consistency_seconds": 0.0320422220393084,
-    "load_seconds": 0.05162759398808703,
-    "realization_seconds": 0.4938428490422666
+    "classification_seconds": 2.5360463529941626,
+    "compile_seconds": 0.22402396000688896,
+    "consistency_seconds": 0.04099580500042066,
+    "load_seconds": 0.0647903319913894,
+    "realization_seconds": 0.7092163339839317
   },
-  "peak_python_bytes": 5888268,
-  "peak_rss_bytes": 51838976,
-  "result_sha256": "d01d0a30c4cf412b37bc4b1dc37ea6ade921c37efc8bd2bffe7cc2755b830b2d",
+  "outcome": {
+    "error_code": null,
+    "error_type": null,
+    "kind": "success",
+    "message": null
+  },
+  "peak_python_bytes": 5888640,
+  "peak_rss_bytes": 52621312,
+  "result_sha256": "e02aaf197a5da6513aa0bee925ad314647742c2c60f028e6885760a0f6e3a0e4",
   "samples": [
     {
-      "classification_seconds": 1.8912630850099958,
-      "compile_seconds": 0.6330906490329653,
-      "consistency_seconds": 0.04038732196204364,
-      "load_seconds": 0.05643659899942577,
-      "realization_seconds": 0.4628312230342999
+      "classification_seconds": 2.2752700070268475,
+      "compile_seconds": 0.6038510699872859,
+      "consistency_seconds": 0.04094831401016563,
+      "load_seconds": 0.06477790797362104,
+      "realization_seconds": 0.6986791879753582
     },
     {
-      "classification_seconds": 1.9180708180065267,
-      "compile_seconds": 0.15255018504103646,
-      "consistency_seconds": 0.03020067495526746,
-      "load_seconds": 0.05162759398808703,
-      "realization_seconds": 0.4938428490422666
+      "classification_seconds": 2.704791883006692,
+      "compile_seconds": 0.22402396000688896,
+      "consistency_seconds": 0.04099580500042066,
+      "load_seconds": 0.0647903319913894,
+      "realization_seconds": 0.7635057789739221
     },
     {
-      "classification_seconds": 2.059367967012804,
-      "compile_seconds": 0.14884727098979056,
-      "consistency_seconds": 0.0320422220393084,
-      "load_seconds": 0.047080596967134625,
-      "realization_seconds": 0.5523734729504213
+      "classification_seconds": 2.5360463529941626,
+      "compile_seconds": 0.19455500901676714,
+      "consistency_seconds": 0.04457163100596517,
+      "load_seconds": 0.07508162996964529,
+      "realization_seconds": 0.7092163339839317
     }
   ],
   "schema": "pyhermit.release-benchmark/1",

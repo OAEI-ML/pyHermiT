@@ -93,8 +93,10 @@ same-as groups according to `ReasonerConfig.individual_grouping`.
 | `Reasoner.pending_removals` | Immutable snapshot of pending removals. |
 | `Reasoner.flush` | Publishes one new overlay-backed ontology state and rebuilds affected private state. |
 
-`Hierarchy`, `HierarchyNode`, `ReasonerConfig`, `BackendName`, `BackendInfo`,
-`InferenceType`, and the exception hierarchy are also public. See the
+`Hierarchy`, `ReasonerConfig`, `BackendName`, `BackendInfo`, `InferenceType`, and the
+exception hierarchy are also public. A `Hierarchy` stores equivalence groups directly as
+`nodes: tuple[frozenset[T], ...]`; `edges`, `top_node`, and `bottom_node` reference those
+groups by integer index. See the
 [user guide](user-guide.md) for backend selection, grouping, errors, cancellation,
 shared views, and performance diagnostics. Public exports and signatures remain typed in
 `pyhermit/__init__.py` and `pyhermit/facade.py`; changes to the facade member set must

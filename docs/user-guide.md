@@ -4,11 +4,19 @@
 
 pyHermiT supports CPython 3.10 and 3.12 and requires `pyowl-core>=0.1,<0.2`.
 A compatible native wheel contains one `abi3` Rust extension; the universal wheel is
-the compiler-free Python fallback. Neither artifact contains or starts Java.
+the compiler-free Python fallback. Neither artifact contains or starts Java. The project
+is still an unpublished `0.1.0.dev0`, so install a locally built artifact or the checkout:
 
 ```shell
-python -m pip install "pyHermiT>=0.1,<0.2" "pyowl-core>=0.1,<0.2"
+python -m pip install /path/to/pyOWLCore
+PYHERMIT_BUILD_NATIVE=0 python -m pip install --no-deps /path/to/pyHermiT
+# Or, after building, install dist/pyhermit-0.1.0.dev0-py3-none-any.whl.
 ```
+
+The ordinary `python -m pip install pyHermiT` command becomes valid only after the
+fail-closed release report permits publication and the selected index owns that name.
+`--no-deps` is intentional for the development checkout: the locally installed
+`pyowl-core 0.1.0.dev0` precedes the declared stable `>=0.1,<0.2` release line.
 
 Source builds use `PYHERMIT_BUILD_NATIVE=auto|0|1`: `auto` tries Rust and otherwise
 builds a truthful pure wheel, `0` always builds the fallback, and `1` fails if the
@@ -120,10 +128,12 @@ pending sets and `flush()` publishes one new immutable overlay-backed view. With
 `buffer_changes=False`, each call flushes immediately. Current delta handling may
 rebuild private compiled state; it does not mutate the caller's core view.
 
-Use a context manager or call `dispose()`. Any later operation raises
-`DisposedReasonerError`. A reasoner serializes its operations. A second thread may call
-`interrupt()`, but simultaneous queries or mutation raise `ConcurrentMutationError`
-rather than sharing partial state.
+Use a context manager or call `dispose()`. Later semantic, update, precompute, or interrupt
+operations raise `DisposedReasonerError`; the immutable `ontology`, `config`, and `backend`
+diagnostic properties remain readable. A reasoner serializes its operations. A second thread may call
+`interrupt()`; queries and mutations from different threads wait for the active operation
+and then run serially. Same-thread reentrant calls and reentrant disposal raise
+`ConcurrentMutationError` rather than exposing partial state.
 
 ## Time, memory, cancellation, and errors
 
@@ -132,8 +142,10 @@ Timeout and interrupt paths roll back operation-local state before another query
 allowed. They raise `ReasonerTimeoutError`, `ReasonerInterruptedError`, or another
 `ReasoningAbortedError` subclass; they are not logical `False` answers.
 
-All public failures derive from `PyHermiTError` and carry a stable code/context mapping
-through `as_dict()`. Important configuration/input failures include
+Failures produced after the pyowl-core input boundary derive from `PyHermiTError` and
+carry a stable code/context mapping through `as_dict()`. Python argument-contract errors
+remain `TypeError`/`ValueError`, and pyowl-core acquisition, parsing, import, and resolver
+errors propagate unchanged. Important pyHermiT configuration/input failures include
 `IncompleteImportClosureError`, `OntologyProfileError`, `UnsupportedDatatypeError`,
 `NativeBackendUnavailableError`, `BackendVersionError`, and `ResourceLimitError`.
 Messages are diagnostic and are not a compatibility key.

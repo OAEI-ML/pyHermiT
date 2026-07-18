@@ -23,7 +23,17 @@ from pyowl_core import (
     load_snapshot,
 )
 
-from pyhermit import BackendName, Hierarchy, Reasoner, ReasonerConfig
+from pyhermit import (
+    BackendInfo,
+    BackendName,
+    Hierarchy,
+    PyHermiTError,
+    Reasoner,
+    ReasonerConfig,
+    ReasonerInterruptedError,
+    ReasonerTimeoutError,
+    ResourceLimitError,
+)
 
 WORKLOADS = {
     "small": (8, 8),
@@ -38,6 +48,7 @@ PHASES = (
     "classification_seconds",
     "realization_seconds",
 )
+PhaseSample = dict[str, float | None]
 
 
 def generated_taxonomy(classes: int, individuals: int) -> bytes:
@@ -59,20 +70,24 @@ def _result_digest(
     hierarchy: Hierarchy[Class],
     realized: frozenset[frozenset[Class]],
 ) -> str:
-    digest = hashlib.sha256(b"pyhermit:release-benchmark-result:v1\x00")
+    digest = hashlib.sha256(b"pyhermit:release-benchmark-result:v2\x00")
     digest.update(bytes((int(consistent),)))
+    digest.update(len(hierarchy.nodes).to_bytes(8, "big"))
     for node in hierarchy.nodes:
         encoded = sorted(item.canonical_bytes() for item in node)
         digest.update(len(encoded).to_bytes(8, "big"))
         for item in encoded:
             digest.update(len(item).to_bytes(8, "big"))
             digest.update(item)
-    for child, parent in sorted(hierarchy.edges):
+    edges = sorted(hierarchy.edges)
+    digest.update(len(edges).to_bytes(8, "big"))
+    for child, parent in edges:
         digest.update(child.to_bytes(8, "big"))
         digest.update(parent.to_bytes(8, "big"))
-    for group in sorted(
-        tuple(sorted(item.canonical_bytes() for item in group)) for group in realized
-    ):
+    groups = sorted(tuple(sorted(item.canonical_bytes() for item in group)) for group in realized)
+    digest.update(len(groups).to_bytes(8, "big"))
+    for group in groups:
+        digest.update(len(group).to_bytes(8, "big"))
         for item in group:
             digest.update(len(item).to_bytes(8, "big"))
             digest.update(item)
@@ -88,6 +103,37 @@ def _peak_rss_bytes() -> int | None:
     return int(value if sys.platform == "darwin" else value * 1024)
 
 
+def _outcome(error: Exception | None) -> dict[str, str | None]:
+    if error is None:
+        return {"kind": "success", "error_type": None, "error_code": None, "message": None}
+    if isinstance(error, ReasonerTimeoutError):
+        kind = "timeout"
+    elif isinstance(error, ResourceLimitError):
+        kind = "resource-limit"
+    elif isinstance(error, ReasonerInterruptedError):
+        kind = "interrupted"
+    else:
+        kind = "error"
+    return {
+        "kind": kind,
+        "error_type": type(error).__name__,
+        "error_code": error.code if isinstance(error, PyHermiTError) else None,
+        "message": str(error),
+    }
+
+
+def _medians(timings: list[PhaseSample]) -> dict[str, float | None]:
+    result: dict[str, float | None] = {}
+    for phase in PHASES:
+        values: list[float] = []
+        for sample in timings:
+            value = sample[phase]
+            if value is not None:
+                values.append(value)
+        result[phase] = statistics.median(values) if values else None
+    return result
+
+
 def run_benchmark(*, size: str, backend: BackendName, samples: int) -> dict[str, object]:
     if size not in WORKLOADS:
         raise ValueError(f"unknown workload size: {size}")
@@ -100,28 +146,36 @@ def run_benchmark(*, size: str, backend: BackendName, samples: int) -> dict[str,
     input_sha256 = hashlib.sha256(source).hexdigest()
     options = LoadOptions(imports=ImportPolicy.IGNORE, backend=BackendPreference.PYTHON)
     config = ReasonerConfig(backend=backend, deterministic=True)
-    timings: list[dict[str, float]] = []
+    timings: list[PhaseSample] = []
     result_sha256: str | None = None
-    selected_backend = None
+    selected_backend: BackendInfo | None = None
+    error: Exception | None = None
 
     tracemalloc.start()
     try:
         for _index in range(samples):
-            started = time.perf_counter()
-            snapshot = load_snapshot(source, options=options)
-            loaded = time.perf_counter()
-            reasoner = Reasoner(snapshot, config=config)
-            compiled = time.perf_counter()
+            timing: PhaseSample = {phase: None for phase in PHASES}
+            reasoner: Reasoner | None = None
             try:
+                started = time.perf_counter()
+                snapshot = load_snapshot(source, options=options)
+                loaded = time.perf_counter()
+                timing["load_seconds"] = loaded - started
+                reasoner = Reasoner(snapshot, config=config)
+                compiled = time.perf_counter()
+                timing["compile_seconds"] = compiled - loaded
                 consistent = reasoner.is_consistent()
                 checked = time.perf_counter()
+                timing["consistency_seconds"] = checked - compiled
                 hierarchy = reasoner.class_hierarchy()
                 classified = time.perf_counter()
+                timing["classification_seconds"] = classified - checked
                 first = next(
                     item for item in snapshot.signature() if isinstance(item, NamedIndividual)
                 )
                 realized = reasoner.types(first)
                 finished = time.perf_counter()
+                timing["realization_seconds"] = finished - classified
                 candidate = _result_digest(consistent, hierarchy, realized)
                 if result_sha256 is not None and candidate != result_sha256:
                     raise AssertionError("benchmark result changed between samples")
@@ -131,26 +185,29 @@ def run_benchmark(*, size: str, backend: BackendName, samples: int) -> dict[str,
                 selected_backend = reasoner.backend
                 if reasoner.ontology is not snapshot:
                     raise AssertionError("reasoner copied or replaced the shared snapshot")
+            except Exception as caught:
+                error = caught
             finally:
-                reasoner.dispose()
-            timings.append(
-                {
-                    "load_seconds": loaded - started,
-                    "compile_seconds": compiled - loaded,
-                    "consistency_seconds": checked - compiled,
-                    "classification_seconds": classified - checked,
-                    "realization_seconds": finished - classified,
-                }
-            )
+                if reasoner is not None:
+                    try:
+                        reasoner.dispose()
+                    except Exception as caught:
+                        if error is None:
+                            error = caught
+            timings.append(timing)
+            if error is not None:
+                result_sha256 = None
+                break
         _current, peak_python_bytes = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
 
-    assert result_sha256 is not None and selected_backend is not None
-    medians = {phase: statistics.median(sample[phase] for sample in timings) for phase in PHASES}
+    if error is None:
+        assert result_sha256 is not None and selected_backend is not None
     return {
         "schema": "pyhermit.release-benchmark/1",
         "status": "informational-local",
+        "outcome": _outcome(error),
         "environment": {
             "python": platform.python_version(),
             "implementation": platform.python_implementation(),
@@ -167,14 +224,16 @@ def run_benchmark(*, size: str, backend: BackendName, samples: int) -> dict[str,
         },
         "backend": {
             "requested": backend.value,
-            "selected": selected_backend.name,
-            "accelerated": selected_backend.accelerated,
-            "implementation_version": selected_backend.implementation_version,
+            "selected": selected_backend.name if selected_backend is not None else None,
+            "accelerated": selected_backend.accelerated if selected_backend is not None else None,
+            "implementation_version": (
+                selected_backend.implementation_version if selected_backend is not None else None
+            ),
         },
         "input_sha256": input_sha256,
         "result_sha256": result_sha256,
         "samples": timings,
-        "medians": medians,
+        "medians": _medians(timings),
         "peak_python_bytes": peak_python_bytes,
         "peak_rss_bytes": _peak_rss_bytes(),
     }
@@ -201,7 +260,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(rendered, end="")
     else:
         args.output.write_text(rendered, encoding="utf-8")
-    return 0
+    outcome = result["outcome"]
+    assert isinstance(outcome, dict)
+    return 0 if outcome["kind"] == "success" else 1
 
 
 if __name__ == "__main__":

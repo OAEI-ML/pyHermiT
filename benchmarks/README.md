@@ -13,8 +13,10 @@ PYTHONPATH=src:../pyOWLCore/src python benchmarks/run_release.py \
 ```
 
 The output conforms to `schema/release-result-v1.schema.json`. A local result is always
-`informational-local`; editing that label does not create accepted evidence. A dedicated
-runner must record its machine image, invoke cold processes as required by
+`informational-local`; this schema deliberately has no accepted-release status. Timeout,
+resource-limit, interruption, and other failures are emitted as structured outcomes with
+partial phase samples and a null result hash rather than omitted. A dedicated runner must
+use a separately reviewed acceptance schema, record its machine image, invoke cold processes as required by
 `../specs/performance.md`, validate identical result hashes, and commit an approved
 baseline before `targets.toml` can change from
 `provisional-awaiting-dedicated-calibration` to `frozen`.

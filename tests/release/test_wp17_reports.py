@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +109,14 @@ def _assert_evidence(paths: list[str]) -> None:
         assert (ROOT / relative).is_file(), f"missing release evidence: {relative}"
 
 
+def _expected_overall_status(report: dict[str, Any]) -> str:
+    statuses = [item["status"] for item in report["suites"]]
+    statuses.extend(item["status"] for item in report["backend_matrix"])
+    statuses.extend(item["status"] for item in report["artifacts"])
+    statuses.extend(item["status"] for item in report["external_gates"])
+    return "fail" if "fail" in statuses else "blocked" if "blocked" in statuses else "pass"
+
+
 def test_committed_release_report_conforms_and_fails_closed() -> None:
     schema = _load(REPORTS / "schema" / "release-report-v1.schema.json")
     report = _load(REPORTS / "release-report-local.json")
@@ -122,15 +131,27 @@ def test_committed_release_report_conforms_and_fails_closed() -> None:
     for gate in report["external_gates"]:
         _assert_evidence(gate["evidence"])
 
-    blocked = any(gate["status"] == "blocked" for gate in report["external_gates"])
-    failed = any(gate["status"] == "fail" for gate in report["external_gates"])
-    assert report["overall_status"] == ("fail" if failed else "blocked" if blocked else "pass")
+    assert report["overall_status"] == _expected_overall_status(report)
     assert {item["backend"] for item in report["backend_matrix"]} == {
         "python",
         "native",
         "auto",
         "verify",
     }
+
+
+def test_release_status_reducer_fails_closed_for_every_local_and_external_lane() -> None:
+    report = _load(REPORTS / "release-report-local.json")
+    lanes = ("suites", "backend_matrix", "artifacts", "external_gates")
+    for lane in lanes:
+        candidate = deepcopy(report)
+        for collection in lanes:
+            for item in candidate[collection]:
+                item["status"] = "pass"
+        candidate[lane][0]["status"] = "fail"
+        assert _expected_overall_status(candidate) == "fail"
+        candidate[lane][0]["status"] = "blocked"
+        assert _expected_overall_status(candidate) == "blocked"
 
 
 def test_coverage_matrix_matches_the_live_constructor_and_facade_contracts() -> None:
