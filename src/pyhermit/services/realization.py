@@ -14,9 +14,14 @@ from typing import TypeAlias, TypeVar
 
 import pyowl_core.model as owl
 
+from pyhermit.backends.native_mapping import MappedRealization
 from pyhermit.config import IndividualGrouping, ReasonerConfig
 from pyhermit.events import ProgressEvent
-from pyhermit.exceptions import InconsistentOntologyError, ReasonerInterruptedError
+from pyhermit.exceptions import (
+    BackendMismatchError,
+    InconsistentOntologyError,
+    ReasonerInterruptedError,
+)
 from pyhermit.normalize import DataRangeInclusion
 
 from .classification import ClassificationService
@@ -57,6 +62,8 @@ class RealizationService:
         "_cache_hits",
         "_cancelled",
         "_classification",
+        "_coarse_loaded",
+        "_coarse_provider",
         "_config",
         "_data_values",
         "_different_groups",
@@ -91,6 +98,8 @@ class RealizationService:
             raise TypeError("cancelled must be callable or None")
         self._service = service
         self._classification = classification
+        self._coarse_provider: Callable[[], MappedRealization] | None = None
+        self._coarse_loaded = False
         self._config = selected_config
         self._cancelled = cancelled
         self._named = tuple(
@@ -119,6 +128,27 @@ class RealizationService:
         self._cache_hits = 0
         self._operation_sequence = 0
 
+    def _install_coarse_provider(
+        self,
+        provider: Callable[[], MappedRealization],
+    ) -> None:
+        """Install the complete native realization boundary before publishing caches."""
+
+        if not callable(provider):
+            raise TypeError("coarse realization provider must be callable")
+        if self._coarse_loaded or any(
+            (
+                self._same_groups is not None,
+                bool(self._type_nodes),
+                bool(self._instance_groups),
+                bool(self._different_groups),
+                bool(self._object_targets),
+                bool(self._data_values),
+            )
+        ):
+            raise RuntimeError("coarse realization provider cannot change after realization")
+        self._coarse_provider = provider
+
     @property
     def named_individuals(self) -> frozenset[owl.NamedIndividual]:
         return frozenset(self._named)
@@ -136,6 +166,7 @@ class RealizationService:
         )
 
     def clear_caches(self) -> None:
+        self._coarse_loaded = False
         self._same_groups = None
         self._group_by_member = None
         self._type_nodes.clear()
@@ -313,6 +344,7 @@ class RealizationService:
         _require_data_property(property_)
         self._validate_individual(subject)
         self._validate_data_property(property_)
+        self._ensure_coarse()
         canonical = self._canonical_individual(subject)
         key = (canonical.canonical_bytes(), property_.canonical_bytes())
         retained = self._data_values.get(key)
@@ -347,6 +379,7 @@ class RealizationService:
         return self._evaluate((owl.DataPropertyAssertion(property_, subject, value),))[0]
 
     def _type_node_ids(self, individual: owl.NamedIndividual) -> frozenset[int]:
+        self._ensure_coarse()
         canonical = self._canonical_individual(individual)
         key = canonical.canonical_bytes()
         retained = self._type_nodes.get(key)
@@ -396,6 +429,7 @@ class RealizationService:
         return not self._type_node_ids(individual).intersection(strict_nodes)
 
     def _same_partition(self) -> tuple[frozenset[owl.NamedIndividual], ...]:
+        self._ensure_coarse()
         retained = self._same_groups
         if retained is not None:
             self._cache_hits += 1
@@ -486,6 +520,7 @@ class RealizationService:
         subject: owl.NamedIndividual,
         property_: owl.ObjectPropertyExpression,
     ) -> tuple[frozenset[owl.NamedIndividual], ...]:
+        self._ensure_coarse()
         candidates = list(self._same_partition())
         canonical = self._canonical_individual(subject)
         key = (canonical.canonical_bytes(), property_.canonical_bytes())
@@ -513,6 +548,124 @@ class RealizationService:
         self._checkpoint()
         self._object_targets[key] = selected
         return selected
+
+    def _ensure_coarse(self) -> None:
+        provider = self._coarse_provider
+        if provider is None or self._coarse_loaded:
+            return
+        operation_id, started = self._start("all", len(self._named))
+        value = provider()
+        if not isinstance(value, MappedRealization):
+            raise BackendMismatchError(
+                "coarse realization provider returned an incompatible result",
+                context={"reason": "coarse_realization_type"},
+            )
+        groups = tuple(value.same_as)
+        observed_names = frozenset(member for group in groups for member in group)
+        if observed_names != frozenset(self._named):
+            raise BackendMismatchError(
+                "coarse realization does not partition exactly the named individuals",
+                context={"reason": "coarse_realization_partition"},
+            )
+        by_member = MappingProxyType(
+            {
+                member: group_id
+                for group_id, group in enumerate(groups)
+                for member in group
+            }
+        )
+
+        hierarchy = self._classification.class_hierarchy()
+        direct_by_group = dict(value.direct_types)
+        if frozenset(direct_by_group) != frozenset(range(len(groups))):
+            raise BackendMismatchError(
+                "coarse realization lacks direct class types for a same-as group",
+                context={"reason": "coarse_realization_type_partition"},
+            )
+        expanded_by_group = {
+            group_id: frozenset(
+                node_id
+                for direct in direct_by_group[group_id]
+                for node_id in (direct, *hierarchy.ancestors(direct))
+            )
+            for group_id in range(len(groups))
+        }
+        type_nodes = {
+            _representative(group).canonical_bytes(): expanded_by_group[group_id]
+            for group_id, group in enumerate(groups)
+        }
+        instance_groups: dict[bytes, frozenset[int]] = {}
+        for node_id, members in enumerate(hierarchy.nodes):
+            selected = frozenset(
+                group_id
+                for group_id, type_ids in expanded_by_group.items()
+                if node_id in type_ids
+            )
+            for member in members:
+                instance_groups[member.canonical_bytes()] = selected
+
+        different_mutable: dict[int, set[int]] = {
+            group_id: set() for group_id in range(len(groups))
+        }
+        for left, right in value.different_from:
+            different_mutable[left].add(right)
+            different_mutable[right].add(left)
+        different_groups = {
+            _representative(group).canonical_bytes(): frozenset(
+                different_mutable[group_id]
+            )
+            for group_id, group in enumerate(groups)
+        }
+
+        all_groups = tuple(groups)
+        object_targets: dict[
+            tuple[bytes, bytes],
+            tuple[frozenset[owl.NamedIndividual], ...],
+        ] = {}
+        for group in groups:
+            subject_key = _representative(group).canonical_bytes()
+            for property_ in _object_property_candidates(self._service):
+                targets = (
+                    all_groups
+                    if property_
+                    in {
+                        owl.OWL_TOP_OBJECT_PROPERTY,
+                        owl.inverse_property(owl.OWL_TOP_OBJECT_PROPERTY),
+                    }
+                    else ()
+                )
+                object_targets[(subject_key, property_.canonical_bytes())] = targets
+        for subject, property_, target_ids in value.object_targets:
+            subject_key = _representative(groups[subject]).canonical_bytes()
+            object_targets[(subject_key, property_.canonical_bytes())] = tuple(
+                groups[target] for target in sorted(target_ids)
+            )
+
+        data_values: dict[tuple[bytes, bytes], frozenset[owl.Literal]] = {}
+        all_literals = frozenset(self._source_literals)
+        for group in groups:
+            subject_key = _representative(group).canonical_bytes()
+            for data_property in _data_property_candidates(self._service):
+                data_values[(subject_key, data_property.canonical_bytes())] = (
+                    all_literals
+                    if data_property == owl.OWL_TOP_DATA_PROPERTY
+                    else frozenset()
+                )
+        for subject, data_property, literals in value.data_targets:
+            subject_key = _representative(groups[subject]).canonical_bytes()
+            data_values[(subject_key, data_property.canonical_bytes())] = literals
+
+        self._checkpoint()
+        # A callback failure must not leave a result that its initiating call did not receive.
+        self._finish(operation_id, len(self._named), started)
+        self._group_by_member = by_member
+        self._same_groups = groups
+        self._type_nodes = type_nodes
+        self._instance_groups = instance_groups
+        self._different_groups = different_groups
+        self._object_targets = object_targets
+        self._data_values = data_values
+        self._coarse_loaded = True
 
     def _format_groups(
         self,
@@ -634,6 +787,32 @@ def _source_literals(service: EntailmentService) -> tuple[owl.Literal, ...]:
             if isinstance(node, owl.Literal):
                 values[node.canonical_bytes()] = node
     return tuple(values[key] for key in sorted(values))
+
+
+def _object_property_candidates(
+    service: EntailmentService,
+) -> frozenset[owl.ObjectPropertyExpression]:
+    named = {
+        value
+        for value in service.source_signature
+        if isinstance(value, owl.ObjectProperty)
+    }
+    named.update((owl.OWL_TOP_OBJECT_PROPERTY, owl.OWL_BOTTOM_OBJECT_PROPERTY))
+    return frozenset(named | {owl.inverse_property(value) for value in named})
+
+
+def _data_property_candidates(service: EntailmentService) -> frozenset[owl.DataProperty]:
+    return frozenset(
+        {
+            owl.OWL_TOP_DATA_PROPERTY,
+            owl.OWL_BOTTOM_DATA_PROPERTY,
+            *(
+                value
+                for value in service.source_signature
+                if isinstance(value, owl.DataProperty)
+            ),
+        }
+    )
 
 
 def _semantic_equality_possible(service: EntailmentService) -> bool:

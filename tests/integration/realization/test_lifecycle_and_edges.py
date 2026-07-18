@@ -5,8 +5,10 @@ from typing import Any
 import pyowl_core.model as owl
 import pytest
 
+from pyhermit.backends.native_mapping import MappedRealization
 from pyhermit.config import FreshEntityPolicy, ReasonerConfig
 from pyhermit.exceptions import (
+    BackendMismatchError,
     FreshEntityError,
     InconsistentOntologyError,
     ReasonerInterruptedError,
@@ -88,3 +90,75 @@ def test_ordinary_large_abox_does_not_allocate_quadratic_same_as_candidates(
     # key, functional-role, or max-cardinality equality source, no O(n^2)
     # same-as entailment candidates are generated.
     assert service.statistics.entailment_tests == 1
+
+
+def test_coarse_realization_seeds_all_public_caches_atomically(
+    make_realization: Any,
+) -> None:
+    class_ = _class("coarse")
+    first, second = (_individual(name) for name in ("coarse-first", "coarse-second"))
+    object_property = owl.ObjectProperty(owl.IRI("urn:test:realization:coarse-object"))
+    data_property = owl.DataProperty(owl.IRI("urn:test:realization:coarse-data"))
+    integer = owl.Datatype(owl.IRI("http://www.w3.org/2001/XMLSchema#integer"))
+    literal = owl.Literal("1", integer)
+    harness = make_realization(
+        (
+            owl.Declaration(class_),
+            owl.ObjectPropertyAssertion(object_property, first, second),
+            owl.DataPropertyAssertion(data_property, first, literal),
+        )
+    )
+    hierarchy = harness.classification.class_hierarchy()
+    class_node = next(
+        node_id for node_id, node in enumerate(hierarchy.nodes) if class_ in node
+    )
+    groups = (frozenset((first,)), frozenset((second,)))
+    calls = 0
+
+    def coarse() -> MappedRealization:
+        nonlocal calls
+        calls += 1
+        return MappedRealization(
+            groups,
+            ((0, frozenset((class_node,))), (1, frozenset((hierarchy.top_node,)))),
+            ((0, object_property, frozenset((1,))),),
+            ((0, data_property, frozenset((literal,))),),
+            frozenset(((0, 1),)),
+        )
+
+    service = harness.realization
+    service._install_coarse_provider(coarse)
+
+    assert service.same_individuals(first) == frozenset((first,))
+    assert service.types(first, direct=True) == frozenset((frozenset((class_,)),))
+    assert service.instances(class_) == frozenset((first,))
+    assert service.object_property_values(first, object_property) == frozenset((second,))
+    assert service.object_property_values(
+        first, owl.OWL_TOP_OBJECT_PROPERTY
+    ) == frozenset((first, second))
+    assert service.data_property_values(first, data_property) == frozenset((literal,))
+    assert service.data_property_values(
+        first, owl.OWL_TOP_DATA_PROPERTY
+    ) == frozenset((literal,))
+    assert service.different_individuals(first) == frozenset((second,))
+    assert calls == 1
+
+
+def test_coarse_realization_failure_publishes_no_partial_partition(
+    make_realization: Any,
+) -> None:
+    first = _individual("coarse-failure")
+    service = make_realization((owl.Declaration(first),)).realization
+    calls = 0
+
+    def invalid() -> MappedRealization:
+        nonlocal calls
+        calls += 1
+        return MappedRealization((), (), (), (), frozenset())
+
+    service._install_coarse_provider(invalid)
+    with pytest.raises(BackendMismatchError):
+        service.same_individuals(first)
+    with pytest.raises(BackendMismatchError):
+        service.same_individuals(first)
+    assert calls == 2

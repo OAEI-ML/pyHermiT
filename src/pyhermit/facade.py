@@ -17,7 +17,7 @@ import pyowl_core.model as owl
 from pyowl_core import IRI, ImportResolver, LoadOptions, OntologyInput, OntologyView
 
 from pyhermit.backends.dispatch import backend_info, select_backend_factory
-from pyhermit.backends.native_mapping import CompiledResultMapper
+from pyhermit.backends.native_mapping import CompiledResultMapper, MappedRealization
 from pyhermit.backends.protocol import (
     BackendInfo,
     BackendSession,
@@ -566,6 +566,12 @@ class Reasoner:
                     session.classify_data_properties()
                 ),
             )
+
+            def coarse_realization() -> MappedRealization:
+                class_hierarchy = classification.class_hierarchy()
+                return mapper.realization(session.realize(), class_hierarchy)
+
+            realization._install_coarse_provider(coarse_realization)
         return _Runtime(
             normalized,
             program,
