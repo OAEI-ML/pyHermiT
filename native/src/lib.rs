@@ -24,6 +24,7 @@ pub mod existentials;
 pub mod input_wire;
 pub mod merging;
 pub mod model;
+pub mod native_tableau;
 pub mod nominals;
 pub mod operation_bridge;
 pub mod program_bridge;
@@ -42,20 +43,26 @@ use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PySequence};
 
 pub use cancel::{CancellationHandle, CancellationState};
 use error::{ErrorKind, NativeError, NativeResult};
+use event_wire::encode_events;
 use input_wire::{
-    decode_config, decode_ontology, DecodeLimits, DecodedConfig, DecodedOntology, InputWireError,
+    decode_config, decode_ontology, decode_query, DecodeLimits, DecodedConfig, DecodedOntology,
+    DecodedQuery, InputWireError,
 };
 use model::{
     ABI_VERSION, CORE_ADAPTER_PROTOCOL_VERSION, CORE_API_VERSION, CORE_MODEL_SCHEMA_VERSION,
     CORE_WIRE_FORMAT_VERSION, IR_SCHEMA_VERSION,
 };
-use program_bridge::{load_permanent_rule_state, LoadedRuleState};
+use native_tableau::ProductionTableau;
+use program_bridge::load_permanent_rule_state;
+use result_wire::{encode_check, encode_check_many, CheckStatistics, CheckWireResult};
+use session::{QueryKey, SessionCheckResult, SessionLimits, SessionQuery, SessionScheduler};
 use store::{replay_state_trace, TableauKernel, STATE_TRACE_MAGIC, STATE_TRACE_VERSION};
 
 const EVENT_CAPACITY: usize = 256;
@@ -63,11 +70,11 @@ const POLL_STRIDE_MAX: u64 = 1_000_000;
 const MAX_STATE_TRACE_BYTES: usize = 64 * 1024 * 1024;
 
 struct SessionOwned {
-    ontology: DecodedOntology,
+    ontology: Arc<DecodedOntology>,
     // Retained beside the ontology so all effective native configuration is owned
     // and immutable for the complete session lifetime.
     _config: DecodedConfig,
-    rules: LoadedRuleState,
+    scheduler: SessionScheduler<ProductionTableau>,
     events: VecDeque<(String, u64)>,
 }
 
@@ -183,12 +190,80 @@ impl NativeSession {
         self.control.poisoned.load(Ordering::Acquire)
     }
 
-    fn check(&self, py: Python<'_>, _query: Option<&Bound<'_, PyBytes>>) -> PyResult<Vec<u8>> {
-        self.unsupported(py, "full_reasoner")
+    fn check(&self, py: Python<'_>, query: Option<&Bound<'_, PyBytes>>) -> PyResult<Vec<u8>> {
+        let limits = DecodeLimits::default();
+        let query_wire = query
+            .map(|value| copy_capped_bytes(value, limits.max_wire_bytes, "query wire"))
+            .transpose()
+            .map_err(|error| error.into_pyerr(py))?;
+        let control = Arc::clone(&self.control);
+        let result = control.run(|owned| {
+            py.detach(|| {
+                control.cancellation.poll()?;
+                let decoded = query_wire
+                    .map(|wire| decode_session_query(wire, &limits))
+                    .transpose()?;
+                let started = Instant::now();
+                let result = if let Some(query) = decoded.as_ref() {
+                    owned
+                        .scheduler
+                        .check_query(query, control.cancellation.as_ref())?
+                } else {
+                    owned
+                        .scheduler
+                        .check_permanent(control.cancellation.as_ref())?
+                };
+                control.cancellation.poll()?;
+                encode_check(check_wire_result(result, started.elapsed()))
+            })
+        });
+        result.map_err(|error| error.into_pyerr(py))
     }
 
-    fn check_many(&self, py: Python<'_>, _queries: &Bound<'_, PySequence>) -> PyResult<Vec<u8>> {
-        self.unsupported(py, "full_reasoner")
+    fn check_many(&self, py: Python<'_>, queries: &Bound<'_, PySequence>) -> PyResult<Vec<u8>> {
+        let limits = DecodeLimits::default();
+        let count = queries.len()?;
+        let mut wires = Vec::new();
+        wires.try_reserve_exact(count).map_err(|_| {
+            NativeError::new(
+                ErrorKind::Resource,
+                "NATIVE_INPUT_SIZE_LIMIT",
+                "query batch allocation failed",
+            )
+            .into_pyerr(py)
+        })?;
+        for index in 0..count {
+            let item = queries.get_item(index)?;
+            let bytes = item.cast::<PyBytes>().map_err(|_| {
+                NativeError::wire("query batch items must be exact bytes").into_pyerr(py)
+            })?;
+            wires.push(
+                copy_capped_bytes(bytes, limits.max_wire_bytes, "query wire")
+                    .map_err(|error| error.into_pyerr(py))?,
+            );
+        }
+        let control = Arc::clone(&self.control);
+        let result = control.run(|owned| {
+            py.detach(|| {
+                control.cancellation.poll()?;
+                let queries = wires
+                    .into_iter()
+                    .map(|wire| decode_session_query(wire, &limits))
+                    .collect::<NativeResult<Vec<_>>>()?;
+                let started = Instant::now();
+                let results = owned
+                    .scheduler
+                    .check_many(&queries, control.cancellation.as_ref())?;
+                control.cancellation.poll()?;
+                let elapsed = started.elapsed();
+                let encoded = results
+                    .into_iter()
+                    .map(|result| check_wire_result(result, elapsed))
+                    .collect::<Vec<_>>();
+                encode_check_many(&encoded)
+            })
+        });
+        result.map_err(|error| error.into_pyerr(py))
     }
 
     fn classify_classes(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
@@ -213,7 +288,13 @@ impl NativeSession {
 
     fn reset_query_state(&self, py: Python<'_>) -> PyResult<()> {
         self.control
-            .run(|owned| owned.rules.kernel.reset_to_operation_root())
+            .run(|owned| owned.scheduler.reset_query_state())
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    fn drain_events(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        self.control
+            .run(|owned| encode_events(&owned.scheduler.drain_events()?))
             .map_err(|error| error.into_pyerr(py))
     }
 
@@ -387,11 +468,19 @@ fn create_session(
             // observed-memory failures are surfaced by the first semantic operation, not while the
             // immutable permanent program is being installed.
             let construction_control = CancellationHandle::from_options(None, None)?.state();
+            let ontology = Arc::new(ontology);
             let rules = load_permanent_rule_state(
                 &ontology,
-                construction_control,
+                Arc::clone(&construction_control),
                 config.disjunction_learning,
             )?;
+            let tableau = ProductionTableau::new(
+                Arc::clone(&ontology),
+                config.clone(),
+                Arc::clone(&cancellation_state),
+                rules,
+            )?;
+            let scheduler = SessionScheduler::new(tableau, SessionLimits::default())?;
             Ok(NativeSession {
                 control: Arc::new(SessionControl {
                     owner_pid: std::process::id(),
@@ -402,7 +491,7 @@ fn create_session(
                     owned: Mutex::new(Some(SessionOwned {
                         ontology,
                         _config: config,
-                        rules,
+                        scheduler,
                         events: VecDeque::with_capacity(EVENT_CAPACITY),
                     })),
                 }),
@@ -448,6 +537,29 @@ fn decode_session_inputs(
     validate_core_metadata(&ontology.metadata)?;
     let config = decode_config(config, limits).map_err(map_input_wire_error)?;
     Ok((ontology, config))
+}
+
+fn decode_session_query(
+    wire: Vec<u8>,
+    limits: &DecodeLimits,
+) -> NativeResult<SessionQuery<DecodedQuery>> {
+    let query = decode_query(wire, limits).map_err(map_input_wire_error)?;
+    Ok(SessionQuery::new(QueryKey::new(query.query_hash), query))
+}
+
+fn check_wire_result(result: SessionCheckResult, elapsed: Duration) -> CheckWireResult {
+    CheckWireResult {
+        satisfiable: result.satisfiable,
+        statistics: CheckStatistics {
+            elapsed_nanoseconds: u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
+            nodes: 0,
+            facts: result.statistics.delta_rows,
+            branches: result.statistics.disjunction_actions,
+            backtracks: result.statistics.backtracks,
+            merges: result.statistics.nominal_actions,
+            datatype_checks: result.statistics.datatype_components,
+        },
+    }
 }
 
 fn map_input_wire_error(error: InputWireError) -> NativeError {
@@ -520,6 +632,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::program_bridge::LoadedRuleState;
 
     fn decode_hex(value: &str) -> Vec<u8> {
         value
@@ -561,32 +674,17 @@ mod tests {
     }
 
     #[test]
-    fn forced_semantic_calls_never_return_a_placeholder() -> NativeResult<()> {
+    fn production_semantic_check_returns_a_compact_native_answer() -> NativeResult<()> {
         let cancellation = CancellationHandle::from_options(None, None)?;
         let (ontology, config) = decoded_session_input()?;
+        let ontology = Arc::new(ontology);
         let rules = loaded_rule_state(&ontology, &config, &cancellation)?;
-        let session = NativeSession {
-            control: Arc::new(SessionControl {
-                owner_pid: std::process::id(),
-                closed: AtomicBool::new(false),
-                busy: AtomicBool::new(false),
-                poisoned: AtomicBool::new(false),
-                cancellation: cancellation.state(),
-                owned: Mutex::new(Some(SessionOwned {
-                    ontology,
-                    _config: config,
-                    rules,
-                    events: VecDeque::new(),
-                })),
-            }),
-        };
-        let result: NativeResult<Vec<u8>> = session
-            .control
-            .run(|_owned| Err(NativeError::feature("full_reasoner")));
-        assert_eq!(
-            result.err().map(|error| error.kind),
-            Some(ErrorKind::Feature)
-        );
+        let tableau =
+            ProductionTableau::new(Arc::clone(&ontology), config, cancellation.state(), rules)?;
+        let scheduler = SessionScheduler::new(tableau, SessionLimits::default())?;
+        let result = scheduler.check_permanent(cancellation.state().as_ref())?;
+        let encoded = encode_check(check_wire_result(result, Duration::ZERO))?;
+        assert_eq!(&encoded[..8], result_wire::RESULT_MAGIC);
         Ok(())
     }
 

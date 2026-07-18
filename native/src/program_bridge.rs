@@ -5,12 +5,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::cancel::CancellationState;
+use crate::datatypes::{
+    decode_datatype_range_model, decode_literal_semantic, DataIdentity, DatatypeLimits,
+    DecodedLiteral, NativeDatatypeRangeModel, OpaqueRangePolicy, RangeWireLimits,
+};
 use crate::error::{NativeError, NativeResult};
 use crate::input_wire::{
     DecodedAtom, DecodedClause, DecodedGroundAtom, DecodedOntology, DecodedPredicate,
     DecodedProgram, DecodedTerm, PredicateKind as InputPredicateKind, TermSort as InputTermSort,
 };
 use crate::model::{DependencySet, NodeKind};
+use crate::operation_bridge::{datatype_error_to_native, role_error_to_native};
+use crate::roles::{RoleAutomatonWire, RoleLimits, RoleRuntime, RoleTransition};
 use crate::rules::{
     GroundAtom, PredicateKind, RuleAtom, RuleClause, RuleEngine, RulePredicate, RuleProgram, Term,
     TermSort,
@@ -21,6 +27,15 @@ use crate::store::TableauKernel;
 pub struct LoadedRuleState {
     pub kernel: TableauKernel,
     pub engine: RuleEngine,
+    pub roles: RoleRuntime,
+    pub datatypes: LoadedDatatypeState,
+}
+
+/// Canonical datatype owners decoded once for the complete native session lifetime.
+pub struct LoadedDatatypeState {
+    pub ranges: NativeDatatypeRangeModel,
+    pub literals: Vec<DecodedLiteral>,
+    pub identities: BTreeMap<u32, DataIdentity>,
 }
 
 /// Convert the one fully validated input program into the checked rule-engine model.
@@ -51,6 +66,8 @@ pub fn load_permanent_rule_state(
     disjunction_learning: bool,
 ) -> NativeResult<LoadedRuleState> {
     cancellation.poll()?;
+    let role_runtime = load_role_runtime(&ontology.program, cancellation.as_ref())?;
+    let datatypes = load_datatype_state(&ontology.program, cancellation.as_ref())?;
     let mut kernel = TableauKernel::new();
     let named: BTreeSet<_> = ontology.named_individuals.iter().copied().collect();
     let individual_count =
@@ -79,8 +96,8 @@ pub fn load_permanent_rule_state(
             kernel.create_node(NodeKind::Concrete, None, false, None, None, None)?,
         );
     }
-    let rules = compile_rule_program(&ontology.program)?;
-    let mut engine = RuleEngine::new(rules, source_nodes, data_nodes, disjunction_learning)?;
+    let rule_program = compile_rule_program(&ontology.program)?;
+    let mut engine = RuleEngine::new(rule_program, source_nodes, data_nodes, disjunction_learning)?;
     for fact in ontology
         .program
         .positive_facts
@@ -113,7 +130,97 @@ pub fn load_permanent_rule_state(
     }
     engine.initialize(&mut kernel, cancellation)?;
     kernel.check_invariants()?;
-    Ok(LoadedRuleState { kernel, engine })
+    Ok(LoadedRuleState {
+        kernel,
+        engine,
+        roles: role_runtime,
+        datatypes,
+    })
+}
+
+fn load_role_runtime(
+    program: &DecodedProgram,
+    cancellation: &CancellationState,
+) -> NativeResult<RoleRuntime> {
+    let source = &program.role_model;
+    let automata = source
+        .automata
+        .iter()
+        .map(|automaton| RoleAutomatonWire {
+            component_id: automaton.component_id,
+            state_count: automaton.state_count,
+            initial_state: automaton.initial_state,
+            final_states: automaton.final_states.clone(),
+            transitions: automaton
+                .transitions
+                .iter()
+                .map(|transition| RoleTransition {
+                    source_state: transition.source_state,
+                    target_state: transition.target_state,
+                    role_id: transition.role_id,
+                })
+                .collect(),
+        })
+        .collect();
+    RoleRuntime::new(
+        source.object_role_count,
+        source.inverse_role_ids.clone(),
+        source.top_object_role_id,
+        source.bottom_object_role_id,
+        automata,
+        RoleLimits::default(),
+        cancellation,
+    )
+    .map_err(role_error_to_native)
+}
+
+fn load_datatype_state(
+    program: &DecodedProgram,
+    cancellation: &CancellationState,
+) -> NativeResult<LoadedDatatypeState> {
+    let source = &program.datatype_model;
+    let range_limits = RangeWireLimits::default();
+    let ranges = decode_datatype_range_model(
+        source.semantic_payload_json.as_bytes(),
+        range_limits,
+        OpaqueRangePolicy::Preserve,
+        cancellation,
+    )
+    .map_err(datatype_error_to_native)?;
+    let literal_limits = DatatypeLimits::default();
+    let mut literals = Vec::new();
+    literals
+        .try_reserve_exact(source.literal_identities.len())
+        .map_err(|_| NativeError::invariant("datatype literal registry allocation failed"))?;
+    let mut identities = BTreeMap::new();
+    for literal in &source.literal_identities {
+        cancellation.poll()?;
+        let decoded = decode_literal_semantic(
+            literal.source_literal_id,
+            literal.semantic_payload_json.as_bytes(),
+            literal_limits,
+            cancellation,
+        )
+        .map_err(datatype_error_to_native)?;
+        if let DecodedLiteral::Semantic(value) = &decoded {
+            if let Some(previous) =
+                identities.insert(literal.data_identity_id, value.data_identity.clone())
+            {
+                if previous != value.data_identity {
+                    return Err(NativeError::wire(
+                        "datatype identity ID maps to inconsistent semantic values",
+                    ));
+                }
+            }
+        }
+        literals.push(decoded);
+    }
+    cancellation.poll()?;
+    Ok(LoadedDatatypeState {
+        ranges,
+        literals,
+        identities,
+    })
 }
 
 fn domain_count(

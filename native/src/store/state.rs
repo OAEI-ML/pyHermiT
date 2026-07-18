@@ -337,6 +337,107 @@ impl TableauKernel {
         }
     }
 
+    /// Conservative live-state estimate used by the coarse session resource gate.
+    ///
+    /// The store deliberately avoids allocator-specific introspection. Variable-size row,
+    /// support, provenance, queue, and index owners are therefore charged with a fixed
+    /// per-entry overhead in addition to their concrete payloads. The estimate is monotonic
+    /// with every collection that can grow during reasoning and intentionally overcounts
+    /// shared handles rather than under-reporting biomedical workloads.
+    pub(crate) fn estimated_memory_bytes(&self) -> NativeResult<u64> {
+        const OWNER_OVERHEAD: u64 = 256;
+        const INDEX_ENTRY_OVERHEAD: u64 = 128;
+        let mut bytes = u64::try_from(std::mem::size_of::<Self>())
+            .map_err(|_| NativeError::invariant("tableau size estimate exceeds u64"))?;
+        let nodes = self.state.nodes.iter().flatten().count();
+        bytes = checked_estimate_add(
+            bytes,
+            nodes,
+            std::mem::size_of::<Node>() as u64 + OWNER_OVERHEAD,
+            "node arena",
+        )?;
+        bytes = checked_estimate_add(
+            bytes,
+            self.state.facts.len(),
+            std::mem::size_of::<FactRow>() as u64 + OWNER_OVERHEAD,
+            "fact arena",
+        )?;
+        for row in &self.state.facts {
+            bytes = checked_estimate_add(
+                bytes,
+                row.key.arguments.len(),
+                std::mem::size_of::<NodeHandle>() as u64,
+                "fact arguments",
+            )?;
+            bytes = checked_estimate_add(
+                bytes,
+                row.supports
+                    .iter()
+                    .map(DependencySet::as_slice)
+                    .map(<[u32]>::len)
+                    .sum(),
+                std::mem::size_of::<u32>() as u64,
+                "fact dependencies",
+            )?;
+            bytes = checked_estimate_add(
+                bytes,
+                row.provenance_ids.len(),
+                INDEX_ENTRY_OVERHEAD,
+                "fact provenance",
+            )?;
+        }
+        for count in [
+            self.state.facts_by_key.len(),
+            self.state.facts_by_node.values().map(BTreeSet::len).sum(),
+            self.state
+                .facts_by_predicate
+                .values()
+                .map(BTreeSet::len)
+                .sum(),
+            self.state
+                .facts_by_position
+                .values()
+                .map(BTreeSet::len)
+                .sum(),
+            self.state.disjunctions.len(),
+            self.branches.len(),
+            self.state.delta_rows.entries.len(),
+            self.state.annotated_equalities.entries.len(),
+            self.state.existential_candidates.entries.len(),
+            self.state.disjunction_queue.entries.len(),
+            self.state.datatype_components.entries.len(),
+            self.state.blocking_invalidations.entries.len(),
+        ] {
+            bytes = checked_estimate_add(bytes, count, INDEX_ENTRY_OVERHEAD, "tableau index")?;
+        }
+        Ok(bytes)
+    }
+
+    #[must_use]
+    pub(crate) fn logical_counts(&self) -> (u64, u64, u64) {
+        (
+            u64::try_from(self.state.nodes.iter().flatten().count()).unwrap_or(u64::MAX),
+            u64::try_from(self.state.facts.iter().filter(|row| row.active).count())
+                .unwrap_or(u64::MAX),
+            u64::try_from(self.branches.len()).unwrap_or(u64::MAX),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn annotated_equality_count(&self) -> usize {
+        self.state.annotated_equalities.entries.len()
+    }
+
+    #[must_use]
+    pub(crate) fn datatype_component_count(&self) -> usize {
+        self.state.datatype_components.entries.len()
+    }
+
+    #[must_use]
+    pub(crate) fn disjunction_queue_count(&self) -> usize {
+        self.state.disjunction_queue.entries.len()
+    }
+
     pub fn begin_operation(&mut self) -> NativeResult<()> {
         if !self.branches.is_empty() {
             return Err(NativeError::wire(
@@ -2193,6 +2294,23 @@ fn clash_rank(clash: &Clash) -> ClashRank<'_> {
         clash.participants.as_slice(),
         clash.provenance_id,
     )
+}
+
+fn checked_estimate_add(
+    current: u64,
+    count: usize,
+    bytes_per_item: u64,
+    label: &'static str,
+) -> NativeResult<u64> {
+    let count = u64::try_from(count)
+        .map_err(|_| NativeError::invariant(format!("{label} count exceeds u64")))?;
+    current
+        .checked_add(
+            count
+                .checked_mul(bytes_per_item)
+                .ok_or_else(|| NativeError::invariant(format!("{label} estimate overflow")))?,
+        )
+        .ok_or_else(|| NativeError::invariant(format!("{label} aggregate estimate overflow")))
 }
 
 fn is_clash_kind(value: &str) -> bool {

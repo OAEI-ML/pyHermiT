@@ -17,6 +17,8 @@ from pyowl_core import (
 )
 
 import pyhermit._native as native
+from pyhermit.backends.native_events import decode_events
+from pyhermit.backends.native_wire import decode_check, decode_check_many
 from pyhermit.exceptions import (
     BackendMismatchError,
     BackendVersionError,
@@ -33,6 +35,7 @@ from ._builder import (
     rehash,
     section_offset,
     valid_documents,
+    valid_query_documents,
 )
 
 
@@ -76,8 +79,6 @@ def test_session_owns_wire_bytes_and_exposes_only_core_fingerprint() -> None:
 @pytest.mark.parametrize(
     ("method", "feature_id"),
     (
-        (lambda session: session.check(None), "full_reasoner"),
-        (lambda session: session.check_many([b"query"]), "full_reasoner"),
         (lambda session: session.classify_classes(), "classification"),
         (lambda session: session.classify_object_properties(), "classification"),
         (lambda session: session.classify_data_properties(), "classification"),
@@ -93,6 +94,35 @@ def test_forced_native_semantic_calls_raise_a_typed_feature_error(
     with pytest.raises(FeatureNotImplementedError) as captured:
         method(session)  # type: ignore[operator]
     assert captured.value.feature_id == feature_id
+    session.close()
+
+
+def test_rule_only_checks_use_the_transactional_scheduler_and_compact_wires() -> None:
+    session = make_session()
+    first = decode_check(session.check(None))
+    second = decode_check(session.check(None))
+    query, _rebuild = valid_query_documents()
+    batch = decode_check_many(session.check_many([query]))
+
+    assert first.satisfiable
+    assert second.satisfiable == first.satisfiable
+    assert len(batch) == 1
+    assert batch[0].satisfiable
+    events = decode_events(session.drain_events())
+    assert [event.kind for event in events].count("operation_completed") == 3
+    assert any(event.query_key is not None for event in events)
+    assert decode_events(session.drain_events()) == ()
+    session.close()
+
+
+def test_query_wire_validation_and_rebuild_policy_fail_closed() -> None:
+    session = make_session()
+    with pytest.raises(BackendMismatchError):
+        session.check_many([b"query"])
+    _query, rebuild = valid_query_documents()
+    with pytest.raises(FeatureNotImplementedError) as captured:
+        session.check(rebuild)
+    assert captured.value.feature_id == "query_rebuild"
     session.close()
 
 

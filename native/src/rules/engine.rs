@@ -221,6 +221,51 @@ impl RuleEngine {
         self.initialized
     }
 
+    /// Validate the rule-owned registries against the associated tableau store.
+    pub fn check_invariants(&self, kernel: &TableauKernel) -> NativeResult<()> {
+        self.check_checkpoint_registry_invariants()?;
+        validate_mutable_state(&self.atom_ids, &self.atoms)?;
+        IndexedJoinEvaluator::validate_node_maps(kernel, &self.source_nodes, &self.data_nodes)?;
+        if !self.initialized {
+            return Err(NativeError::invariant(
+                "production rule engine is not initialized",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Conservative live-state estimate for session-level memory accounting.
+    pub fn estimated_memory_bytes(&self) -> NativeResult<u64> {
+        const ENTRY_OVERHEAD: u64 = 256;
+        let mut bytes = u64::try_from(size_of::<Self>())
+            .map_err(|_| NativeError::invariant("rule-engine size estimate exceeds u64"))?;
+        for count in [
+            self.program.predicates().len(),
+            self.program.clauses().len(),
+            self.source_nodes.len(),
+            self.data_nodes.len(),
+            self.atom_ids.len(),
+            self.atoms.len(),
+            self.disjunction_keys.len(),
+        ] {
+            bytes = bytes
+                .checked_add(
+                    u64::try_from(count)
+                        .map_err(|_| NativeError::invariant("rule registry count exceeds u64"))?
+                        .checked_mul(ENTRY_OVERHEAD)
+                        .ok_or_else(|| {
+                            NativeError::invariant("rule registry memory estimate overflow")
+                        })?,
+                )
+                .ok_or_else(|| {
+                    NativeError::invariant("rule-engine aggregate memory estimate overflow")
+                })?;
+        }
+        bytes
+            .checked_add(self.checkpoint_bytes)
+            .ok_or_else(|| NativeError::invariant("rule checkpoint memory estimate overflow"))
+    }
+
     /// Capture all mutable state owned by this engine. The caller must capture
     /// the associated `TableauKernel` at the same operation boundary.
     pub fn checkpoint(

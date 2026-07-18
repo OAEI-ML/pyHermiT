@@ -33,6 +33,12 @@ def valid_documents() -> tuple[bytes, bytes]:
     return _golden_document("ontology"), _golden_document("config")
 
 
+def valid_query_documents() -> tuple[bytes, bytes]:
+    """Return the canonical incremental and rebuild-required query documents."""
+
+    return _golden_document("query"), _golden_document("query_rebuild")
+
+
 def rehash(document: bytes | bytearray) -> bytes:
     """Refresh the native-input-v1 payload hash after a deliberate mutation."""
 
