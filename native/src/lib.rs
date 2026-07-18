@@ -53,8 +53,8 @@ pub use cancel::{CancellationHandle, CancellationState};
 use error::{ErrorKind, NativeError, NativeResult};
 use event_wire::encode_events;
 use input_wire::{
-    decode_config, decode_ontology, decode_query, DecodeLimits, DecodedConfig, DecodedOntology,
-    DecodedQuery, InputWireError,
+    decode_config, decode_delta, decode_ontology, decode_query, DecodeLimits, DecodedConfig,
+    DecodedDelta, DecodedOntology, DecodedQuery, InputWireError,
 };
 use model::{
     ABI_VERSION, CORE_ADAPTER_PROTOCOL_VERSION, CORE_API_VERSION, CORE_MODEL_SCHEMA_VERSION,
@@ -62,7 +62,10 @@ use model::{
 };
 use native_tableau::ProductionTableau;
 use program_bridge::load_permanent_rule_state;
-use result_wire::{encode_check, encode_check_many, CheckStatistics, CheckWireResult};
+use result_wire::{
+    encode_check, encode_check_many, encode_delta, CheckStatistics, CheckWireResult,
+    DeltaWireOutcome,
+};
 use session::{QueryKey, SessionCheckResult, SessionLimits, SessionQuery, SessionScheduler};
 use store::{replay_state_trace, TableauKernel, STATE_TRACE_MAGIC, STATE_TRACE_VERSION};
 
@@ -283,8 +286,23 @@ impl NativeSession {
         self.unsupported(py, "realization")
     }
 
-    fn apply_delta(&self, py: Python<'_>, _delta: &Bound<'_, PyBytes>) -> PyResult<Vec<u8>> {
-        self.unsupported(py, "incremental_updates")
+    fn apply_delta(&self, py: Python<'_>, delta: &Bound<'_, PyBytes>) -> PyResult<Vec<u8>> {
+        let limits = DecodeLimits::default();
+        let wire = copy_capped_bytes(delta, limits.max_wire_bytes, "delta wire")
+            .map_err(|error| error.into_pyerr(py))?;
+        let control = Arc::clone(&self.control);
+        let result = control.run(|owned| {
+            py.detach(|| {
+                control.cancellation.poll()?;
+                let delta = decode_delta(wire, &limits).map_err(map_input_wire_error)?;
+                delta
+                    .validate_revision(&owned.ontology)
+                    .map_err(map_input_wire_error)?;
+                control.cancellation.poll()?;
+                encode_delta(delta_wire_outcome(&delta))
+            })
+        });
+        result.map_err(|error| error.into_pyerr(py))
     }
 
     fn reset_query_state(&self, py: Python<'_>) -> PyResult<()> {
@@ -550,6 +568,17 @@ fn decode_session_query(
     Ok(SessionQuery::new(QueryKey::new(query.query_hash), query))
 }
 
+fn delta_wire_outcome(delta: &DecodedDelta) -> DeltaWireOutcome {
+    if delta.result_program_sha256 == delta.base_program_sha256
+        && delta.fact_additions.is_empty()
+        && delta.fact_removals.is_empty()
+    {
+        DeltaWireOutcome::AppliedIncrementally
+    } else {
+        DeltaWireOutcome::RebuildRequired
+    }
+}
+
 fn check_wire_result(result: SessionCheckResult, elapsed: Duration) -> CheckWireResult {
     CheckWireResult {
         satisfiable: result.satisfiable,
@@ -722,6 +751,30 @@ mod tests {
         assert_eq!(
             error.as_ref().map(|value| value.code),
             Some("NATIVE_CORE_VERSION")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn decoded_delta_uses_the_same_noop_or_rebuild_contract_as_python() -> NativeResult<()> {
+        let limits = DecodeLimits::default();
+        let (ontology, _config) = decoded_session_input()?;
+        let mut delta =
+            decode_delta(golden_document("delta"), &limits).map_err(map_input_wire_error)?;
+        delta
+            .validate_revision(&ontology)
+            .map_err(map_input_wire_error)?;
+        assert_eq!(
+            delta_wire_outcome(&delta),
+            DeltaWireOutcome::RebuildRequired
+        );
+
+        delta.result_program_sha256 = delta.base_program_sha256;
+        delta.fact_additions.clear();
+        delta.fact_removals.clear();
+        assert_eq!(
+            delta_wire_outcome(&delta),
+            DeltaWireOutcome::AppliedIncrementally
         );
         Ok(())
     }
