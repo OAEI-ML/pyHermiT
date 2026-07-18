@@ -13,7 +13,7 @@ import os
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypeVar, cast
 
 from pyhermit import __version__
@@ -99,7 +99,11 @@ class VerifyBackendFactory:
     ) -> VerifyBackendSession:
         native = self._native.create_session(ontology, config, cancellation)
         try:
-            python = self._python.create_session(ontology, config, cancellation)
+            # Verify mode has one user-visible operation.  The Python session is a semantic
+            # shadow and must not replay progress/warning side effects after the native call.
+            # Cancellation and every semantic option remain shared exactly.
+            shadow_config = replace(config, progress=None, warnings=None)
+            python = self._python.create_session(ontology, shadow_config, cancellation)
         except BaseException:
             with suppress(Exception):
                 native.close()

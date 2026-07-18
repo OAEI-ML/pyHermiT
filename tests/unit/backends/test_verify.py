@@ -9,12 +9,15 @@ from collections.abc import Sequence
 import pytest
 
 from pyhermit.backends.protocol import (
+    BackendInfo,
     CheckResult,
     DeltaOutcome,
     HierarchyIds,
     RealizationIds,
 )
-from pyhermit.backends.verify import VerifyBackendSession
+from pyhermit.backends.verify import VerifyBackendFactory, VerifyBackendSession
+from pyhermit.config import ReasonerConfig
+from pyhermit.events import CancellationToken
 from pyhermit.exceptions import (
     BackendMismatchError,
     BackendPoisonedError,
@@ -75,6 +78,38 @@ class _Session:
     def _require_open(self) -> None:
         if self.closed:
             raise DisposedReasonerError("fake session is closed")
+
+
+class _Factory:
+    def __init__(self, name: str, session: _Session) -> None:
+        self.session = session
+        self.config: ReasonerConfig | None = None
+        self._info = BackendInfo(
+            name=name,  # type: ignore[arg-type]
+            package_version="0.1.0",
+            ir_schema_version=1,
+            implementation_version=f"{name}-test",
+            core_package_version="0.1.0",
+            core_api_version=(1, 0),
+            core_model_schema_version=1,
+            core_wire_format_version=(1, 0),
+            core_adapter_protocol_version=1,
+            complete_features=frozenset({"full_reasoner"}),
+            accelerated=name == "native",
+        )
+
+    @property
+    def info(self) -> BackendInfo:
+        return self._info
+
+    def create_session(
+        self,
+        _ontology: object,
+        config: ReasonerConfig,
+        _cancellation: CancellationToken,
+    ) -> _Session:
+        self.config = config
+        return self.session
 
 
 def _raise_or_return(value: object) -> object:
@@ -152,3 +187,29 @@ def test_close_is_paired_and_idempotent() -> None:
     assert native.closed and python.closed
     with pytest.raises(DisposedReasonerError):
         session.check()
+
+
+def test_verify_factory_suppresses_callbacks_only_on_python_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native = _Factory("native", _Session())
+    python = _Factory("python", _Session())
+    monkeypatch.setattr("pyhermit.backends.verify.PythonBackendFactory", lambda: python)
+
+    def progress(_event: object) -> None:
+        return None
+
+    def warning(_event: object) -> None:
+        return None
+
+    config = ReasonerConfig(progress=progress, warnings=warning)
+
+    factory = VerifyBackendFactory(native)  # type: ignore[arg-type]
+    session = factory.create_session(object(), config, CancellationToken())  # type: ignore[arg-type]
+
+    assert native.config is config
+    assert python.config is not None
+    assert python.config.progress is None
+    assert python.config.warnings is None
+    assert python.config.semantic_items() == config.semantic_items()
+    session.close()
