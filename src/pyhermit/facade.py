@@ -17,6 +17,7 @@ import pyowl_core.model as owl
 from pyowl_core import IRI, ImportResolver, LoadOptions, OntologyInput, OntologyView
 
 from pyhermit.backends.dispatch import backend_info, select_backend_factory
+from pyhermit.backends.native_mapping import CompiledResultMapper
 from pyhermit.backends.protocol import (
     BackendInfo,
     BackendSession,
@@ -71,6 +72,7 @@ class _Runtime:
     entailment: EntailmentService
     classification: ClassificationService
     realization: RealizationService
+    result_mapper: CompiledResultMapper | None
 
 
 class Reasoner:
@@ -547,6 +549,23 @@ class Reasoner:
             config=self._config,
             cancelled=self._cancelled,
         )
+        result_mapper: CompiledResultMapper | None = None
+        if self._factory.info.name == "native":
+            mapper = CompiledResultMapper(
+                program,
+                signature=entailment.source_signature,
+                source_literals=realization.source_literals,
+            )
+            result_mapper = mapper
+            classification._install_coarse_hierarchy_providers(
+                classes=lambda: mapper.class_hierarchy(session.classify_classes()),
+                object_properties=lambda: mapper.object_property_hierarchy(
+                    session.classify_object_properties()
+                ),
+                data_properties=lambda: mapper.data_property_hierarchy(
+                    session.classify_data_properties()
+                ),
+            )
         return _Runtime(
             normalized,
             program,
@@ -556,6 +575,7 @@ class Reasoner:
             entailment,
             classification,
             realization,
+            result_mapper,
         )
 
     def _temporary_check(self, axioms: tuple[owl.AxiomNode, ...]) -> CheckResult:

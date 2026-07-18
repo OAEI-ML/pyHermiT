@@ -17,7 +17,11 @@ import pyowl_core.model as owl
 from pyhermit.backends.protocol import Hierarchy
 from pyhermit.config import ReasonerConfig
 from pyhermit.events import ProgressEvent
-from pyhermit.exceptions import InconsistentOntologyError, ReasonerInterruptedError
+from pyhermit.exceptions import (
+    BackendMismatchError,
+    InconsistentOntologyError,
+    ReasonerInterruptedError,
+)
 from pyhermit.hierarchy import (
     ClassificationMode,
     ClassificationResult,
@@ -53,12 +57,15 @@ class ClassificationService:
 
     __slots__ = (
         "_cancelled",
+        "_class_hierarchy_provider",
         "_class_position_cache",
         "_classes",
         "_config",
         "_data_properties",
+        "_data_property_hierarchy_provider",
         "_object_position_cache",
         "_object_properties",
+        "_object_property_hierarchy_provider",
         "_operation_sequence",
         "_service",
         "_statistics",
@@ -81,6 +88,13 @@ class ClassificationService:
         self._service = service
         self._config = selected_config
         self._cancelled = cancelled
+        self._class_hierarchy_provider: Callable[[], Hierarchy[owl.Class]] | None = None
+        self._object_property_hierarchy_provider: (
+            Callable[[], Hierarchy[owl.ObjectPropertyExpression]] | None
+        ) = None
+        self._data_property_hierarchy_provider: (
+            Callable[[], Hierarchy[owl.DataProperty]] | None
+        ) = None
         self._classes: HierarchyIndex[owl.Class] | None = None
         self._object_properties: HierarchyIndex[owl.ObjectPropertyExpression] | None = None
         self._data_properties: HierarchyIndex[owl.DataProperty] | None = None
@@ -88,6 +102,27 @@ class ClassificationService:
         self._class_position_cache: dict[bytes, _Position] = {}
         self._object_position_cache: dict[bytes, _Position] = {}
         self._operation_sequence = 0
+
+    def _install_coarse_hierarchy_providers(
+        self,
+        *,
+        classes: Callable[[], Hierarchy[owl.Class]],
+        object_properties: Callable[[], Hierarchy[owl.ObjectPropertyExpression]],
+        data_properties: Callable[[], Hierarchy[owl.DataProperty]],
+    ) -> None:
+        """Install one native coarse boundary before any taxonomy cache is published."""
+
+        providers = (classes, object_properties, data_properties)
+        if not all(callable(provider) for provider in providers):
+            raise TypeError("coarse hierarchy providers must be callable")
+        if any(
+            value is not None
+            for value in (self._classes, self._object_properties, self._data_properties)
+        ):
+            raise RuntimeError("coarse hierarchy providers cannot change after classification")
+        self._class_hierarchy_provider = classes
+        self._object_property_hierarchy_provider = object_properties
+        self._data_property_hierarchy_provider = data_properties
 
     def class_hierarchy(self) -> Hierarchy[owl.Class]:
         return self._class_index().hierarchy
@@ -424,6 +459,16 @@ class ClassificationService:
         retained = self._classes
         if retained is not None:
             return retained
+        provider = self._class_hierarchy_provider
+        if provider is not None:
+            self._classes = self._coarse_index(
+                ClassificationDomain.CLASSES,
+                self._class_elements(),
+                provider,
+                top=owl.OWL_THING,
+                bottom=owl.OWL_NOTHING,
+            )
+            return self._classes
         result = self._classify(
             ClassificationDomain.CLASSES,
             tuple(self._class_elements()),
@@ -441,6 +486,16 @@ class ClassificationService:
         retained = self._object_properties
         if retained is not None:
             return retained
+        provider = self._object_property_hierarchy_provider
+        if provider is not None:
+            self._object_properties = self._coarse_index(
+                ClassificationDomain.OBJECT_PROPERTIES,
+                self._object_elements(),
+                provider,
+                top=owl.OWL_TOP_OBJECT_PROPERTY,
+                bottom=owl.OWL_BOTTOM_OBJECT_PROPERTY,
+            )
+            return self._object_properties
         result = self._classify(
             ClassificationDomain.OBJECT_PROPERTIES,
             tuple(self._object_elements()),
@@ -458,6 +513,16 @@ class ClassificationService:
         retained = self._data_properties
         if retained is not None:
             return retained
+        provider = self._data_property_hierarchy_provider
+        if provider is not None:
+            self._data_properties = self._coarse_index(
+                ClassificationDomain.DATA_PROPERTIES,
+                self._data_elements(),
+                provider,
+                top=owl.OWL_TOP_DATA_PROPERTY,
+                bottom=owl.OWL_BOTTOM_DATA_PROPERTY,
+            )
+            return self._data_properties
         result = self._classify(
             ClassificationDomain.DATA_PROPERTIES,
             tuple(self._data_elements()),
@@ -470,6 +535,62 @@ class ClassificationService:
         self._data_properties = result.hierarchy
         self._statistics[ClassificationDomain.DATA_PROPERTIES] = result.statistics
         return self._data_properties
+
+    def _coarse_index(
+        self,
+        domain: ClassificationDomain,
+        elements: Iterable[T],
+        provider: Callable[[], Hierarchy[T]],
+        *,
+        top: T,
+        bottom: T,
+    ) -> HierarchyIndex[T]:
+        self._require_consistent()
+        self._checkpoint()
+        expected = frozenset(elements)
+        self._operation_sequence += 1
+        operation_id = f"classification-{domain.value}-{self._operation_sequence}"
+        started = time.perf_counter()
+        self._emit_progress(
+            operation_id,
+            "classification-started",
+            0,
+            len(expected),
+            started,
+        )
+        hierarchy = provider()
+        if not isinstance(hierarchy, Hierarchy):
+            raise BackendMismatchError(
+                "coarse classification provider returned an incompatible result",
+                context={"reason": "coarse_hierarchy_type"},
+            )
+        by_member = {
+            member: node_id
+            for node_id, node in enumerate(hierarchy.nodes)
+            for member in node
+        }
+        if frozenset(by_member) != expected:
+            raise BackendMismatchError(
+                "coarse classification hierarchy does not cover exactly its public domain",
+                context={"domain": domain.value, "reason": "coarse_hierarchy_partition"},
+            )
+        if top not in hierarchy.nodes[hierarchy.top_node] or bottom not in hierarchy.nodes[
+            hierarchy.bottom_node
+        ]:
+            raise BackendMismatchError(
+                "coarse classification hierarchy has invalid top or bottom membership",
+                context={"domain": domain.value, "reason": "coarse_hierarchy_boundary"},
+            )
+        result = HierarchyIndex(hierarchy, by_member)
+        self._checkpoint()
+        self._emit_progress(
+            operation_id,
+            "classification-completed",
+            len(expected),
+            len(expected),
+            started,
+        )
+        return result
 
     def _classify(
         self,

@@ -5,9 +5,10 @@ from typing import Any
 import pyowl_core.model as owl
 import pytest
 
+from pyhermit.backends.protocol import Hierarchy
 from pyhermit.config import ReasonerConfig
 from pyhermit.events import ProgressEvent
-from pyhermit.exceptions import ReasonerInterruptedError
+from pyhermit.exceptions import BackendMismatchError, ReasonerInterruptedError
 from pyhermit.services import ClassificationDomain
 
 
@@ -43,6 +44,46 @@ def test_class_hierarchy_equivalence_unsatisfiable_isolated_and_navigation(
     assert service.disjoint_classes(dead) >= frozenset(
         (frozenset((owl.OWL_NOTHING, dead)),)
     )
+
+
+def test_coarse_hierarchy_provider_is_lazy_cached_and_fail_closed(
+    make_classification: Any,
+) -> None:
+    a = _class("Coarse")
+    expected = make_classification((owl.Declaration(a),)).classification.class_hierarchy()
+    harness = make_classification((owl.Declaration(a),))
+    calls = 0
+
+    def classes() -> Hierarchy[owl.Class]:
+        nonlocal calls
+        calls += 1
+        return expected
+
+    harness.classification._install_coarse_hierarchy_providers(
+        classes=classes,
+        object_properties=lambda: pytest.fail("object provider was called"),
+        data_properties=lambda: pytest.fail("data provider was called"),
+    )
+
+    assert harness.classification.class_hierarchy() == expected
+    assert harness.classification.class_hierarchy() == expected
+    assert calls == 1
+
+    invalid = make_classification((owl.Declaration(a),)).classification
+    invalid._install_coarse_hierarchy_providers(
+        classes=lambda: Hierarchy(
+            (frozenset((owl.OWL_THING,)), frozenset((owl.OWL_NOTHING,))),
+            frozenset(((1, 0),)),
+            0,
+            1,
+        ),
+        object_properties=lambda: pytest.fail("object provider was called"),
+        data_properties=lambda: pytest.fail("data provider was called"),
+    )
+    with pytest.raises(BackendMismatchError, match="exactly its public domain"):
+        invalid.class_hierarchy()
+    with pytest.raises(BackendMismatchError):
+        invalid.class_hierarchy()
 
 
 def test_complex_bottom_expression_is_disjoint_with_bottom_node(
