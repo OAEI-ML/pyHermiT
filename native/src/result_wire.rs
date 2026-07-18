@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use sha2::{Digest, Sha256};
 
 use crate::error::{NativeError, NativeResult};
-use crate::services::HierarchyIds;
+use crate::services::{HierarchyIds, RealizationIds};
 
 pub const RESULT_MAGIC: &[u8; 8] = b"PYHMTRS\0";
 pub const RESULT_SCHEMA_VERSION: u16 = 1;
@@ -168,39 +168,71 @@ pub fn encode_hierarchy(hierarchy: &HierarchyIds) -> NativeResult<Vec<u8>> {
 }
 
 pub fn encode_realization(result: &RealizationWireResult) -> NativeResult<Vec<u8>> {
-    validate_realization(result)?;
-    let group_count = usize_to_u32(result.same_as.len(), "same-as group count")?;
-    let individual_count = count_nested(&result.same_as, "same-as member count")?;
-    let direct_value_count = result
-        .direct_types
-        .iter()
-        .try_fold(0_u32, |total, (_, values)| {
-            checked_nested_total(total, values.len())
-        })?;
-    let object_value_count = result
-        .object_targets
-        .iter()
-        .try_fold(0_u32, |total, (_, _, values)| {
-            checked_nested_total(total, values.len())
-        })?;
-    let data_value_count = result
-        .data_targets
-        .iter()
-        .try_fold(0_u32, |total, (_, _, values)| {
-            checked_nested_total(total, values.len())
-        })?;
-    let direct_count = usize_to_u32(result.direct_types.len(), "direct-type row count")?;
-    let object_count = usize_to_u32(result.object_targets.len(), "object-target row count")?;
-    let data_count = usize_to_u32(result.data_targets.len(), "data-target row count")?;
-    let different_count = usize_to_u32(result.different_from.len(), "different-from count")?;
+    encode_realization_parts(
+        &result.same_as,
+        &result.direct_types,
+        &result.object_targets,
+        &result.data_targets,
+        &result.different_from,
+    )
+}
 
-    let payload_length = realization_payload_length(
-        result,
+/// Encode an immutable validated realization without cloning its potentially large tables.
+pub fn encode_realization_ids(result: &RealizationIds) -> NativeResult<Vec<u8>> {
+    encode_realization_parts(
+        result.same_as(),
+        result.direct_types(),
+        result.object_targets(),
+        result.data_targets(),
+        result.different_from(),
+    )
+}
+
+fn encode_realization_parts(
+    same_as: &[Vec<u32>],
+    direct_types: &[(u32, Vec<u32>)],
+    object_targets: &[(u32, u32, Vec<u32>)],
+    data_targets: &[(u32, u32, Vec<u32>)],
+    different_from: &[(u32, u32)],
+) -> NativeResult<Vec<u8>> {
+    validate_realization_parts(
+        same_as,
+        direct_types,
+        object_targets,
+        data_targets,
+        different_from,
+    )?;
+    let group_count = usize_to_u32(same_as.len(), "same-as group count")?;
+    let individual_count = count_nested(same_as, "same-as member count")?;
+    let direct_value_count = direct_types.iter().try_fold(0_u32, |total, (_, values)| {
+        checked_nested_total(total, values.len())
+    })?;
+    let object_value_count = object_targets
+        .iter()
+        .try_fold(0_u32, |total, (_, _, values)| {
+            checked_nested_total(total, values.len())
+        })?;
+    let data_value_count = data_targets
+        .iter()
+        .try_fold(0_u32, |total, (_, _, values)| {
+            checked_nested_total(total, values.len())
+        })?;
+    let direct_count = usize_to_u32(direct_types.len(), "direct-type row count")?;
+    let object_count = usize_to_u32(object_targets.len(), "object-target row count")?;
+    let data_count = usize_to_u32(data_targets.len(), "data-target row count")?;
+    let different_count = usize_to_u32(different_from.len(), "different-from count")?;
+
+    let payload_length = realization_payload_length(RealizationCounts {
+        groups: same_as.len(),
+        direct_rows: direct_types.len(),
+        object_rows: object_targets.len(),
+        data_rows: data_targets.len(),
+        different_pairs: different_from.len(),
         individual_count,
         direct_value_count,
         object_value_count,
         data_value_count,
-    )?;
+    })?;
     let mut payload = Vec::new();
     payload.try_reserve_exact(payload_length).map_err(|_| {
         NativeError::invariant("realization-result payload allocation failed before encoding")
@@ -220,11 +252,11 @@ pub fn encode_realization(result: &RealizationWireResult) -> NativeResult<Vec<u8
             0,
         ],
     );
-    write_offsets_and_values(&mut payload, result.same_as.iter().map(Vec::as_slice))?;
-    write_rows2(&mut payload, &result.direct_types)?;
-    write_rows3(&mut payload, &result.object_targets)?;
-    write_rows3(&mut payload, &result.data_targets)?;
-    for &(left, right) in &result.different_from {
+    write_offsets_and_values(&mut payload, same_as.iter().map(Vec::as_slice))?;
+    write_rows2(&mut payload, direct_types)?;
+    write_rows3(&mut payload, object_targets)?;
+    write_rows3(&mut payload, data_targets)?;
+    for &(left, right) in different_from {
         let pair: [u32; 2] = (left, right).into();
         write_u32s(&mut payload, &pair);
     }
@@ -242,14 +274,20 @@ pub fn encode_delta(outcome: DeltaWireOutcome) -> NativeResult<Vec<u8>> {
     finish_document(ResultKind::Delta, 1, payload)
 }
 
-fn validate_realization(result: &RealizationWireResult) -> NativeResult<()> {
-    if result.same_as.windows(2).any(|pair| pair[0] >= pair[1]) {
+fn validate_realization_parts(
+    same_as: &[Vec<u32>],
+    direct_types: &[(u32, Vec<u32>)],
+    object_targets: &[(u32, u32, Vec<u32>)],
+    data_targets: &[(u32, u32, Vec<u32>)],
+    different_from: &[(u32, u32)],
+) -> NativeResult<()> {
+    if same_as.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(NativeError::invariant(
             "same-as groups are not canonically sorted",
         ));
     }
     let mut individuals = BTreeSet::new();
-    for group in &result.same_as {
+    for group in same_as {
         if group.is_empty() || group.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(NativeError::invariant(
                 "same-as group is empty or noncanonical",
@@ -264,11 +302,10 @@ fn validate_realization(result: &RealizationWireResult) -> NativeResult<()> {
             ));
         }
     }
-    let group_count = usize_to_u32(result.same_as.len(), "same-as group count")?;
-    validate_rows2(&result.direct_types, group_count, "direct-type")?;
-    validate_rows3(&result.object_targets, group_count, "object-target")?;
-    if result
-        .object_targets
+    let group_count = usize_to_u32(same_as.len(), "same-as group count")?;
+    validate_rows2(direct_types, group_count, "direct-type")?;
+    validate_rows3(object_targets, group_count, "object-target")?;
+    if object_targets
         .iter()
         .any(|(_, _, targets)| targets.iter().any(|target| *target >= group_count))
     {
@@ -276,13 +313,9 @@ fn validate_realization(result: &RealizationWireResult) -> NativeResult<()> {
             "object-target row references an absent same-as group",
         ));
     }
-    validate_rows3(&result.data_targets, group_count, "data-target")?;
-    if result
-        .different_from
-        .windows(2)
-        .any(|pair| pair[0] >= pair[1])
-        || result
-            .different_from
+    validate_rows3(data_targets, group_count, "data-target")?;
+    if different_from.windows(2).any(|pair| pair[0] >= pair[1])
+        || different_from
             .iter()
             .any(|&(left, right)| left >= right || right >= group_count)
     {
@@ -325,33 +358,39 @@ fn validate_rows3(
     Ok(())
 }
 
-fn realization_payload_length(
-    result: &RealizationWireResult,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RealizationCounts {
+    groups: usize,
+    direct_rows: usize,
+    object_rows: usize,
+    data_rows: usize,
+    different_pairs: usize,
     individual_count: u32,
     direct_value_count: u32,
     object_value_count: u32,
     data_value_count: u32,
-) -> NativeResult<usize> {
-    let group_offsets = result
-        .same_as
-        .len()
+}
+
+fn realization_payload_length(counts: RealizationCounts) -> NativeResult<usize> {
+    let group_offsets = counts
+        .groups
         .checked_add(1)
         .ok_or_else(|| NativeError::invariant("same-as offset count overflow"))?;
     let words = group_offsets
-        .checked_add(usize::try_from(individual_count).unwrap_or(usize::MAX))
-        .and_then(|value| value.checked_add(result.direct_types.len().saturating_mul(3)))
+        .checked_add(usize::try_from(counts.individual_count).unwrap_or(usize::MAX))
+        .and_then(|value| value.checked_add(counts.direct_rows.saturating_mul(3)))
         .and_then(|value| {
-            value.checked_add(usize::try_from(direct_value_count).unwrap_or(usize::MAX))
+            value.checked_add(usize::try_from(counts.direct_value_count).unwrap_or(usize::MAX))
         })
-        .and_then(|value| value.checked_add(result.object_targets.len().saturating_mul(4)))
+        .and_then(|value| value.checked_add(counts.object_rows.saturating_mul(4)))
         .and_then(|value| {
-            value.checked_add(usize::try_from(object_value_count).unwrap_or(usize::MAX))
+            value.checked_add(usize::try_from(counts.object_value_count).unwrap_or(usize::MAX))
         })
-        .and_then(|value| value.checked_add(result.data_targets.len().saturating_mul(4)))
+        .and_then(|value| value.checked_add(counts.data_rows.saturating_mul(4)))
         .and_then(|value| {
-            value.checked_add(usize::try_from(data_value_count).unwrap_or(usize::MAX))
+            value.checked_add(usize::try_from(counts.data_value_count).unwrap_or(usize::MAX))
         })
-        .and_then(|value| value.checked_add(result.different_from.len().saturating_mul(2)))
+        .and_then(|value| value.checked_add(counts.different_pairs.saturating_mul(2)))
         .ok_or_else(|| NativeError::invariant("realization-result word count overflow"))?;
     REALIZATION_PREFIX_LEN
         .checked_add(checked_bytes(words, 4, "realization payload")?)

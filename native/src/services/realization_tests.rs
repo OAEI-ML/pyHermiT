@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::error::{ErrorKind, NativeError, NativeResult};
-use crate::result_wire::{encode_realization, RealizationWireResult};
+use crate::result_wire::{encode_realization, encode_realization_ids, RealizationWireResult};
 use crate::session::{NeverAbort, OperationControl};
 
 use super::{
@@ -202,9 +202,10 @@ fn canonical_builder_groups_equality_and_excludes_non_named_witnesses() -> Nativ
 #[test]
 fn conversion_to_result_wire_is_exact_and_consuming_path_is_zero_copy() -> NativeResult<()> {
     let result = build_realization_ids(&fixture(), RealizationLimits::default(), &NeverAbort)?;
+    let direct_encoding = encode_realization_ids(result.ids().as_ref())?;
     let cloned_wire = result.to_wire_result();
     assert_eq!(cloned_wire.object_targets, vec![(0, 42, vec![1, 2])]);
-    assert!(!encode_realization(&cloned_wire)?.is_empty());
+    assert_eq!(encode_realization(&cloned_wire)?, direct_encoding);
 
     let owned = Arc::try_unwrap(result.into_ids())
         .map_err(|_| NativeError::invariant("test realization unexpectedly remained shared"))?;
