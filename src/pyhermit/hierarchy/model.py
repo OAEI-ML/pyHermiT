@@ -27,9 +27,7 @@ class HierarchyIndex(Generic[T]):
             raise TypeError("hierarchy must be Hierarchy")
         index = dict(self.by_member)
         expected = {
-            member: node_id
-            for node_id, node in enumerate(self.hierarchy.nodes)
-            for member in node
+            member: node_id for node_id, node in enumerate(self.hierarchy.nodes) for member in node
         }
         if index != expected:
             raise ValueError("member index must exactly cover the hierarchy partition")
@@ -61,18 +59,10 @@ class HierarchyIndex(Generic[T]):
         return frozenset(child for child, parent in self.hierarchy.edges if parent == node_id)
 
     def supernodes(self, node_id: int, *, direct: bool) -> frozenset[int]:
-        return (
-            self.direct_supernodes(node_id)
-            if direct
-            else self.hierarchy.ancestors(node_id)
-        )
+        return self.direct_supernodes(node_id) if direct else self.hierarchy.ancestors(node_id)
 
     def subnodes(self, node_id: int, *, direct: bool) -> frozenset[int]:
-        return (
-            self.direct_subnodes(node_id)
-            if direct
-            else self.hierarchy.descendants(node_id)
-        )
+        return self.direct_subnodes(node_id) if direct else self.hierarchy.descendants(node_id)
 
     def groups(self, node_ids: frozenset[int]) -> frozenset[frozenset[T]]:
         return frozenset(self.hierarchy.nodes[node_id] for node_id in node_ids)

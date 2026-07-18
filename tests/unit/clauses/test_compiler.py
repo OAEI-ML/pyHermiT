@@ -277,8 +277,8 @@ def test_compile_captured_bundle_normalizes_and_compiles_exactly_once(
     monkeypatch.setattr(clause_compiler, "normalize_view", normalize_once)
     monkeypatch.setattr(clause_compiler, "compile_normalized", compile_once)
 
-    retained_normalized, retained_program, compiled = (
-        clause_compiler.compile_captured_bundle(captured, ReasonerConfig())
+    retained_normalized, retained_program, compiled = clause_compiler.compile_captured_bundle(
+        captured, ReasonerConfig()
     )
 
     assert normalized_calls == [view_marker]

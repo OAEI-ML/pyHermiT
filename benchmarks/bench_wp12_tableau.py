@@ -36,8 +36,7 @@ class RunResult:
 
 def _workload(individuals: int, depth: int) -> ClauseProgram:
     chain = tuple(
-        owl.Class(owl.IRI(f"urn:bench:wp12:class:{index:04d}"))
-        for index in range(depth + 1)
+        owl.Class(owl.IRI(f"urn:bench:wp12:class:{index:04d}")) for index in range(depth + 1)
     )
     axioms: list[owl.AxiomNode] = [
         owl.SubClassOf(chain[index], chain[index + 1]) for index in range(depth)
@@ -177,9 +176,7 @@ def main() -> int:
         "tableau": {
             "median_seconds": statistics.median(elapsed),
             "p95_seconds": _percentile(elapsed, 0.95),
-            "source_individuals_per_second": (
-                arguments.individuals / statistics.median(elapsed)
-            ),
+            "source_individuals_per_second": (arguments.individuals / statistics.median(elapsed)),
         },
         "tracemalloc_peak_bytes": peak_bytes,
         "cancellation": _cancellation(

@@ -369,14 +369,10 @@ def _generated_cases(rng: random.Random, count: int) -> list[dict[str, Any]]:
         case = _blank(f"generated-finite-{index:03d}", size, exhaustive=True)
         dependency = 10_000 + index * 100
         for variable in range(size):
-            case["ranges"].append(
-                _range(variable, rng.choice(finite_ranges), dependency)
-            )
+            case["ranges"].append(_range(variable, rng.choice(finite_ranges), dependency))
             dependency += 1
             if rng.random() < 0.22:
-                case["ranges"].append(
-                    _range(variable, rng.choice(finite_ranges), dependency)
-                )
+                case["ranges"].append(_range(variable, rng.choice(finite_ranges), dependency))
                 dependency += 1
             if rng.random() < 0.18:
                 case["fixed_values"].append(
@@ -384,9 +380,7 @@ def _generated_cases(rng: random.Random, count: int) -> list[dict[str, Any]]:
                 )
                 dependency += 1
             if rng.random() < 0.24:
-                case["cardinalities"].append(
-                    _cardinality(variable, rng.randint(0, 4), dependency)
-                )
+                case["cardinalities"].append(_cardinality(variable, rng.randint(0, 4), dependency))
                 dependency += 1
         for left in range(size):
             for right in range(left + 1, size):
@@ -500,9 +494,7 @@ def build_fixture() -> dict[str, Any]:
         if case["exhaustive"]:
             exhaustive = solver.solve_exhaustive(executable)
             if exhaustive.satisfiable != result.satisfiable:
-                raise AssertionError(
-                    f"optimized/exhaustive disagreement for {case['name']}"
-                )
+                raise AssertionError(f"optimized/exhaustive disagreement for {case['name']}")
         case["expected"] = _result(result)
         solved[case["name"]] = result
 

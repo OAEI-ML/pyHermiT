@@ -92,9 +92,9 @@ class ClassificationService:
         self._object_property_hierarchy_provider: (
             Callable[[], Hierarchy[owl.ObjectPropertyExpression]] | None
         ) = None
-        self._data_property_hierarchy_provider: (
-            Callable[[], Hierarchy[owl.DataProperty]] | None
-        ) = None
+        self._data_property_hierarchy_provider: Callable[[], Hierarchy[owl.DataProperty]] | None = (
+            None
+        )
         self._classes: HierarchyIndex[owl.Class] | None = None
         self._object_properties: HierarchyIndex[owl.ObjectPropertyExpression] | None = None
         self._data_properties: HierarchyIndex[owl.DataProperty] | None = None
@@ -232,8 +232,7 @@ class ClassificationService:
             and expression in index.by_member
             and index.node_id(expression) == index.hierarchy.bottom_node
         ) or (
-            not isinstance(expression, owl.Class)
-            and not self._service.is_satisfiable(expression)
+            not isinstance(expression, owl.Class) and not self._service.is_satisfiable(expression)
         ):
             # OWL Nothing, and every expression equivalent to it, is disjoint
             # with itself.  A CanonicalSet cannot represent the duplicate pair,
@@ -252,9 +251,7 @@ class ClassificationService:
             if representative != expression
         )
         selected.update(
-            node_id
-            for node_id, entailed in zip(candidate_ids, outcomes, strict=True)
-            if entailed
+            node_id for node_id, entailed in zip(candidate_ids, outcomes, strict=True) if entailed
         )
         return index.groups(frozenset(selected))
 
@@ -402,9 +399,7 @@ class ClassificationService:
         outcomes = self._service._entails_each(
             tuple(owl.DataPropertyDomain(property_, value) for value in representatives)
         )
-        selected = frozenset(
-            node_id for node_id, entailed in enumerate(outcomes) if entailed
-        )
+        selected = frozenset(node_id for node_id, entailed in enumerate(outcomes) if entailed)
         return index.groups(_minimal_nodes(index, selected) if direct else selected)
 
     def classify_slow(
@@ -565,18 +560,17 @@ class ClassificationService:
                 context={"reason": "coarse_hierarchy_type"},
             )
         by_member = {
-            member: node_id
-            for node_id, node in enumerate(hierarchy.nodes)
-            for member in node
+            member: node_id for node_id, node in enumerate(hierarchy.nodes) for member in node
         }
         if frozenset(by_member) != expected:
             raise BackendMismatchError(
                 "coarse classification hierarchy does not cover exactly its public domain",
                 context={"domain": domain.value, "reason": "coarse_hierarchy_partition"},
             )
-        if top not in hierarchy.nodes[hierarchy.top_node] or bottom not in hierarchy.nodes[
-            hierarchy.bottom_node
-        ]:
+        if (
+            top not in hierarchy.nodes[hierarchy.top_node]
+            or bottom not in hierarchy.nodes[hierarchy.bottom_node]
+        ):
             raise BackendMismatchError(
                 "coarse classification hierarchy has invalid top or bottom membership",
                 context={"domain": domain.value, "reason": "coarse_hierarchy_boundary"},
@@ -704,9 +698,7 @@ class ClassificationService:
 
     def _test_object_properties(
         self,
-        pairs: tuple[
-            tuple[owl.ObjectPropertyExpression, owl.ObjectPropertyExpression], ...
-        ],
+        pairs: tuple[tuple[owl.ObjectPropertyExpression, owl.ObjectPropertyExpression], ...],
     ) -> tuple[bool, ...]:
         return self._service._entails_each(
             tuple(owl.SubObjectPropertyOf(sub, sup) for sub, sup in pairs)
@@ -724,9 +716,11 @@ class ClassificationService:
         relations: set[tuple[owl.Class, owl.Class]] = set()
         for record in self._service.normalized.records:
             value = record.statement
-            if isinstance(value, owl.SubClassOf) and isinstance(
-                value.sub_class, owl.Class
-            ) and isinstance(value.super_class, owl.Class):
+            if (
+                isinstance(value, owl.SubClassOf)
+                and isinstance(value.sub_class, owl.Class)
+                and isinstance(value.super_class, owl.Class)
+            ):
                 relations.add((value.sub_class, value.super_class))
             elif isinstance(value, owl.EquivalentClasses):
                 classes = tuple(
@@ -746,9 +740,7 @@ class ClassificationService:
     def _known_object_relations(
         self,
     ) -> frozenset[tuple[owl.ObjectPropertyExpression, owl.ObjectPropertyExpression]]:
-        relations: set[
-            tuple[owl.ObjectPropertyExpression, owl.ObjectPropertyExpression]
-        ] = set()
+        relations: set[tuple[owl.ObjectPropertyExpression, owl.ObjectPropertyExpression]] = set()
 
         def include(
             sub: owl.ObjectPropertyExpression,
@@ -931,9 +923,7 @@ class ClassificationService:
         if bottom_entailed:
             selected.add(index.hierarchy.bottom_node)
         selected.update(
-            node_id
-            for node_id, entailed in zip(candidate_ids, outcomes, strict=True)
-            if entailed
+            node_id for node_id, entailed in zip(candidate_ids, outcomes, strict=True) if entailed
         )
         return index.groups(frozenset(selected))
 
@@ -955,9 +945,7 @@ class ClassificationService:
             for value in representatives
         )
         outcomes = self._service._entails_each(axioms)
-        selected = frozenset(
-            node_id for node_id, entailed in enumerate(outcomes) if entailed
-        )
+        selected = frozenset(node_id for node_id, entailed in enumerate(outcomes) if entailed)
         return index.groups(_minimal_nodes(index, selected) if direct else selected)
 
     def _require_consistent(self) -> None:
@@ -1036,9 +1024,7 @@ def _semantic_boundary(
     boundary: set[int] = set()
     while frontier:
         successors = {
-            node: (
-                index.direct_supernodes(node) if upward else index.direct_subnodes(node)
-            )
+            node: (index.direct_supernodes(node) if upward else index.direct_subnodes(node))
             for node in frontier
         }
         candidates = tuple(
@@ -1061,9 +1047,7 @@ def _semantic_boundary(
         )
         outcomes = tester(pairs)
         true_candidates = {
-            candidate
-            for candidate, outcome in zip(candidates, outcomes, strict=True)
-            if outcome
+            candidate for candidate, outcome in zip(candidates, outcomes, strict=True) if outcome
         }
         proven_true.update(true_candidates)
         for node in frontier:
@@ -1093,9 +1077,7 @@ def _position_nodes(
             related
             for node in tuple(selected)
             for related in (
-                index.hierarchy.ancestors(node)
-                if upward
-                else index.hierarchy.descendants(node)
+                index.hierarchy.ancestors(node) if upward else index.hierarchy.descendants(node)
             )
         )
     return frozenset(selected)
@@ -1103,9 +1085,7 @@ def _position_nodes(
 
 def _minimal_nodes(index: HierarchyIndex[T], selected: frozenset[int]) -> frozenset[int]:
     return frozenset(
-        node
-        for node in selected
-        if not index.hierarchy.descendants(node).intersection(selected)
+        node for node in selected if not index.hierarchy.descendants(node).intersection(selected)
     )
 
 

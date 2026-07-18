@@ -484,8 +484,7 @@ class RealizationIds:
             for value in types:
                 _validate_u32(value, "class_node_id")
         object_targets = tuple(
-            (subject, prop, tuple(targets))
-            for subject, prop, targets in self.object_targets
+            (subject, prop, tuple(targets)) for subject, prop, targets in self.object_targets
         )
         _validate_target_rows(object_targets, len(groups), "object")
         for _subject, _prop, targets in object_targets:
@@ -493,8 +492,7 @@ class RealizationIds:
                 raise ValueError("object target references an absent same-as group")
 
         data_targets = tuple(
-            (subject, prop, tuple(targets))
-            for subject, prop, targets in self.data_targets
+            (subject, prop, tuple(targets)) for subject, prop, targets in self.data_targets
         )
         _validate_target_rows(data_targets, len(groups), "data")
 

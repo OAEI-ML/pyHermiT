@@ -28,9 +28,7 @@ OPTIONS = LoadOptions(imports=ImportPolicy.IGNORE, backend=BackendPreference.PYT
 def view(*body: str):  # type: ignore[no-untyped-def]
     source = (
         "Prefix(:=<urn:test#>) Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>) "
-        "Ontology(<urn:test:profile> "
-        + " ".join(body)
-        + ")"
+        "Ontology(<urn:test:profile> " + " ".join(body) + ")"
     ).encode()
     return load_snapshot(source, options=OPTIONS)
 
@@ -136,19 +134,19 @@ def test_datatype_definitions_literals_facets_and_opaque_policy_are_validated() 
             "Declaration(Datatype(:small))",
             "Declaration(DataProperty(:value))",
             "DatatypeDefinition(:small DatatypeRestriction(xsd:integer "
-            "xsd:minInclusive \"0\"^^xsd:integer))",
+            'xsd:minInclusive "0"^^xsd:integer))',
             "DataPropertyRange(:value :small)",
         )
     )
     malformed = codes(
         "Declaration(DataProperty(:value))",
-        "DataPropertyAssertion(:value :i \"nope\"^^xsd:integer)",
+        'DataPropertyAssertion(:value :i "nope"^^xsd:integer)',
     )
     custom_literal = codes(
         "Declaration(Datatype(:custom))",
         "Declaration(DataProperty(:value))",
         "DatatypeDefinition(:custom xsd:string)",
-        "DataPropertyAssertion(:value :i \"x\"^^:custom)",
+        'DataPropertyAssertion(:value :i "x"^^:custom)',
     )
     unknown_view = view(
         "Declaration(Datatype(:unknown))",
@@ -185,7 +183,7 @@ def test_datatype_definition_uniqueness_acyclicity_and_builtin_rules_are_reporte
     illegal_facet = codes(
         "Declaration(DataProperty(:value))",
         "DataPropertyRange(:value DatatypeRestriction(xsd:boolean "
-        "xsd:minInclusive \"false\"^^xsd:boolean))",
+        'xsd:minInclusive "false"^^xsd:boolean))',
     )
 
     assert "DUPLICATE_DATATYPE_DEFINITION" in duplicate
@@ -234,7 +232,7 @@ def test_anonymous_individual_positions_and_forest_conditions_are_enforced() -> 
     (
         "DifferentIndividuals(_:a :named)",
         "NegativeObjectPropertyAssertion(:p _:a :named)",
-        "NegativeDataPropertyAssertion(:value _:a \"x\")",
+        'NegativeDataPropertyAssertion(:value _:a "x")',
         "ClassAssertion(ObjectOneOf(_:a) :named)",
         "ClassAssertion(ObjectHasValue(:p _:a) :named)",
     ),

@@ -41,21 +41,20 @@ def test_scc_collapse_and_transitive_reduction_are_canonical() -> None:
 
 def test_incremental_modes_match_the_slow_all_pairs_oracle() -> None:
     elements = ("bottom", "a", "a2", "b", "c", "top")
-    true_relations = {
-        (value, value) for value in elements
-    } | {
-        ("bottom", value) for value in elements
-    } | {
-        (value, "top") for value in elements
-    } | {
-        ("a", "a2"),
-        ("a2", "a"),
-        ("a", "b"),
-        ("a2", "b"),
-        ("b", "c"),
-        ("a", "c"),
-        ("a2", "c"),
-    }
+    true_relations = (
+        {(value, value) for value in elements}
+        | {("bottom", value) for value in elements}
+        | {(value, "top") for value in elements}
+        | {
+            ("a", "a2"),
+            ("a2", "a"),
+            ("a", "b"),
+            ("a2", "b"),
+            ("b", "c"),
+            ("a", "c"),
+            ("a2", "c"),
+        }
+    )
 
     def test(pairs):  # type: ignore[no-untyped-def]
         return tuple(pair in true_relations for pair in pairs)

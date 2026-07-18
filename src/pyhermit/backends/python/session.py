@@ -138,9 +138,7 @@ def _combine_query_program(
         permanent.provenance,
         overlay.provenance,
     )
-    clauses = _merge_clauses(
-        ((permanent.clauses, permanent_ids), (overlay.clauses, overlay_ids))
-    )
+    clauses = _merge_clauses(((permanent.clauses, permanent_ids), (overlay.clauses, overlay_ids)))
     positive = _merge_facts(
         ((permanent.positive_facts, permanent_ids), (overlay.positive_facts, overlay_ids))
     )
@@ -534,9 +532,7 @@ def _merge_disjunctions(
     for disjunctions, mapping in sources:
         for disjunction in disjunctions:
             rows = {
-                (fact.predicate_id, fact.arguments): set(
-                    _remap_ids(fact.provenance_ids, mapping)
-                )
+                (fact.predicate_id, fact.arguments): set(_remap_ids(fact.provenance_ids, mapping))
                 for fact in disjunction.disjuncts
             }
             key = tuple(sorted(rows, key=_fact_identity_bytes))

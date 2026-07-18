@@ -88,9 +88,12 @@ def test_maps_hierarchies_in_their_explicit_symbol_domains() -> None:
 
     mapped = mapper.class_hierarchy(raw)
 
-    assert class_ in mapped.nodes[
-        next(index for index, node in enumerate(raw.nodes) if mapper.class_id(class_) in node)
-    ]
+    assert (
+        class_
+        in mapped.nodes[
+            next(index for index, node in enumerate(raw.nodes) if mapper.class_id(class_) in node)
+        ]
+    )
     assert owl.OWL_THING in mapped.nodes[mapped.top_node]
     assert owl.OWL_NOTHING in mapped.nodes[mapped.bottom_node]
     with pytest.raises(BackendMismatchError):
@@ -124,9 +127,10 @@ def test_maps_hierarchies_in_their_explicit_symbol_domains() -> None:
             object_bottom,
         )
     )
-    assert owl.inverse_property(owl.OWL_TOP_OBJECT_PROPERTY) in object_hierarchy.nodes[
-        object_hierarchy.top_node
-    ]
+    assert (
+        owl.inverse_property(owl.OWL_TOP_OBJECT_PROPERTY)
+        in object_hierarchy.nodes[object_hierarchy.top_node]
+    )
     assert mapper.object_property_id(
         owl.inverse_property(owl.OWL_BOTTOM_OBJECT_PROPERTY)
     ) == mapper.object_property_id(owl.OWL_BOTTOM_OBJECT_PROPERTY)
@@ -177,9 +181,7 @@ def test_maps_realization_groups_properties_literals_and_class_nodes() -> None:
 
     assert mapped.same_as[left_group] == frozenset((left,))
     assert mapped.direct_types == ((left_group, frozenset((class_node,))),)
-    assert mapped.object_targets == (
-        (left_group, object_property, frozenset((right_group,))),
-    )
+    assert mapped.object_targets == ((left_group, object_property, frozenset((right_group,))),)
     assert mapped.data_targets == ((left_group, data_property, frozenset((literal,))),)
     assert mapped.different_from == frozenset((tuple(sorted((left_group, right_group))),))
 

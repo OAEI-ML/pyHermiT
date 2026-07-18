@@ -279,9 +279,7 @@ class Reasoner:
         direct: bool = False,
     ) -> frozenset[frozenset[owl.ObjectPropertyExpression]]:
         with self._operation():
-            return self._runtime.classification.super_object_properties(
-                property_, direct=direct
-            )
+            return self._runtime.classification.super_object_properties(property_, direct=direct)
 
     def sub_object_properties(
         self,
@@ -290,9 +288,7 @@ class Reasoner:
         direct: bool = False,
     ) -> frozenset[frozenset[owl.ObjectPropertyExpression]]:
         with self._operation():
-            return self._runtime.classification.sub_object_properties(
-                property_, direct=direct
-            )
+            return self._runtime.classification.sub_object_properties(property_, direct=direct)
 
     def inverse_object_properties(
         self,
@@ -315,9 +311,7 @@ class Reasoner:
         direct: bool = False,
     ) -> frozenset[frozenset[owl.Class]]:
         with self._operation():
-            return self._runtime.classification.object_property_domains(
-                property_, direct=direct
-            )
+            return self._runtime.classification.object_property_domains(property_, direct=direct)
 
     def object_property_ranges(
         self,
@@ -326,9 +320,7 @@ class Reasoner:
         direct: bool = False,
     ) -> frozenset[frozenset[owl.Class]]:
         with self._operation():
-            return self._runtime.classification.object_property_ranges(
-                property_, direct=direct
-            )
+            return self._runtime.classification.object_property_ranges(property_, direct=direct)
 
     def data_property_hierarchy(self) -> Hierarchy[owl.DataProperty]:
         with self._operation():
@@ -348,9 +340,7 @@ class Reasoner:
         direct: bool = False,
     ) -> frozenset[frozenset[owl.DataProperty]]:
         with self._operation():
-            return self._runtime.classification.super_data_properties(
-                property_, direct=direct
-            )
+            return self._runtime.classification.super_data_properties(property_, direct=direct)
 
     def sub_data_properties(
         self,
@@ -359,9 +349,7 @@ class Reasoner:
         direct: bool = False,
     ) -> frozenset[frozenset[owl.DataProperty]]:
         with self._operation():
-            return self._runtime.classification.sub_data_properties(
-                property_, direct=direct
-            )
+            return self._runtime.classification.sub_data_properties(property_, direct=direct)
 
     def disjoint_data_properties(
         self,
@@ -377,9 +365,7 @@ class Reasoner:
         direct: bool = False,
     ) -> frozenset[frozenset[owl.Class]]:
         with self._operation():
-            return self._runtime.classification.data_property_domains(
-                property_, direct=direct
-            )
+            return self._runtime.classification.data_property_domains(property_, direct=direct)
 
     def types(
         self,
@@ -398,9 +384,7 @@ class Reasoner:
         direct: bool = False,
     ) -> bool:
         with self._operation():
-            return self._runtime.realization.has_type(
-                individual, expression, direct=direct
-            )
+            return self._runtime.realization.has_type(individual, expression, direct=direct)
 
     def instances(
         self,
@@ -512,9 +496,7 @@ class Reasoner:
             self._config,
             cancelled=self._cancelled,
         )
-        session = self._factory.create_session(
-            bundle[2], self._config, self._cancellation.token
-        )
+        session = self._factory.create_session(bundle[2], self._config, self._cancellation.token)
         try:
             return self._services(bundle, session)
         except BaseException:
@@ -595,9 +577,7 @@ class Reasoner:
             self._config,
             cancelled=self._cancelled,
         )
-        session = self._factory.create_session(
-            bundle[2], self._config, self._cancellation.token
-        )
+        session = self._factory.create_session(bundle[2], self._config, self._cancellation.token)
         try:
             return session.check()
         finally:
@@ -733,11 +713,7 @@ def _entities(
 ) -> tuple[EntityT, ...]:
     return tuple(
         sorted(
-            (
-                value
-                for value in runtime.entailment.source_signature
-                if isinstance(value, type_)
-            ),
+            (value for value in runtime.entailment.source_signature if isinstance(value, type_)),
             key=lambda value: value.canonical_bytes(),
         )
     )

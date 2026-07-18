@@ -91,16 +91,12 @@ class SubsumptionOracle(Generic[T]):
         self._cancelled = cancelled
         self._known = set(known)
         self._known.update((value, value) for value in self._elements)
-        self._known_successors: dict[T, set[T]] = {
-            value: set() for value in self._elements
-        }
+        self._known_successors: dict[T, set[T]] = {value: set() for value in self._elements}
         for child, parent in self._known:
             if child not in self._known_successors or parent not in self._known_successors:
                 raise ValueError("known relations must reference only classifier elements")
             self._known_successors[child].add(parent)
-        self._cache: dict[tuple[T, T], bool] = {
-            relation: True for relation in self._known
-        }
+        self._cache: dict[tuple[T, T], bool] = {relation: True for relation in self._known}
         # Candidate P-edges are introduced lazily by hierarchy-search frontiers.
         # Eagerly allocating |elements|² pairs would preclude large taxonomies.
         self._possible: set[tuple[T, T]] = set()
@@ -233,11 +229,7 @@ class IncrementalClassifier(Generic[T]):
         known_relations = self._oracle.known
         ordered = tuple(
             sorted(
-                (
-                    value
-                    for value in self._elements
-                    if value not in {self._top, self._bottom}
-                ),
+                (value for value in self._elements if value not in {self._top, self._bottom}),
                 key=lambda value: (
                     sum(child == value for child, _parent in known_relations),
                     self._key(value),
@@ -288,9 +280,7 @@ class SlowAllPairsClassifier(Generic[T]):
             from pyhermit.exceptions import ReasonerInterruptedError
 
             raise ReasonerInterruptedError("classification was interrupted")
-        relations = tuple(
-            (child, parent) for child in self._elements for parent in self._elements
-        )
+        relations = tuple((child, parent) for child in self._elements for parent in self._elements)
         outcomes = tuple(self._tester(relations))
         if len(outcomes) != len(relations) or not all(
             isinstance(value, bool) for value in outcomes
@@ -298,11 +288,7 @@ class SlowAllPairsClassifier(Generic[T]):
             raise RuntimeError("subsumption tester returned an invalid result batch")
         hierarchy = build_hierarchy(
             self._elements,
-            (
-                relation
-                for relation, entailed in zip(relations, outcomes, strict=True)
-                if entailed
-            ),
+            (relation for relation, entailed in zip(relations, outcomes, strict=True) if entailed),
             top=self._top,
             bottom=self._bottom,
             key=self._key,

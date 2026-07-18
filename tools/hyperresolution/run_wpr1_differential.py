@@ -60,9 +60,7 @@ def main() -> int:
         python_paths.append(environment["PYTHONPATH"])
     environment["PYTHONPATH"] = os.pathsep.join(python_paths)
     cargo_parent = str(Path(arguments.cargo).resolve().parent)
-    environment["PATH"] = os.pathsep.join(
-        [cargo_parent, environment.get("PATH", os.defpath)]
-    )
+    environment["PATH"] = os.pathsep.join([cargo_parent, environment.get("PATH", os.defpath)])
     python_gate = _command(
         [
             arguments.python,

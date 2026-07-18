@@ -60,9 +60,7 @@ def test_data_values_preserve_explicit_lexical_aliases_and_never_invent_witnesse
     make_realization: Any,
 ) -> None:
     p, q, other = _data("p"), _data("q"), _data("other")
-    first, alias, unrelated = (
-        _individual(name) for name in ("first", "alias", "unrelated")
-    )
+    first, alias, unrelated = (_individual(name) for name in ("first", "alias", "unrelated"))
     integer = owl.Datatype(owl.IRI(XSD_INTEGER))
     canonical = owl.Literal("1", integer)
     lexical_alias = owl.Literal("01", integer)
@@ -79,9 +77,7 @@ def test_data_values_preserve_explicit_lexical_aliases_and_never_invent_witnesse
     service = harness.realization
 
     assert service.source_literals == frozenset((canonical, lexical_alias))
-    assert service.data_property_values(alias, q) == frozenset(
-        (canonical, lexical_alias)
-    )
+    assert service.data_property_values(alias, q) == frozenset((canonical, lexical_alias))
     assert service.has_data_property_relationship(alias, q, lexical_alias)
     assert service.data_property_values(first, other) == frozenset()
     assert service.data_property_values(first, owl.OWL_TOP_DATA_PROPERTY) == frozenset(
@@ -114,9 +110,7 @@ def test_semantic_functional_merge_drives_same_as_and_grouped_object_answers(
     ).realization
 
     assert service.same_individuals(first) == frozenset((first, second))
-    assert service.object_property_values(source, p) == frozenset(
-        (frozenset((first, second)),)
-    )
+    assert service.object_property_values(source, p) == frozenset((frozenset((first, second)),))
 
 
 def test_generated_object_answers_match_naive_entailment_oracle(

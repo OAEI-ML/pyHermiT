@@ -87,9 +87,7 @@ def _crafted_cases() -> list[dict[str, Any]]:
 
     case = _blank("conflicting-fixed-values", 2)
     case["equalities"].append(_binary(0, 1, [3]))
-    case["fixed_values"].extend(
-        [_record(0, [4], value=2), _record(1, [5], value=4)]
-    )
+    case["fixed_values"].extend([_record(0, [4], value=2), _record(1, [5], value=4)])
     cases.append(case)
 
     case = _blank("empty-domain-intersection", 1)
@@ -112,9 +110,7 @@ def _crafted_cases() -> list[dict[str, Any]]:
     cases.append(case)
 
     case = _blank("fixed-neighbours-share-an-identity", 2)
-    case["fixed_values"].extend(
-        [_record(0, [12], value=4), _record(1, [13], value=5)]
-    )
+    case["fixed_values"].extend([_record(0, [12], value=4), _record(1, [13], value=5)])
     case["inequalities"].append(_binary(0, 1, [14]))
     cases.append(case)
 
@@ -124,36 +120,24 @@ def _crafted_cases() -> list[dict[str, Any]]:
             case["domains"].append(
                 _record(variable, [20 + variable], kind="finite", values=colours)
             )
-        case["inequalities"].extend(
-            [_binary(0, 1, [30]), _binary(1, 2, [31]), _binary(0, 2, [32])]
-        )
+        case["inequalities"].extend([_binary(0, 1, [30]), _binary(1, 2, [31]), _binary(0, 2, [32])])
         cases.append(case)
 
     case = _blank("unbounded-complement-domain", 2)
-    case["domains"].append(
-        _record(0, [40], kind="complement-finite", values=[2, 4])
-    )
+    case["domains"].append(_record(0, [40], kind="complement-finite", values=[2, 4]))
     case["inequalities"].append(_binary(0, 1, [41]))
     case["cardinalities"].append(_record(0, [42], minimum=4_294_967_295))
     cases.append(case)
 
     case = _blank("duplicate-edge-selects-smallest-dependency-set", 2)
-    case["fixed_values"].extend(
-        [_record(0, [43], value=4), _record(1, [44], value=5)]
-    )
-    case["inequalities"].extend(
-        [_binary(0, 1, [50, 51]), _binary(0, 1, [49])]
-    )
+    case["fixed_values"].extend([_record(0, [43], value=4), _record(1, [44], value=5)])
+    case["inequalities"].extend([_binary(0, 1, [50, 51]), _binary(0, 1, [49])])
     cases.append(case)
 
     case = _blank("elimination-preserves-minimal-active-clash", 4)
     for variable in range(3):
-        case["domains"].append(
-            _record(variable, [60 + variable], kind="finite", values=[2, 4])
-        )
-    case["domains"].append(
-        _record(3, [63], kind="finite", values=[2, 4, 6, 7])
-    )
+        case["domains"].append(_record(variable, [60 + variable], kind="finite", values=[2, 4]))
+    case["domains"].append(_record(3, [63], kind="finite", values=[2, 4, 6, 7]))
     case["inequalities"].extend(
         [
             _binary(0, 1, [64]),
@@ -165,17 +149,13 @@ def _crafted_cases() -> list[dict[str, Any]]:
     cases.append(case)
 
     case = _blank("complement-excludes-fixed-value", 1)
-    case["domains"].append(
-        _record(0, [70], kind="complement-finite", values=[4])
-    )
+    case["domains"].append(_record(0, [70], kind="complement-finite", values=[4]))
     case["fixed_values"].append(_record(0, [71], value=5))
     cases.append(case)
 
     case = _blank("lexical-aliases-share-data-identity", 2)
     case["equalities"].append(_binary(0, 1, [72]))
-    case["fixed_values"].extend(
-        [_record(0, [73], value=2), _record(1, [74], value=3)]
-    )
+    case["fixed_values"].extend([_record(0, [73], value=2), _record(1, [74], value=3)])
     cases.append(case)
 
     case = _blank("explicit-empty-enumeration", 1)
@@ -194,9 +174,7 @@ def _random_finite_cases(rng: random.Random, count: int) -> list[dict[str, Any]]
         for variable in case["variables"]:
             value_count = rng.randint(0, 5)
             values = sorted(rng.sample(palette_indexes, value_count))
-            case["domains"].append(
-                _record(variable, [dependency], kind="finite", values=values)
-            )
+            case["domains"].append(_record(variable, [dependency], kind="finite", values=values))
             dependency += 1
             if rng.random() < 0.18:
                 second_count = rng.randint(0, 4)

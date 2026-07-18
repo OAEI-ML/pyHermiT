@@ -23,16 +23,19 @@ _RECORD = struct.Struct("<HBBIQQII32sB7xII")
 
 def _document(records: list[bytes], strings: bytes = b"") -> bytes:
     payload = b"".join(records) + strings
-    return _HEADER.pack(
-        EVENT_MAGIC,
-        1,
-        EVENT_RECORD_LENGTH,
-        0,
-        EVENT_HEADER_LENGTH + len(payload),
-        len(records),
-        len(strings),
-        hashlib.sha256(payload).digest(),
-    ) + payload
+    return (
+        _HEADER.pack(
+            EVENT_MAGIC,
+            1,
+            EVENT_RECORD_LENGTH,
+            0,
+            EVENT_HEADER_LENGTH + len(payload),
+            len(records),
+            len(strings),
+            hashlib.sha256(payload).digest(),
+        )
+        + payload
+    )
 
 
 def _record(

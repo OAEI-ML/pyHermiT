@@ -509,9 +509,7 @@ def compile_query_program(
     selected_limits = limits or CompilationLimits()
     if not isinstance(selected_limits, CompilationLimits):
         raise TypeError("limits must be CompilationLimits or None")
-    contextual_digest = (
-        None if query_context is None else query_context.permanent_program_sha256
-    )
+    contextual_digest = None if query_context is None else query_context.permanent_program_sha256
     if (
         permanent_program_sha256 is not None
         and contextual_digest is not None
@@ -604,9 +602,7 @@ def compile_query_program(
         if query_context is not None
         else _predicate_specs_from_registry(permanent_program.predicates)
     )
-    base_set = (
-        query_context.predicate_set if query_context is not None else frozenset(base_specs)
-    )
+    base_set = query_context.predicate_set if query_context is not None else frozenset(base_specs)
     state.predicates.update(base_specs)
     for record in query.records:
         state.checkpoint()
@@ -2877,9 +2873,7 @@ def _freeze_predicates(
         )
         if len(selected_base_specs) != len(base_registry.predicates):
             raise ValueError("base_specs must align with base_registry")
-        selected_base_set = (
-            frozenset(selected_base_specs) if base_set is None else base_set
-        )
+        selected_base_set = frozenset(selected_base_specs) if base_set is None else base_set
         if len(selected_base_set) != len(selected_base_specs):
             raise ValueError("base predicate specs must be structurally unique")
     local_specs = tuple(
@@ -3329,8 +3323,7 @@ def _freeze_datatype_model(
 ) -> DatatypeModelIR:
     if base_model is not None and first_local_symbols is not None:
         unchanged_domains = all(
-            len(symbols.table.domain(kind).values)
-            == first_local_symbols.get(kind.value)
+            len(symbols.table.domain(kind).values) == first_local_symbols.get(kind.value)
             for kind in (
                 SymbolKind.DATA_RANGE,
                 SymbolKind.SOURCE_LITERAL,
@@ -3338,8 +3331,7 @@ def _freeze_datatype_model(
             )
         )
         has_local_definition = any(
-            isinstance(record.statement, owl.DatatypeDefinition)
-            for record in normalized.records
+            isinstance(record.statement, owl.DatatypeDefinition) for record in normalized.records
         )
         if unchanged_domains and not has_local_definition:
             return base_model

@@ -30,9 +30,7 @@ class MappedRealization:
 
     same_as: tuple[frozenset[owl.NamedIndividual], ...]
     direct_types: tuple[tuple[int, frozenset[int]], ...]
-    object_targets: tuple[
-        tuple[int, owl.ObjectPropertyExpression, frozenset[int]], ...
-    ]
+    object_targets: tuple[tuple[int, owl.ObjectPropertyExpression, frozenset[int]], ...]
     data_targets: tuple[tuple[int, owl.DataProperty, frozenset[owl.Literal]], ...]
     different_from: frozenset[tuple[int, int]]
 
@@ -80,9 +78,7 @@ class CompiledResultMapper:
             owl.OWL_BOTTOM_OBJECT_PROPERTY,
             *source_object_properties,
         }
-        object_properties.update(
-            owl.inverse_property(value) for value in source_object_properties
-        )
+        object_properties.update(owl.inverse_property(value) for value in source_object_properties)
         data_properties = {
             owl.OWL_TOP_DATA_PROPERTY,
             owl.OWL_BOTTOM_DATA_PROPERTY,
@@ -246,9 +242,7 @@ class CompiledResultMapper:
             direct_types.append((group_id, frozenset(type_nodes)))
 
         _canonical_rows(value.object_targets, "object-target")
-        object_targets: list[
-            tuple[int, owl.ObjectPropertyExpression, frozenset[int]]
-        ] = []
+        object_targets: list[tuple[int, owl.ObjectPropertyExpression, frozenset[int]]] = []
         for group_id, property_id, targets in value.object_targets:
             _require_group(group_id, groups, "object-property subject")
             if any(target >= len(groups) for target in targets):
@@ -269,9 +263,7 @@ class CompiledResultMapper:
             )
 
         _canonical_rows(value.data_targets, "data-target")
-        data_targets: list[
-            tuple[int, owl.DataProperty, frozenset[owl.Literal]]
-        ] = []
+        data_targets: list[tuple[int, owl.DataProperty, frozenset[owl.Literal]]] = []
         for group_id, property_id, targets in value.data_targets:
             _require_group(group_id, groups, "data-property subject")
             data_targets.append(

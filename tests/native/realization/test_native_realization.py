@@ -134,8 +134,7 @@ def test_native_realization_matches_python_for_every_answer_table_and_caches() -
         assert object_rows[(k_group, inverse)] == reference.object_property_values(k, inverse)
 
         data_rows = {
-            (subject, property_): values
-            for subject, property_, values in realized.data_targets
+            (subject, property_): values for subject, property_, values in realized.data_targets
         }
         assert data_rows[(i_group, d)] == reference.data_property_values(i, d)
         assert (min(i_group, k_group), max(i_group, k_group)) in realized.different_from
@@ -224,9 +223,7 @@ def test_realization_rejects_inconsistent_ontology() -> None:
 
 
 def test_ordinary_large_abox_does_not_generate_quadratic_same_as_queries() -> None:
-    declarations = tuple(
-        f"Declaration(NamedIndividual(:ordinary-{index}))" for index in range(250)
-    )
+    declarations = tuple(f"Declaration(NamedIndividual(:ordinary-{index}))" for index in range(250))
     reference, session, _mapper = native_runtime(functional(*declarations))
     try:
         realized = decode_realization(session.realize())

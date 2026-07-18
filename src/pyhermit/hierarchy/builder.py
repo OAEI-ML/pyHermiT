@@ -32,10 +32,7 @@ def build_hierarchy(
     if not callable(key):
         raise TypeError("key must be callable")
     semantic_edges = set(relations)
-    if any(
-        child not in values or parent not in values
-        for child, parent in semantic_edges
-    ):
+    if any(child not in values or parent not in values for child, parent in semantic_edges):
         raise ValueError("relations must reference only classified elements")
     scc_edges = set(semantic_edges)
     for value in values:
@@ -107,15 +104,10 @@ def hierarchy_from_partition(
     new_id = {old_id: index for index, old_id in enumerate(ordered_old_ids)}
     nodes = tuple(frozenset(members[old_id]) for old_id in ordered_old_ids)
     materialized_edges = set(edges)
-    if any(
-        child not in new_id or parent not in new_id
-        for child, parent in materialized_edges
-    ):
+    if any(child not in new_id or parent not in new_id for child, parent in materialized_edges):
         raise ValueError("hierarchy edge references an absent partition node")
     remapped = {
-        (new_id[child], new_id[parent])
-        for child, parent in materialized_edges
-        if child != parent
+        (new_id[child], new_id[parent]) for child, parent in materialized_edges if child != parent
     }
     reduced = _transitive_reduction(remapped, len(nodes))
     hierarchy = Hierarchy(
@@ -126,11 +118,7 @@ def hierarchy_from_partition(
     )
     return HierarchyIndex(
         hierarchy,
-        {
-            member: node_id
-            for node_id, node in enumerate(hierarchy.nodes)
-            for member in node
-        },
+        {member: node_id for node_id, node in enumerate(hierarchy.nodes) for member in node},
     )
 
 
@@ -151,9 +139,7 @@ def relation_closure(
         for child in values:
             if pivot in successors[child]:
                 successors[child].update(pivot_successors)
-    return frozenset(
-        (child, parent) for child, parents in successors.items() for parent in parents
-    )
+    return frozenset((child, parent) for child, parents in successors.items() for parent in parents)
 
 
 def _strongly_connected_components(
@@ -235,11 +221,7 @@ def _transitive_reduction(
         successors[edge[0]].remove(edge[1])
         if not _reachable(successors, edge[0], edge[1]):
             successors[edge[0]].add(edge[1])
-    return frozenset(
-        (child, parent)
-        for child, parents in successors.items()
-        for parent in parents
-    )
+    return frozenset((child, parent) for child, parents in successors.items() for parent in parents)
 
 
 def _reachable(

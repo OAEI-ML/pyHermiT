@@ -19,9 +19,7 @@ OPTIONS = LoadOptions(imports=ImportPolicy.IGNORE, backend=BackendPreference.PYT
 
 def functional(identity: str, *body: str) -> bytes:
     return (
-        f"Prefix(:=<urn:{identity}#>) Ontology(<urn:{identity}> "
-        + " ".join(body)
-        + ")"
+        f"Prefix(:=<urn:{identity}#>) Ontology(<urn:{identity}> " + " ".join(body) + ")"
     ).encode()
 
 

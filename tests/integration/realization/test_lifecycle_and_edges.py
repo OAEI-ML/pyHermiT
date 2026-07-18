@@ -45,9 +45,7 @@ def test_fresh_individual_builtins_and_disallow_policy(make_realization: Any) ->
 
 def test_inconsistent_ontology_rejects_realization_answers(make_realization: Any) -> None:
     individual = _individual("inconsistent")
-    service = make_realization(
-        (owl.ClassAssertion(owl.OWL_NOTHING, individual),)
-    ).realization
+    service = make_realization((owl.ClassAssertion(owl.OWL_NOTHING, individual),)).realization
 
     with pytest.raises(InconsistentOntologyError):
         service.types(individual)
@@ -109,9 +107,7 @@ def test_coarse_realization_seeds_all_public_caches_atomically(
         )
     )
     hierarchy = harness.classification.class_hierarchy()
-    class_node = next(
-        node_id for node_id, node in enumerate(hierarchy.nodes) if class_ in node
-    )
+    class_node = next(node_id for node_id, node in enumerate(hierarchy.nodes) if class_ in node)
     groups = (frozenset((first,)), frozenset((second,)))
     calls = 0
 
@@ -133,13 +129,11 @@ def test_coarse_realization_seeds_all_public_caches_atomically(
     assert service.types(first, direct=True) == frozenset((frozenset((class_,)),))
     assert service.instances(class_) == frozenset((first,))
     assert service.object_property_values(first, object_property) == frozenset((second,))
-    assert service.object_property_values(
-        first, owl.OWL_TOP_OBJECT_PROPERTY
-    ) == frozenset((first, second))
+    assert service.object_property_values(first, owl.OWL_TOP_OBJECT_PROPERTY) == frozenset(
+        (first, second)
+    )
     assert service.data_property_values(first, data_property) == frozenset((literal,))
-    assert service.data_property_values(
-        first, owl.OWL_TOP_DATA_PROPERTY
-    ) == frozenset((literal,))
+    assert service.data_property_values(first, owl.OWL_TOP_DATA_PROPERTY) == frozenset((literal,))
     assert service.different_individuals(first) == frozenset((second,))
     assert calls == 1
 

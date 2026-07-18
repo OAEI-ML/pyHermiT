@@ -118,9 +118,7 @@ def build_fixture() -> dict[str, Any]:
         compile_literal(_literal(source), compatibility=source.compatibility)
         for source in _sources()
     )
-    payloads = tuple(
-        compile_literal_semantic_payload(value) for value in compiled
-    )
+    payloads = tuple(compile_literal_semantic_payload(value) for value in compiled)
     if not all(isinstance(value, LiteralSemanticPayload) for value in payloads):
         raise AssertionError("known fixture datatype unexpectedly compiled as opaque")
     literals = [

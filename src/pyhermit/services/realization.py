@@ -28,8 +28,7 @@ from .classification import ClassificationService
 from .entailment import EntailmentService
 
 IndividualResults: TypeAlias = (
-    frozenset[owl.NamedIndividual]
-    | frozenset[frozenset[owl.NamedIndividual]]
+    frozenset[owl.NamedIndividual] | frozenset[frozenset[owl.NamedIndividual]]
 )
 T = TypeVar("T", owl.NamedIndividual, owl.Class)
 
@@ -220,16 +219,9 @@ class RealizationService:
         if retained is None:
             operation_id, started = self._start("instances", len(groups))
             outcomes = self._evaluate(
-                tuple(
-                    owl.ClassAssertion(expression, _representative(group))
-                    for group in groups
-                )
+                tuple(owl.ClassAssertion(expression, _representative(group)) for group in groups)
             )
-            selected = frozenset(
-                index
-                for index, entailed in enumerate(outcomes)
-                if entailed
-            )
+            selected = frozenset(index for index, entailed in enumerate(outcomes) if entailed)
             self._checkpoint()
             self._instance_groups[key] = selected
             retained = selected
@@ -267,9 +259,7 @@ class RealizationService:
         key = canonical.canonical_bytes()
         retained = self._different_groups.get(key)
         if retained is None:
-            candidates = tuple(
-                index for index in range(len(groups)) if index != own
-            )
+            candidates = tuple(index for index in range(len(groups)) if index != own)
             outcomes = self._evaluate(
                 tuple(
                     owl.DifferentIndividuals(
@@ -279,9 +269,7 @@ class RealizationService:
                 )
             )
             selected = frozenset(
-                index
-                for index, entailed in zip(candidates, outcomes, strict=True)
-                if entailed
+                index for index, entailed in zip(candidates, outcomes, strict=True) if entailed
             )
             self._checkpoint()
             self._different_groups[key] = selected
@@ -313,9 +301,7 @@ class RealizationService:
                 _representative(subject_group),
                 property_,
             )
-            names = frozenset(
-                target for group in targets for target in group
-            )
+            names = frozenset(target for group in targets for target in group)
             if names:
                 answers.update((subject, names) for subject in subject_group)
         return MappingProxyType(
@@ -331,9 +317,7 @@ class RealizationService:
         _require_named_individual(subject)
         _require_object_property(property_)
         _require_named_individual(object_)
-        return self._evaluate(
-            (owl.ObjectPropertyAssertion(property_, subject, object_),)
-        )[0]
+        return self._evaluate((owl.ObjectPropertyAssertion(property_, subject, object_),))[0]
 
     def data_property_values(
         self,
@@ -390,13 +374,10 @@ class RealizationService:
         representatives = tuple(_representative(node) for node in hierarchy.nodes)
         outcomes = self._evaluate(
             tuple(
-                owl.ClassAssertion(representative, individual)
-                for representative in representatives
+                owl.ClassAssertion(representative, individual) for representative in representatives
             )
         )
-        selected = frozenset(
-            node for node, entailed in enumerate(outcomes) if entailed
-        )
+        selected = frozenset(node for node, entailed in enumerate(outcomes) if entailed)
         self._checkpoint()
         self._type_nodes[key] = selected
         return selected
@@ -404,9 +385,7 @@ class RealizationService:
     def _minimal_type_nodes(self, selected: frozenset[int]) -> frozenset[int]:
         hierarchy = self._classification.class_hierarchy()
         return frozenset(
-            node
-            for node in selected
-            if not hierarchy.descendants(node).intersection(selected)
+            node for node in selected if not hierarchy.descendants(node).intersection(selected)
         )
 
     def _is_direct_instance(
@@ -419,9 +398,7 @@ class RealizationService:
             return True
         hierarchy = self._classification.class_hierarchy()
         node_by_member = {
-            member: node
-            for node, members in enumerate(hierarchy.nodes)
-            for member in members
+            member: node for node, members in enumerate(hierarchy.nodes) for member in members
         }
         strict_nodes = frozenset(
             node_by_member[_representative(group)] for group in strict_subclasses
@@ -437,9 +414,7 @@ class RealizationService:
         operation_id, started = self._start("same-as", len(self._named))
         self._evaluate(())
         parent = list(range(len(self._named)))
-        source_index = {
-            individual: index for index, individual in enumerate(self._named)
-        }
+        source_index = {individual: index for index, individual in enumerate(self._named)}
 
         def root(value: int) -> int:
             while parent[value] != value:
@@ -454,8 +429,7 @@ class RealizationService:
             asserted = tuple(
                 individual
                 for individual in statement.individuals
-                if isinstance(individual, owl.NamedIndividual)
-                and individual in source_index
+                if isinstance(individual, owl.NamedIndividual) and individual in source_index
             )
             if len(asserted) < 2:
                 continue
@@ -468,20 +442,14 @@ class RealizationService:
         seed_groups: dict[int, set[owl.NamedIndividual]] = {}
         for index, individual in enumerate(self._named):
             seed_groups.setdefault(root(index), set()).add(individual)
-        representatives = tuple(
-            _representative(frozenset(group))
-            for group in seed_groups.values()
-        )
+        representatives = tuple(_representative(frozenset(group)) for group in seed_groups.values())
         pairs = (
             tuple(itertools.combinations(representatives, 2))
             if _semantic_equality_possible(self._service)
             else ()
         )
         outcomes = self._evaluate(
-            tuple(
-                owl.SameIndividual(owl.CanonicalSet(pair))
-                for pair in pairs
-            )
+            tuple(owl.SameIndividual(owl.CanonicalSet(pair)) for pair in pairs)
         )
         for (left, right), entailed in zip(pairs, outcomes, strict=True):
             if not entailed:
@@ -503,11 +471,7 @@ class RealizationService:
             )
         )
         by_member = MappingProxyType(
-            {
-                member: group_id
-                for group_id, group in enumerate(groups)
-                for member in group
-            }
+            {member: group_id for group_id, group in enumerate(groups) for member in group}
         )
         self._checkpoint()
         self._group_by_member = by_member
@@ -541,9 +505,7 @@ class RealizationService:
             )
         )
         selected = tuple(
-            group
-            for group, entailed in zip(candidates, outcomes, strict=True)
-            if entailed
+            group for group, entailed in zip(candidates, outcomes, strict=True) if entailed
         )
         self._checkpoint()
         self._object_targets[key] = selected
@@ -568,11 +530,7 @@ class RealizationService:
                 context={"reason": "coarse_realization_partition"},
             )
         by_member = MappingProxyType(
-            {
-                member: group_id
-                for group_id, group in enumerate(groups)
-                for member in group
-            }
+            {member: group_id for group_id, group in enumerate(groups) for member in group}
         )
 
         hierarchy = self._classification.class_hierarchy()
@@ -597,9 +555,7 @@ class RealizationService:
         instance_groups: dict[bytes, frozenset[int]] = {}
         for node_id, members in enumerate(hierarchy.nodes):
             selected = frozenset(
-                group_id
-                for group_id, type_ids in expanded_by_group.items()
-                if node_id in type_ids
+                group_id for group_id, type_ids in expanded_by_group.items() if node_id in type_ids
             )
             for member in members:
                 instance_groups[member.canonical_bytes()] = selected
@@ -611,9 +567,7 @@ class RealizationService:
             different_mutable[left].add(right)
             different_mutable[right].add(left)
         different_groups = {
-            _representative(group).canonical_bytes(): frozenset(
-                different_mutable[group_id]
-            )
+            _representative(group).canonical_bytes(): frozenset(different_mutable[group_id])
             for group_id, group in enumerate(groups)
         }
 
@@ -647,9 +601,7 @@ class RealizationService:
             subject_key = _representative(group).canonical_bytes()
             for data_property in _data_property_candidates(self._service):
                 data_values[(subject_key, data_property.canonical_bytes())] = (
-                    all_literals
-                    if data_property == owl.OWL_TOP_DATA_PROPERTY
-                    else frozenset()
+                    all_literals if data_property == owl.OWL_TOP_DATA_PROPERTY else frozenset()
                 )
         for subject, data_property, literals in value.data_targets:
             subject_key = _representative(groups[subject]).canonical_bytes()
@@ -682,11 +634,7 @@ class RealizationService:
         if self._same_groups is None:
             return individual
         group_id = self._require_group_index().get(individual)
-        return (
-            individual
-            if group_id is None
-            else _representative(self._same_groups[group_id])
-        )
+        return individual if group_id is None else _representative(self._same_groups[group_id])
 
     def _group_id(self, individual: owl.NamedIndividual) -> int | None:
         self._same_partition()
@@ -792,11 +740,7 @@ def _source_literals(service: EntailmentService) -> tuple[owl.Literal, ...]:
 def _object_property_candidates(
     service: EntailmentService,
 ) -> frozenset[owl.ObjectPropertyExpression]:
-    named = {
-        value
-        for value in service.source_signature
-        if isinstance(value, owl.ObjectProperty)
-    }
+    named = {value for value in service.source_signature if isinstance(value, owl.ObjectProperty)}
     named.update((owl.OWL_TOP_OBJECT_PROPERTY, owl.OWL_BOTTOM_OBJECT_PROPERTY))
     return frozenset(named | {owl.inverse_property(value) for value in named})
 
@@ -806,11 +750,7 @@ def _data_property_candidates(service: EntailmentService) -> frozenset[owl.DataP
         {
             owl.OWL_TOP_DATA_PROPERTY,
             owl.OWL_BOTTOM_DATA_PROPERTY,
-            *(
-                value
-                for value in service.source_signature
-                if isinstance(value, owl.DataProperty)
-            ),
+            *(value for value in service.source_signature if isinstance(value, owl.DataProperty)),
         }
     )
 

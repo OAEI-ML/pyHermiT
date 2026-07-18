@@ -15,9 +15,7 @@ FINGERPRINT = "e6" * 32
 
 
 def _satisfiable(axioms: Iterable[owl.AxiomNode]) -> bool:
-    program = compile_normalized(
-        normalize_axioms(tuple(axioms), logical_fingerprint=FINGERPRINT)
-    )
+    program = compile_normalized(normalize_axioms(tuple(axioms), logical_fingerprint=FINGERPRINT))
     token = CancellationSource().token
     return PythonTableau(program, ReasonerConfig(), token).run(token).satisfiable
 

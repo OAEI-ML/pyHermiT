@@ -177,17 +177,9 @@ def _validate_shape(event: NativeSessionEvent) -> None:
             and event.error_code is None
         )
     elif event.kind == "check_completed":
-        valid = (
-            event.completed > 0
-            and event.satisfiable is not None
-            and event.error_code is None
-        )
+        valid = event.completed > 0 and event.satisfiable is not None and event.error_code is None
     elif event.kind == "query_state_reset":
-        valid = (
-            event.query_key is None
-            and event.satisfiable is None
-            and event.error_code is None
-        )
+        valid = event.query_key is None and event.satisfiable is None and event.error_code is None
     elif event.kind == "operation_completed":
         valid = (
             event.completed == event.total
@@ -197,9 +189,7 @@ def _validate_shape(event: NativeSessionEvent) -> None:
         )
     else:
         valid = (
-            event.query_key is None
-            and event.satisfiable is None
-            and event.error_code is not None
+            event.query_key is None and event.satisfiable is None and event.error_code is not None
         )
     if not valid:
         _fail(f"native {event.kind.replace('_', '-')} event fields are noncanonical")
@@ -207,8 +197,7 @@ def _validate_shape(event: NativeSessionEvent) -> None:
 
 def _stable_code(value: str) -> bool:
     return bool(value) and all(
-        character.isupper() or character.isdigit() or character == "_"
-        for character in value
+        character.isupper() or character.isdigit() or character == "_" for character in value
     )
 
 

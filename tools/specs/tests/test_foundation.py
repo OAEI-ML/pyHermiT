@@ -32,8 +32,7 @@ print(json.dumps(added))
         # Isolated mode prevents editable-install state from hiding import side effects.
         isolated_code = (
             f"sys.path.insert(0, {str(core_src)!r});\n"
-            f"sys.path.insert(0, {str(root / 'src')!r});\n"
-            + code
+            f"sys.path.insert(0, {str(root / 'src')!r});\n" + code
         )
         result = subprocess.run(
             [sys.executable, "-I", "-c", "import sys\n" + isolated_code],

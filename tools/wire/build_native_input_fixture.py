@@ -77,9 +77,7 @@ def _build_program() -> ClauseProgram:
         for kind in sorted(SymbolKind, key=lambda value: value.value)
     )
     symbols = SymbolTable(domains, predicates)
-    provenance = ProvenanceTable(
-        (ProvenanceEntry(0, (hashlib.sha256(b"source").hexdigest(),)),)
-    )
+    provenance = ProvenanceTable((ProvenanceEntry(0, (hashlib.sha256(b"source").hexdigest(),)),))
     facts = tuple(
         sorted(
             (
@@ -192,12 +190,8 @@ def build_fixture_documents() -> dict[str, bytes]:
     datatype_program = compile_normalized(
         normalize_axioms(
             (
-                owl.DataPropertyAssertion(
-                    data_property, individual, owl.Literal("01", datatype)
-                ),
-                owl.DataPropertyAssertion(
-                    data_property, individual, owl.Literal("1", datatype)
-                ),
+                owl.DataPropertyAssertion(data_property, individual, owl.Literal("01", datatype)),
+                owl.DataPropertyAssertion(data_property, individual, owl.Literal("1", datatype)),
             ),
             logical_fingerprint="64" * 32,
         )
@@ -227,9 +221,7 @@ def build_fixture_documents() -> dict[str, bytes]:
         provenance=datatype_program.provenance,
     )
     return {
-        "config": encode_config(
-            ReasonerConfig(timeout=2.5, workers=3, max_memory_bytes=4096)
-        ),
+        "config": encode_config(ReasonerConfig(timeout=2.5, workers=3, max_memory_bytes=4096)),
         "delta": encode_delta(delta),
         "ontology": build_fixture_document(),
         "ontology_datatype": encode_ontology(datatype_ontology),

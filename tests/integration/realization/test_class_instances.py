@@ -101,8 +101,7 @@ def test_generated_realization_matches_naive_entailment_oracle(
     classes = tuple(_class(f"Generated{index}") for index in range(6))
     individuals = tuple(_individual(f"generated-{index}") for index in range(4))
     axioms: list[owl.AxiomNode] = [
-        owl.SubClassOf(classes[index], classes[index + 1])
-        for index in range(len(classes) - 1)
+        owl.SubClassOf(classes[index], classes[index + 1]) for index in range(len(classes) - 1)
     ]
     axioms.extend(
         owl.SubClassOf(classes[left], classes[right])
@@ -124,11 +123,7 @@ def test_generated_realization_matches_naive_entailment_oracle(
         )
         assert harness.realization.instances(expression) == expected_instances
     for individual in individuals:
-        returned = {
-            member
-            for group in harness.realization.types(individual)
-            for member in group
-        }
+        returned = {member for group in harness.realization.types(individual) for member in group}
         expected_types = {
             expression
             for expression in (*classes, owl.OWL_THING, owl.OWL_NOTHING)

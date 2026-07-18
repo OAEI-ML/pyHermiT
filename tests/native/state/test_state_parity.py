@@ -156,8 +156,7 @@ def test_hand_built_mechanics_traces_match_exactly(trace: StateTrace) -> None:
 def test_deterministic_generated_fact_delta_and_disjunction_traces(seed: int) -> None:
     randomizer = random.Random(seed)
     operations = [
-        StateOperation("create_node", {"kind": "root", "name": f"n{index}"})
-        for index in range(4)
+        StateOperation("create_node", {"kind": "root", "name": f"n{index}"}) for index in range(4)
     ]
     operations.append(StateOperation("begin_operation", {}))
     for index in range(24):

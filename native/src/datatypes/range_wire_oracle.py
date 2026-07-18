@@ -72,9 +72,7 @@ def facet(iri: str, lexical: str, datatype_iri: str) -> owl.FacetRestriction:
     return owl.FacetRestriction(owl.IRI(iri), literal((lexical, datatype_iri)))
 
 
-def restriction(
-    datatype_iri: str, *facets: owl.FacetRestriction
-) -> owl.DatatypeRestriction:
+def restriction(datatype_iri: str, *facets: owl.FacetRestriction) -> owl.DatatypeRestriction:
     return owl.DatatypeRestriction(datatype(datatype_iri), owl.CanonicalSet(facets))
 
 
@@ -241,9 +239,7 @@ def build_fixture() -> dict[str, Any]:
         compile_literal(literal(source), compatibility=source.compatibility)
         for source in literal_sources()
     )
-    literal_payloads = tuple(
-        compile_literal_semantic_payload(value) for value in compiled
-    )
+    literal_payloads = tuple(compile_literal_semantic_payload(value) for value in compiled)
     if not all(isinstance(value, LiteralSemanticPayload) for value in literal_payloads):
         raise AssertionError("oracle literals unexpectedly contain opaque semantics")
     ranges: list[dict[str, Any]] = []

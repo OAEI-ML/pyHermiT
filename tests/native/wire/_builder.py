@@ -17,9 +17,7 @@ ONTOLOGY_FINGERPRINT = hashlib.sha256(b"ontology").hexdigest()
 
 def _golden_document(name: str) -> bytes:
     fixture = json.loads(
-        (Path(__file__).parents[2] / "data" / "native-input-v1.json").read_text(
-            encoding="utf-8"
-        )
+        (Path(__file__).parents[2] / "data" / "native-input-v1.json").read_text(encoding="utf-8")
     )
     encoded = fixture["documents"][name]["hex"]
     if not isinstance(encoded, str):

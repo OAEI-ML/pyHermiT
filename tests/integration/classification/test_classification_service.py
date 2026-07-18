@@ -30,9 +30,7 @@ def test_class_hierarchy_equivalence_unsatisfiable_isolated_and_navigation(
     ).classification
 
     hierarchy = service.class_hierarchy()
-    by_member = {
-        member: node_id for node_id, node in enumerate(hierarchy.nodes) for member in node
-    }
+    by_member = {member: node_id for node_id, node in enumerate(hierarchy.nodes) for member in node}
     assert by_member[b] == by_member[c]
     assert hierarchy.nodes[hierarchy.bottom_node] == frozenset((owl.OWL_NOTHING, dead))
     assert isolated in by_member
@@ -41,9 +39,7 @@ def test_class_hierarchy_equivalence_unsatisfiable_isolated_and_navigation(
     assert frozenset((owl.OWL_THING,)) in service.superclasses(a)
     assert frozenset((a,)) in service.subclasses(b)
     assert service.unsatisfiable_classes() == frozenset((owl.OWL_NOTHING, dead))
-    assert service.disjoint_classes(dead) >= frozenset(
-        (frozenset((owl.OWL_NOTHING, dead)),)
-    )
+    assert service.disjoint_classes(dead) >= frozenset((frozenset((owl.OWL_NOTHING, dead)),))
 
 
 def test_coarse_hierarchy_provider_is_lazy_cached_and_fail_closed(
@@ -90,14 +86,10 @@ def test_complex_bottom_expression_is_disjoint_with_bottom_node(
     make_classification: Any,
 ) -> None:
     a = _class("Contradiction")
-    contradiction = owl.ObjectIntersectionOf(
-        owl.CanonicalSet((a, owl.ObjectComplementOf(a)))
-    )
+    contradiction = owl.ObjectIntersectionOf(owl.CanonicalSet((a, owl.ObjectComplementOf(a))))
     service = make_classification((owl.Declaration(a),)).classification
 
-    assert service.disjoint_classes(contradiction) >= frozenset(
-        (frozenset((owl.OWL_NOTHING,)),)
-    )
+    assert service.disjoint_classes(contradiction) >= frozenset((frozenset((owl.OWL_NOTHING,)),))
 
 
 def test_nonasserted_semantic_subsumption_and_complex_query_position(
@@ -173,9 +165,7 @@ def test_classification_cache_is_atomic_and_progress_is_observable(
 
     assert second is first
     assert len(harness.temporary_queries) == query_count
-    classification_events = [
-        event for event in events if event.kind.startswith("classification-")
-    ]
+    classification_events = [event for event in events if event.kind.startswith("classification-")]
     assert [event.kind for event in classification_events] == [
         "classification-started",
         "classification-completed",

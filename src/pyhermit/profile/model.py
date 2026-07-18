@@ -82,9 +82,7 @@ class OWL2DLReport:
     def raise_for_errors(self) -> None:
         if self.conforms:
             return
-        errors = tuple(
-            issue for issue in self.issues if issue.severity is ProfileSeverity.ERROR
-        )
+        errors = tuple(issue for issue in self.issues if issue.severity is ProfileSeverity.ERROR)
         codes = ", ".join(sorted({issue.rule_id for issue in errors}))
         raise OntologyProfileError(
             f"ontology is outside OWL 2 DL: {codes or 'incomplete validation'}",

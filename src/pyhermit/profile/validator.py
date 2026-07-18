@@ -43,10 +43,7 @@ _BUILTIN_KINDS: dict[str, frozenset[owl.EntityKind]] = {
     owl.OWL_BOTTOM_OBJECT_PROPERTY.iri.value: frozenset((owl.EntityKind.OBJECT_PROPERTY,)),
     owl.OWL_TOP_DATA_PROPERTY.iri.value: frozenset((owl.EntityKind.DATA_PROPERTY,)),
     owl.OWL_BOTTOM_DATA_PROPERTY.iri.value: frozenset((owl.EntityKind.DATA_PROPERTY,)),
-    **{
-        iri: frozenset((owl.EntityKind.DATATYPE,))
-        for iri in SUPPORTED_DATATYPES
-    },
+    **{iri: frozenset((owl.EntityKind.DATATYPE,)) for iri in SUPPORTED_DATATYPES},
     **{
         iri: frozenset((owl.EntityKind.ANNOTATION_PROPERTY,))
         for iri in (
@@ -166,9 +163,10 @@ def validate_owl2_dl_view(
                 data_ranges[node.canonical_bytes()] = cast(owl.DataRange, node)
             if isinstance(node, owl.Literal):
                 literals[node.canonical_bytes()] = node
-            if isinstance(node, (owl.DataSomeValuesFrom, owl.DataAllValuesFrom)) and len(
-                node.properties
-            ) != 1:
+            if (
+                isinstance(node, (owl.DataSomeValuesFrom, owl.DataAllValuesFrom))
+                and len(node.properties) != 1
+            ):
                 issues.append(
                     _issue_for_axiom(
                         view,
@@ -245,8 +243,7 @@ def validate_owl2_dl_view(
             compile_literal_semantic_payload(
                 literal,
                 allow_opaque=(
-                    unsupported_datatypes
-                    is UnsupportedDatatypePolicy.IGNORE_WITH_WARNING
+                    unsupported_datatypes is UnsupportedDatatypePolicy.IGNORE_WITH_WARNING
                 ),
             )
         except _DATATYPE_ERRORS as error:
@@ -264,10 +261,7 @@ def validate_owl2_dl_view(
                 type(extension).__name__,
                 tuple(
                     sorted(
-                        {
-                            origin.document_key
-                            for origin in view.origin_index.origins_for(extension)
-                        }
+                        {origin.document_key for origin in view.origin_index.origins_for(extension)}
                     )
                 ),
                 hashlib.sha256(extension.canonical_bytes()).hexdigest(),
@@ -299,8 +293,7 @@ def _ontology_identifier_issues(
                 ProfileIssue(
                     f"OWL2DL_RESERVED_{field}_IRI",
                     ProfileSeverity.ERROR,
-                    f"{field.lower()} IRI must not use reserved OWL/RDF vocabulary: "
-                    f"{iri.value}",
+                    f"{field.lower()} IRI must not use reserved OWL/RDF vocabulary: {iri.value}",
                     "OntologyID",
                     (document.document_key,),
                 )
@@ -333,14 +326,7 @@ def _issue_for_axiom(
         ProfileSeverity.ERROR,
         message,
         type(axiom).__name__ if constructor is None else constructor,
-        tuple(
-            sorted(
-                {
-                    origin.document_key
-                    for origin in view.origin_index.origins_for(axiom)
-                }
-            )
-        ),
+        tuple(sorted({origin.document_key for origin in view.origin_index.origins_for(axiom)})),
         hashlib.sha256(axiom.canonical_bytes()).hexdigest(),
     )
 
@@ -365,8 +351,7 @@ def _validate_top_data_property(
 ) -> None:
     top_iri = owl.OWL_TOP_DATA_PROPERTY.iri.value
     occurs = any(
-        isinstance(node, owl.DataProperty) and node.iri.value == top_iri
-        for node in owl.walk(axiom)
+        isinstance(node, owl.DataProperty) and node.iri.value == top_iri for node in owl.walk(axiom)
     )
     if not occurs:
         return
@@ -425,9 +410,7 @@ def _collect_anonymous_constraints(
         return
     source = axiom.source
     target = axiom.target
-    if isinstance(source, owl.AnonymousIndividual) and isinstance(
-        target, owl.AnonymousIndividual
-    ):
+    if isinstance(source, owl.AnonymousIndividual) and isinstance(target, owl.AnonymousIndividual):
         edges.append((source, target, axiom))
     elif isinstance(source, owl.AnonymousIndividual) and isinstance(target, owl.NamedIndividual):
         count, retained = named_links.get(source, (0, axiom))
@@ -476,9 +459,7 @@ def _validate_anonymous_graph(
         if count <= 1:
             continue
         representative = next(
-            axiom
-            for source, target, axiom in edges
-            if frozenset((source, target)) == pair
+            axiom for source, target, axiom in edges if frozenset((source, target)) == pair
         )
         issues.append(
             _issue_for_axiom(
