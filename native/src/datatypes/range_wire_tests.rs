@@ -18,6 +18,8 @@ use super::*;
 use crate::datatypes::{DatatypeErrorKind, NeverCancel};
 
 const ORACLE: &str = include_str!("range_wire_oracle_v1.json");
+const ALGEBRA_SEED: u64 = 0xA17E_BA5E_2026_0718;
+const ALGEBRA_CASE_COUNT: usize = 512;
 
 #[derive(Deserialize)]
 struct Oracle {
@@ -42,23 +44,8 @@ struct OracleRange {
     range_id: u32,
 }
 
-#[test]
-fn python_oracle_matches_every_wire_kind_facet_and_family() {
-    let fixture: Oracle = serde_json::from_str(ORACLE).expect("oracle JSON");
-    assert_eq!(fixture.schema_version, 1);
-    let limits = RangeWireLimits::default();
-    let model = decode_datatype_range_model(
-        fixture.model_json.as_bytes(),
-        limits,
-        OpaqueRangePolicy::Preserve,
-        &NeverCancel,
-    )
-    .expect("canonical model");
-    assert_eq!(model.range_count(), fixture.ranges.len());
-    assert_eq!(model.definition_count(), 2);
-    assert_eq!(model.opaque_range_ids(), &[17]);
-
-    let identities: Vec<_> = fixture
+fn oracle_identities(fixture: &Oracle, limits: RangeWireLimits) -> Vec<DataIdentity> {
+    fixture
         .literal_payloads
         .iter()
         .enumerate()
@@ -76,7 +63,33 @@ fn python_oracle_matches_every_wire_kind_facet_and_family() {
                 DecodedLiteral::Opaque(_) => panic!("oracle literal cannot be opaque"),
             }
         })
-        .collect();
+        .collect()
+}
+
+fn generated_index(state: &mut u64, modulus: usize) -> usize {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    usize::try_from(*state >> 32).unwrap_or(usize::MAX) % modulus
+}
+
+#[test]
+fn python_oracle_matches_every_wire_kind_facet_and_family() {
+    let fixture: Oracle = serde_json::from_str(ORACLE).expect("oracle JSON");
+    assert_eq!(fixture.schema_version, 1);
+    let limits = RangeWireLimits::default();
+    let model = decode_datatype_range_model(
+        fixture.model_json.as_bytes(),
+        limits,
+        OpaqueRangePolicy::Preserve,
+        &NeverCancel,
+    )
+    .expect("canonical model");
+    assert_eq!(model.range_count(), fixture.ranges.len());
+    assert_eq!(model.definition_count(), 2);
+    assert_eq!(model.opaque_range_ids(), &[17]);
+
+    let identities = oracle_identities(&fixture, limits);
 
     for expected in &fixture.ranges {
         if expected.cardinality == "unsupported" {
@@ -130,6 +143,131 @@ fn python_oracle_matches_every_wire_kind_facet_and_family() {
             expected.label
         );
     }
+}
+
+#[test]
+fn generated_public_algebra_matches_the_python_membership_oracle(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture: Oracle = serde_json::from_str(ORACLE)?;
+    let limits = RangeWireLimits::default();
+    let model = decode_datatype_range_model(
+        fixture.model_json.as_bytes(),
+        limits,
+        OpaqueRangePolicy::Preserve,
+        &NeverCancel,
+    )?;
+    let identities = oracle_identities(&fixture, limits);
+    let supported = fixture
+        .ranges
+        .iter()
+        .filter(|expected| expected.cardinality != "unsupported")
+        .map(|expected| {
+            Ok((
+                model.compile_range(expected.range_id, &NeverCancel)?,
+                expected,
+            ))
+        })
+        .collect::<Result<Vec<_>, DatatypeError>>()?;
+    assert_eq!(supported.len(), 17);
+
+    let mut state = ALGEBRA_SEED;
+    for case_index in 0..ALGEBRA_CASE_COUNT {
+        let left_index = generated_index(&mut state, supported.len());
+        let right_index = generated_index(&mut state, supported.len());
+        let third_index = generated_index(&mut state, supported.len());
+        let operation = generated_index(&mut state, 8);
+        let (left, left_expected) = &supported[left_index];
+        let (right, right_expected) = &supported[right_index];
+        let (third, third_expected) = &supported[third_index];
+        let observed = match operation {
+            0 => left.intersection(right, limits, &NeverCancel)?,
+            1 => {
+                let complement = right.complement(limits, &NeverCancel)?;
+                left.intersection(&complement, limits, &NeverCancel)?
+            }
+            2 => left
+                .intersection(right, limits, &NeverCancel)?
+                .complement(limits, &NeverCancel)?,
+            3 => left.complement(limits, &NeverCancel)?.intersection(
+                &right.complement(limits, &NeverCancel)?,
+                limits,
+                &NeverCancel,
+            )?,
+            4 => left
+                .complement(limits, &NeverCancel)?
+                .complement(limits, &NeverCancel)?,
+            5 => left
+                .intersection(right, limits, &NeverCancel)?
+                .intersection(third, limits, &NeverCancel)?,
+            6 => {
+                let complement = right.complement(limits, &NeverCancel)?;
+                left.intersection(&complement, limits, &NeverCancel)?
+                    .complement(limits, &NeverCancel)?
+            }
+            7 => {
+                let conjunction = left.intersection(right, limits, &NeverCancel)?;
+                left.intersection(
+                    &conjunction.complement(limits, &NeverCancel)?,
+                    limits,
+                    &NeverCancel,
+                )?
+            }
+            _ => {
+                return Err(DatatypeError::invalid("generated algebra operation is absent").into())
+            }
+        };
+        for (value_index, identity) in identities.iter().enumerate() {
+            let left_contains = left_expected.checks[value_index];
+            let right_contains = right_expected.checks[value_index];
+            let third_contains = third_expected.checks[value_index];
+            let expected = match operation {
+                0 => left_contains && right_contains,
+                1 | 7 => left_contains && !right_contains,
+                2 => !(left_contains && right_contains),
+                3 => !left_contains && !right_contains,
+                4 => left_contains,
+                5 => left_contains && right_contains && third_contains,
+                6 => !left_contains || right_contains,
+                _ => {
+                    return Err(
+                        DatatypeError::invalid("generated algebra operation is absent").into(),
+                    )
+                }
+            };
+            assert_eq!(
+                observed.contains(identity, limits, &NeverCancel)?,
+                expected,
+                "generated case={case_index} operation={operation} value={value_index}",
+            );
+        }
+    }
+
+    for (range, expected) in supported {
+        let complement = range.complement(limits, &NeverCancel)?;
+        assert!(
+            range
+                .intersection(&complement, limits, &NeverCancel)?
+                .is_empty_exact(limits, &NeverCancel)?,
+            "{} did not intersect its complement to empty",
+            expected.label
+        );
+        let double_complement = complement.complement(limits, &NeverCancel)?;
+        assert_eq!(
+            double_complement.cardinality(limits, &NeverCancel)?,
+            range.cardinality(limits, &NeverCancel)?,
+            "double-complement cardinality for {}",
+            expected.label,
+        );
+        for (value_index, identity) in identities.iter().enumerate() {
+            assert_eq!(
+                double_complement.contains(identity, limits, &NeverCancel)?,
+                expected.checks[value_index],
+                "double-complement {} value={value_index}",
+                expected.label,
+            );
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -351,6 +489,36 @@ fn decoder_enforces_payload_depth_size_nodes_and_cancellation() {
         &cancellation,
     )
     .unwrap_err();
+    assert_eq!(error.kind, DatatypeErrorKind::Cancelled);
+    assert!(cancellation.0.get() > 0);
+}
+
+#[test]
+fn public_algebra_bounds_dnf_growth_and_cooperatively_cancels() {
+    let payload = canonical_intersection(vec![
+        canonical_datatype_atom(XSD_BOOLEAN),
+        canonical_datatype_atom(XSD_INTEGER),
+    ]);
+    let range = decode_data_range_semantic(
+        &serde_json::to_vec(&payload).unwrap(),
+        RangeWireLimits::default(),
+        OpaqueRangePolicy::Reject,
+        &NeverCancel,
+    )
+    .unwrap();
+
+    let limits = RangeWireLimits {
+        max_dnf_clauses: 1,
+        ..RangeWireLimits::default()
+    };
+    let error = range.complement(limits, &NeverCancel).unwrap_err();
+    assert_eq!(error.kind, DatatypeErrorKind::Resource);
+    assert_eq!(error.limit, Some("max_dnf_clauses"));
+
+    let cancellation = CancelImmediately(Cell::new(0));
+    let error = range
+        .complement(RangeWireLimits::default(), &cancellation)
+        .unwrap_err();
     assert_eq!(error.kind, DatatypeErrorKind::Cancelled);
     assert!(cancellation.0.get() > 0);
 }

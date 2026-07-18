@@ -1,20 +1,88 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+
 use std::collections::BTreeSet;
+use std::fmt::Display;
 use std::hint::black_box;
 
 use _native::datatypes::{
-    solve_component, ConstraintComponent, DataIdentity, DatatypeError, DomainConstraint,
-    DomainKind, EqualityConstraint, ExactRational, InequalityConstraint, NeverCancel, RegexLimits,
-    SolverLimits, XsdRegex,
+    decode_datatype_range_model, solve_component, ConstraintComponent, DataIdentity,
+    DomainConstraint, DomainKind, EqualityConstraint, ExactRational, InequalityConstraint,
+    NativeDataWitness, NeverCancel, OpaqueRangePolicy, RangeWireLimits, RegexLimits, SolverLimits,
+    XsdRegex,
 };
 use _native::model::DependencySet;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use num_bigint::BigInt;
 
-fn require<T>(result: Result<T, DatatypeError>) -> T {
+const MIXED_RANGE_ORACLE: &str = include_str!("../src/datatypes/range_wire_oracle_v1.json");
+
+#[derive(serde::Deserialize)]
+struct MixedRangeOracle {
+    model_json: String,
+}
+
+fn require<T, E: Display>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
         eprintln!("datatype benchmark setup or execution failed: {error}");
         std::process::abort();
     })
+}
+
+fn mixed_ranges(c: &mut Criterion) {
+    let fixture: MixedRangeOracle = require(serde_json::from_str(MIXED_RANGE_ORACLE));
+    let payload = fixture.model_json.into_bytes();
+    let limits = RangeWireLimits::default();
+    let model = require(decode_datatype_range_model(
+        &payload,
+        limits,
+        OpaqueRangePolicy::Preserve,
+        &NeverCancel,
+    ));
+    let selected = require(model.compile_range(12, &NeverCancel));
+    let mixed_identity = DataIdentity::String {
+        text: "x".to_owned(),
+        language: None,
+    };
+    let numeric_exclusions = (0..=3)
+        .map(|value| NativeDataWitness::Concrete(identity(value)))
+        .collect::<BTreeSet<_>>();
+
+    let mut group = c.benchmark_group("datatype_mixed_range");
+    group.bench_function("decode/model_18_ranges", |b| {
+        b.iter(|| {
+            black_box(require(decode_datatype_range_model(
+                black_box(payload.as_slice()),
+                limits,
+                OpaqueRangePolicy::Preserve,
+                &NeverCancel,
+            )))
+        });
+    });
+    group.bench_function("compile/named_numeric_string", |b| {
+        b.iter(|| black_box(require(model.compile_range(black_box(12), &NeverCancel))));
+    });
+    group.bench_function("contains/mixed_string_member", |b| {
+        b.iter(|| {
+            black_box(require(selected.contains(
+                black_box(&mixed_identity),
+                limits,
+                &NeverCancel,
+            )))
+        });
+    });
+    group.bench_function("cardinality/exact_mixed_finite", |b| {
+        b.iter(|| black_box(require(selected.cardinality(limits, &NeverCancel))));
+    });
+    group.bench_function("witness/after_numeric_exclusions", |b| {
+        b.iter(|| {
+            black_box(require(selected.witness(
+                black_box(&numeric_exclusions),
+                limits,
+                &NeverCancel,
+            )))
+        });
+    });
+    group.finish();
 }
 
 fn identity(value: u32) -> DataIdentity {
@@ -191,5 +259,5 @@ fn xsd_regex(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, datatype_solver, xsd_regex);
+criterion_group!(benches, datatype_solver, xsd_regex, mixed_ranges);
 criterion_main!(benches);

@@ -136,7 +136,7 @@ fn cursors_cannot_cross_automaton_ownership_boundaries() -> Result<(), RoleError
 }
 
 #[test]
-fn hostile_bounds_fail_without_panics_or_partial_runtime() {
+fn hostile_bounds_fail_without_panics_or_partial_runtime() -> Result<(), RoleError> {
     let invalid_state = RoleAutomaton::from_wire(
         RoleAutomatonWire {
             component_id: 0,
@@ -167,6 +167,22 @@ fn hostile_bounds_fail_without_panics_or_partial_runtime() {
         invalid_inverse.err().map(|error| error.kind),
         Some(RoleErrorKind::Invalid)
     );
+
+    let selected = runtime()?;
+    let overlong = vec![2; 33];
+    let error = selected
+        .accepts(4, &overlong, &NeverCancel)
+        .err()
+        .ok_or_else(|| RoleError::invalid("overlong role word was accepted"))?;
+    assert_eq!(error.kind, RoleErrorKind::Resource);
+    assert_eq!(error.limit, Some("max_word_length"));
+
+    let error = selected
+        .accepts(4, &[u32::MAX], &NeverCancel)
+        .err()
+        .ok_or_else(|| RoleError::invalid("dangling role ID was accepted"))?;
+    assert_eq!(error.kind, RoleErrorKind::Invalid);
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -216,6 +232,7 @@ fn construction_and_execution_are_cooperatively_cancellable() -> Result<(), Role
 #[derive(Debug, Deserialize)]
 struct DifferentialFixture {
     schema_version: u32,
+    generator_seed: u64,
     role_count: u32,
     inverse_role_ids: Vec<u32>,
     top_role_id: u32,
@@ -223,6 +240,7 @@ struct DifferentialFixture {
     word_count_per_automaton: usize,
     automata: Vec<RoleAutomatonWire>,
     cases: Vec<DifferentialCase>,
+    propagation_cases: Vec<PropagationCase>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +250,12 @@ struct DifferentialCase {
     accepts: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct PropagationCase {
+    word: Vec<u32>,
+    accepted_components: Vec<u32>,
+}
+
 #[test]
 fn bounded_words_match_the_shared_python_nfa_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let fixture: DifferentialFixture = serde_json::from_str(include_str!(concat!(
@@ -239,6 +263,7 @@ fn bounded_words_match_the_shared_python_nfa_fixture() -> Result<(), Box<dyn std
         "/../tests/data/roles/wpr3-role-automata-v1.json"
     )))?;
     assert_eq!(fixture.schema_version, 1);
+    assert_eq!(fixture.generator_seed, 0x5750_5233);
     assert_eq!(
         fixture.cases.len(),
         fixture.word_count_per_automaton * fixture.automata.len()
@@ -266,6 +291,18 @@ fn bounded_words_match_the_shared_python_nfa_fixture() -> Result<(), Box<dyn std
             case.accepts,
             "component={} word={:?}",
             case.component_id,
+            case.word,
+        );
+    }
+    assert_eq!(
+        fixture.propagation_cases.len(),
+        fixture.word_count_per_automaton
+    );
+    for case in fixture.propagation_cases {
+        assert_eq!(
+            runtime.accepted_components(&case.word, &NeverCancel)?,
+            case.accepted_components,
+            "propagated components for word={:?}",
             case.word,
         );
     }

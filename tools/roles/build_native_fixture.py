@@ -23,6 +23,7 @@ from pyowl_core import (
 from pyhermit.roles import build_role_axiom_graph
 
 DEFAULT_OUTPUT = Path("tests/data/roles/wpr3-role-automata-v1.json")
+GENERATOR_SEED = 0x5750_5233
 
 
 def _property(name: str) -> ObjectProperty:
@@ -50,7 +51,7 @@ def build_fixture() -> dict[str, Any]:
     words: set[tuple[int, ...]] = {()}
     for length in (1, 2):
         words.update(itertools.product(alphabet, repeat=length))
-    randomizer = random.Random(0x5750_5233)
+    randomizer = random.Random(GENERATOR_SEED)
     for _ in range(512):
         length = randomizer.randint(3, 6)
         words.add(tuple(randomizer.choice(alphabet) for _ in range(length)))
@@ -83,11 +84,31 @@ def build_fixture() -> dict[str, Any]:
             }
             for word in word_corpus
         )
+    target_by_component = {
+        component.component_id: graph.object_roles[component.member_role_ids[0]]
+        for component in graph.object_components
+    }
+    propagation_cases = [
+        {
+            "accepted_components": [
+                component
+                for component in sorted(graph.automata)
+                if graph.accepts(
+                    target_by_component[component],
+                    tuple(graph.object_roles[role_id] for role_id in word),
+                )
+            ],
+            "word": list(word),
+        }
+        for word in word_corpus
+    ]
     return {
         "automata": automata,
         "bottom_role_id": graph.bottom_object_role_id,
         "cases": cases,
+        "generator_seed": GENERATOR_SEED,
         "inverse_role_ids": list(graph.inverse_role_ids),
+        "propagation_cases": propagation_cases,
         "role_count": len(graph.object_roles),
         "schema_version": 1,
         "top_role_id": graph.top_object_role_id,
