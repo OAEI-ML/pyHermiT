@@ -11,6 +11,7 @@ use crate::input_wire::{
     DecodedConfig, DecodedExpressivity, DecodedGroundAtom, DecodedGroundDisjunction,
     DecodedOntology, DecodedProgram, DecodedProvenanceEntry, DecodedQuery, PredicateKind,
 };
+use crate::nominals::NominalIntroductionManager;
 use crate::program_bridge::{load_permanent_rule_state, LoadedRuleState};
 use crate::rules::RuleEngineCheckpoint;
 use crate::session::{
@@ -38,6 +39,7 @@ pub struct ProductionTableau {
 pub struct ProductionCheckpoint {
     kernel: TableauKernel,
     engine: RuleEngineCheckpoint,
+    nominals: NominalIntroductionManager,
 }
 
 impl ProductionTableau {
@@ -104,9 +106,14 @@ impl NativeTableau for ProductionTableau {
         }
         control.poll()?;
         let kernel = self.permanent.kernel.clone();
+        let nominals = self.permanent.nominals.clone();
         let engine = self.permanent.engine.checkpoint(control)?;
         control.poll()?;
-        Ok(ProductionCheckpoint { kernel, engine })
+        Ok(ProductionCheckpoint {
+            kernel,
+            engine,
+            nominals,
+        })
     }
 
     fn install_query(
@@ -153,11 +160,17 @@ impl NativeTableau for ProductionTableau {
             ));
         }
         match disposition {
-            OperationDisposition::RollbackQuery => self.permanent.engine.rollback_with_kernel(
-                &mut self.permanent.kernel,
-                checkpoint.kernel,
-                checkpoint.engine,
-            ),
+            OperationDisposition::RollbackQuery => self
+                .permanent
+                .engine
+                .rollback_with_kernel(
+                    &mut self.permanent.kernel,
+                    checkpoint.kernel,
+                    checkpoint.engine,
+                )
+                .map(|()| {
+                    self.permanent.nominals = checkpoint.nominals;
+                }),
             OperationDisposition::CommitPermanent => {
                 self.permanent
                     .engine
@@ -182,14 +195,15 @@ impl NativeTableau for ProductionTableau {
 
     fn process_nominals(&mut self, control: &dyn OperationControl) -> NativeResult<u64> {
         control.poll()?;
-        let expressivity = self.active_expressivity();
-        if expressivity.nominals
-            || expressivity.keys
-            || self.active().kernel.annotated_equality_count() != 0
-        {
-            return Err(NativeError::feature("native_nominals"));
-        }
-        Ok(0)
+        let cancellation = Arc::clone(&self.cancellation);
+        let active = self.active_mut();
+        let processed = active.nominals.process_all(
+            &mut active.kernel,
+            &mut active.engine,
+            cancellation.as_ref(),
+        )?;
+        control.poll()?;
+        Ok(processed)
     }
 
     fn apply_next_delta(
@@ -286,20 +300,39 @@ impl NativeTableau for ProductionTableau {
         control.poll()?;
         let cancellation = Arc::clone(&self.cancellation);
         let active = self.active_mut();
-        let transition = active
-            .engine
-            .resolve_clash(&mut active.kernel, cancellation.as_ref())?;
-        control.poll()?;
-        match transition {
-            BranchTransition::Advanced => Ok(ClashResolution::Backtracked),
-            BranchTransition::Unsat => Ok(ClashResolution::Unsatisfiable),
-            BranchTransition::NoWork
-            | BranchTransition::Satisfied
-            | BranchTransition::Deterministic
-            | BranchTransition::Branched
-            | BranchTransition::Exhausted => Err(NativeError::invariant(
-                "clash phase did not return a terminal resolution",
-            )),
+        loop {
+            match active.nominals.resolve_clash(
+                &mut active.kernel,
+                &mut active.engine,
+                cancellation.as_ref(),
+            )? {
+                BranchTransition::Advanced => return Ok(ClashResolution::Backtracked),
+                BranchTransition::Unsat => return Ok(ClashResolution::Unsatisfiable),
+                BranchTransition::Exhausted => continue,
+                BranchTransition::NoWork => {}
+                BranchTransition::Satisfied
+                | BranchTransition::Deterministic
+                | BranchTransition::Branched => {
+                    return Err(NativeError::invariant(
+                        "nominal clash phase returned a forward transition",
+                    ));
+                }
+            }
+            let transition = active
+                .engine
+                .resolve_clash(&mut active.kernel, cancellation.as_ref())?;
+            control.poll()?;
+            return match transition {
+                BranchTransition::Advanced => Ok(ClashResolution::Backtracked),
+                BranchTransition::Unsat => Ok(ClashResolution::Unsatisfiable),
+                BranchTransition::NoWork
+                | BranchTransition::Satisfied
+                | BranchTransition::Deterministic
+                | BranchTransition::Branched
+                | BranchTransition::Exhausted => Err(NativeError::invariant(
+                    "clash phase did not return a terminal resolution",
+                )),
+            };
         }
     }
 

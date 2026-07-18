@@ -15,6 +15,7 @@ use crate::input_wire::{
     DecodedProgram, DecodedTerm, PredicateKind as InputPredicateKind, TermSort as InputTermSort,
 };
 use crate::model::{DependencySet, NodeKind};
+use crate::nominals::NominalIntroductionManager;
 use crate::operation_bridge::{datatype_error_to_native, role_error_to_native};
 use crate::roles::{RoleAutomatonWire, RoleLimits, RoleRuntime, RoleTransition};
 use crate::rules::{
@@ -29,6 +30,7 @@ pub struct LoadedRuleState {
     pub engine: RuleEngine,
     pub roles: RoleRuntime,
     pub datatypes: LoadedDatatypeState,
+    pub nominals: NominalIntroductionManager,
 }
 
 /// Canonical datatype owners decoded once for the complete native session lifetime.
@@ -135,6 +137,7 @@ pub fn load_permanent_rule_state(
         engine,
         roles: role_runtime,
         datatypes,
+        nominals: NominalIntroductionManager::default(),
     })
 }
 
