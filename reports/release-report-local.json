@@ -1,7 +1,7 @@
 {
   "schema": "pyhermit.release-report/1",
   "generated_on": "2026-07-18",
-  "revision": "1b63c10",
+  "revision": "22d7bc9",
   "package_version": "0.1.0.dev0",
   "overall_status": "blocked",
   "suites": [
