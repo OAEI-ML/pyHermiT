@@ -1,7 +1,7 @@
 {
   "schema": "pyhermit.coverage-matrix/1",
   "generated_on": "2026-07-18",
-  "revision": "5900222",
+  "revision": "1b63c10",
   "constructor_contract": {
     "source": "pyowl_core.MODEL_CONSTRUCTORS",
     "count": 76,
