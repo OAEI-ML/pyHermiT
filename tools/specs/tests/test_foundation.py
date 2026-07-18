@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import json
 import os
 import subprocess
@@ -74,6 +75,13 @@ print(json.dumps(added))
         self.assertTrue((package / "py.typed").is_file())
         self.assertFalse((package / "api.py").exists())
         self.assertTrue((repository_root() / "native" / "Cargo.toml").is_file())
+
+    def test_native_wheel_uses_the_python_310_stable_abi(self) -> None:
+        configuration = configparser.ConfigParser()
+        loaded = configuration.read(repository_root() / "setup.cfg")
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(configuration["bdist_wheel"]["py_limited_api"], "cp310")
 
 
 if __name__ == "__main__":
