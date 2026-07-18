@@ -342,6 +342,12 @@ def _map_hierarchy(
 ) -> Hierarchy[_T]:
     if not isinstance(value, HierarchyIds):
         raise TypeError("value must be HierarchyIds")
+    observed = frozenset(member for node in value.nodes for member in node)
+    if observed != frozenset(symbols):
+        _fail(
+            f"native {label} hierarchy does not cover exactly its compiled domain",
+            "hierarchy_partition_mismatch",
+        )
     nodes = tuple(
         frozenset(_lookup(symbols, member, f"{label} hierarchy member") for member in node)
         for node in value.nodes

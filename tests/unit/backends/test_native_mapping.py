@@ -89,16 +89,27 @@ def test_maps_hierarchies_in_their_explicit_symbol_domains() -> None:
     object_members = (
         (mapper.object_property_id(owl.OWL_BOTTOM_OBJECT_PROPERTY),),
         (mapper.object_property_id(object_property),),
+        (mapper.object_property_id(owl.inverse_property(object_property)),),
         (mapper.object_property_id(owl.OWL_TOP_OBJECT_PROPERTY),),
     )
     object_nodes = tuple(sorted(object_members))
     object_bottom = object_nodes.index(object_members[0])
     object_middle = object_nodes.index(object_members[1])
-    object_top = object_nodes.index(object_members[2])
+    inverse_middle = object_nodes.index(object_members[2])
+    object_top = object_nodes.index(object_members[3])
     object_hierarchy = mapper.object_property_hierarchy(
         HierarchyIds(
             object_nodes,
-            tuple(sorted(((object_bottom, object_middle), (object_middle, object_top)))),
+            tuple(
+                sorted(
+                    (
+                        (object_bottom, object_middle),
+                        (object_bottom, inverse_middle),
+                        (object_middle, object_top),
+                        (inverse_middle, object_top),
+                    )
+                )
+            ),
             object_top,
             object_bottom,
         )
@@ -163,19 +174,10 @@ def test_maps_realization_groups_properties_literals_and_class_nodes() -> None:
     assert mapped.different_from == frozenset((tuple(sorted((left_group, right_group))),))
 
 
-def test_rejects_incomplete_partitions_and_non_group_object_targets() -> None:
-    mapper, class_, object_property, _data_property, left, _right, _literal = _runtime()
+def test_rejects_incomplete_partitions() -> None:
+    mapper, class_, _object_property, _data_property, left, _right, _literal = _runtime()
     hierarchy = mapper.class_hierarchy(_class_ids(mapper, class_))
     incomplete = RealizationIds(((mapper.individual_id(left),),))
     with pytest.raises(BackendMismatchError) as partition_error:
         mapper.realization(incomplete, hierarchy)
     assert partition_error.value.context["reason"] == "realization_partition_mismatch"
-
-    groups = tuple(sorted(tuple((identifier,)) for identifier in mapper.individual_ids))
-    invalid_target = RealizationIds(
-        groups,
-        object_targets=((0, mapper.object_property_id(object_property), (len(groups),)),),
-    )
-    with pytest.raises(BackendMismatchError) as target_error:
-        mapper.realization(invalid_target, hierarchy)
-    assert target_error.value.context["reason"] == "realization_object_group_missing"

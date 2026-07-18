@@ -267,6 +267,15 @@ fn validate_realization(result: &RealizationWireResult) -> NativeResult<()> {
     let group_count = usize_to_u32(result.same_as.len(), "same-as group count")?;
     validate_rows2(&result.direct_types, group_count, "direct-type")?;
     validate_rows3(&result.object_targets, group_count, "object-target")?;
+    if result
+        .object_targets
+        .iter()
+        .any(|(_, _, targets)| targets.iter().any(|target| *target >= group_count))
+    {
+        return Err(NativeError::invariant(
+            "object-target row references an absent same-as group",
+        ));
+    }
     validate_rows3(&result.data_targets, group_count, "data-target")?;
     if result
         .different_from
@@ -523,7 +532,7 @@ mod tests {
         let result = RealizationWireResult {
             same_as: vec![vec![1, 2], vec![7]],
             direct_types: vec![(0, vec![3, 4]), (1, vec![5])],
-            object_targets: vec![(0, 9, vec![1, 7])],
+            object_targets: vec![(0, 9, vec![0, 1])],
             data_targets: vec![(1, 8, vec![11, 12])],
             different_from: vec![(0, 1)],
         };
@@ -542,6 +551,9 @@ mod tests {
         );
         let mut invalid = result;
         invalid.same_as = vec![vec![2], vec![1]];
+        assert!(encode_realization(&invalid).is_err());
+        invalid.same_as = vec![vec![1], vec![2]];
+        invalid.object_targets = vec![(0, 9, vec![2])];
         assert!(encode_realization(&invalid).is_err());
         Ok(())
     }

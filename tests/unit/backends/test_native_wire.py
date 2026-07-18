@@ -106,7 +106,7 @@ def test_realization_decodes_all_canonical_tables() -> None:
             u32s(0, 0, 2, 1, 2, 1),
             u32s(3, 4, 5),
             u32s(0, 9, 0, 2),
-            u32s(1, 7),
+            u32s(0, 1),
             u32s(1, 8, 0, 2),
             u32s(11, 12),
             u32s(0, 1),
@@ -115,7 +115,7 @@ def test_realization_decodes_all_canonical_tables() -> None:
     result = decode_realization(document(ResultKind.REALIZATION, 2, payload))
     assert result.same_as == ((1, 2), (7,))
     assert result.direct_types == ((0, (3, 4)), (1, (5,)))
-    assert result.object_targets == ((0, 9, (1, 7)),)
+    assert result.object_targets == ((0, 9, (0, 1)),)
     assert result.data_targets == ((1, 8, (11, 12)),)
     assert result.different_from == ((0, 1),)
 

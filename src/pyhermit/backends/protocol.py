@@ -445,6 +445,12 @@ class Hierarchy(Generic[T]):
 
 @dataclass(frozen=True, slots=True)
 class RealizationIds:
+    """Canonical realization rows over domain-scoped compiled IDs.
+
+    ``same_as`` partitions named-individual symbol IDs. Object targets are same-as
+    *group IDs* (not individual symbol IDs); data targets are source-literal IDs.
+    """
+
     same_as: tuple[tuple[int, ...], ...]
     direct_types: tuple[tuple[int, tuple[int, ...]], ...] = ()
     object_targets: tuple[tuple[int, int, tuple[int, ...]], ...] = ()
@@ -464,7 +470,12 @@ class RealizationIds:
             members.update(group)
         if groups != tuple(sorted(groups)):
             raise ValueError("same-as groups must be sorted")
-        for group_id, types in self.direct_types:
+        direct_types = tuple((group_id, tuple(types)) for group_id, types in self.direct_types)
+        if direct_types != tuple(sorted(set(direct_types))):
+            raise ValueError("direct-type rows must be sorted and unique")
+        if len({group_id for group_id, _types in direct_types}) != len(direct_types):
+            raise ValueError("direct-type rows must be unique by same-as group")
+        for group_id, types in direct_types:
             _validate_u32(group_id, "same_as_group_id")
             if group_id >= len(groups):
                 raise ValueError("direct type references an absent same-as group")
@@ -472,25 +483,57 @@ class RealizationIds:
                 raise ValueError("direct type IDs must be sorted and unique")
             for value in types:
                 _validate_u32(value, "class_node_id")
-        for rows, value_name in (
-            (self.object_targets, "object_target_id"),
-            (self.data_targets, "source_literal_id"),
-        ):
-            for subject, prop, targets in rows:
-                _validate_u32(subject, "same_as_group_id")
-                _validate_u32(prop, "property_id")
-                if subject >= len(groups):
-                    raise ValueError("property answer references an absent same-as group")
-                if targets != tuple(sorted(set(targets))):
-                    raise ValueError("property targets must be sorted and unique")
-                for target in targets:
-                    _validate_u32(target, value_name)
-        for left, right in self.different_from:
+        object_targets = tuple(
+            (subject, prop, tuple(targets))
+            for subject, prop, targets in self.object_targets
+        )
+        _validate_target_rows(object_targets, len(groups), "object")
+        for _subject, _prop, targets in object_targets:
+            if any(target >= len(groups) for target in targets):
+                raise ValueError("object target references an absent same-as group")
+
+        data_targets = tuple(
+            (subject, prop, tuple(targets))
+            for subject, prop, targets in self.data_targets
+        )
+        _validate_target_rows(data_targets, len(groups), "data")
+
+        different_from = tuple(self.different_from)
+        if different_from != tuple(sorted(set(different_from))):
+            raise ValueError("different-from pairs must be sorted and unique")
+        for left, right in different_from:
             _validate_u32(left, "different_from_left")
             _validate_u32(right, "different_from_right")
             if left >= right or right >= len(groups):
                 raise ValueError("different-from pairs must be canonical valid group IDs")
         object.__setattr__(self, "same_as", groups)
+        object.__setattr__(self, "direct_types", direct_types)
+        object.__setattr__(self, "object_targets", object_targets)
+        object.__setattr__(self, "data_targets", data_targets)
+        object.__setattr__(self, "different_from", different_from)
+
+
+def _validate_target_rows(
+    rows: tuple[tuple[int, int, tuple[int, ...]], ...],
+    group_count: int,
+    label: str,
+) -> None:
+    if rows != tuple(sorted(set(rows))):
+        raise ValueError(f"{label}-target rows must be sorted and unique")
+    if len({(subject, prop) for subject, prop, _targets in rows}) != len(rows):
+        raise ValueError(f"{label}-target rows must be unique by subject and property")
+    for subject, prop, targets in rows:
+        _validate_u32(subject, "same_as_group_id")
+        _validate_u32(prop, "property_id")
+        if subject >= group_count:
+            raise ValueError("property answer references an absent same-as group")
+        if targets != tuple(sorted(set(targets))):
+            raise ValueError("property targets must be sorted and unique")
+        for target in targets:
+            _validate_u32(
+                target,
+                "same_as_group_id" if label == "object" else "source_literal_id",
+            )
 
 
 @dataclass(frozen=True, slots=True)

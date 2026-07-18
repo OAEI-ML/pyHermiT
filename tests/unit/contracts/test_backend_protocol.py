@@ -152,6 +152,29 @@ def test_realization_ids_partition_and_reference_validation() -> None:
         RealizationIds(same_as=((0, 1), (1, 2)))
 
 
+def test_realization_ids_require_canonical_rows_and_group_object_targets() -> None:
+    with pytest.raises(ValueError, match="object target"):
+        RealizationIds(
+            same_as=((0,), (1,)),
+            object_targets=((0, 4, (2,)),),
+        )
+    with pytest.raises(ValueError, match="direct-type rows"):
+        RealizationIds(
+            same_as=((0,), (1,)),
+            direct_types=((1, (3,)), (0, (2,))),
+        )
+    with pytest.raises(ValueError, match="unique by subject and property"):
+        RealizationIds(
+            same_as=((0,), (1,)),
+            data_targets=((0, 4, (1,)), (0, 4, (2,))),
+        )
+    with pytest.raises(ValueError, match="different-from pairs"):
+        RealizationIds(
+            same_as=((0,), (1,), (2,)),
+            different_from=((1, 2), (0, 1)),
+        )
+
+
 def test_backend_diagnostic_json_is_exact_and_sorted() -> None:
     python = BackendAvailability("python", True, "1", 1, None)
     native = BackendAvailability("native", False, None, None, "not_installed")
