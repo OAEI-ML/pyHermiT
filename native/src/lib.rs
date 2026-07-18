@@ -473,6 +473,7 @@ fn create_session(
                 &ontology,
                 Arc::clone(&construction_control),
                 config.disjunction_learning,
+                config.existentials,
             )?;
             let tableau = ProductionTableau::new(
                 Arc::clone(&ontology),
@@ -670,7 +671,12 @@ mod tests {
         config: &DecodedConfig,
         cancellation: &CancellationHandle,
     ) -> NativeResult<LoadedRuleState> {
-        load_permanent_rule_state(ontology, cancellation.state(), config.disjunction_learning)
+        load_permanent_rule_state(
+            ontology,
+            cancellation.state(),
+            config.disjunction_learning,
+            config.existentials,
+        )
     }
 
     #[test]

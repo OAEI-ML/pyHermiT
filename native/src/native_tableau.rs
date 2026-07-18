@@ -7,6 +7,10 @@ use std::sync::Arc;
 use crate::branching::BranchTransition;
 use crate::cancel::CancellationState;
 use crate::error::{NativeError, NativeResult};
+use crate::existentials::{
+    expansion_to_native, AssertedOnlyDatatypes, BranchTransition as ExpansionBranchTransition,
+    ExpansionStatus, NativeExpansionControl, RuntimeExpansionAccess, RuntimeExpansionState,
+};
 use crate::input_wire::{
     DecodedConfig, DecodedExpressivity, DecodedGroundAtom, DecodedGroundDisjunction,
     DecodedOntology, DecodedProgram, DecodedProvenanceEntry, DecodedQuery, PredicateKind,
@@ -140,6 +144,7 @@ impl NativeTableau for ProductionTableau {
             &combined,
             Arc::clone(&self.cancellation),
             self.config.disjunction_learning,
+            self.config.existentials,
         )?;
         control.poll()?;
         self.query = Some(loaded);
@@ -266,10 +271,26 @@ impl NativeTableau for ProductionTableau {
         control: &dyn OperationControl,
     ) -> NativeResult<PhaseProgress> {
         control.poll()?;
-        if self.has_existential_candidates() {
-            return Err(NativeError::feature("native_existentials"));
+        if self.active_expressivity().datatypes {
+            return Err(NativeError::feature("native_datatypes"));
         }
-        Ok(PhaseProgress::NoWork)
+        let active = self.active_mut();
+        let mut datatypes = AssertedOnlyDatatypes;
+        let mut state = RuntimeExpansionState::new(&mut active.kernel, None);
+        let mut access = RuntimeExpansionAccess::new(&mut active.engine, &mut datatypes, control);
+        let mut expansion_control = NativeExpansionControl::new(control);
+        let result = active
+            .existentials
+            .process_next(&mut state, &mut access, &mut expansion_control)
+            .map_err(expansion_to_native)?;
+        control.poll()?;
+        match result.status {
+            ExpansionStatus::NoWork => Ok(PhaseProgress::NoWork),
+            ExpansionStatus::Blocked => Err(NativeError::feature("native_blocking")),
+            ExpansionStatus::Satisfied | ExpansionStatus::Expanded | ExpansionStatus::Clashed => {
+                Ok(PhaseProgress::Progress)
+            }
+        }
     }
 
     fn process_disjunction(
@@ -301,6 +322,40 @@ impl NativeTableau for ProductionTableau {
         let cancellation = Arc::clone(&self.cancellation);
         let active = self.active_mut();
         loop {
+            let expansion_level = active
+                .kernel
+                .clash()
+                .and_then(|clash| clash.dependency.maximum());
+            if let Some(level) = expansion_level {
+                let owns_branch = {
+                    let state = RuntimeExpansionState::new(&mut active.kernel, None);
+                    active
+                        .existentials
+                        .owns_branch(&state, level)
+                        .map_err(expansion_to_native)?
+                };
+                if owns_branch {
+                    let mut datatypes = AssertedOnlyDatatypes;
+                    let mut state = RuntimeExpansionState::new(&mut active.kernel, None);
+                    let mut access =
+                        RuntimeExpansionAccess::new(&mut active.engine, &mut datatypes, control);
+                    let mut expansion_control = NativeExpansionControl::new(control);
+                    match active
+                        .existentials
+                        .resolve_clash(&mut state, &mut access, &mut expansion_control)
+                        .map_err(expansion_to_native)?
+                    {
+                        ExpansionBranchTransition::Advanced => {
+                            return Ok(ClashResolution::Backtracked);
+                        }
+                        ExpansionBranchTransition::Unsat => {
+                            return Ok(ClashResolution::Unsatisfiable);
+                        }
+                        ExpansionBranchTransition::Exhausted => continue,
+                        ExpansionBranchTransition::NoWork => {}
+                    }
+                }
+            }
             match active.nominals.resolve_clash(
                 &mut active.kernel,
                 &mut active.engine,
@@ -499,7 +554,10 @@ fn remap_disjunction(
 mod tests {
     use super::*;
     use crate::cancel::CancellationHandle;
-    use crate::input_wire::{decode_config, decode_ontology, DecodeLimits};
+    use crate::input_wire::{
+        decode_config, decode_ontology, DecodeLimits, DecodedGroundAtom, DecodedPredicate,
+        DecodedSymbolValue, DecodedTerm, ExistentialChoice, PredicateKind, SymbolKind, TermSort,
+    };
     use crate::session::{NeverAbort, SessionLimits, SessionScheduler};
 
     fn decode_hex(value: &str) -> Vec<u8> {
@@ -539,6 +597,7 @@ mod tests {
             &ontology,
             Arc::clone(&cancellation),
             config.disjunction_learning,
+            config.existentials,
         )?;
         let tableau = ProductionTableau::new(ontology, config, cancellation, loaded)?;
         let session = SessionScheduler::new(tableau, SessionLimits::default())?;
@@ -547,6 +606,86 @@ mod tests {
         assert_eq!(first.satisfiable, second.satisfiable);
         assert!(!first.cache_hit);
         assert!(second.cache_hit);
+        Ok(())
+    }
+
+    #[test]
+    fn production_tableau_expands_a_top_role_object_obligation() -> NativeResult<()> {
+        let limits = DecodeLimits::default();
+        let mut ontology = decode_ontology(golden_document("ontology"), &limits)
+            .map_err(|error| NativeError::wire(error.message))?;
+        let class_domain = ontology
+            .program
+            .symbol_domains
+            .iter_mut()
+            .find(|domain| domain.kind == SymbolKind::ClassExpression)
+            .ok_or_else(|| NativeError::invariant("golden class domain is absent"))?;
+        let symbol_id = u32::try_from(class_domain.values.len())
+            .map_err(|_| NativeError::invariant("test class domain exceeds u32"))?;
+        class_domain.values.push(DecodedSymbolValue {
+            identifier: symbol_id,
+            key: b"native-expansion-filler".to_vec(),
+            display: "native-expansion-filler".to_owned(),
+            generated: false,
+            query_local: false,
+        });
+        let filler_predicate_id = u32::try_from(ontology.program.predicates.len())
+            .map_err(|_| NativeError::invariant("test predicate count exceeds u32"))?;
+        ontology.program.predicates.push(DecodedPredicate {
+            predicate_id: filler_predicate_id,
+            kind: PredicateKind::Concept,
+            argument_sorts: vec![TermSort::Object],
+            symbol_id: Some(symbol_id),
+            role_id: None,
+            cardinality: None,
+            filler_predicate_id: None,
+            annotation: Vec::new(),
+            internal_key: None,
+        });
+        let existential_predicate_id = filler_predicate_id
+            .checked_add(1)
+            .ok_or_else(|| NativeError::invariant("test predicate ID overflow"))?;
+        ontology.program.predicates.push(DecodedPredicate {
+            predicate_id: existential_predicate_id,
+            kind: PredicateKind::AtLeastObject,
+            argument_sorts: vec![TermSort::Object],
+            symbol_id: None,
+            role_id: Some(ontology.program.role_model.top_object_role_id),
+            cardinality: Some(1),
+            filler_predicate_id: Some(filler_predicate_id),
+            annotation: Vec::new(),
+            internal_key: None,
+        });
+        let individual_id = ontology
+            .program
+            .domain(SymbolKind::Individual)
+            .and_then(|domain| domain.values.first())
+            .map(|value| value.identifier)
+            .ok_or_else(|| NativeError::invariant("golden individual domain is empty"))?;
+        ontology.program.positive_facts.push(DecodedGroundAtom {
+            predicate_id: existential_predicate_id,
+            arguments: vec![DecodedTerm::Individual { individual_id }],
+            provenance_ids: Vec::new(),
+        });
+        ontology.program.expressivity.number_restrictions = true;
+        let ontology = Arc::new(ontology);
+        let mut config = decode_config(golden_document("config"), &limits)
+            .map_err(|error| NativeError::wire(error.message))?;
+        config.existentials = ExistentialChoice::CreationOrder;
+        let cancellation = CancellationHandle::from_options(None, None)?.state();
+        let loaded = load_permanent_rule_state(
+            &ontology,
+            Arc::clone(&cancellation),
+            config.disjunction_learning,
+            config.existentials,
+        )?;
+        let tableau = ProductionTableau::new(ontology, config, cancellation, loaded)?;
+        let session = SessionScheduler::new(tableau, SessionLimits::default())?;
+
+        let result = session.check_permanent(&NeverAbort)?;
+
+        assert!(result.satisfiable);
+        assert_eq!(result.statistics.existential_actions, 1);
         Ok(())
     }
 }

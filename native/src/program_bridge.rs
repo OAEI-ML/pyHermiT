@@ -10,9 +10,14 @@ use crate::datatypes::{
     DecodedLiteral, NativeDatatypeRangeModel, OpaqueRangePolicy, RangeWireLimits,
 };
 use crate::error::{NativeError, NativeResult};
+use crate::existentials::{
+    expansion_program_from_rules, expansion_to_native, ExistentialExpansionManager,
+    ExpansionLimits, ExpansionStrategy, SpecialRoleIds,
+};
 use crate::input_wire::{
     DecodedAtom, DecodedClause, DecodedGroundAtom, DecodedOntology, DecodedPredicate,
-    DecodedProgram, DecodedTerm, PredicateKind as InputPredicateKind, TermSort as InputTermSort,
+    DecodedProgram, DecodedTerm, ExistentialChoice, PredicateKind as InputPredicateKind,
+    SymbolKind, TermSort as InputTermSort,
 };
 use crate::model::{DependencySet, NodeKind};
 use crate::nominals::NominalIntroductionManager;
@@ -31,6 +36,7 @@ pub struct LoadedRuleState {
     pub roles: RoleRuntime,
     pub datatypes: LoadedDatatypeState,
     pub nominals: NominalIntroductionManager,
+    pub existentials: ExistentialExpansionManager,
 }
 
 /// Canonical datatype owners decoded once for the complete native session lifetime.
@@ -66,6 +72,7 @@ pub fn load_permanent_rule_state(
     ontology: &DecodedOntology,
     cancellation: Arc<CancellationState>,
     disjunction_learning: bool,
+    existential_choice: ExistentialChoice,
 ) -> NativeResult<LoadedRuleState> {
     cancellation.poll()?;
     let role_runtime = load_role_runtime(&ontology.program, cancellation.as_ref())?;
@@ -99,6 +106,25 @@ pub fn load_permanent_rule_state(
         );
     }
     let rule_program = compile_rule_program(&ontology.program)?;
+    let reusable_fillers = reusable_atomic_fillers(&ontology.program)?;
+    let expansion_program = expansion_program_from_rules(
+        &rule_program,
+        expansion_special_roles(&ontology.program, &rule_program)?,
+        &reusable_fillers,
+    )
+    .map_err(expansion_to_native)?;
+    let expansion_strategy = match existential_choice {
+        ExistentialChoice::IndividualReuse => ExpansionStrategy::IndividualReuse,
+        ExistentialChoice::Auto | ExistentialChoice::CreationOrder => {
+            ExpansionStrategy::CreationOrder
+        }
+    };
+    let existentials = ExistentialExpansionManager::new(
+        expansion_program,
+        expansion_strategy,
+        ExpansionLimits::default(),
+    )
+    .map_err(expansion_to_native)?;
     let mut engine = RuleEngine::new(rule_program, source_nodes, data_nodes, disjunction_learning)?;
     for fact in ontology
         .program
@@ -138,7 +164,81 @@ pub fn load_permanent_rule_state(
         roles: role_runtime,
         datatypes,
         nominals: NominalIntroductionManager::default(),
+        existentials,
     })
+}
+
+fn reusable_atomic_fillers(program: &DecodedProgram) -> NativeResult<BTreeSet<u32>> {
+    let class_symbols = program
+        .domain(SymbolKind::ClassExpression)
+        .ok_or_else(|| NativeError::wire("class-expression symbol domain is absent"))?;
+    let mut reusable = BTreeSet::new();
+    for predicate in &program.predicates {
+        if predicate.kind != InputPredicateKind::Concept {
+            continue;
+        }
+        let symbol_id = predicate
+            .symbol_id
+            .ok_or_else(|| NativeError::wire("concept predicate has no class-expression ID"))?;
+        let symbol =
+            class_symbols
+                .values
+                .get(usize::try_from(symbol_id).map_err(|_| {
+                    NativeError::wire("class-expression ID cannot fit this platform")
+                })?)
+                .ok_or_else(|| {
+                    NativeError::wire("concept predicate class-expression ID is dangling")
+                })?;
+        if !symbol.generated {
+            reusable.insert(predicate.predicate_id);
+        }
+    }
+    Ok(reusable)
+}
+
+fn expansion_special_roles(
+    source: &DecodedProgram,
+    rule_program: &RuleProgram,
+) -> NativeResult<SpecialRoleIds> {
+    let mut special = SpecialRoleIds {
+        top_object: source.role_model.top_object_role_id,
+        bottom_object: source.role_model.bottom_object_role_id,
+        top_data: source.role_model.top_data_property_id,
+        bottom_data: source.role_model.bottom_data_property_id,
+    };
+    let has_object_obligation = rule_program
+        .predicates()
+        .iter()
+        .any(|predicate| predicate.kind == PredicateKind::AtLeastObject);
+    if special.top_object == special.bottom_object {
+        if has_object_obligation {
+            return Err(NativeError::wire(
+                "object existential program aliases top and bottom roles",
+            ));
+        }
+        special.bottom_object = distinct_sentinel(special.top_object);
+    }
+    let has_data_obligation = rule_program
+        .predicates()
+        .iter()
+        .any(|predicate| predicate.kind == PredicateKind::AtLeastData);
+    if special.top_data == special.bottom_data {
+        if has_data_obligation {
+            return Err(NativeError::wire(
+                "data existential program aliases top and bottom properties",
+            ));
+        }
+        special.bottom_data = distinct_sentinel(special.top_data);
+    }
+    Ok(special)
+}
+
+const fn distinct_sentinel(value: u32) -> u32 {
+    if value == u32::MAX {
+        value - 1
+    } else {
+        value + 1
+    }
 }
 
 fn load_role_runtime(
@@ -479,7 +579,12 @@ mod tests {
         let ontology = decode_ontology(golden_ontology(), &DecodeLimits::default())
             .map_err(|error| NativeError::wire(error.message))?;
         let cancellation = CancellationHandle::from_options(None, None)?.state();
-        let loaded = load_permanent_rule_state(&ontology, cancellation, true)?;
+        let loaded = load_permanent_rule_state(
+            &ontology,
+            cancellation,
+            true,
+            ExistentialChoice::CreationOrder,
+        )?;
         assert!(loaded.engine.initialized());
         loaded.kernel.check_invariants()?;
         Ok(())
