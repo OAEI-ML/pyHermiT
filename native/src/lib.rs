@@ -698,11 +698,13 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "FEATURES",
         (
             "abi3-py310",
-            "wire-v1",
-            "state-trace-v1",
             "cancellable-mock-work",
             "classification",
+            "full_reasoner",
+            "incremental_updates",
             "realization",
+            "state-trace-v1",
+            "wire-v1",
         ),
     )?;
     module.add_class::<CancellationHandle>()?;

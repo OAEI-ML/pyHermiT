@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from io import BytesIO
 from pathlib import Path
@@ -31,14 +32,13 @@ def functional(*body: str) -> bytes:
     return (
         "Prefix(:=<urn:test#>) "
         "Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>) "
-        "Ontology(<urn:test:facade> "
-        + " ".join(body)
-        + ")"
+        "Ontology(<urn:test:facade> " + " ".join(body) + ")"
     ).encode()
 
 
 def config(**options: object) -> ReasonerConfig:
-    return ReasonerConfig(backend="python", **options)  # type: ignore[arg-type]
+    backend = os.environ.get("PYHERMIT_TEST_BACKEND", "python")
+    return ReasonerConfig(backend=backend, **options)  # type: ignore[arg-type]
 
 
 def test_public_surface_reexports_exact_core_views_and_runs_complete_services() -> None:
@@ -68,7 +68,7 @@ def test_public_surface_reexports_exact_core_views_and_runs_complete_services() 
         owl.Datatype(owl.IRI("http://www.w3.org/2001/XMLSchema#integer")),
     )
 
-    assert reasoner.backend.name == "python"
+    assert reasoner.backend.name == os.environ.get("PYHERMIT_TEST_BACKEND", "python")
     assert reasoner.is_consistent()
     assert reasoner.is_subclass(a, b)
     assert reasoner.entails(owl.SubClassOf(a, b))

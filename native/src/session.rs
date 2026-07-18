@@ -1225,8 +1225,8 @@ fn run_transaction<K: NativeTableau>(
         return Err(poisoned_error(
             "NATIVE_OPERATION_FINISH_FAILED",
             format!(
-                "native operation could not establish a safe committed root: {}",
-                error.code
+                "native operation could not establish a safe committed root: {} ({})",
+                error.code, error.message
             ),
         ));
     }

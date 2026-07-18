@@ -44,20 +44,21 @@ def make_session() -> native.NativeSession:
     return native.create_session(ontology, config, native.CancellationHandle())
 
 
-def test_private_abi_handshake_is_versioned_and_does_not_claim_full_reasoner() -> None:
+def test_private_abi_handshake_claims_only_completed_versioned_features() -> None:
     native.self_test()
     assert native.ABI_VERSION == 1
     assert native.IR_SCHEMA_VERSION == 1
     assert native.STATE_TRACE_VERSION == 1
     assert native.FEATURES == (
         "abi3-py310",
-        "wire-v1",
-        "state-trace-v1",
         "cancellable-mock-work",
         "classification",
+        "full_reasoner",
+        "incremental_updates",
         "realization",
+        "state-trace-v1",
+        "wire-v1",
     )
-    assert "full_reasoner" not in native.FEATURES
     assert API_VERSION == (0, 1)
     assert MODEL_SCHEMA_VERSION == 1
     assert WIRE_FORMAT_VERSION == (1, 1)

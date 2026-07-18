@@ -15,8 +15,9 @@ use crate::existentials::{
     NativeExpansionControl, RuntimeExpansionAccess, RuntimeExpansionState,
 };
 use crate::input_wire::{
-    DecodedConfig, DecodedGroundAtom, DecodedGroundDisjunction, DecodedOntology, DecodedProgram,
-    DecodedProvenanceEntry, DecodedQuery, PredicateKind,
+    DecodedAtom, DecodedClause, DecodedConfig, DecodedGroundAtom, DecodedGroundDisjunction,
+    DecodedOntology, DecodedProgram, DecodedProvenanceEntry, DecodedQuery, DecodedTerm,
+    PredicateKind,
 };
 use crate::model::NodeHandle;
 use crate::nominals::NominalIntroductionManager;
@@ -75,6 +76,28 @@ impl ProductionTableau {
 
     fn active_mut(&mut self) -> &mut LoadedRuleState {
         self.query.as_mut().unwrap_or(&mut self.permanent)
+    }
+
+    fn restore_permanent_checkpoint(
+        &mut self,
+        checkpoint: ProductionCheckpoint,
+    ) -> NativeResult<()> {
+        let ProductionCheckpoint {
+            kernel,
+            engine,
+            nominals,
+            blocking,
+            datatype_signature,
+        } = checkpoint;
+        self.permanent
+            .engine
+            .rollback_with_kernel(&mut self.permanent.kernel, kernel, engine)?;
+        self.permanent.nominals = nominals;
+        self.permanent.blocking.restore(blocking);
+        self.permanent
+            .datatypes
+            .restore_signature(datatype_signature);
+        Ok(())
     }
 
     #[must_use]
@@ -164,26 +187,20 @@ impl NativeTableau for ProductionTableau {
             ));
         }
         match disposition {
-            OperationDisposition::RollbackQuery => self
-                .permanent
-                .engine
-                .rollback_with_kernel(
-                    &mut self.permanent.kernel,
-                    checkpoint.kernel,
-                    checkpoint.engine,
-                )
-                .map(|()| {
-                    self.permanent.nominals = checkpoint.nominals;
-                    self.permanent.blocking.restore(checkpoint.blocking);
-                    self.permanent
-                        .datatypes
-                        .restore_signature(checkpoint.datatype_signature);
-                }),
+            OperationDisposition::RollbackQuery => self.restore_permanent_checkpoint(checkpoint),
             OperationDisposition::CommitPermanent => {
-                self.permanent
-                    .engine
-                    .release_checkpoint(checkpoint.engine)?;
-                self.permanent.kernel.begin_operation()
+                // A satisfiable nondeterministic model retains live choice points for potential
+                // backtracking and cannot become the branch-free permanent operation root.  The
+                // scheduler still caches the completed Boolean result, while the tableau returns
+                // to its exact pre-check state for subsequent isolated overlays.
+                if self.permanent.kernel.logical_counts().2 > 0 {
+                    self.restore_permanent_checkpoint(checkpoint)
+                } else {
+                    self.permanent
+                        .engine
+                        .release_checkpoint(checkpoint.engine)?;
+                    self.permanent.kernel.begin_operation()
+                }
             }
         }
     }
@@ -499,26 +516,27 @@ fn combine_query_ontology(
         ));
     }
     let (provenance, overlay_provenance) =
-        append_provenance(&ontology.program.provenance, &overlay.provenance)?;
-    let mut clauses = ontology.program.clauses.clone();
-    for source in &overlay.clauses {
-        let mut clause = source.clone();
-        clause.clause_id = u32::try_from(clauses.len())
-            .map_err(|_| NativeError::wire("combined query clause count exceeds u32"))?;
-        clause.provenance_ids = remap_provenance(&clause.provenance_ids, &overlay_provenance)?;
-        clauses.push(clause);
-    }
-    let mut positive_facts = ontology.program.positive_facts.clone();
-    positive_facts.extend(remap_facts(&overlay.positive_facts, &overlay_provenance)?);
-    let mut negative_facts = ontology.program.negative_facts.clone();
-    negative_facts.extend(remap_facts(&overlay.negative_facts, &overlay_provenance)?);
-    let mut ground_disjunctions = ontology.program.ground_disjunctions.clone();
-    for source in &overlay.ground_disjunctions {
-        let mut disjunction = remap_disjunction(source, &overlay_provenance)?;
-        disjunction.disjunction_id = u32::try_from(ground_disjunctions.len())
-            .map_err(|_| NativeError::wire("combined query disjunction count exceeds u32"))?;
-        ground_disjunctions.push(disjunction);
-    }
+        merge_provenance(&ontology.program.provenance, &overlay.provenance)?;
+    let clauses = merge_clauses(
+        &ontology.program.clauses,
+        &overlay.clauses,
+        &overlay_provenance,
+    )?;
+    let positive_facts = merge_facts(
+        &ontology.program.positive_facts,
+        &overlay.positive_facts,
+        &overlay_provenance,
+    )?;
+    let negative_facts = merge_facts(
+        &ontology.program.negative_facts,
+        &overlay.negative_facts,
+        &overlay_provenance,
+    )?;
+    let ground_disjunctions = merge_disjunctions(
+        &ontology.program.ground_disjunctions,
+        &overlay.ground_disjunctions,
+        &overlay_provenance,
+    )?;
     let program = DecodedProgram {
         symbol_domains: overlay.symbol_domains.clone(),
         predicates: overlay.predicates.clone(),
@@ -557,15 +575,39 @@ fn combine_query_ontology(
     })
 }
 
-fn append_provenance(
+fn merge_provenance(
     permanent: &[DecodedProvenanceEntry],
     overlay: &[DecodedProvenanceEntry],
 ) -> NativeResult<(Vec<DecodedProvenanceEntry>, BTreeMap<u32, u32>)> {
     let mut combined = permanent.to_vec();
+    let mut identities = BTreeMap::new();
+    for entry in permanent {
+        if identities
+            .insert(
+                (entry.source_sha256.clone(), entry.generated),
+                entry.provenance_id,
+            )
+            .is_some()
+        {
+            return Err(NativeError::wire(
+                "permanent provenance contains duplicate semantic identities",
+            ));
+        }
+    }
     let mut mapping = BTreeMap::new();
     for source in overlay {
-        let provenance_id = u32::try_from(combined.len())
-            .map_err(|_| NativeError::wire("combined provenance count exceeds u32"))?;
+        let identity = (source.source_sha256.clone(), source.generated);
+        let provenance_id = if let Some(existing) = identities.get(&identity).copied() {
+            existing
+        } else {
+            let identifier = u32::try_from(combined.len())
+                .map_err(|_| NativeError::wire("combined provenance count exceeds u32"))?;
+            let mut entry = source.clone();
+            entry.provenance_id = identifier;
+            combined.push(entry);
+            identities.insert(identity, identifier);
+            identifier
+        };
         if mapping
             .insert(source.provenance_id, provenance_id)
             .is_some()
@@ -574,9 +616,6 @@ fn append_provenance(
                 "query provenance contains duplicate identifiers",
             ));
         }
-        let mut entry = source.clone();
-        entry.provenance_id = provenance_id;
-        combined.push(entry);
     }
     Ok((combined, mapping))
 }
@@ -607,13 +646,155 @@ fn remap_facts(
         .collect()
 }
 
-fn remap_disjunction(
-    source: &DecodedGroundDisjunction,
+type AtomIdentity = (u32, Vec<DecodedTerm>);
+type ClauseIdentity = (Vec<AtomIdentity>, Vec<AtomIdentity>, Vec<u32>);
+type FactIdentity = (u32, Vec<DecodedTerm>);
+type DisjunctionIdentity = Vec<FactIdentity>;
+
+fn atom_identity(atom: &DecodedAtom) -> AtomIdentity {
+    (atom.predicate_id, atom.arguments.clone())
+}
+
+fn clause_identity(clause: &DecodedClause) -> ClauseIdentity {
+    (
+        clause.body.iter().map(atom_identity).collect(),
+        clause.head.iter().map(atom_identity).collect(),
+        clause.join_order.clone(),
+    )
+}
+
+fn fact_identity(fact: &DecodedGroundAtom) -> FactIdentity {
+    (fact.predicate_id, fact.arguments.clone())
+}
+
+fn union_ids(target: &mut Vec<u32>, incoming: &[u32]) {
+    target.extend_from_slice(incoming);
+    target.sort_unstable();
+    target.dedup();
+}
+
+fn merge_clauses(
+    permanent: &[DecodedClause],
+    overlay: &[DecodedClause],
     mapping: &BTreeMap<u32, u32>,
-) -> NativeResult<DecodedGroundDisjunction> {
-    let mut value = source.clone();
-    value.disjuncts = remap_facts(&value.disjuncts, mapping)?;
-    Ok(value)
+) -> NativeResult<Vec<DecodedClause>> {
+    let mut combined = Vec::new();
+    let mut indexes = BTreeMap::new();
+    for clause in permanent {
+        merge_clause(&mut combined, &mut indexes, clause.clone())?;
+    }
+    for source in overlay {
+        let mut clause = source.clone();
+        clause.provenance_ids = remap_provenance(&clause.provenance_ids, mapping)?;
+        merge_clause(&mut combined, &mut indexes, clause)?;
+    }
+    Ok(combined)
+}
+
+fn merge_clause(
+    combined: &mut Vec<DecodedClause>,
+    indexes: &mut BTreeMap<ClauseIdentity, usize>,
+    mut clause: DecodedClause,
+) -> NativeResult<()> {
+    let identity = clause_identity(&clause);
+    if let Some(index) = indexes.get(&identity).copied() {
+        union_ids(&mut combined[index].provenance_ids, &clause.provenance_ids);
+        return Ok(());
+    }
+    clause.clause_id = u32::try_from(combined.len())
+        .map_err(|_| NativeError::wire("combined query clause count exceeds u32"))?;
+    clause.provenance_ids.sort_unstable();
+    clause.provenance_ids.dedup();
+    indexes.insert(identity, combined.len());
+    combined.push(clause);
+    Ok(())
+}
+
+fn merge_facts(
+    permanent: &[DecodedGroundAtom],
+    overlay: &[DecodedGroundAtom],
+    mapping: &BTreeMap<u32, u32>,
+) -> NativeResult<Vec<DecodedGroundAtom>> {
+    let mut combined = Vec::new();
+    let mut indexes = BTreeMap::new();
+    for fact in permanent {
+        merge_fact(&mut combined, &mut indexes, fact.clone());
+    }
+    for fact in remap_facts(overlay, mapping)? {
+        merge_fact(&mut combined, &mut indexes, fact);
+    }
+    Ok(combined)
+}
+
+fn merge_fact(
+    combined: &mut Vec<DecodedGroundAtom>,
+    indexes: &mut BTreeMap<FactIdentity, usize>,
+    mut fact: DecodedGroundAtom,
+) {
+    let identity = fact_identity(&fact);
+    if let Some(index) = indexes.get(&identity).copied() {
+        union_ids(&mut combined[index].provenance_ids, &fact.provenance_ids);
+        return;
+    }
+    fact.provenance_ids.sort_unstable();
+    fact.provenance_ids.dedup();
+    indexes.insert(identity, combined.len());
+    combined.push(fact);
+}
+
+fn merge_disjunctions(
+    permanent: &[DecodedGroundDisjunction],
+    overlay: &[DecodedGroundDisjunction],
+    mapping: &BTreeMap<u32, u32>,
+) -> NativeResult<Vec<DecodedGroundDisjunction>> {
+    let mut combined = Vec::new();
+    let mut indexes = BTreeMap::new();
+    for disjunction in permanent {
+        merge_disjunction(&mut combined, &mut indexes, disjunction.clone())?;
+    }
+    for source in overlay {
+        let mut disjunction = source.clone();
+        disjunction.provenance_ids = remap_provenance(&disjunction.provenance_ids, mapping)?;
+        disjunction.disjuncts = remap_facts(&disjunction.disjuncts, mapping)?;
+        merge_disjunction(&mut combined, &mut indexes, disjunction)?;
+    }
+    Ok(combined)
+}
+
+fn merge_disjunction(
+    combined: &mut Vec<DecodedGroundDisjunction>,
+    indexes: &mut BTreeMap<DisjunctionIdentity, usize>,
+    mut disjunction: DecodedGroundDisjunction,
+) -> NativeResult<()> {
+    let identity = disjunction
+        .disjuncts
+        .iter()
+        .map(fact_identity)
+        .collect::<Vec<_>>();
+    if let Some(index) = indexes.get(&identity).copied() {
+        let retained = &mut combined[index];
+        union_ids(&mut retained.provenance_ids, &disjunction.provenance_ids);
+        if retained.disjuncts.len() != disjunction.disjuncts.len() {
+            return Err(NativeError::invariant(
+                "equal disjunction identities have different cardinality",
+            ));
+        }
+        for (target, source) in retained.disjuncts.iter_mut().zip(&disjunction.disjuncts) {
+            union_ids(&mut target.provenance_ids, &source.provenance_ids);
+        }
+        return Ok(());
+    }
+    disjunction.disjunction_id = u32::try_from(combined.len())
+        .map_err(|_| NativeError::wire("combined query disjunction count exceeds u32"))?;
+    disjunction.provenance_ids.sort_unstable();
+    disjunction.provenance_ids.dedup();
+    for disjunct in &mut disjunction.disjuncts {
+        disjunct.provenance_ids.sort_unstable();
+        disjunct.provenance_ids.dedup();
+    }
+    indexes.insert(identity, combined.len());
+    combined.push(disjunction);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -676,6 +857,36 @@ mod tests {
         assert_eq!(first.satisfiable, second.satisfiable);
         assert!(!first.cache_hit);
         assert!(second.cache_hit);
+        Ok(())
+    }
+
+    #[test]
+    fn complete_query_prefix_merges_to_the_exact_permanent_program() -> NativeResult<()> {
+        let limits = DecodeLimits::default();
+        let ontology = decode_ontology(golden_document("ontology"), &limits)
+            .map_err(|error| NativeError::wire(error.message))?;
+        let mut first_local_symbols = [0_u32; 8];
+        for domain in &ontology.program.symbol_domains {
+            first_local_symbols[domain.kind as usize] = u32::try_from(domain.values.len())
+                .map_err(|_| NativeError::invariant("test symbol boundary exceeds u32"))?;
+        }
+        let query_hash = [19; 32];
+        let query = DecodedQuery {
+            permanent_program_sha256: ontology.metadata.program_sha256,
+            query_hash,
+            overlay_program_sha256: Some(query_hash),
+            first_local_predicate_id: u32::try_from(ontology.program.predicates.len())
+                .map_err(|_| NativeError::invariant("test predicate boundary exceeds u32"))?,
+            first_local_symbols,
+            requires_rebuild: false,
+            program: Some(ontology.program.clone()),
+            reason: None,
+            interpretation: vec!["duplicate-prefix-regression".to_owned()],
+        };
+
+        let combined = combine_query_ontology(&ontology, &query)?;
+
+        assert_eq!(combined, ontology);
         Ok(())
     }
 

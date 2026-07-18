@@ -17,7 +17,7 @@ from contextlib import suppress
 from types import ModuleType
 from typing import NoReturn, Protocol, TypeVar, cast
 
-from pyhermit import __version__
+from pyhermit._version import __version__
 from pyhermit.backends.native_events import NativeSessionEvent, decode_events
 from pyhermit.backends.native_wire import (
     decode_check,
@@ -131,6 +131,11 @@ class NativeBackendFactory:
         self_test = getattr(module, "self_test", None)
         if not isinstance(implementation, str) or not implementation:
             _version_error("native implementation version is invalid", "metadata_invalid")
+        if implementation != __version__:
+            _version_error(
+                "native implementation version does not match the Python package",
+                "package_version_mismatch",
+            )
         if abi != 1:
             _version_error("native ABI does not match the Python adapter", "abi_mismatch")
         if schema != COMPILED_IR_SCHEMA_VERSION:
@@ -143,8 +148,10 @@ class NativeBackendFactory:
             _version_error("native feature metadata is invalid", "metadata_invalid")
         if not _REQUIRED_FEATURES.issubset(features):
             _version_error("native extension is not a complete reasoner", "incomplete_features")
-        if not isinstance(handle_type, type) or not callable(create_session) or not callable(
-            self_test
+        if (
+            not isinstance(handle_type, type)
+            or not callable(create_session)
+            or not callable(self_test)
         ):
             _version_error("native extension surface is incomplete", "metadata_invalid")
         try:
@@ -283,9 +290,7 @@ class NativeBackendSession:
         if isinstance(queries, (str, bytes)) or not isinstance(queries, Sequence):
             raise TypeError("queries must be a sequence of compiled queries")
         values = tuple(queries)
-        encoded = tuple(
-            self._codec.encode_query(cast(CompiledQuery, value)) for value in values
-        )
+        encoded = tuple(self._codec.encode_query(cast(CompiledQuery, value)) for value in values)
         for value in encoded:
             _require_bytes(value, "encoded query")
         result = self._invoke(
@@ -362,6 +367,7 @@ class NativeBackendSession:
                 self._drain_events(started)
             raise
         self._drain_events(started)
+        self._cancellation.check()
         return value
 
     def _drain_events(self, started: float) -> None:

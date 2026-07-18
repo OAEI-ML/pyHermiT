@@ -133,6 +133,12 @@ pub fn load_permanent_rule_state(
     .map_err(expansion_to_native)?;
     let blocking = load_blocking_manager(&ontology.program, &rule_program, blocking_choice)?;
     let mut engine = RuleEngine::new(rule_program, source_nodes, data_nodes, disjunction_learning)?;
+    // Establish the engine's recovery root before installing compiled ABox rows.  A ground
+    // disjunction legitimately creates a live choice branch, and operation-root replacement is
+    // deliberately forbidden once such a branch exists.  The session-level checkpoint still
+    // captures every installed row before reasoning starts and remains the authoritative rollback
+    // boundary for cancellation or failure.
+    engine.initialize(&mut kernel, Arc::clone(&cancellation))?;
     for fact in ontology
         .program
         .positive_facts
@@ -163,7 +169,6 @@ pub fn load_permanent_rule_state(
             &[],
         )?;
     }
-    engine.initialize(&mut kernel, cancellation)?;
     kernel.check_invariants()?;
     Ok(LoadedRuleState {
         kernel,

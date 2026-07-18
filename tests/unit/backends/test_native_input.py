@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from pyhermit.backends.native_input import (
     HEADER_SIZE,
     NativeInputError,
+    SectionKind,
     encode_config,
     encode_delta,
     encode_ontology,
@@ -80,9 +82,7 @@ def _program(*, size: int = 1, query_local: bool = False, rich: bool = False) ->
         for kind in sorted(SymbolKind, key=lambda value: value.value)
     )
     symbols = SymbolTable(domains, predicates)
-    provenance = ProvenanceTable(
-        (ProvenanceEntry(0, (hashlib.sha256(b"source").hexdigest(),)),)
-    )
+    provenance = ProvenanceTable((ProvenanceEntry(0, (hashlib.sha256(b"source").hexdigest(),)),))
     facts = tuple(
         sorted(
             (GroundAtom(0, (IndividualTerm(index),), (0,)) for index in range(size)),
@@ -120,11 +120,15 @@ def _program(*, size: int = 1, query_local: bool = False, rich: bool = False) ->
         non_simple = (1,)
         transitions = tuple(
             sorted(
-                (RoleTransitionIR(0, 1, None), RoleTransitionIR(0, 1, 1)),
+                (
+                    RoleTransitionIR(1, 2, 0),
+                    RoleTransitionIR(0, 1, 1),
+                    RoleTransitionIR(0, 2, None),
+                ),
                 key=lambda value: value.canonical_bytes(),
             )
         )
-        automata = (RoleAutomatonIR(1, 2, 0, (1,), transitions),)
+        automata = (RoleAutomatonIR(1, 3, 0, (2,), transitions),)
     return ClauseProgram(
         symbols=symbols,
         predicates=predicates,
@@ -227,6 +231,31 @@ def test_config_query_and_delta_are_concrete_deterministic_documents() -> None:
         reasons=("assertion-only",),
     )
     assert encode_delta(delta) == encode_delta(delta)
+
+
+def test_role_transitions_use_numeric_native_wire_order_not_ir_json_order() -> None:
+    encoded = encode_ontology(_ontology(size=2, rich=True))
+    section_count = struct.unpack_from("<I", encoded, 32)[0]
+    transition_payload = b""
+    for index in range(section_count):
+        directory_offset = HEADER_SIZE + index * 32
+        kind = struct.unpack_from("<H", encoded, directory_offset)[0]
+        if kind != SectionKind.TRANSITIONS:
+            continue
+        payload_offset, payload_length = struct.unpack_from("<QQ", encoded, directory_offset + 8)
+        transition_payload = encoded[payload_offset : payload_offset + payload_length]
+        break
+
+    assert transition_payload
+    rows = tuple(
+        struct.unpack_from("<III", transition_payload, offset)
+        for offset in range(0, len(transition_payload), 12)
+    )
+    assert rows == (
+        (0, 1, 1),
+        (0, 2, (1 << 32) - 1),
+        (1, 2, 0),
+    )
 
 
 def test_encoder_rejects_protocol_standin_and_noncanonical_semantic_json() -> None:

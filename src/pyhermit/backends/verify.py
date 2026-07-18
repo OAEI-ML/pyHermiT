@@ -75,8 +75,7 @@ class VerifyBackendFactory:
             package_version=__version__,
             ir_schema_version=native_info.ir_schema_version,
             implementation_version=(
-                f"verify:{native_info.implementation_version}+"
-                f"{python_info.implementation_version}"
+                f"verify:{native_info.implementation_version}+{python_info.implementation_version}"
             ),
             core_package_version=native_info.core_package_version,
             core_api_version=native_info.core_api_version,
@@ -109,7 +108,7 @@ class VerifyBackendFactory:
                 native.close()
             raise
         try:
-            return VerifyBackendSession(native, python)
+            return VerifyBackendSession(native, python, cancellation)
         except BaseException:
             with suppress(Exception):
                 native.close()
@@ -122,6 +121,7 @@ class VerifyBackendSession:
     """One fail-closed pair of complete sessions with exact result/error comparison."""
 
     __slots__ = (
+        "_cancellation",
         "_closed",
         "_lock",
         "_mismatch_operation",
@@ -130,7 +130,12 @@ class VerifyBackendSession:
         "_python",
     )
 
-    def __init__(self, native: BackendSession, python: BackendSession) -> None:
+    def __init__(
+        self,
+        native: BackendSession,
+        python: BackendSession,
+        cancellation: CancellationToken | None = None,
+    ) -> None:
         for name, session in (("native", native), ("python", python)):
             if not all(
                 callable(getattr(session, method, None))
@@ -149,6 +154,7 @@ class VerifyBackendSession:
                 raise TypeError(f"{name} must satisfy BackendSession")
         self._native = native
         self._python = python
+        self._cancellation = cancellation
         self._owner_pid = os.getpid()
         self._lock = threading.Lock()
         self._closed = False
@@ -236,6 +242,17 @@ class VerifyBackendSession:
     ) -> _T:
         with self._operation(operation):
             native = _capture(native_call)
+            cancellation = self._cancellation
+            if cancellation is not None and (
+                cancellation.interrupted or cancellation.deadline_exceeded
+            ):
+                # The native call owns user-visible callbacks.  Once one of those callbacks or
+                # an external thread cancels the shared token, running the callback-free Python
+                # shadow can only manufacture a timing-dependent mismatch.  Preserve the native
+                # error, or let the shared token raise before any shadow side effects occur.
+                if native.error is not None:
+                    raise native.error
+                cancellation.check()
             python = _capture(python_call)
             return cast(_T, self._resolve(operation, native, python))
 

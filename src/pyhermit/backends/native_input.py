@@ -506,7 +506,19 @@ class _ProgramEncoder:
         for automaton in roles.automata:
             _exact(automaton, RoleAutomatonIR, "role automaton")
             finals = self.u32s.add(list(automaton.final_states))
-            for transition in automaton.transitions:
+            # RoleAutomatonIR is ordered by generic canonical JSON bytes so its private program
+            # hash is stable across every IR record type.  The compact native wire has its own
+            # numeric canonical order, which keeps validation/allocation linear in Rust and must
+            # not accidentally depend on lexical JSON ordering (for example role 10 before 2).
+            transitions = sorted(
+                automaton.transitions,
+                key=lambda transition: (
+                    transition.source_state,
+                    U32_NONE if transition.role_id is None else transition.role_id,
+                    transition.target_state,
+                ),
+            )
+            for transition in transitions:
                 _exact(transition, RoleTransitionIR, "role transition")
                 self.transitions.extend(
                     _TRANSITION.pack(
@@ -523,10 +535,10 @@ class _ProgramEncoder:
                     finals[0],
                     finals[1],
                     transition_first,
-                    len(automaton.transitions),
+                    len(transitions),
                 )
             )
-            transition_first += len(automaton.transitions)
+            transition_first += len(transitions)
         return _ROLE.pack(
             roles.object_role_count,
             roles.data_property_count,
@@ -671,8 +683,10 @@ def encode_query(query: CompiledQuery) -> bytes:
     for value in query.interpretation:
         ref = strings.add(_utf8(value, "query interpretation"))
         string_refs.extend(_STRING_REF.pack(*ref))
-    flags = int(query.requires_rebuild) | (int(query.program is not None) << 1) | (
-        int(query.reason is not None) << 2
+    flags = (
+        int(query.requires_rebuild)
+        | (int(query.program is not None) << 1)
+        | (int(query.reason is not None) << 2)
     )
     overlay_digest = bytes(32)
     program_sections: list[_Section] = []
@@ -817,9 +831,7 @@ def _program_from_ontology(ontology: CompiledOntology) -> ClauseProgram:
     clauses = cast(tuple[DLClause, ...], ontology.clauses)
     positive_facts = cast(tuple[GroundAtom, ...], ontology.positive_facts)
     negative_facts = cast(tuple[GroundAtom, ...], ontology.negative_facts)
-    ground_disjunctions = cast(
-        tuple[GroundDisjunctionIR, ...], ontology.ground_disjunctions
-    )
+    ground_disjunctions = cast(tuple[GroundDisjunctionIR, ...], ontology.ground_disjunctions)
     return ClauseProgram(
         symbols=symbols,
         predicates=predicates,

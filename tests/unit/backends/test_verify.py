@@ -17,7 +17,7 @@ from pyhermit.backends.protocol import (
 )
 from pyhermit.backends.verify import VerifyBackendFactory, VerifyBackendSession
 from pyhermit.config import ReasonerConfig
-from pyhermit.events import CancellationToken
+from pyhermit.events import CancellationSource, CancellationToken
 from pyhermit.exceptions import (
     BackendMismatchError,
     BackendPoisonedError,
@@ -30,6 +30,7 @@ class _Session:
     def __init__(self) -> None:
         self.fingerprint = "11" * 32
         self.check_result: object = CheckResult(True)
+        self.check_count = 0
         self.closed = False
         self.reset_count = 0
         self.received_queries: tuple[object, ...] = ()
@@ -41,6 +42,7 @@ class _Session:
 
     def check(self, query: object = None) -> object:
         self._require_open()
+        self.check_count += 1
         return _raise_or_return(self.check_result)
 
     def check_many(self, queries: Sequence[object]) -> object:
@@ -168,6 +170,31 @@ def test_exception_mismatch_is_not_treated_as_a_python_recovery() -> None:
     with pytest.raises(BackendMismatchError) as caught:
         session.check()
     assert caught.value.context["reason"] == "exception_mismatch"
+
+
+def test_shared_cancellation_after_native_skips_the_timing_dependent_shadow() -> None:
+    cancellation = CancellationSource()
+    cancellation.begin_operation()
+
+    class InterruptingSession(_Session):
+        def check(self, query: object = None) -> object:
+            self._require_open()
+            self.check_count += 1
+            cancellation.interrupt("cancelled during native callback")
+            return CheckResult(True)
+
+    native = InterruptingSession()
+    python = _Session()
+    session = VerifyBackendSession(  # type: ignore[arg-type]
+        native,
+        python,
+        cancellation.token,
+    )
+
+    with pytest.raises(ReasonerInterruptedError, match="native callback"):
+        session.check()
+    assert native.check_count == 1
+    assert python.check_count == 0
 
 
 def test_construction_rejects_different_ontology_fingerprints() -> None:
