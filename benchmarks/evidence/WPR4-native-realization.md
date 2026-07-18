@@ -52,6 +52,14 @@ deterministic input permutations, cancellation and resource limits, cache hit/pr
 foreign/stale ownership, failed and cancelled replacement isolation, and result-wire encoding.
 The consuming wire-conversion test also proves that a same-as vector retains its allocation.
 
+Focused optimized command:
+
+```text
+cargo test --locked --release --no-default-features --lib services::realization_tests
+```
+
+Result: 9/9 passed in 0.09 seconds after the release build completed.
+
 The large-ABox test builds 40,000 named singleton groups, 40,000 direct-type facts, and 39,999
 object facts. It completed in 0.52 seconds in the focused debug run on the development host and
 asserts work accounting exactly equals the exposed fact count; it creates no pairwise equality
