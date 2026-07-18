@@ -25,8 +25,12 @@ pub mod model;
 pub mod nominals;
 pub mod roles;
 pub mod rules;
+pub mod session;
 pub mod store;
 pub mod wire;
+
+#[cfg(test)]
+mod session_tests;
 
 use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
