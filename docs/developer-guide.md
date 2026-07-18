@@ -81,13 +81,14 @@ profiling but cannot satisfy the release gate.
 
 The implementation is source-guided from pinned HermiT behavior, with project-authored
 code and explicit provenance inventories. `LICENSE`, `COPYING`, `NOTICE.md`,
-`tests/data/PROVENANCE.toml`, `tools/specs/reference.toml`, and
-`tools/specs/dependencies.toml` are part of the audit surface. Runtime artifacts exclude
+`tests/data/PROVENANCE.toml`, `tools/specs/reference.toml`,
+`reports/licensing/adapted-files.toml`, and `tools/specs/dependencies.toml` are part of
+the audit surface. Runtime artifacts exclude
 Java sources, JARs/classes, the oracle, reference downloads, and test-only goldens.
 
 WP17 local evidence does not close external gates. The 350-check licensed W3C execution,
 larger live-reference sample, hosted platform/sanitizer matrix, controlled performance
-calibration, and five remaining `LIC-001` items stay blocked in
+calibration, and the remaining `LIC-001` owner/legal signoff stay blocked in
 [the release report](../reports/release-report-local.json). Publication must remain
 disabled until those entries have reviewed evidence and the fail-closed license checker
 permits it.

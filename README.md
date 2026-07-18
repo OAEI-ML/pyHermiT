@@ -14,9 +14,11 @@ launcher, Java bridge, or reference implementation.
 The owner has selected the source-guided implementation mode and
 `LGPL-3.0-or-later`, matching the pinned upstream declaration. `LICENSE` contains the
 LGPL text, `COPYING` the GPL text it incorporates, and `NOTICE.md` the initial upstream
-attribution. No release may be published while the remaining `LIC-001` provenance,
-file-header, package-metadata, source-obligation, artifact-audit, and legal-review
-checklist in [`specs/deviations.md`](specs/deviations.md) is open.
+attribution. No release may be published while the repository-owned `LIC-001`
+provenance/header/package/artifact audits await the final owner/legal-review signoff
+required by [`specs/deviations.md`](specs/deviations.md). The local audits are under
+[`reports/licensing/`](reports/licensing/) and
+[`reports/release/artifact-audit.md`](reports/release/artifact-audit.md).
 
 ## Documentation and release state
 

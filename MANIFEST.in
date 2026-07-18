@@ -16,7 +16,7 @@ recursive-include native/benches *.rs
 recursive-include src *.py *.pyi py.typed
 recursive-include specs *.md *.toml
 recursive-include docs *.md
-recursive-include reports *.json *.md
+recursive-include reports *.json *.md *.toml
 recursive-include benchmarks *.py *.json *.md *.toml
 recursive-include tools/specs *.py *.toml *.md
 prune tests

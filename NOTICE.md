@@ -23,9 +23,10 @@ pyHermiT reimplements the core reasoning behavior of **HermiT**:
 - Copyright: the HermiT authors, University of Oxford, and contributors
 
 No HermiT source or binary is vendored in this repository. Files that
-translate or adapt pinned HermiT material must carry upstream copyright and
-license notices plus a modification statement, and are inventoried in the
-file-level provenance records required by `specs/deviations.md` §4–5 before
-any artifact is published.
+translate or adapt pinned HermiT material carry upstream copyright and
+license notices plus a modification statement. The repository-owned inventory
+is `reports/licensing/adapted-files.toml`; its scope and headers remain subject
+to the owner/legal review required by `specs/deviations.md` §4–5 before any
+artifact is published.
 
 pyHermiT does not claim endorsement by the original HermiT authors.

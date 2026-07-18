@@ -23,5 +23,7 @@ release; dates describe repository evidence, not package-index publication.
 
 Publication remains blocked pending the licensed 350-check W3C execution, larger live
 reference sample, hosted platform/sanitizer results, dedicated performance calibration,
-and completion of the five open `LIC-001` provenance/legal items. Java is permitted only
-in the opt-in development comparison lane and is absent from runtime artifacts.
+and the remaining `LIC-001` owner/legal signoff. The four repository-owned provenance,
+header, package/source, and artifact audits are complete but do not provide legal approval.
+Java is permitted only in the opt-in development comparison lane and is absent from runtime
+artifacts.

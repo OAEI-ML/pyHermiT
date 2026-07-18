@@ -1,3 +1,8 @@
+# Copyright 2008, 2009, 2010 by the Oxford University Computing Laboratory
+# Modifications Copyright 2026 pyHermiT contributors
+# Adapted from HermiT commit 37ec30aced32ac81ebecc5e33fad255ddefcb4c3;
+# see reports/licensing/adapted-files.toml.
+
 """Exhaustive, deterministic OWL axiom normalization.
 
 SPDX-License-Identifier: LGPL-3.0-or-later

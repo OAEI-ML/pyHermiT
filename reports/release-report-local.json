@@ -111,8 +111,8 @@
     {
       "id": "LIC-001",
       "status": "blocked",
-      "reason": "Five owner/legal provenance and source-obligation checklist items remain open, so publication fails closed.",
-      "evidence": ["tools/specs/licensing.toml", "specs/deviations.md"]
+      "reason": "Repository provenance/header/package/artifact audits are complete, but owner/legal signoff remains open, so publication fails closed.",
+      "evidence": ["tools/specs/licensing.toml", "specs/deviations.md", "reports/licensing/adapted-files.toml", "reports/licensing/adapted-file-header-audit.md", "reports/licensing/package-license-audit.md", "reports/release/artifact-audit.md"]
     }
   ]
 }

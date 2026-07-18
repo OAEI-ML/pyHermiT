@@ -84,9 +84,9 @@ included in wheels.
 
 ### LIC-001 — release-blocking project/derivative license decision
 
-Status: **decision recorded (owner, 2026-07-17); implementation partially executed —
-every public artifact release/publish remains blocked until the checklist below is
-completed and audited.**
+Status: **decision recorded (owner, 2026-07-17); repository-owned implementation and
+artifact audits completed 2026-07-18; owner/legal review is still pending — every public
+artifact release/publish remains blocked until that signoff is recorded.**
 
 Recorded decision (owner, 2026-07-17):
 
@@ -105,11 +105,15 @@ Recorded decision (owner, 2026-07-17):
   the GPL-3.0 text it incorporates, and `NOTICE.md` credits HermiT and records this
   decision. The earlier bare GPL-3 `LICENSE` was never an approved relicensing and is
   superseded.
-- Still required before any publication: file-level provenance inventory of every
-  adapted file with upstream copyright/LGPL notices and modification statements;
-  `pyproject.toml`/Cargo SPDX metadata; wheel/sdist license-file layout; source/offer
-  obligations for LGPL material; artifact audit evidence; and legal review of the
-  executed changes.
+- Executed on 2026-07-18: the file-level adapted-source inventory, aggregate upstream
+  and modification headers, wheel/sdist license and corresponding-source policy, and
+  local artifact audit are recorded under `reports/licensing/` and
+  `reports/release/artifact-audit.md`. Their executable checks leave the machine gate
+  open and publication disabled.
+- Still required before any publication: owner/legal review of the inventory boundary,
+  aggregate notice layout (the pinned source contains more than one copyright-header
+  variant), source-distribution strategy, and artifact policy, followed by an explicit
+  `reports/licensing/owner-legal-review-signoff.md` decision.
 
 Historical context: the repository previously contained the GNU GPL version 3 text as
 `LICENSE`, while pinned HermiT declares `LGPL-3.0-or-later`. Merely placing a license
@@ -140,9 +144,9 @@ selected above):
 
 Until LIC-001 is fully closed, local development/test artifacts may be built but packaging
 metadata must be clearly provisional and release workflows MUST fail before upload. The
-decision and the `LICENSE`/`COPYING`/`NOTICE.md` changes are recorded above; closing the
-record additionally requires the header/`pyproject.toml`/Cargo metadata changes, a complete
-provenance inventory, artifact audit evidence, and a reviewer sign-off entry.
+decision, license texts, metadata, adapted-file/header inventory, package-source policy, and
+local artifact audit are recorded above. Closing the record now requires the owner/legal
+review signoff entry; no repository audit may substitute for it.
 
 Release requirements:
 

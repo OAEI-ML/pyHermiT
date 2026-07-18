@@ -34,26 +34,26 @@ expected_evidence = ["pyproject.toml", "Cargo.toml"]
 
 [[requirement]]
 id = "adapted-file-provenance-inventory"
-status = "pending"
-evidence = ""
+status = "complete"
+evidence = "reports/licensing/adapted-files.toml"
 expected_evidence = ["reports/licensing/adapted-files.toml"]
 
 [[requirement]]
 id = "adapted-file-headers-and-modification-notices"
-status = "pending"
-evidence = ""
+status = "complete"
+evidence = "reports/licensing/adapted-file-header-audit.md"
 expected_evidence = ["reports/licensing/adapted-file-header-audit.md"]
 
 [[requirement]]
 id = "wheel-sdist-license-layout-and-source-obligations"
-status = "pending"
-evidence = ""
+status = "complete"
+evidence = "reports/licensing/package-license-audit.md"
 expected_evidence = ["reports/licensing/package-license-audit.md"]
 
 [[requirement]]
 id = "artifact-audit"
-status = "pending"
-evidence = ""
+status = "complete"
+evidence = "reports/release/artifact-audit.md"
 expected_evidence = ["reports/release/artifact-audit.md"]
 
 [[requirement]]

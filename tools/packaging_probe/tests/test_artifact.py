@@ -12,6 +12,7 @@ from tools.packaging_probe.check_artifact import (
     ArtifactError,
     _check_runtime_dependencies,
     _contains_absolute_path,
+    _license_hashes,
     _runtime_version,
     _wheel_tags,
     inspect_artifact,
@@ -19,6 +20,49 @@ from tools.packaging_probe.check_artifact import (
 
 
 class ArtifactCheckerTests(unittest.TestCase):
+    def test_license_payloads_are_content_checked(self) -> None:
+        root = Path(__file__).parents[3]
+        prefix = "pyhermit-0.dist-info/licenses"
+        content = ArchiveContent(
+            {
+                f"{prefix}/{name}": (root / name).read_bytes()
+                for name in ("LICENSE", "COPYING", "NOTICE.md")
+            }
+        )
+
+        hashes = _license_hashes(content, wheel=True)
+
+        self.assertEqual(set(hashes), {"LICENSE", "COPYING", "NOTICE.md"})
+        self.assertTrue(all(len(value) == 64 for value in hashes.values()))
+
+    def test_incomplete_notice_payload_is_rejected(self) -> None:
+        root = Path(__file__).parents[3]
+        prefix = "pyhermit-0.dist-info/licenses"
+        content = ArchiveContent(
+            {
+                f"{prefix}/LICENSE": (root / "LICENSE").read_bytes(),
+                f"{prefix}/COPYING": (root / "COPYING").read_bytes(),
+                f"{prefix}/NOTICE.md": b"LGPL-3.0-or-later only",
+            }
+        )
+
+        with self.assertRaisesRegex(ArtifactError, "missing required provenance"):
+            _license_hashes(content, wheel=True)
+
+    def test_modified_complete_notice_payload_is_rejected(self) -> None:
+        root = Path(__file__).parents[3]
+        prefix = "pyhermit-0.dist-info/licenses"
+        content = ArchiveContent(
+            {
+                f"{prefix}/LICENSE": (root / "LICENSE").read_bytes(),
+                f"{prefix}/COPYING": (root / "COPYING").read_bytes(),
+                f"{prefix}/NOTICE.md": (root / "NOTICE.md").read_bytes() + b"\n",
+            }
+        )
+
+        with self.assertRaisesRegex(ArtifactError, "payload identity"):
+            _license_hashes(content, wheel=True)
+
     def test_pep_508_dependency_specifier_is_parsed(self) -> None:
         _check_runtime_dependencies(
             "\n".join(

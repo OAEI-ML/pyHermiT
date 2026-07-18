@@ -44,6 +44,11 @@ _ABSOLUTE_PATH_MARKERS = (
 _MAX_MEMBER_SIZE = 256 * 1024 * 1024
 _MAX_ARCHIVE_SIZE = 1024 * 1024 * 1024
 _PATH_BOUNDARY_BYTES = frozenset(b"\x00\t\n\r \"'=(:,[{")
+_LICENSE_PAYLOAD_SHA256 = {
+    "COPYING": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "LICENSE": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+    "NOTICE.md": "59fb5010cb7fb6bc6061b95551cab0e4f6b55223adfbe5510f1a9eabdff7adcc",
+}
 
 
 class ArtifactError(ValueError):
@@ -65,6 +70,7 @@ class ArtifactReport:
     tags: tuple[str, ...]
     native_members: tuple[str, ...]
     python_hashes: Mapping[str, str]
+    license_hashes: Mapping[str, str]
     metadata_sha256: str
     archive_sha256: str
     java_free: bool = True
@@ -196,6 +202,40 @@ def _check_metadata(message: Message) -> tuple[str, str, str]:
 
     _check_runtime_dependencies(message)
     return name, version, requires_python
+
+
+def _license_hashes(content: ArchiveContent, *, wheel: bool) -> dict[str, str]:
+    """Validate required license payload content and return identity hashes."""
+
+    payloads: dict[str, bytes] = {}
+    for name in ("LICENSE", "COPYING", "NOTICE.md"):
+        suffix = f".dist-info/licenses/{name}" if wheel else f"/{name}"
+        _, payloads[name] = _one_member(content, suffix)
+    try:
+        license_text = payloads["LICENSE"].decode("utf-8")
+        copying_text = payloads["COPYING"].decode("utf-8")
+        notice_text = payloads["NOTICE.md"].decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ArtifactError("license and notice payloads must be UTF-8") from error
+    if "GNU LESSER GENERAL PUBLIC LICENSE" not in license_text or "Version 3" not in license_text:
+        raise ArtifactError("LICENSE must contain the GNU LGPL version 3 text")
+    if "GNU GENERAL PUBLIC LICENSE" not in copying_text or "Version 3" not in copying_text:
+        raise ArtifactError("COPYING must contain the GNU GPL version 3 text")
+    required_notice = (
+        "LGPL-3.0-or-later",
+        "source-guided",
+        "37ec30aced32ac81ebecc5e33fad255ddefcb4c3",
+        "reports/licensing/adapted-files.toml",
+    )
+    missing = tuple(value for value in required_notice if value not in notice_text)
+    if missing:
+        raise ArtifactError(f"NOTICE.md is missing required provenance values: {missing}")
+    hashes = {
+        name: hashlib.sha256(payload).hexdigest() for name, payload in sorted(payloads.items())
+    }
+    if hashes != _LICENSE_PAYLOAD_SHA256:
+        raise ArtifactError("license or notice payload identity differs from the audited files")
+    return hashes
 
 
 def _check_runtime_dependencies(metadata: Message | str) -> None:
@@ -356,8 +396,7 @@ def _inspect_wheel(path: Path, content: ArchiveContent, expected: str) -> Artifa
             raise ArtifactError(f"wheel is missing runtime file: {required}")
     if _runtime_version(content.files["pyhermit/_version.py"]) != version:
         raise ArtifactError("wheel metadata and runtime version source differ")
-    for license_name in ("LICENSE", "COPYING", "NOTICE.md"):
-        _one_member(content, f".dist-info/licenses/{license_name}")
+    license_hashes = _license_hashes(content, wheel=True)
 
     _, wheel_raw = _one_member(content, ".dist-info/WHEEL")
     root_is_pure = BytesParser().parsebytes(wheel_raw).get("Root-Is-Purelib", "").lower()
@@ -388,6 +427,7 @@ def _inspect_wheel(path: Path, content: ArchiveContent, expected: str) -> Artifa
         tags=tags,
         native_members=native,
         python_hashes=_python_hashes(content, sdist=False),
+        license_hashes=license_hashes,
         metadata_sha256=hashlib.sha256(metadata_raw).hexdigest(),
         archive_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
     )
@@ -420,6 +460,10 @@ def _inspect_sdist(path: Path, content: ArchiveContent, expected: str) -> Artifa
         "native/Cargo.toml",
         "native/src/lib.rs",
         "pyproject.toml",
+        "reports/licensing/adapted-file-header-audit.md",
+        "reports/licensing/adapted-files.toml",
+        "reports/licensing/package-license-audit.md",
+        "reports/release/artifact-audit.md",
         "setup.cfg",
         "setup.py",
         "specs/SPEC.md",
@@ -435,6 +479,7 @@ def _inspect_sdist(path: Path, content: ArchiveContent, expected: str) -> Artifa
     version_member = f"{root}/src/pyhermit/_version.py"
     if _runtime_version(content.files[version_member]) != version:
         raise ArtifactError("sdist metadata and runtime version source differ")
+    license_hashes = _license_hashes(content, wheel=False)
     forbidden_prefixes = (
         ".reference/",
         "target/",
@@ -454,6 +499,7 @@ def _inspect_sdist(path: Path, content: ArchiveContent, expected: str) -> Artifa
         tags=(),
         native_members=(),
         python_hashes=_python_hashes(content, sdist=True),
+        license_hashes=license_hashes,
         metadata_sha256=hashlib.sha256(metadata_raw).hexdigest(),
         archive_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
     )
@@ -493,6 +539,8 @@ def compare_wheels(pure: Path, native: Path) -> tuple[ArtifactReport, ArtifactRe
         raise ArtifactError("pure/native METADATA bytes differ")
     if pure_report.python_hashes != native_report.python_hashes:
         raise ArtifactError("pure/native Python payload differs")
+    if pure_report.license_hashes != native_report.license_hashes:
+        raise ArtifactError("pure/native license or notice payload differs")
     return pure_report, native_report
 
 

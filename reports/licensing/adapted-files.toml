@@ -1,0 +1,208 @@
+schema = 1
+gate_id = "LIC-001"
+status = "repository-audited-awaiting-owner-legal-review"
+audit_date = "2026-07-18"
+project_license = "LGPL-3.0-or-later"
+reference_repository = "https://github.com/phillord/hermit-reasoner.git"
+reference_commit = "37ec30aced32ac81ebecc5e33fad255ddefcb4c3"
+reference_tree = "576db18fd8152be24d577b24c99e2af0d31ceef8"
+reference_license = "LGPL-3.0-or-later"
+copyright_notice = "Copyright 2008, 2009, 2010 by the Oxford University Computing Laboratory"
+modification_notice = "Modifications Copyright 2026 pyHermiT contributors"
+notice_policy = "Adapted files carry the repository's conservative aggregate Oxford notice; pinned upstream files include 2008-2010, 2009-only, and absent file-header variants, so legal review must approve the aggregate layout"
+known_upstream_notice_variants = ["Copyright 2008, 2009, 2010 by the Oxford University Computing Laboratory", "Copyright 2009 by the Oxford University Computing Laboratory", "no file-level copyright header (XMLLiteral.java; its handler is noticed)"]
+selection_rule = "Every runtime file that states HermiT-derived shapes, side conditions, or compatibility; every runtime file already retaining the upstream Oxford modification notice; the complete Python blocking subsystem identified as a port by tools/blocking/WP11-EVIDENCE.md; and the two WP10 tests explicitly specified as ports of MergeTest and NIRuleTest"
+scope_caveat = "This conservative inventory does not label any unlisted file clean-room or make a legal originality determination; all distributed project code remains LGPL-3.0-or-later"
+legal_review = "pending"
+
+[[adapted_file]]
+path = "native/src/blocking/compiled.rs"
+sha256 = "1e14b7e0bfe235a3bdc7769cd55b04e6deb5e62696861e062c9674b9c5ea2a6f"
+adaptation = "Native port of HermiT validated/core blocking clause checks with conservative unsupported-shape handling"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/blocking/BlockingValidator.java", "src/main/java/org/semanticweb/HermiT/blocking/ValidatedPairwiseDirectBlockingChecker.java", "src/main/java/org/semanticweb/HermiT/blocking/ValidatedSingleDirectBlockingChecker.java"]
+
+[[adapted_file]]
+path = "native/src/merging/mod.rs"
+sha256 = "dbd9278a8faab5192e0dfddeb0b97363db13e049ad2bfe6449aa3d98487785b9"
+adaptation = "Native implementation of HermiT merge orientation, dependency transfer, and rescheduling mechanics"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/tableau/MergingManager.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/backends/python/blocking/cache.py"
+sha256 = "005c67843ddd7c75d7023d817cd3432ef20846166a6e53d2d33c13a0b8e4e289"
+adaptation = "Bounded Python redesign of HermiT blocking-signature cache semantics"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/blocking/BlockingSignatureCache.java", "src/main/java/org/semanticweb/HermiT/blocking/SetFactory.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/backends/python/blocking/manager.py"
+sha256 = "d6df241d4301e18daef7b048af9ba68e4bde4186953cf1d58cc1d3357d223690"
+adaptation = "Python-native port of HermiT ancestor, anywhere, and validated-anywhere blocking maintenance"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/blocking/AncestorBlocking.java", "src/main/java/org/semanticweb/HermiT/blocking/AnywhereBlocking.java", "src/main/java/org/semanticweb/HermiT/blocking/AnywhereValidatedBlocking.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/backends/python/blocking/signatures.py"
+sha256 = "5b0a6a5c280454fd60de608ddf2acba325fd769bff52c67877e8f911d976ee4a"
+adaptation = "Python redesign of HermiT single, pairwise, and validated direct-blocking labels and checks"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/blocking/DirectBlockingChecker.java", "src/main/java/org/semanticweb/HermiT/blocking/PairWiseDirectBlockingChecker.java", "src/main/java/org/semanticweb/HermiT/blocking/SingleDirectBlockingChecker.java", "src/main/java/org/semanticweb/HermiT/blocking/ValidatedPairwiseDirectBlockingChecker.java", "src/main/java/org/semanticweb/HermiT/blocking/ValidatedSingleDirectBlockingChecker.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/backends/python/blocking/strategy.py"
+sha256 = "a96ee88a2045d03b197c9f9fec46b2c69c8400885ce1abfc369ae9e71754732f"
+adaptation = "Deterministic Python port of HermiT blocking strategy and checker selection"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/blocking/BlockingStrategy.java", "src/main/java/org/semanticweb/HermiT/Reasoner.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/backends/python/blocking/validation.py"
+sha256 = "72c3d3e972310d495488861f4d30a736750bf1199a7e787e3de84a49935fbeed"
+adaptation = "Python-native port of the pinned validator's two core-blocking checks"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/blocking/BlockingValidator.java", "src/main/java/org/semanticweb/HermiT/blocking/AnywhereValidatedBlocking.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/backends/python/merging.py"
+sha256 = "4706a255a379cdac37dcd976d0e014d7b5fbae49f04115a5c6ee1931c3bcc0ba"
+adaptation = "Python implementation of HermiT-compatible merge orientation, annotation transfer, and rescheduling"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/tableau/MergingManager.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/backends/python/nominals.py"
+sha256 = "c6b0104d0c9eca60bd6135c303f525478ebaba66204d8b27d9068dde22f7728d"
+adaptation = "Rollback-safe implementation of the pinned nominal-introduction side conditions"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/tableau/NominalIntroductionManager.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/backends/python/state/dependencies.py"
+sha256 = "1bcd6f3975286ad4f54352eab3aeffd20e4bbdb146dd1879d577b776ef43c931"
+adaptation = "Immutable Python redesign of HermiT dependency-set interning and union behavior"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/tableau/DependencySetFactory.java", "src/main/java/org/semanticweb/HermiT/tableau/PermanentDependencySet.java", "src/main/java/org/semanticweb/HermiT/tableau/UnionDependencySet.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/backends/python/state/extensions.py"
+sha256 = "c6eac9a64bc2239d898a469f0a4552bf3232975b2f7a1eaaa5d76755d87a0edd"
+adaptation = "Rollback-safe Python redesign of HermiT extension tables, tuple indexes, and delta views"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/tableau/ExtensionManager.java", "src/main/java/org/semanticweb/HermiT/tableau/ExtensionTable.java", "src/main/java/org/semanticweb/HermiT/tableau/TupleIndex.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/backends/python/state/nodes.py"
+sha256 = "19b774ddc927b6228f4e1b744bfb0283048ea726f4d97f94d55cabfc016af0f6"
+adaptation = "Generation-safe Python arena preserving HermiT node lifecycle semantics"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/tableau/Node.java", "src/main/java/org/semanticweb/HermiT/tableau/NodeType.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/clauses/compiler.py"
+sha256 = "b695f0265500526b4b2ffcc5a35159ad1b278a71cee3a49409be2cb73eb5cf04"
+adaptation = "Deterministic Python clausification retaining pinned HermiT structural translation shapes"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/structural/OWLClausification.java", "src/main/java/org/semanticweb/HermiT/structural/ReducedABoxOnlyClausification.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/config.py"
+sha256 = "e533990dfb09a291b8b2c0cd75f511ac9ba99b2aedeb14782529d20ed80fd127"
+adaptation = "Serializable Python configuration contract retaining pinned public defaults and strategies"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/Configuration.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/binary.py"
+sha256 = "0a24927b6da826d64b3d9245eb2c2e1bf5035f954727ca8c1cacb47a1363ed20"
+adaptation = "Python binary lexical/value and length-space implementation adapted from HermiT handlers"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/binarydata/Base64.java", "src/main/java/org/semanticweb/HermiT/datatypes/binarydata/BinaryDataDatatypeHandler.java", "src/main/java/org/semanticweb/HermiT/datatypes/binarydata/BinaryDataLengthInterval.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/facets.py"
+sha256 = "674c75ddf7d0c4133503c686390d83164da9c1e0ecd1c29d878318bef7d9c3ed"
+adaptation = "Python facet validation and dispatch adapted from the pinned datatype registry and handlers"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/DatatypeHandler.java", "src/main/java/org/semanticweb/HermiT/datatypes/DatatypeRegistry.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/ieee754.py"
+sha256 = "aa8c37dccb1619ea56713b48da0c76ec77a52a4a3bd6064f66e109e6c44af993"
+adaptation = "Bit-exact Python float/double lexical and successor behavior adapted from HermiT"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/doublenum/DoubleDatatypeHandler.java", "src/main/java/org/semanticweb/HermiT/datatypes/floatnum/FloatDatatypeHandler.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/ieee_ranges.py"
+sha256 = "715ed80427dec76da642c5b130a914e91b6ae6b6f2d2fcfd46bd169a44db9094"
+adaptation = "Immutable Python IEEE range algebra adapted from HermiT float/double intervals"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/doublenum/DoubleInterval.java", "src/main/java/org/semanticweb/HermiT/datatypes/floatnum/FloatInterval.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/literals.py"
+sha256 = "4e14f041ccfd5c9b7e3bcd6c287f6b747cbe34b985a8cb7e4a3b3f0bf74866cd"
+adaptation = "Canonical Python literal compilation retaining HermiT datatype-handler compatibility"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/DatatypeRegistry.java", "src/main/java/org/semanticweb/HermiT/datatypes/MalformedLiteralException.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/nonnumeric_ranges.py"
+sha256 = "bb0a91d5430137e6a0f46c46c4ea3ea94797368a39cc964f6b72d70b1dc9b7aa"
+adaptation = "Python nonnumeric length/value range primitives adapted from HermiT subsets"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/binarydata/BinaryDataLengthInterval.java", "src/main/java/org/semanticweb/HermiT/datatypes/rdfplainliteral/RDFPlainLiteralLengthInterval.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/ranges.py"
+sha256 = "822b549dd7c8d1cc8ca3cfe9b3f858b14641dd25b8203e6306ff522f70b1c8c4"
+adaptation = "Exact immutable numeric interval/range algebra adapted from HermiT OWL-real classes"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/owlreal/NumberInterval.java", "src/main/java/org/semanticweb/HermiT/datatypes/owlreal/NumberRange.java", "src/main/java/org/semanticweb/HermiT/datatypes/owlreal/OWLRealValueSpaceSubset.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/temporal.py"
+sha256 = "c11fea3c2b247145f860953d9774f76bad624c585cac4a9098c0d602c1ec458c"
+adaptation = "Arbitrary-year Python dateTime model adapted from HermiT temporal semantics"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/datetime/DateTime.java", "src/main/java/org/semanticweb/HermiT/datatypes/datetime/DateTimeDatatypeHandler.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/temporal_ranges.py"
+sha256 = "992d888879b7145ce9dbf99698c8c5194f11b4ef973559940e941aa7063706fd"
+adaptation = "Python dateTime partial-order range algebra adapted from HermiT intervals"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/datetime/DateTimeInterval.java", "src/main/java/org/semanticweb/HermiT/datatypes/datetime/DateTimeValueSpaceSubset.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/textual.py"
+sha256 = "e653d234eb6316e8188f231720367b06f865130af50900559ac78d850deb667c"
+adaptation = "Python string, plain-literal, and anyURI value-space behavior adapted from HermiT handlers"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/anyuri/AnyURIDatatypeHandler.java", "src/main/java/org/semanticweb/HermiT/datatypes/rdfplainliteral/RDFPlainLiteralDatatypeHandler.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/datatypes/xml_literal.py"
+sha256 = "f80cd5623278fdb54fc08cce6266162cfeaa787075eeb118f49af90a7a473edc"
+adaptation = "Entity-safe Python XML-literal value semantics adapted from HermiT"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/datatypes/xmlliteral/XMLLiteral.java", "src/main/java/org/semanticweb/HermiT/datatypes/xmlliteral/XMLLiteralDatatypeHandler.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/hierarchy/classifier.py"
+sha256 = "8ea1fc08b3cf154d57b371e31dab8a141dfa453d6850635daf617185ffe3dbe1"
+adaptation = "Deterministic Python quasi-order classification retaining HermiT search behavior"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/hierarchy/HierarchySearch.java", "src/main/java/org/semanticweb/HermiT/hierarchy/QuasiOrderClassification.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/normalize/expressions.py"
+sha256 = "340b231ab21f0067a47294026c01cdbd91488d7da19a07ef50a8f52223ff8549"
+adaptation = "Deterministic Python simplification and negation-normal-form rewrites following HermiT shapes"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/structural/ExpressionManager.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/normalize/normalizer.py"
+sha256 = "3b9e9da514f502bbb4a073b358e93cee05373754c93ad2d4d32b5f3e65e7921e"
+adaptation = "Deterministic Python OWL normalization adapted from HermiT structural rules"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/structural/ExpressionManager.java", "src/main/java/org/semanticweb/HermiT/structural/OWLNormalization.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/roles/automata.py"
+sha256 = "dcee01461805d6d7b61ea24e590431a603aa786479fa3c35356292c57a48be14"
+adaptation = "Deterministic epsilon-NFA construction retaining HermiT role-language shapes"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/structural/ObjectPropertyInclusionManager.java"]
+
+[[adapted_file]]
+path = "src/pyhermit/roles/builder.py"
+sha256 = "e7f58d7020978e4fe72de3c62f39daf2fd561afbf64aa7153cb33998175dff25"
+adaptation = "Deterministic Python role-model construction adapted from HermiT structural managers"
+upstream_components = ["src/main/java/org/semanticweb/HermiT/graph/Graph.java", "src/main/java/org/semanticweb/HermiT/structural/BuiltInPropertyManager.java", "src/main/java/org/semanticweb/HermiT/structural/ObjectPropertyInclusionManager.java"]
+
+[[adapted_file]]
+path = "tests/unit/expansion/test_existentials_merging.py"
+sha256 = "6c6337a9b1ad47651a62531fc19e48840fe6e06cb628207f6dfdf114a0a8fbf7"
+adaptation = "Project-structured Python semantic case port of HermiT MergeTest and reuse behavior"
+upstream_components = ["src/test/java/org/semanticweb/HermiT/tableau/MergeTest.java"]
+
+[[adapted_file]]
+path = "tests/unit/expansion/test_nominals.py"
+sha256 = "cfa9194aab2cc80912317793bc508d607bde040633c33c6c81cfa8069b81272c"
+adaptation = "Project-structured Python semantic case port of HermiT NIRuleTest"
+upstream_components = ["src/test/java/org/semanticweb/HermiT/tableau/NIRuleTest.java"]

@@ -7,7 +7,11 @@
 //! the blocking manager.  Unsupported non-hypertableau clause shapes reject a
 //! provisional block conservatively; they can expose more expansion but cannot
 //! make an invalid model appear satisfiable.
+// Copyright 2008, 2009, 2010 by the Oxford University Computing Laboratory
+// Modifications Copyright 2026 pyHermiT contributors
 // SPDX-License-Identifier: LGPL-3.0-or-later
+// Adapted from HermiT commit 37ec30aced32ac81ebecc5e33fad255ddefcb4c3;
+// see reports/licensing/adapted-files.toml.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
