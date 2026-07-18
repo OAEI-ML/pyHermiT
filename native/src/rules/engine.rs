@@ -207,6 +207,16 @@ impl RuleEngine {
     }
 
     #[must_use]
+    pub fn source_node(&self, individual_id: u32) -> Option<NodeHandle> {
+        self.source_nodes.get(&individual_id).copied()
+    }
+
+    #[must_use]
+    pub fn data_node(&self, data_identity_id: u32) -> Option<NodeHandle> {
+        self.data_nodes.get(&data_identity_id).copied()
+    }
+
+    #[must_use]
     pub const fn initialized(&self) -> bool {
         self.initialized
     }

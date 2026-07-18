@@ -1,0 +1,409 @@
+//! Linear-time bridge from validated input-wire records to the native rule program.
+// SPDX-License-Identifier: LGPL-3.0-or-later
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use crate::cancel::CancellationState;
+use crate::error::{NativeError, NativeResult};
+use crate::input_wire::{
+    DecodedAtom, DecodedClause, DecodedGroundAtom, DecodedOntology, DecodedPredicate,
+    DecodedProgram, DecodedTerm, PredicateKind as InputPredicateKind, TermSort as InputTermSort,
+};
+use crate::model::{DependencySet, NodeKind};
+use crate::rules::{
+    GroundAtom, PredicateKind, RuleAtom, RuleClause, RuleEngine, RulePredicate, RuleProgram, Term,
+    TermSort,
+};
+use crate::store::TableauKernel;
+
+/// Permanent native rule/kernel owners created without retaining Python objects.
+pub struct LoadedRuleState {
+    pub kernel: TableauKernel,
+    pub engine: RuleEngine,
+}
+
+/// Convert the one fully validated input program into the checked rule-engine model.
+///
+/// Logical-opposite links are not duplicated on the wire. They are recovered with a
+/// deterministic ordered index, keeping construction O(predicates log predicates) rather
+/// than performing a quadratic search on large biomedical programs.
+pub fn compile_rule_program(source: &DecodedProgram) -> NativeResult<RuleProgram> {
+    let opposites = opposite_predicate_ids(&source.predicates)?;
+    let predicates = source
+        .predicates
+        .iter()
+        .map(|predicate| compile_predicate(predicate, opposites.get(&predicate.predicate_id)))
+        .collect::<NativeResult<Vec<_>>>()?;
+    let clauses = source
+        .clauses
+        .iter()
+        .map(compile_clause)
+        .collect::<NativeResult<Vec<_>>>()?;
+    RuleProgram::new(predicates, clauses)
+}
+
+/// Allocate permanent source nodes, seed every asserted fact/disjunction, and initialize
+/// the native hyperresolution engine as one checked operation root.
+pub fn load_permanent_rule_state(
+    ontology: &DecodedOntology,
+    cancellation: Arc<CancellationState>,
+    disjunction_learning: bool,
+) -> NativeResult<LoadedRuleState> {
+    cancellation.poll()?;
+    let mut kernel = TableauKernel::new();
+    let named: BTreeSet<_> = ontology.named_individuals.iter().copied().collect();
+    let individual_count =
+        domain_count(&ontology.program, crate::input_wire::SymbolKind::Individual)?;
+    let data_count = domain_count(&ontology.program, crate::input_wire::SymbolKind::DataValue)?;
+    let mut source_nodes = BTreeMap::new();
+    for individual_id in 0..individual_count {
+        cancellation.poll()?;
+        source_nodes.insert(
+            individual_id,
+            kernel.create_node(
+                NodeKind::Root,
+                None,
+                named.contains(&individual_id),
+                Some(individual_id),
+                None,
+                None,
+            )?,
+        );
+    }
+    let mut data_nodes = BTreeMap::new();
+    for data_identity_id in 0..data_count {
+        cancellation.poll()?;
+        data_nodes.insert(
+            data_identity_id,
+            kernel.create_node(NodeKind::Concrete, None, false, None, None, None)?,
+        );
+    }
+    let rules = compile_rule_program(&ontology.program)?;
+    let mut engine = RuleEngine::new(rules, source_nodes, data_nodes, disjunction_learning)?;
+    for fact in ontology
+        .program
+        .positive_facts
+        .iter()
+        .chain(&ontology.program.negative_facts)
+    {
+        cancellation.poll()?;
+        engine.dispatch_ground_atom(
+            &mut kernel,
+            compile_ground_atom(fact, &engine)?,
+            DependencySet::empty(),
+            true,
+            &fact.provenance_ids,
+        )?;
+    }
+    for disjunction in &ontology.program.ground_disjunctions {
+        cancellation.poll()?;
+        let atoms = disjunction
+            .disjuncts
+            .iter()
+            .map(|atom| compile_ground_atom(atom, &engine))
+            .collect::<NativeResult<Vec<_>>>()?;
+        engine.apply_ground_head(
+            &mut kernel,
+            atoms,
+            DependencySet::empty(),
+            &disjunction.provenance_ids,
+            &[],
+        )?;
+    }
+    engine.initialize(&mut kernel, cancellation)?;
+    kernel.check_invariants()?;
+    Ok(LoadedRuleState { kernel, engine })
+}
+
+fn domain_count(
+    program: &DecodedProgram,
+    kind: crate::input_wire::SymbolKind,
+) -> NativeResult<u32> {
+    let count = program
+        .domain(kind)
+        .ok_or_else(|| NativeError::wire("input program is missing a symbol domain"))?
+        .values
+        .len();
+    u32::try_from(count).map_err(|_| NativeError::wire("symbol domain exceeds u32 identifiers"))
+}
+
+fn compile_ground_atom(
+    source: &DecodedGroundAtom,
+    engine: &RuleEngine,
+) -> NativeResult<GroundAtom> {
+    let arguments = source
+        .arguments
+        .iter()
+        .map(|term| match term {
+            DecodedTerm::Variable { .. } => Err(NativeError::wire(
+                "validated ground atom unexpectedly contains a variable",
+            )),
+            DecodedTerm::Individual { individual_id } => engine
+                .source_node(*individual_id)
+                .ok_or_else(|| NativeError::wire("ground individual ID is dangling")),
+            DecodedTerm::Data {
+                data_identity_id, ..
+            } => engine
+                .data_node(*data_identity_id)
+                .ok_or_else(|| NativeError::wire("ground data identity ID is dangling")),
+        })
+        .collect::<NativeResult<Vec<_>>>()?;
+    GroundAtom::new(source.predicate_id, arguments)
+}
+
+fn compile_predicate(
+    source: &DecodedPredicate,
+    opposite: Option<&u32>,
+) -> NativeResult<RulePredicate> {
+    let mut predicate = RulePredicate::new(
+        source.predicate_id,
+        predicate_kind(source.kind),
+        source
+            .argument_sorts
+            .iter()
+            .copied()
+            .map(term_sort)
+            .collect(),
+    )?;
+    if let Some(value) = source.symbol_id {
+        predicate = predicate.with_symbol_id(value);
+    }
+    if let (Some(cardinality), Some(role_id), Some(filler_predicate_id)) = (
+        source.cardinality,
+        source.role_id,
+        source.filler_predicate_id,
+    ) {
+        predicate = predicate.with_cardinality(cardinality, role_id, filler_predicate_id);
+    } else if let Some(value) = source.role_id {
+        predicate = predicate.with_role_id(value);
+    }
+    if !source.annotation.is_empty() {
+        predicate = predicate.with_annotation(source.annotation.clone());
+    }
+    if let Some(value) = &source.internal_key {
+        predicate = predicate.with_internal_key(value.clone());
+    }
+    if let Some(value) = opposite {
+        predicate = predicate.with_opposite(*value);
+    }
+    Ok(predicate)
+}
+
+fn compile_clause(source: &DecodedClause) -> NativeResult<RuleClause> {
+    RuleClause::new(
+        source.clause_id,
+        source
+            .body
+            .iter()
+            .map(compile_atom)
+            .collect::<NativeResult<Vec<_>>>()?,
+        source
+            .head
+            .iter()
+            .map(compile_atom)
+            .collect::<NativeResult<Vec<_>>>()?,
+        source.provenance_ids.clone(),
+        source.join_order.clone(),
+    )
+}
+
+fn compile_atom(source: &DecodedAtom) -> NativeResult<RuleAtom> {
+    RuleAtom::new(
+        source.predicate_id,
+        source.arguments.iter().map(compile_term).collect(),
+    )
+}
+
+const fn compile_term(source: &DecodedTerm) -> Term {
+    match source {
+        DecodedTerm::Variable { index, sort } => Term::variable(*index, term_sort(*sort)),
+        DecodedTerm::Individual { individual_id } => Term::individual(*individual_id),
+        DecodedTerm::Data {
+            source_literal_id,
+            data_identity_id,
+        } => Term::data_constant(*source_literal_id, *data_identity_id),
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct OppositeKey {
+    family: u8,
+    sorts: Vec<InputTermSort>,
+    symbol_id: Option<u32>,
+    role_id: Option<u32>,
+    annotation: Vec<u32>,
+}
+
+fn opposite_predicate_ids(predicates: &[DecodedPredicate]) -> NativeResult<BTreeMap<u32, u32>> {
+    let mut positive = BTreeMap::new();
+    let mut negative = BTreeMap::new();
+    for predicate in predicates {
+        let Some((polarity, family)) = opposite_family(predicate.kind) else {
+            continue;
+        };
+        let key = OppositeKey {
+            family,
+            sorts: predicate.argument_sorts.clone(),
+            symbol_id: predicate.symbol_id,
+            role_id: predicate.role_id,
+            annotation: predicate.annotation.clone(),
+        };
+        let selected = if polarity {
+            &mut positive
+        } else {
+            &mut negative
+        };
+        if selected.insert(key, predicate.predicate_id).is_some() {
+            return Err(NativeError::wire(
+                "input program contains duplicate logical-opposite predicate identities",
+            ));
+        }
+    }
+    let mut output = BTreeMap::new();
+    for (key, positive_id) in positive {
+        if let Some(negative_id) = negative.get(&key).copied() {
+            output.insert(positive_id, negative_id);
+            output.insert(negative_id, positive_id);
+        }
+    }
+    Ok(output)
+}
+
+const fn opposite_family(kind: InputPredicateKind) -> Option<(bool, u8)> {
+    match kind {
+        InputPredicateKind::Concept => Some((true, 0)),
+        InputPredicateKind::NegatedConcept => Some((false, 0)),
+        InputPredicateKind::Nominal => Some((true, 1)),
+        InputPredicateKind::NegatedNominal => Some((false, 1)),
+        InputPredicateKind::ObjectRole => Some((true, 2)),
+        InputPredicateKind::NegatedObjectRole => Some((false, 2)),
+        InputPredicateKind::DataRole => Some((true, 3)),
+        InputPredicateKind::NegatedDataRole => Some((false, 3)),
+        InputPredicateKind::DataRange => Some((true, 4)),
+        InputPredicateKind::NegatedDataRange => Some((false, 4)),
+        InputPredicateKind::Equality => Some((true, 5)),
+        InputPredicateKind::Inequality => Some((false, 5)),
+        InputPredicateKind::AtLeastObject
+        | InputPredicateKind::AtLeastData
+        | InputPredicateKind::AnnotatedEquality
+        | InputPredicateKind::AutomatonState
+        | InputPredicateKind::DisjointGuard
+        | InputPredicateKind::OrderingGuard
+        | InputPredicateKind::NamedIndividual => None,
+    }
+}
+
+const fn term_sort(value: InputTermSort) -> TermSort {
+    match value {
+        InputTermSort::Object => TermSort::Object,
+        InputTermSort::Data => TermSort::Data,
+    }
+}
+
+const fn predicate_kind(value: InputPredicateKind) -> PredicateKind {
+    match value {
+        InputPredicateKind::Concept => PredicateKind::Concept,
+        InputPredicateKind::NegatedConcept => PredicateKind::NegatedConcept,
+        InputPredicateKind::Nominal => PredicateKind::Nominal,
+        InputPredicateKind::NegatedNominal => PredicateKind::NegatedNominal,
+        InputPredicateKind::ObjectRole => PredicateKind::ObjectRole,
+        InputPredicateKind::NegatedObjectRole => PredicateKind::NegatedObjectRole,
+        InputPredicateKind::DataRole => PredicateKind::DataRole,
+        InputPredicateKind::NegatedDataRole => PredicateKind::NegatedDataRole,
+        InputPredicateKind::DataRange => PredicateKind::DataRange,
+        InputPredicateKind::NegatedDataRange => PredicateKind::NegatedDataRange,
+        InputPredicateKind::Equality => PredicateKind::Equality,
+        InputPredicateKind::Inequality => PredicateKind::Inequality,
+        InputPredicateKind::AtLeastObject => PredicateKind::AtLeastObject,
+        InputPredicateKind::AtLeastData => PredicateKind::AtLeastData,
+        InputPredicateKind::AnnotatedEquality => PredicateKind::AnnotatedEquality,
+        InputPredicateKind::AutomatonState => PredicateKind::AutomatonState,
+        InputPredicateKind::DisjointGuard => PredicateKind::DisjointGuard,
+        InputPredicateKind::OrderingGuard => PredicateKind::OrderingGuard,
+        InputPredicateKind::NamedIndividual => PredicateKind::NamedIndividual,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cancel::CancellationHandle;
+    use crate::input_wire::{decode_ontology, DecodeLimits};
+
+    fn decode_hex(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .filter_map(|pair| {
+                let text = std::str::from_utf8(pair).ok()?;
+                u8::from_str_radix(text, 16).ok()
+            })
+            .collect()
+    }
+
+    fn golden_ontology() -> Vec<u8> {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/data/native-input-v1.json"))
+                .unwrap_or(serde_json::Value::Null);
+        fixture
+            .get("documents")
+            .and_then(|documents| documents.get("ontology"))
+            .and_then(|document| document.get("hex"))
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(Vec::new, decode_hex)
+    }
+
+    #[test]
+    fn production_input_compiles_to_the_checked_rule_model() -> NativeResult<()> {
+        let ontology = decode_ontology(golden_ontology(), &DecodeLimits::default())
+            .map_err(|error| NativeError::wire(error.message))?;
+        let rules = compile_rule_program(&ontology.program)?;
+        assert_eq!(rules.predicates().len(), ontology.program.predicates.len());
+        assert_eq!(rules.clauses().len(), ontology.program.clauses.len());
+        Ok(())
+    }
+
+    #[test]
+    fn production_input_loads_one_owned_permanent_rule_state() -> NativeResult<()> {
+        let ontology = decode_ontology(golden_ontology(), &DecodeLimits::default())
+            .map_err(|error| NativeError::wire(error.message))?;
+        let cancellation = CancellationHandle::from_options(None, None)?.state();
+        let loaded = load_permanent_rule_state(&ontology, cancellation, true)?;
+        assert!(loaded.engine.initialized());
+        loaded.kernel.check_invariants()?;
+        Ok(())
+    }
+
+    #[test]
+    fn logical_opposites_are_recovered_without_wire_duplication() -> NativeResult<()> {
+        let source = vec![
+            decoded_predicate(0, InputPredicateKind::Concept, Some(7)),
+            decoded_predicate(1, InputPredicateKind::NegatedConcept, Some(7)),
+            decoded_predicate(2, InputPredicateKind::Concept, Some(8)),
+        ];
+        let opposites = opposite_predicate_ids(&source)?;
+        assert_eq!(opposites.get(&0), Some(&1));
+        assert_eq!(opposites.get(&1), Some(&0));
+        assert!(!opposites.contains_key(&2));
+        Ok(())
+    }
+
+    fn decoded_predicate(
+        predicate_id: u32,
+        kind: InputPredicateKind,
+        symbol_id: Option<u32>,
+    ) -> DecodedPredicate {
+        DecodedPredicate {
+            predicate_id,
+            kind,
+            argument_sorts: vec![InputTermSort::Object],
+            symbol_id,
+            role_id: None,
+            cardinality: None,
+            filler_predicate_id: None,
+            annotation: Vec::new(),
+            internal_key: None,
+        }
+    }
+}

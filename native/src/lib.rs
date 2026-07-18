@@ -26,6 +26,7 @@ pub mod merging;
 pub mod model;
 pub mod nominals;
 pub mod operation_bridge;
+pub mod program_bridge;
 pub mod result_wire;
 pub mod roles;
 pub mod rules;
@@ -54,6 +55,7 @@ use model::{
     ABI_VERSION, CORE_ADAPTER_PROTOCOL_VERSION, CORE_API_VERSION, CORE_MODEL_SCHEMA_VERSION,
     CORE_WIRE_FORMAT_VERSION, IR_SCHEMA_VERSION,
 };
+use program_bridge::{load_permanent_rule_state, LoadedRuleState};
 use store::{replay_state_trace, TableauKernel, STATE_TRACE_MAGIC, STATE_TRACE_VERSION};
 
 const EVENT_CAPACITY: usize = 256;
@@ -65,7 +67,7 @@ struct SessionOwned {
     // Retained beside the ontology so all effective native configuration is owned
     // and immutable for the complete session lifetime.
     _config: DecodedConfig,
-    kernel: TableauKernel,
+    rules: LoadedRuleState,
     events: VecDeque<(String, u64)>,
 }
 
@@ -211,7 +213,7 @@ impl NativeSession {
 
     fn reset_query_state(&self, py: Python<'_>) -> PyResult<()> {
         self.control
-            .run(|owned| owned.kernel.reset_to_operation_root())
+            .run(|owned| owned.rules.kernel.reset_to_operation_root())
             .map_err(|error| error.into_pyerr(py))
     }
 
@@ -359,27 +361,52 @@ fn create_session(
     config: &Bound<'_, PyBytes>,
     cancellation: PyRef<'_, CancellationHandle>,
 ) -> PyResult<NativeSession> {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let limits = DecodeLimits::default();
-        let (ontology, config) = decode_session_inputs(
+    let limits = DecodeLimits::default();
+    let copied = catch_unwind(AssertUnwindSafe(|| {
+        Ok((
             copy_capped_bytes(ir, limits.max_wire_bytes, "ontology wire")?,
             copy_capped_bytes(config, limits.max_wire_bytes, "configuration wire")?,
-            &limits,
-        )?;
-        Ok(NativeSession {
-            control: Arc::new(SessionControl {
-                owner_pid: std::process::id(),
-                closed: AtomicBool::new(false),
-                busy: AtomicBool::new(false),
-                poisoned: AtomicBool::new(false),
-                cancellation: cancellation.state(),
-                owned: Mutex::new(Some(SessionOwned {
-                    ontology,
-                    _config: config,
-                    kernel: TableauKernel::new(),
-                    events: VecDeque::with_capacity(EVENT_CAPACITY),
-                })),
-            }),
+        ))
+    }));
+    let (ontology_wire, config_wire) = match copied {
+        Ok(value) => value.map_err(|error: NativeError| error.into_pyerr(py))?,
+        Err(_) => {
+            return Err(NativeError::new(
+                ErrorKind::Poisoned,
+                "NATIVE_PANIC",
+                "native session input-copy panic was contained",
+            )
+            .into_pyerr(py));
+        }
+    };
+    let cancellation_state = cancellation.state();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        py.detach(move || {
+            let (ontology, config) = decode_session_inputs(ontology_wire, config_wire, &limits)?;
+            // Session construction preserves the WPR0 lifecycle contract: operation timeout and
+            // observed-memory failures are surfaced by the first semantic operation, not while the
+            // immutable permanent program is being installed.
+            let construction_control = CancellationHandle::from_options(None, None)?.state();
+            let rules = load_permanent_rule_state(
+                &ontology,
+                construction_control,
+                config.disjunction_learning,
+            )?;
+            Ok(NativeSession {
+                control: Arc::new(SessionControl {
+                    owner_pid: std::process::id(),
+                    closed: AtomicBool::new(false),
+                    busy: AtomicBool::new(false),
+                    poisoned: AtomicBool::new(false),
+                    cancellation: cancellation_state,
+                    owned: Mutex::new(Some(SessionOwned {
+                        ontology,
+                        _config: config,
+                        rules,
+                        events: VecDeque::with_capacity(EVENT_CAPACITY),
+                    })),
+                }),
+            })
         })
     }));
     match result {
@@ -525,10 +552,19 @@ mod tests {
         )
     }
 
+    fn loaded_rule_state(
+        ontology: &DecodedOntology,
+        config: &DecodedConfig,
+        cancellation: &CancellationHandle,
+    ) -> NativeResult<LoadedRuleState> {
+        load_permanent_rule_state(ontology, cancellation.state(), config.disjunction_learning)
+    }
+
     #[test]
     fn forced_semantic_calls_never_return_a_placeholder() -> NativeResult<()> {
         let cancellation = CancellationHandle::from_options(None, None)?;
         let (ontology, config) = decoded_session_input()?;
+        let rules = loaded_rule_state(&ontology, &config, &cancellation)?;
         let session = NativeSession {
             control: Arc::new(SessionControl {
                 owner_pid: std::process::id(),
@@ -539,7 +575,7 @@ mod tests {
                 owned: Mutex::new(Some(SessionOwned {
                     ontology,
                     _config: config,
-                    kernel: TableauKernel::new(),
+                    rules,
                     events: VecDeque::new(),
                 })),
             }),
