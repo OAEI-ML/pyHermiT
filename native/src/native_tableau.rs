@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::blocking::{BlockingCheckpoint, NeverCancel as NeverCancelBlocking};
+use crate::blocking::{
+    BlockingCheckpoint, CompiledClauseBlockingValidator, NeverCancel as NeverCancelBlocking,
+};
 use crate::branching::BranchTransition;
 use crate::cancel::CancellationState;
 use crate::error::{NativeError, NativeResult};
@@ -405,11 +407,37 @@ impl NativeTableau for ProductionTableau {
         control: &dyn OperationControl,
     ) -> NativeResult<(ValidationStatus, u64)> {
         control.poll()?;
-        if self.active().blocking.plan().validated() {
-            return Err(NativeError::feature("native_validated_blocking"));
-        }
         let bridge = OperationControlBridge::new(control);
         let active = self.active_mut();
+        if active.blocking.plan().validated() {
+            let mut validator = CompiledClauseBlockingValidator::new(
+                active.engine.program(),
+                active.blocking.plan().core_mode,
+            )
+            .map_err(crate::operation_bridge::blocking_error_to_native)?;
+            let result = active.blocking.validation_and_apply(
+                &mut active.kernel,
+                &mut validator,
+                &bridge,
+                false,
+            );
+            let (compute, validation) = bridge.finish_blocking(result)?;
+            let checks = compute
+                .stats
+                .candidate_checks
+                .checked_add(validation.checked_blocks)
+                .ok_or_else(|| NativeError::invariant("blocking check count overflow"))?;
+            let checks = u64::try_from(checks)
+                .map_err(|_| NativeError::invariant("blocking check count exceeds u64"))?;
+            return Ok((
+                if validation.valid {
+                    ValidationStatus::Valid
+                } else {
+                    ValidationStatus::Invalidated
+                },
+                checks,
+            ));
+        }
         let ready = active.blocking.ready_for_sat(&active.kernel, &bridge);
         let ready = bridge.finish_blocking(ready)?;
         if !ready {
@@ -595,7 +623,7 @@ mod tests {
 
     use crate::cancel::CancellationHandle;
     use crate::input_wire::{
-        decode_config, decode_ontology, DecodeLimits, DecodedAtom, DecodedClause,
+        decode_config, decode_ontology, BlockingChoice, DecodeLimits, DecodedAtom, DecodedClause,
         DecodedGroundAtom, DecodedPredicate, DecodedSymbolValue, DecodedTerm, ExistentialChoice,
         PredicateKind, SymbolKind, TermSort,
     };
@@ -751,6 +779,7 @@ mod tests {
         let mut config = decode_config(golden_document("config"), &limits)
             .map_err(|error| NativeError::wire(error.message))?;
         config.existentials = ExistentialChoice::CreationOrder;
+        config.blocking = BlockingChoice::ValidatedAnywhere;
         let cancellation = CancellationHandle::from_options(None, None)?.state();
         let loaded = load_permanent_rule_state(
             &ontology,
@@ -767,6 +796,7 @@ mod tests {
         assert!(result.satisfiable);
         assert_eq!(result.statistics.existential_actions, 2);
         assert!(result.statistics.blocking_checks >= 1);
+        assert!(result.statistics.validation_passes >= 1);
         Ok(())
     }
 
