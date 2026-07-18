@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::blocking::{BlockingCheckpoint, NeverCancel as NeverCancelBlocking};
 use crate::branching::BranchTransition;
 use crate::cancel::CancellationState;
 use crate::error::{NativeError, NativeResult};
@@ -15,7 +16,9 @@ use crate::input_wire::{
     DecodedConfig, DecodedExpressivity, DecodedGroundAtom, DecodedGroundDisjunction,
     DecodedOntology, DecodedProgram, DecodedProvenanceEntry, DecodedQuery, PredicateKind,
 };
+use crate::model::NodeHandle;
 use crate::nominals::NominalIntroductionManager;
+use crate::operation_bridge::OperationControlBridge;
 use crate::program_bridge::{load_permanent_rule_state, LoadedRuleState};
 use crate::rules::RuleEngineCheckpoint;
 use crate::session::{
@@ -44,6 +47,7 @@ pub struct ProductionCheckpoint {
     kernel: TableauKernel,
     engine: RuleEngineCheckpoint,
     nominals: NominalIntroductionManager,
+    blocking: BlockingCheckpoint<NodeHandle>,
 }
 
 impl ProductionTableau {
@@ -111,12 +115,14 @@ impl NativeTableau for ProductionTableau {
         control.poll()?;
         let kernel = self.permanent.kernel.clone();
         let nominals = self.permanent.nominals.clone();
+        let blocking = self.permanent.blocking.checkpoint();
         let engine = self.permanent.engine.checkpoint(control)?;
         control.poll()?;
         Ok(ProductionCheckpoint {
             kernel,
             engine,
             nominals,
+            blocking,
         })
     }
 
@@ -145,6 +151,7 @@ impl NativeTableau for ProductionTableau {
             Arc::clone(&self.cancellation),
             self.config.disjunction_learning,
             self.config.existentials,
+            self.config.blocking,
         )?;
         control.poll()?;
         self.query = Some(loaded);
@@ -175,6 +182,7 @@ impl NativeTableau for ProductionTableau {
                 )
                 .map(|()| {
                     self.permanent.nominals = checkpoint.nominals;
+                    self.permanent.blocking.restore(checkpoint.blocking);
                 }),
             OperationDisposition::CommitPermanent => {
                 self.permanent
@@ -263,7 +271,14 @@ impl NativeTableau for ProductionTableau {
 
     fn refresh_blocking(&mut self, control: &dyn OperationControl) -> NativeResult<u64> {
         control.poll()?;
-        Ok(0)
+        let bridge = OperationControlBridge::new(control);
+        let active = self.active_mut();
+        let result = active
+            .blocking
+            .compute_and_apply(&mut active.kernel, &bridge, false);
+        let result = bridge.finish_blocking(result)?;
+        u64::try_from(result.stats.candidate_checks)
+            .map_err(|_| NativeError::invariant("blocking check count exceeds u64"))
     }
 
     fn process_existential(
@@ -276,7 +291,7 @@ impl NativeTableau for ProductionTableau {
         }
         let active = self.active_mut();
         let mut datatypes = AssertedOnlyDatatypes;
-        let mut state = RuntimeExpansionState::new(&mut active.kernel, None);
+        let mut state = RuntimeExpansionState::new(&mut active.kernel, Some(&active.blocking));
         let mut access = RuntimeExpansionAccess::new(&mut active.engine, &mut datatypes, control);
         let mut expansion_control = NativeExpansionControl::new(control);
         let result = active
@@ -285,8 +300,7 @@ impl NativeTableau for ProductionTableau {
             .map_err(expansion_to_native)?;
         control.poll()?;
         match result.status {
-            ExpansionStatus::NoWork => Ok(PhaseProgress::NoWork),
-            ExpansionStatus::Blocked => Err(NativeError::feature("native_blocking")),
+            ExpansionStatus::NoWork | ExpansionStatus::Blocked => Ok(PhaseProgress::NoWork),
             ExpansionStatus::Satisfied | ExpansionStatus::Expanded | ExpansionStatus::Clashed => {
                 Ok(PhaseProgress::Progress)
             }
@@ -328,7 +342,8 @@ impl NativeTableau for ProductionTableau {
                 .and_then(|clash| clash.dependency.maximum());
             if let Some(level) = expansion_level {
                 let owns_branch = {
-                    let state = RuntimeExpansionState::new(&mut active.kernel, None);
+                    let state =
+                        RuntimeExpansionState::new(&mut active.kernel, Some(&active.blocking));
                     active
                         .existentials
                         .owns_branch(&state, level)
@@ -336,7 +351,8 @@ impl NativeTableau for ProductionTableau {
                 };
                 if owns_branch {
                     let mut datatypes = AssertedOnlyDatatypes;
-                    let mut state = RuntimeExpansionState::new(&mut active.kernel, None);
+                    let mut state =
+                        RuntimeExpansionState::new(&mut active.kernel, Some(&active.blocking));
                     let mut access =
                         RuntimeExpansionAccess::new(&mut active.engine, &mut datatypes, control);
                     let mut expansion_control = NativeExpansionControl::new(control);
@@ -392,7 +408,9 @@ impl NativeTableau for ProductionTableau {
     }
 
     fn invalidate_after_backtrack(&mut self) -> NativeResult<()> {
-        self.active().kernel.check_invariants()
+        let active = self.active_mut();
+        active.blocking.invalidate_all();
+        active.kernel.check_invariants()
     }
 
     fn validate_blocking(
@@ -400,13 +418,39 @@ impl NativeTableau for ProductionTableau {
         control: &dyn OperationControl,
     ) -> NativeResult<(ValidationStatus, u64)> {
         control.poll()?;
+        if self.active().blocking.plan().validated() {
+            return Err(NativeError::feature("native_validated_blocking"));
+        }
+        let bridge = OperationControlBridge::new(control);
+        let active = self.active_mut();
+        let ready = active.blocking.ready_for_sat(&active.kernel, &bridge);
+        let ready = bridge.finish_blocking(ready)?;
+        if !ready {
+            return Err(NativeError::invariant(
+                "nonvalidated blocking did not reach a SAT-ready state",
+            ));
+        }
         Ok((ValidationStatus::NotRequired, 0))
     }
 
     fn ready_for_sat(&self) -> NativeResult<bool> {
-        let kernel = &self.active().kernel;
+        let active = self.active();
+        let kernel = &active.kernel;
+        let existentials_ready =
+            kernel
+                .active_node_handles()
+                .into_iter()
+                .try_fold(true, |ready, handle| {
+                    let node = kernel.active_node(handle)?;
+                    Ok::<_, NativeError>(
+                        ready
+                            && (node.unprocessed_existentials.is_empty()
+                                || node.blocker.is_some()
+                                || active.blocking.is_blocked(handle)),
+                    )
+                })?;
         Ok(kernel.clash().is_none()
-            && kernel.existential_candidate_count() == 0
+            && existentials_ready
             && kernel.annotated_equality_count() == 0
             && kernel.datatype_component_count() == 0
             && kernel.disjunction_queue_count() == 0)
@@ -415,7 +459,14 @@ impl NativeTableau for ProductionTableau {
     fn check_invariants(&self) -> NativeResult<()> {
         let active = self.active();
         active.kernel.check_invariants()?;
-        active.engine.check_invariants(&active.kernel)
+        active.engine.check_invariants(&active.kernel)?;
+        if active.blocking.projection().is_some() {
+            active
+                .blocking
+                .check_invariants(&NeverCancelBlocking)
+                .map_err(crate::operation_bridge::blocking_error_to_native)?;
+        }
+        Ok(())
     }
 }
 
@@ -555,8 +606,9 @@ mod tests {
     use super::*;
     use crate::cancel::CancellationHandle;
     use crate::input_wire::{
-        decode_config, decode_ontology, DecodeLimits, DecodedGroundAtom, DecodedPredicate,
-        DecodedSymbolValue, DecodedTerm, ExistentialChoice, PredicateKind, SymbolKind, TermSort,
+        decode_config, decode_ontology, DecodeLimits, DecodedAtom, DecodedClause,
+        DecodedGroundAtom, DecodedPredicate, DecodedSymbolValue, DecodedTerm, ExistentialChoice,
+        PredicateKind, SymbolKind, TermSort,
     };
     use crate::session::{NeverAbort, SessionLimits, SessionScheduler};
 
@@ -598,6 +650,7 @@ mod tests {
             Arc::clone(&cancellation),
             config.disjunction_learning,
             config.existentials,
+            config.blocking,
         )?;
         let tableau = ProductionTableau::new(ontology, config, cancellation, loaded)?;
         let session = SessionScheduler::new(tableau, SessionLimits::default())?;
@@ -610,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn production_tableau_expands_a_top_role_object_obligation() -> NativeResult<()> {
+    fn production_tableau_blocks_a_cyclic_object_obligation() -> NativeResult<()> {
         let limits = DecodeLimits::default();
         let mut ontology = decode_ontology(golden_document("ontology"), &limits)
             .map_err(|error| NativeError::wire(error.message))?;
@@ -642,7 +695,26 @@ mod tests {
             annotation: Vec::new(),
             internal_key: None,
         });
-        let existential_predicate_id = filler_predicate_id
+        let role_id = ontology.program.role_model.object_role_count;
+        ontology.program.role_model.object_role_count = role_id
+            .checked_add(1)
+            .ok_or_else(|| NativeError::invariant("test object-role count overflow"))?;
+        ontology.program.role_model.inverse_role_ids.push(role_id);
+        let role_predicate_id = filler_predicate_id
+            .checked_add(1)
+            .ok_or_else(|| NativeError::invariant("test predicate ID overflow"))?;
+        ontology.program.predicates.push(DecodedPredicate {
+            predicate_id: role_predicate_id,
+            kind: PredicateKind::ObjectRole,
+            argument_sorts: vec![TermSort::Object, TermSort::Object],
+            symbol_id: None,
+            role_id: Some(role_id),
+            cardinality: None,
+            filler_predicate_id: None,
+            annotation: Vec::new(),
+            internal_key: None,
+        });
+        let existential_predicate_id = role_predicate_id
             .checked_add(1)
             .ok_or_else(|| NativeError::invariant("test predicate ID overflow"))?;
         ontology.program.predicates.push(DecodedPredicate {
@@ -650,11 +722,29 @@ mod tests {
             kind: PredicateKind::AtLeastObject,
             argument_sorts: vec![TermSort::Object],
             symbol_id: None,
-            role_id: Some(ontology.program.role_model.top_object_role_id),
+            role_id: Some(role_id),
             cardinality: Some(1),
             filler_predicate_id: Some(filler_predicate_id),
             annotation: Vec::new(),
             internal_key: None,
+        });
+        let variable = DecodedTerm::Variable {
+            index: 0,
+            sort: TermSort::Object,
+        };
+        ontology.program.clauses.push(DecodedClause {
+            clause_id: u32::try_from(ontology.program.clauses.len())
+                .map_err(|_| NativeError::invariant("test clause count exceeds u32"))?,
+            body: vec![DecodedAtom {
+                predicate_id: filler_predicate_id,
+                arguments: vec![variable.clone()],
+            }],
+            head: vec![DecodedAtom {
+                predicate_id: existential_predicate_id,
+                arguments: vec![variable],
+            }],
+            provenance_ids: vec![0],
+            join_order: vec![0],
         });
         let individual_id = ontology
             .program
@@ -678,6 +768,7 @@ mod tests {
             Arc::clone(&cancellation),
             config.disjunction_learning,
             config.existentials,
+            config.blocking,
         )?;
         let tableau = ProductionTableau::new(ontology, config, cancellation, loaded)?;
         let session = SessionScheduler::new(tableau, SessionLimits::default())?;
@@ -685,7 +776,8 @@ mod tests {
         let result = session.check_permanent(&NeverAbort)?;
 
         assert!(result.satisfiable);
-        assert_eq!(result.statistics.existential_actions, 1);
+        assert_eq!(result.statistics.existential_actions, 2);
+        assert!(result.statistics.blocking_checks >= 1);
         Ok(())
     }
 }

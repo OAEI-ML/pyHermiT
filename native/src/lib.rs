@@ -474,6 +474,7 @@ fn create_session(
                 Arc::clone(&construction_control),
                 config.disjunction_learning,
                 config.existentials,
+                config.blocking,
             )?;
             let tableau = ProductionTableau::new(
                 Arc::clone(&ontology),
@@ -676,6 +677,7 @@ mod tests {
             cancellation.state(),
             config.disjunction_learning,
             config.existentials,
+            config.blocking,
         )
     }
 

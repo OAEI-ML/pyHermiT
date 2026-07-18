@@ -4,6 +4,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::blocking::{
+    select_blocking_plan, BlockingLimits, BlockingManager, BlockingMode, BlockingRequirements,
+    BlockingVocabulary, DirectChecker,
+};
 use crate::cancel::CancellationState;
 use crate::datatypes::{
     decode_datatype_range_model, decode_literal_semantic, DataIdentity, DatatypeLimits,
@@ -15,13 +19,15 @@ use crate::existentials::{
     ExpansionLimits, ExpansionStrategy, SpecialRoleIds,
 };
 use crate::input_wire::{
-    DecodedAtom, DecodedClause, DecodedGroundAtom, DecodedOntology, DecodedPredicate,
-    DecodedProgram, DecodedTerm, ExistentialChoice, PredicateKind as InputPredicateKind,
-    SymbolKind, TermSort as InputTermSort,
+    BlockingChoice, DecodedAtom, DecodedClause, DecodedGroundAtom, DecodedOntology,
+    DecodedPredicate, DecodedProgram, DecodedTerm, ExistentialChoice,
+    PredicateKind as InputPredicateKind, SymbolKind, TermSort as InputTermSort,
 };
-use crate::model::{DependencySet, NodeKind};
+use crate::model::{DependencySet, NodeHandle, NodeKind};
 use crate::nominals::NominalIntroductionManager;
-use crate::operation_bridge::{datatype_error_to_native, role_error_to_native};
+use crate::operation_bridge::{
+    blocking_error_to_native, datatype_error_to_native, role_error_to_native,
+};
 use crate::roles::{RoleAutomatonWire, RoleLimits, RoleRuntime, RoleTransition};
 use crate::rules::{
     GroundAtom, PredicateKind, RuleAtom, RuleClause, RuleEngine, RulePredicate, RuleProgram, Term,
@@ -37,6 +43,7 @@ pub struct LoadedRuleState {
     pub datatypes: LoadedDatatypeState,
     pub nominals: NominalIntroductionManager,
     pub existentials: ExistentialExpansionManager,
+    pub blocking: BlockingManager<NodeHandle>,
 }
 
 /// Canonical datatype owners decoded once for the complete native session lifetime.
@@ -73,6 +80,7 @@ pub fn load_permanent_rule_state(
     cancellation: Arc<CancellationState>,
     disjunction_learning: bool,
     existential_choice: ExistentialChoice,
+    blocking_choice: BlockingChoice,
 ) -> NativeResult<LoadedRuleState> {
     cancellation.poll()?;
     let role_runtime = load_role_runtime(&ontology.program, cancellation.as_ref())?;
@@ -125,6 +133,7 @@ pub fn load_permanent_rule_state(
         ExpansionLimits::default(),
     )
     .map_err(expansion_to_native)?;
+    let blocking = load_blocking_manager(&ontology.program, &rule_program, blocking_choice)?;
     let mut engine = RuleEngine::new(rule_program, source_nodes, data_nodes, disjunction_learning)?;
     for fact in ontology
         .program
@@ -165,6 +174,7 @@ pub fn load_permanent_rule_state(
         datatypes,
         nominals: NominalIntroductionManager::default(),
         existentials,
+        blocking,
     })
 }
 
@@ -239,6 +249,63 @@ const fn distinct_sentinel(value: u32) -> u32 {
     } else {
         value + 1
     }
+}
+
+fn load_blocking_manager(
+    source: &DecodedProgram,
+    rules: &RuleProgram,
+    choice: BlockingChoice,
+) -> NativeResult<BlockingManager<NodeHandle>> {
+    let mode = match choice {
+        BlockingChoice::Auto => BlockingMode::Auto,
+        BlockingChoice::Anywhere => BlockingMode::Anywhere,
+        BlockingChoice::ValidatedAnywhere => BlockingMode::ValidatedAnywhere,
+        BlockingChoice::Ancestor => BlockingMode::Ancestor,
+    };
+    let requirements = BlockingRequirements {
+        has_inverse_roles: source.expressivity.inverse_roles,
+        has_nominals: source.expressivity.nominals,
+        requires_validated_core: false,
+        complex_core: false,
+        has_additional_ontology: false,
+        query_local_axioms: source
+            .symbol_domains
+            .iter()
+            .flat_map(|domain| &domain.values)
+            .any(|value| value.query_local),
+        direct_checker_kind: None,
+    };
+    let plan = select_blocking_plan(mode, requirements).map_err(blocking_error_to_native)?;
+    let concept_kinds = [
+        PredicateKind::Concept,
+        PredicateKind::NegatedConcept,
+        PredicateKind::Nominal,
+        PredicateKind::NegatedNominal,
+        PredicateKind::AutomatonState,
+        PredicateKind::DisjointGuard,
+        PredicateKind::NamedIndividual,
+    ];
+    let vocabulary = BlockingVocabulary::new(
+        rules
+            .predicates()
+            .iter()
+            .filter(|predicate| concept_kinds.contains(&predicate.kind))
+            .map(|predicate| predicate.predicate_id),
+        rules
+            .predicates()
+            .iter()
+            .filter(|predicate| predicate.kind == PredicateKind::ObjectRole)
+            .map(|predicate| predicate.predicate_id),
+    )
+    .map_err(blocking_error_to_native)?;
+    let checker = DirectChecker::new(
+        plan.direct_checker_kind,
+        vocabulary,
+        source.expressivity.inverse_roles,
+    )
+    .map_err(blocking_error_to_native)?;
+    BlockingManager::new(plan, checker, None, BlockingLimits::default(), 1_000_000)
+        .map_err(blocking_error_to_native)
 }
 
 fn load_role_runtime(
@@ -584,6 +651,7 @@ mod tests {
             cancellation,
             true,
             ExistentialChoice::CreationOrder,
+            BlockingChoice::Auto,
         )?;
         assert!(loaded.engine.initialized());
         loaded.kernel.check_invariants()?;
