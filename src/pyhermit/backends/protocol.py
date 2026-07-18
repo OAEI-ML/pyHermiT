@@ -308,21 +308,47 @@ class CheckResult:
             raise TypeError("statistics must be ReasoningStatistics")
 
 
-def _reachable(edges: set[tuple[int, int]], start: int, target: int, skip: tuple[int, int]) -> bool:
-    frontier = [start]
-    seen = {start}
-    while frontier:
-        current = frontier.pop()
-        for child, parent in edges:
-            if (child, parent) == skip or child != current:
-                continue
-            if parent == target:
-                return True
-            if parent in seen:
-                continue
-            seen.add(parent)
-            frontier.append(parent)
-    return False
+def _validate_reduced_dag(edges: tuple[tuple[int, int], ...], node_count: int) -> None:
+    """Validate acyclicity/reduction without repeated whole-edge scans on deep taxonomies."""
+
+    successors: list[list[int]] = [[] for _ in range(node_count)]
+    incoming = [0] * node_count
+    for child, parent in edges:
+        if not 0 <= child < node_count or not 0 <= parent < node_count:
+            raise ValueError("hierarchy edge references an absent node")
+        if child == parent:
+            raise ValueError("hierarchy edges cannot be reflexive")
+        successors[child].append(parent)
+        incoming[parent] += 1
+
+    frontier = [node for node, degree in enumerate(incoming) if degree == 0]
+    cursor = 0
+    while cursor < len(frontier):
+        current = frontier[cursor]
+        cursor += 1
+        for parent in successors[current]:
+            incoming[parent] -= 1
+            if incoming[parent] == 0:
+                frontier.append(parent)
+    if len(frontier) != node_count:
+        raise ValueError("hierarchy must be acyclic")
+
+    # An edge can only be redundant when another direct parent of the same child reaches its
+    # target. Chains and the usual single-parent taxonomy case therefore remain linear.
+    for direct in successors:
+        if len(direct) < 2:
+            continue
+        for target in direct:
+            search = [candidate for candidate in direct if candidate != target]
+            seen = [False] * node_count
+            while search:
+                current = search.pop()
+                if current == target:
+                    raise ValueError("hierarchy edges must be a transitive reduction")
+                if seen[current]:
+                    continue
+                seen[current] = True
+                search.extend(successors[current])
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,18 +382,7 @@ class HierarchyIds:
         edges = tuple(self.edges)
         if edges != tuple(sorted(set(edges))):
             raise ValueError("hierarchy edges must be sorted and unique")
-        edge_set = set(edges)
-        for child, parent in edges:
-            if not 0 <= child < len(nodes) or not 0 <= parent < len(nodes):
-                raise ValueError("hierarchy edge references an absent node")
-            if child == parent:
-                raise ValueError("hierarchy edges cannot be reflexive")
-        for edge in edges:
-            if _reachable(edge_set, edge[0], edge[1], edge):
-                raise ValueError("hierarchy edges must be a transitive reduction")
-        for start in range(len(nodes)):
-            if _reachable(edge_set, start, start, (-1, -1)):
-                raise ValueError("hierarchy must be acyclic")
+        _validate_reduced_dag(edges, len(nodes))
         object.__setattr__(self, "nodes", nodes)
         object.__setattr__(self, "edges", edges)
 

@@ -24,6 +24,7 @@ pub mod merging;
 pub mod model;
 pub mod nominals;
 pub mod operation_bridge;
+pub mod result_wire;
 pub mod roles;
 pub mod rules;
 pub mod services;
