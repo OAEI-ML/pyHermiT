@@ -12,6 +12,7 @@ from types import ModuleType
 
 import pytest
 
+from pyhermit import __version__
 from pyhermit.backends.native import NativeBackendFactory
 from pyhermit.backends.native_events import (
     EVENT_HEADER_LENGTH,
@@ -146,7 +147,7 @@ def _compiled() -> CompiledOntology:
 
 def _extension() -> tuple[ModuleType, list[_Handle], list[_Session]]:
     module = ModuleType("pyhermit._native")
-    module.__version__ = "0.1.0-test"
+    module.__version__ = __version__
     module.ABI_VERSION = 1
     module.IR_SCHEMA_VERSION = 1
     module.FEATURES = (
@@ -199,9 +200,7 @@ def _document(kind: ResultKind, count: int, payload: bytes) -> bytes:
 
 
 def _check_document(kind: ResultKind, values: tuple[bool, ...]) -> bytes:
-    payload = b"".join(
-        struct.pack("<B7x7Q", int(value), 0, 0, 0, 0, 0, 0, 0) for value in values
-    )
+    payload = b"".join(struct.pack("<B7x7Q", int(value), 0, 0, 0, 0, 0, 0, 0) for value in values)
     return _document(kind, len(values), payload)
 
 
@@ -232,17 +231,20 @@ def _event_record(
 
 def _event_document(records: tuple[bytes, ...]) -> bytes:
     payload = b"".join(records)
-    return struct.pack(
-        "<8sHHIQII32s",
-        EVENT_MAGIC,
-        1,
-        EVENT_RECORD_LENGTH,
-        0,
-        EVENT_HEADER_LENGTH + len(payload),
-        len(records),
-        0,
-        hashlib.sha256(payload).digest(),
-    ) + payload
+    return (
+        struct.pack(
+            "<8sHHIQII32s",
+            EVENT_MAGIC,
+            1,
+            EVENT_RECORD_LENGTH,
+            0,
+            EVENT_HEADER_LENGTH + len(payload),
+            len(records),
+            0,
+            hashlib.sha256(payload).digest(),
+        )
+        + payload
+    )
 
 
 def _u32s(*values: int) -> bytes:
@@ -312,6 +314,14 @@ def test_factory_rejects_an_incomplete_feature_handshake() -> None:
     extension.FEATURES = ("classification",)
     with pytest.raises(BackendVersionError, match="complete reasoner"):
         NativeBackendFactory(extension)
+
+
+def test_factory_rejects_a_package_version_mismatch() -> None:
+    extension, _handles, _sessions = _extension()
+    extension.__version__ = "0.1.0.other"
+    with pytest.raises(BackendVersionError) as caught:
+        NativeBackendFactory(extension)
+    assert caught.value.context["reason"] == "package_version_mismatch"
 
 
 def test_events_are_validated_and_callbacks_run_after_native_return(

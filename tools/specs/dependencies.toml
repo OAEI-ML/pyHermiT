@@ -13,7 +13,7 @@ audit_owner = "WP01,WPP0"
 
 [[dependency]]
 name = "setuptools"
-requirement = "setuptools>=77"
+requirement = "setuptools==83.0.0"
 scope = "build"
 license = "MIT"
 source = "https://pypi.org/project/setuptools/"
@@ -24,7 +24,7 @@ audit_owner = "WP00,WPP0"
 
 [[dependency]]
 name = "setuptools-rust"
-requirement = "setuptools-rust>=1.13,<2"
+requirement = "setuptools-rust==1.13.0"
 scope = "build"
 license = "MIT"
 source = "https://pypi.org/project/setuptools-rust/"
@@ -142,3 +142,113 @@ purpose = "dummy abi3 extension used only to prove optional Rust build behavior"
 shipped = false
 linkage = "excluded-packaging-probe"
 audit_owner = "WP00,WPR0,WPP0"
+
+[[dependency]]
+name = "num-bigint"
+requirement = "num-bigint==0.5.1"
+scope = "native-runtime"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/num-bigint"
+purpose = "arbitrary-precision integer and rational datatype values"
+shipped = true
+linkage = "statically-linked-native"
+audit_owner = "WPR2,WPP0"
+
+[[dependency]]
+name = "num-integer"
+requirement = "num-integer==0.1.46"
+scope = "native-runtime"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/num-integer"
+purpose = "exact integer arithmetic helpers for native datatypes"
+shipped = true
+linkage = "statically-linked-native"
+audit_owner = "WPR2,WPP0"
+
+[[dependency]]
+name = "num-traits"
+requirement = "num-traits==0.2.19"
+scope = "native-runtime"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/num-traits"
+purpose = "checked numeric traits for native datatype arithmetic"
+shipped = true
+linkage = "statically-linked-native"
+audit_owner = "WPR2,WPP0"
+
+[[dependency]]
+name = "pyo3"
+requirement = "pyo3==0.29.0"
+scope = "native-runtime"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/pyo3"
+purpose = "private CPython stable-ABI extension boundary"
+shipped = true
+linkage = "statically-linked-native"
+audit_owner = "WPR0,WPR4,WPP0"
+
+[[dependency]]
+name = "serde"
+requirement = "serde==1.0.228"
+scope = "native-runtime"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/serde"
+purpose = "bounded native diagnostic and trace serialization"
+shipped = true
+linkage = "statically-linked-native"
+audit_owner = "WPR0,WPP0"
+
+[[dependency]]
+name = "serde_json"
+requirement = "serde_json==1.0.145"
+scope = "native-runtime"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/serde_json"
+purpose = "native diagnostic and test-trace JSON encoding"
+shipped = true
+linkage = "statically-linked-native"
+audit_owner = "WPR0,WPP0"
+
+[[dependency]]
+name = "sha2"
+requirement = "sha2==0.10.9"
+scope = "native-runtime"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/sha2"
+purpose = "wire integrity and compatibility fingerprints"
+shipped = true
+linkage = "statically-linked-native"
+audit_owner = "WPR0,WPP0"
+
+[[dependency]]
+name = "pyo3-build-config"
+requirement = "pyo3-build-config==0.29.0"
+scope = "native-build"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/pyo3-build-config"
+purpose = "stable-ABI extension build configuration"
+shipped = false
+linkage = "build-only"
+audit_owner = "WPR0,WPP0"
+
+[[dependency]]
+name = "criterion"
+requirement = "criterion==0.5.1"
+scope = "native-development"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/criterion"
+purpose = "native microbenchmark harness"
+shipped = false
+linkage = "development-only"
+audit_owner = "WPR0,WPP0"
+
+[[dependency]]
+name = "clap"
+requirement = "clap==4.5.21"
+scope = "native-development"
+license = "Apache-2.0 OR MIT"
+source = "https://crates.io/crates/clap"
+purpose = "MSRV-compatible benchmark command-line support"
+shipped = false
+linkage = "development-only"
+audit_owner = "WPR0,WPP0"

@@ -1,0 +1,486 @@
+name: Distribution matrix
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheels-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONPATH: "."
+  PYTHONSAFEPATH: "1"
+
+jobs:
+  rust-dependency-policy:
+    name: Rust advisory, license, and source policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Audit the complete locked Rust dependency graph
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          manifest-path: native/Cargo.toml
+          arguments: --all-features --locked
+          command: check
+
+  source-artifacts:
+    name: Reproducible sdist and universal fallback
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: rebuild-source
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned build frontend
+        run: >-
+          python -m pip install
+          build==1.5.0 setuptools==83.0.0 setuptools-rust==1.13.0 wheel==0.46.3
+
+      - name: Set fixed reproducible archive timestamp
+        run: echo "SOURCE_DATE_EPOCH=946684800" >> "$GITHUB_ENV"
+
+      - name: Build each source artifact twice
+        env:
+          PYHERMIT_BUILD_NATIVE: "0"
+        run: |
+          python -m build --sdist --wheel --no-isolation --outdir dist .
+          python -m build --sdist --wheel --no-isolation \
+            --outdir "$GITHUB_WORKSPACE/rebuilt" "$GITHUB_WORKSPACE/rebuild-source"
+          test "$(find dist -name '*.tar.gz' | wc -l)" -eq 1
+          test "$(find dist -name '*-py3-none-any.whl' | wc -l)" -eq 1
+          cmp dist/*.tar.gz rebuilt/*.tar.gz
+          cmp dist/*-py3-none-any.whl rebuilt/*-py3-none-any.whl
+
+      - name: Audit metadata, RECORD, file lists, licenses, and no-Java boundary
+        run: |
+          python -m tools.packaging_probe.check_artifact --pure dist/*-py3-none-any.whl
+          python -m tools.packaging_probe.check_artifact dist/*.tar.gz
+          python -m tools.packaging_probe.run_probe
+          python -m tools.specs.check_release_gate --assert-blocked
+
+      - name: Audit the publish-disabled Cargo package source list
+        run: |
+          cargo package --manifest-path native/Cargo.toml --locked --allow-dirty --list \
+            > "$RUNNER_TEMP/native-package-files.txt"
+          python - "$RUNNER_TEMP/native-package-files.txt" <<'PY'
+          from pathlib import Path
+          import sys
+          paths = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          required = {
+              "Cargo.lock",
+              "Cargo.toml",
+              "src/classification_bridge.rs",
+              "src/lib.rs",
+              "src/realization_bridge.rs",
+          }
+          assert required.issubset(paths), required - set(paths)
+          assert len(paths) == len(set(paths))
+          assert not any(
+              path.startswith("target/")
+              or path.lower().endswith((".class", ".jar", ".java"))
+              for path in paths
+          )
+          PY
+
+      - name: Prove forced native cannot silently fall back when Cargo is absent
+        run: |
+          mkdir forced-native-failure
+          if CARGO="$RUNNER_TEMP/unavailable-cargo" PYHERMIT_BUILD_NATIVE=1 \
+            python -m build --wheel --no-isolation --outdir forced-native-failure; then
+            echo "forced native build unexpectedly succeeded without Cargo"
+            exit 1
+          fi
+          test "$(find forced-native-failure -name '*.whl' | wc -l)" -eq 0
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: source-artifacts
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  compiler-free-installed:
+    name: Compiler/JRE-free / Python ${{ matrix.python }}
+    needs: source-artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: source-artifacts
+          path: artifacts
+
+      - name: Prepare complete offline dependency wheelhouse
+        run: |
+          python -m pip download --dest wheelhouse --only-binary=:all: \
+            hypothesis packaging pytest setuptools==83.0.0 \
+            setuptools-rust==1.13.0 "tomli>=2.0,<3" wheel==0.46.3
+          python -m pip download --dest wheelhouse --only-binary=:all: \
+            --platform any --implementation py --python-version 310 --abi none \
+            "pyowl-core>=0.1,<0.2"
+
+      - name: Install fallback wheel without compilers or Java and run semantic suite
+        run: >-
+          python tests/packaging/install_artifact.py
+          artifacts/*-py3-none-any.whl --python "$(command -v python)"
+          --wheelhouse wheelhouse --expected-backend python
+          --expected-core-backend python --semantic-suite
+
+      - name: Install sdist without Cargo, C/C++ compiler, Java, or network
+        run: >-
+          python tests/packaging/install_artifact.py
+          artifacts/*.tar.gz --python "$(command -v python)"
+          --wheelhouse wheelhouse --expected-backend python --expected-core-backend python
+
+  native-wheels:
+    name: Native / ${{ matrix.id }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x86_64
+            runner: ubuntu-24.04
+            build: "cp310-{manylinux,musllinux}_x86_64"
+            arch: x86_64
+            macos-target: "10.12"
+          - id: linux-aarch64
+            runner: ubuntu-24.04-arm
+            build: "cp310-{manylinux,musllinux}_aarch64"
+            arch: aarch64
+            macos-target: "10.12"
+          - id: macos-x86_64
+            runner: macos-15-intel
+            build: "cp310-macosx_x86_64"
+            arch: x86_64
+            macos-target: "10.12"
+          - id: macos-arm64
+            runner: macos-14
+            build: "cp310-macosx_arm64"
+            arch: arm64
+            macos-target: "11.0"
+          - id: windows-amd64
+            runner: windows-latest
+            build: "cp310-win_amd64"
+            arch: AMD64
+            macos-target: "10.12"
+          - id: windows-arm64
+            runner: windows-11-arm
+            build: "cp310-win_arm64"
+            arch: ARM64
+            macos-target: "10.12"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Pin host Rust toolchain
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - name: Build, repair, ABI-audit, and test native wheel
+        uses: pypa/cibuildwheel@294735312765b09d24a2fbec22660ce817587d55 # v4.1.0
+        env:
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_ENVIRONMENT_MACOS: >-
+            PYHERMIT_BUILD_NATIVE=1 CARGO_TERM_COLOR=always SOURCE_DATE_EPOCH=946684800
+            MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos-target }}
+        with:
+          output-dir: wheelhouse
+
+      - name: Check out independent native rebuild source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: rebuild-source
+          persist-credentials: false
+
+      - name: Rebuild native wheel without tests for reproducibility comparison
+        uses: pypa/cibuildwheel@294735312765b09d24a2fbec22660ce817587d55 # v4.1.0
+        env:
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_TEST_COMMAND: ""
+          CIBW_ENVIRONMENT_MACOS: >-
+            PYHERMIT_BUILD_NATIVE=1 CARGO_TERM_COLOR=always SOURCE_DATE_EPOCH=946684800
+            MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos-target }}
+        with:
+          package-dir: rebuild-source
+          output-dir: rebuilt
+
+      - name: Require byte-for-byte reproducible native wheels
+        shell: bash
+        run: |
+          test "$(find wheelhouse -maxdepth 1 -name '*.whl' | wc -l)" -eq \
+            "$(find rebuilt -maxdepth 1 -name '*.whl' | wc -l)"
+          for wheel in wheelhouse/*.whl; do
+            rebuilt="rebuilt/$(basename "$wheel")"
+            test -f "$rebuilt"
+            cmp "$wheel" "$rebuilt"
+          done
+
+      - name: Install pinned Linux ABI and dependency auditors
+        if: runner.os == 'Linux'
+        run: python -m pip install abi3audit==0.0.26 auditwheel==6.7.0
+
+      - name: Install pinned macOS ABI and dependency auditors
+        if: runner.os == 'macOS'
+        run: python -m pip install abi3audit==0.0.26 delocate==0.13.0
+
+      - name: Install pinned Windows ABI and dependency auditors
+        if: runner.os == 'Windows'
+        run: python -m pip install abi3audit==0.0.26 delvewheel==1.13.0
+
+      - name: Enforce archive, ABI, Java, path, and shared-library policy
+        shell: bash
+        run: |
+          for wheel in wheelhouse/*.whl; do
+            python -m tools.packaging_probe.check_artifact --native --external "$wheel"
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-${{ matrix.id }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  abi3-python312:
+    name: ABI3 Python 3.12 / ${{ matrix.id }}
+    needs: native-wheels
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x86_64
+            runner: ubuntu-24.04
+            pattern: "*manylinux*x86_64.whl"
+          - id: linux-aarch64
+            runner: ubuntu-24.04-arm
+            pattern: "*manylinux*aarch64.whl"
+          - id: macos-x86_64
+            runner: macos-15-intel
+            pattern: "*macosx*x86_64.whl"
+          - id: macos-arm64
+            runner: macos-14
+            pattern: "*macosx*arm64.whl"
+          - id: windows-amd64
+            runner: windows-latest
+            pattern: "*win_amd64.whl"
+          - id: windows-arm64
+            runner: windows-11-arm
+            pattern: "*win_arm64.whl"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-${{ matrix.id }}
+          path: native
+
+      - name: Prepare runtime and test wheelhouse
+        shell: bash
+        run: |
+          python -m pip download --dest wheelhouse --only-binary=:all: \
+            "pyowl-core>=0.1,<0.2" hypothesis packaging pytest tomli
+          python -m pip download --dest pure-core-wheelhouse --only-binary=:all: \
+            hypothesis packaging pytest tomli
+          python -m pip download --dest pure-core-wheelhouse --only-binary=:all: \
+            --platform any --implementation py --python-version 310 --abi none \
+            "pyowl-core>=0.1,<0.2"
+
+      - name: Exercise ABI3 wheel and semantic suite
+        shell: bash
+        env:
+          WHEEL_PATTERN: ${{ matrix.pattern }}
+        run: |
+          wheel="$(find native -name "$WHEEL_PATTERN" -print -quit)"
+          test -n "$wheel"
+          python tests/packaging/install_artifact.py "$wheel" --python "$(command -v python)" --wheelhouse wheelhouse --expected-backend native --expected-core-backend native --semantic-suite
+          python tests/packaging/install_artifact.py "$wheel" --python "$(command -v python)" --wheelhouse pure-core-wheelhouse --expected-backend native --expected-core-backend python
+
+  musllinux-python312:
+    name: ABI3 Python 3.12 / musllinux ${{ matrix.arch }}
+    needs: native-wheels
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            id: linux-x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            id: linux-aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-${{ matrix.id }}
+          path: native
+
+      - name: Download universal runtime dependency
+        run: >-
+          python -m pip download --dest wheelhouse --only-binary=:all:
+          --platform any --implementation py --python-version 310 --abi none
+          "pyowl-core>=0.1,<0.2"
+
+      - name: Exercise musllinux wheel on native hardware
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker run --rm -v "$PWD:/project" -w /tmp python:3.12-alpine sh -ec '
+            python -m venv /tmp/venv
+            /tmp/venv/bin/python -m pip install --no-index --find-links /project/wheelhouse /project/native/*musllinux*'"$ARCH"'.whl
+            /tmp/venv/bin/python /project/tests/packaging/installed_smoke.py --expected-backend native --expected-core-backend python
+          '
+
+  artifact-consistency:
+    name: Complete same-version artifact set
+    needs:
+      - rust-dependency-policy
+      - source-artifacts
+      - compiler-free-installed
+      - native-wheels
+      - abi3-python312
+      - musllinux-python312
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "source-artifacts"
+          path: artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "native-*"
+          path: artifacts
+          merge-multiple: true
+
+      - name: Require the exact target set and compare every wheel
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          artifacts = Path("artifacts")
+          pure = tuple(artifacts.glob("*-py3-none-any.whl"))
+          native = tuple(artifacts.glob("*-cp310-abi3-*.whl"))
+          sdist = tuple(artifacts.glob("*.tar.gz"))
+          assert (len(pure), len(native), len(sdist)) == (1, 8, 1), (pure, native, sdist)
+          PY
+          python -m tools.packaging_probe.check_artifact artifacts/*.tar.gz
+          python -m tools.packaging_probe.check_artifact --pure artifacts/*-py3-none-any.whl
+          for wheel in artifacts/*-cp310-abi3-*.whl; do
+            python -m tools.packaging_probe.check_artifact --native "$wheel"
+            python -m tools.packaging_probe.check_artifact --compare artifacts/*-py3-none-any.whl "$wheel"
+          done
+
+      - name: Verify resolver preference and create immutable manifest
+        run: |
+          python tests/packaging/check_index_preference.py --index artifacts
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          artifacts = Path("artifacts")
+          entries = []
+          for path in sorted((*artifacts.glob("*.whl"), *artifacts.glob("*.tar.gz"))):
+              entries.append({"file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+          manifest = {
+              "schema": 1,
+              "source_revision": os.environ["GITHUB_SHA"],
+              "source_date_epoch": int(os.environ.get("SOURCE_DATE_EPOCH", "946684800")),
+              "artifacts": entries,
+          }
+          (artifacts / "release-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          python -m tools.packaging_probe.create_sbom \
+            --namespace "https://github.com/OAEI-ML/pyHermiT/sbom/${GITHUB_SHA}" \
+            --output artifacts/release-sbom.spdx.json
+          cd artifacts
+          sha256sum *.whl *.tar.gz release-manifest.json release-sbom.spdx.json > SHA256SUMS
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-bundle
+          path: |
+            artifacts/*.whl
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
+            artifacts/release-manifest.json
+            artifacts/release-sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 7

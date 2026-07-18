@@ -5,6 +5,7 @@ from types import ModuleType
 
 import pytest
 
+from pyhermit import __version__
 from pyhermit.backends.dispatch import (
     REQUIRED_NATIVE_FEATURES,
     _probe_native,
@@ -23,10 +24,11 @@ def native_module(
     *,
     abi: int = 1,
     schema: int = 1,
+    version: str = __version__,
     features: tuple[str, ...] | None = None,
 ) -> ModuleType:
     module = ModuleType("pyhermit._native")
-    module.__version__ = "native-test-v1"
+    module.__version__ = version
     module.ABI_VERSION = abi
     module.IR_SCHEMA_VERSION = schema
     module.FEATURES = tuple(sorted(REQUIRED_NATIVE_FEATURES)) if features is None else features
@@ -100,6 +102,20 @@ def test_probe_validates_schema_features_and_self_test(
     broken.self_test = fail
     monkeypatch.setattr(importlib, "import_module", lambda _name: broken)
     assert _probe_native().availability.reason == "self_test_failed"
+
+
+def test_probe_rejects_native_package_version_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = native_module(version="0.1.0.other")
+    monkeypatch.setattr(importlib, "import_module", lambda _name: module)
+
+    availability = _probe_native().availability
+
+    assert not availability.available
+    assert availability.reason == "package_version_mismatch"
+    with pytest.raises(BackendVersionError):
+        select_backend_factory(ReasonerConfig(backend="native"))
 
 
 def test_backend_info_is_stable_and_does_not_create_a_session(

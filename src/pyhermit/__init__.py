@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-__version__ = "0.1.0.dev0"
-
 from pyowl_core import (
     IRI,
     ImportResolver,
@@ -19,6 +17,7 @@ from pyowl_core import (
     load_snapshot,
 )
 
+from ._version import __version__
 from .backends.protocol import BackendInfo, BackendStatus, Hierarchy
 from .config import (
     BackendName,

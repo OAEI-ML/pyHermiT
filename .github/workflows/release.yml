@@ -1,4 +1,4 @@
-name: Release blocked by LIC-001
+name: Release candidate (publication blocked by LIC-001)
 
 on:
   workflow_dispatch:
@@ -7,16 +7,56 @@ permissions:
   contents: read
 
 jobs:
+  distribution-matrix:
+    uses: ./.github/workflows/wheels.yml
+
   licensing-gate:
     name: Refuse publication until LIC-001 closes
+    needs: distribution-matrix
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
       - name: Require completed licensing and provenance review
         run: python -m tools.specs.check_release_gate --require-publishable
 
-      # No upload permission or publishing action is present. WPP0 replaces this workflow
-      # only after the machine-readable gate and complete artifact matrix pass.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: artifacts
+
+      - name: Verify the staged release manifest and every artifact again
+        run: |
+          cd artifacts
+          sha256sum --check SHA256SUMS
+          cd ..
+          python -m tools.packaging_probe.check_artifact artifacts/*.tar.gz artifacts/*.whl
+
+      # Deliberately no package-index upload permission or action. Publication remains
+      # unavailable until LIC-001 evidence is complete and owner-reviewed.
+
+  attest-candidate:
+    name: Sigstore/GitHub provenance for the complete candidate
+    needs: licensing-gate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: artifacts
+
+      - name: Attest every staged artifact, manifest, checksum file, and SBOM
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: artifacts/*
+
+      # This job records provenance only after LIC-001 closes. It does not publish the
+      # distribution to TestPyPI, PyPI, or another package index.

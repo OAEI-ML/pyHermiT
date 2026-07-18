@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Literal, cast
 
+from pyhermit._version import __version__
 from pyhermit.backends.protocol import (
     COMPILED_IR_SCHEMA_VERSION,
     BackendAvailability,
@@ -150,16 +151,10 @@ def _probe_native() -> _NativeProbe:
         module = importlib.import_module("pyhermit._native")
     except ModuleNotFoundError as error:
         if error.name != "pyhermit._native":
-            return _NativeProbe(
-                BackendAvailability("native", False, None, None, "import_failed")
-            )
-        return _NativeProbe(
-            BackendAvailability("native", False, None, None, "not_installed")
-        )
+            return _NativeProbe(BackendAvailability("native", False, None, None, "import_failed"))
+        return _NativeProbe(BackendAvailability("native", False, None, None, "not_installed"))
     except (ImportError, OSError):
-        return _NativeProbe(
-            BackendAvailability("native", False, None, None, "import_failed")
-        )
+        return _NativeProbe(BackendAvailability("native", False, None, None, "import_failed"))
 
     implementation = getattr(module, "__version__", None)
     abi = getattr(module, "ABI_VERSION", None)
@@ -167,6 +162,13 @@ def _probe_native() -> _NativeProbe:
     if not isinstance(implementation, str) or not implementation:
         return _NativeProbe(
             BackendAvailability("native", False, None, None, "metadata_invalid"),
+            module,
+        )
+    if implementation != __version__:
+        return _NativeProbe(
+            BackendAvailability(
+                "native", False, implementation, schema, "package_version_mismatch"
+            ),
             module,
         )
     if abi != NATIVE_ABI_VERSION:
@@ -222,15 +224,19 @@ def _unsupported_runtime_reason() -> str | None:
 
 
 def _is_backend_factory(value: object) -> bool:
-    return (
-        getattr(value, "info", None) is not None
-        and callable(getattr(value, "create_session", None))
+    return getattr(value, "info", None) is not None and callable(
+        getattr(value, "create_session", None)
     )
 
 
 def _raise_native_unavailable(availability: BackendAvailability) -> None:
     reason = availability.reason or "unavailable"
-    if reason in {"abi_mismatch", "schema_mismatch", "metadata_invalid"}:
+    if reason in {
+        "abi_mismatch",
+        "metadata_invalid",
+        "package_version_mismatch",
+        "schema_mismatch",
+    }:
         raise BackendVersionError(
             "the installed native backend is incompatible",
             context={"reason": reason},

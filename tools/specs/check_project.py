@@ -62,8 +62,28 @@ def _validate_project_metadata(root: Path, pyproject: dict[str, Any]) -> dict[st
     project = require_mapping(pyproject.get("project"), "project")
     if require_str(project.get("name"), "project.name") != "pyHermiT":
         raise ProjectCheckError("project.name must remain pyHermiT")
-    if require_str(project.get("version"), "project.version") != "0.1.0.dev0":
-        raise ProjectCheckError("WP00 version must be 0.1.0.dev0")
+    if "version" in project:
+        raise ProjectCheckError("project.version must use the runtime single source")
+    dynamic = {
+        require_str(value, "project.dynamic item")
+        for value in require_list(project.get("dynamic"), "project.dynamic")
+    }
+    if dynamic != {"version"}:
+        raise ProjectCheckError("project.dynamic must contain only version")
+    tool = require_mapping(pyproject.get("tool"), "tool")
+    setuptools = require_mapping(tool.get("setuptools"), "tool.setuptools")
+    setuptools_dynamic = require_mapping(setuptools.get("dynamic"), "tool.setuptools.dynamic")
+    version_config = require_mapping(
+        setuptools_dynamic.get("version"), "tool.setuptools.dynamic.version"
+    )
+    if require_str(version_config.get("attr"), "dynamic version attr") != (
+        "pyhermit._version.__version__"
+    ):
+        raise ProjectCheckError("setuptools must read pyhermit._version.__version__")
+    version_source = (root / "src/pyhermit/_version.py").read_text(encoding="utf-8")
+    match = re.search(r'^__version__ = "([^"]+)"$', version_source, flags=re.MULTILINE)
+    if match is None or match.group(1) != "0.1.0.dev0":
+        raise ProjectCheckError("runtime version source must be 0.1.0.dev0")
     if require_str(project.get("requires-python"), "project.requires-python") != ">=3.10":
         raise ProjectCheckError("project requires-python must be >=3.10")
     if require_str(project.get("license"), "project.license") != "LGPL-3.0-or-later":
@@ -125,6 +145,29 @@ def _requirements_by_scope(pyproject: dict[str, Any], root: Path) -> dict[tuple[
     if features != {"extension-module", "abi3-py310"}:
         raise ProjectCheckError(f"unexpected probe pyo3 features: {sorted(features)}")
     result[("development-probe", "pyo3")] = f"pyo3=={version}"
+
+    native = load_toml(root / "native/Cargo.toml")
+    for table_name, scope in (
+        ("dependencies", "native-runtime"),
+        ("build-dependencies", "native-build"),
+        ("dev-dependencies", "native-development"),
+    ):
+        dependencies = require_mapping(native.get(table_name), f"native {table_name}")
+        for crate, raw in dependencies.items():
+            if isinstance(raw, str):
+                cargo_version = raw
+            else:
+                dependency = require_mapping(raw, f"native {table_name}.{crate}")
+                cargo_version = require_str(
+                    dependency.get("version"), f"native {table_name}.{crate}.version"
+                )
+            if not cargo_version.startswith("=") or cargo_version.startswith("=="):
+                raise ProjectCheckError(f"native dependency must use an exact Cargo pin: {crate}")
+            requirement = f"{crate}=={cargo_version[1:]}"
+            key = (scope, _normalized_name(crate))
+            if key in result:
+                raise ProjectCheckError(f"duplicate {scope} requirement for {key[1]}")
+            result[key] = requirement
     return result
 
 
@@ -283,8 +326,14 @@ def _validate_targets(path: Path) -> int:
     data = load_toml(path)
     if require_int(data.get("schema"), "native target schema") != 1:
         raise ProjectCheckError("native target schema must be 1")
-    if require_str(data.get("status"), "native target status") != "planned-not-implemented":
-        raise ProjectCheckError("WP00 must not claim native wheels are implemented")
+    expected_status = "configured-awaiting-hosted-validation"
+    if require_str(data.get("status"), "native target status") != expected_status:
+        raise ProjectCheckError("WPP0 target matrix must await hosted validation")
+    workflow = path.parent.parent.parent / require_str(
+        data.get("workflow"), "native target workflow"
+    )
+    if not workflow.is_file():
+        raise ProjectCheckError(f"native wheel workflow is missing: {workflow}")
     actual: set[tuple[str, str]] = set()
     for index, raw in enumerate(require_list(data.get("target"), "native targets")):
         table = require_mapping(raw, f"target[{index}]")
@@ -292,8 +341,8 @@ def _validate_targets(path: Path) -> int:
             require_str(table.get("platform"), f"target[{index}].platform"),
             require_str(table.get("architecture"), f"target[{index}].architecture"),
         )
-        if require_str(table.get("status"), f"target[{index}].status") != "planned":
-            raise ProjectCheckError(f"native target falsely claims completion: {target}")
+        if require_str(table.get("status"), f"target[{index}].status") != expected_status:
+            raise ProjectCheckError(f"native target must await hosted validation: {target}")
         if target in actual:
             raise ProjectCheckError(f"duplicate native target: {target}")
         actual.add(target)
@@ -357,7 +406,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{summary['dependencies']} dependencies, "
             f"{summary['reference_areas']} reference areas, "
             f"{summary['licensing_pending']} LIC-001 items pending, "
-            f"{summary['planned_native_targets']} native targets explicitly planned"
+            f"{summary['planned_native_targets']} native targets configured "
+            "pending hosted validation"
         )
     return 0
 

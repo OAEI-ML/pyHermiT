@@ -61,6 +61,7 @@ harness = false
 
 [profile.release]
 codegen-units = 1
+incremental = false
 lto = "thin"
 panic = "unwind"
 strip = "symbols"

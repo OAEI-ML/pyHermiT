@@ -9,5 +9,6 @@ rust-version = "1.83"
 license = "LGPL-3.0-or-later"
 repository = "https://github.com/OAEI-ML/pyHermiT"
 
-# WPR0 adds the private native crate and lockfile after the Python state/wire contracts
-# are frozen. An empty workspace is deliberate: WP00 must not ship a fake reasoner.
+# The publish-disabled native crate remains its own workspace so optional PEP 517 builds
+# consume `native/Cargo.lock` directly. This root manifest is the repository-wide metadata
+# anchor; release profile settings live in the crate that actually produces the extension.
