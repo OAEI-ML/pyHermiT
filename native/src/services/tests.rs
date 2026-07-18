@@ -63,6 +63,56 @@ fn incremental_modes_match_exact_partition_and_reduction() -> NativeResult<()> {
 }
 
 #[test]
+fn shared_visited_descendant_does_not_create_a_false_boundary() -> NativeResult<()> {
+    // 1 is unsatisfiable (equivalent to bottom 0). The told graph has two branches whose
+    // downward searches share bottom: 1 -> 2 -> 4 -> 5 and 1 -> 3. A node reached through one
+    // branch must remain visible as a proven neighbour when the other branch is visited.
+    let elements = vec![0, 1, 2, 3, 4, 5, 6];
+    let known = vec![(1, 2), (1, 3), (2, 4), (4, 5)];
+    let mut true_relations = elements
+        .iter()
+        .flat_map(|value| [(0, *value), (*value, 6), (*value, *value)])
+        .collect::<Vec<_>>();
+    true_relations.extend(elements.iter().map(|parent| (1, *parent)));
+    true_relations.extend([(2, 4), (2, 5), (4, 5)]);
+    true_relations.sort_unstable();
+    true_relations.dedup();
+
+    for mode in [
+        ClassificationMode::Deterministic,
+        ClassificationMode::QuasiOrder,
+    ] {
+        let result = classify_ids(
+            ClassificationProblem {
+                elements: &elements,
+                top: 6,
+                bottom: 0,
+                known: &known,
+                known_complete: false,
+                mode,
+                limits: ClassificationLimits::default(),
+            },
+            &crate::session::NeverAbort,
+            |relations, _control| {
+                Ok(relations
+                    .iter()
+                    .map(|relation| true_relations.binary_search(relation).is_ok())
+                    .collect())
+            },
+        )?;
+        assert_eq!(
+            result.hierarchy.nodes,
+            vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5], vec![6]]
+        );
+        assert_eq!(
+            result.hierarchy.edges,
+            vec![(0, 1), (0, 2), (1, 3), (2, 5), (3, 4), (4, 5)]
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn complete_relation_collapses_sccs_and_removes_redundant_edges() -> NativeResult<()> {
     let known = vec![(1, 2), (1, 3), (1, 4), (2, 1), (2, 3), (2, 4), (3, 4)];
     let calls = AtomicU64::new(0);

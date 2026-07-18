@@ -869,14 +869,13 @@ impl MutableHierarchy {
                         .edges
                         .iter()
                         .filter_map(|&(child, parent)| {
-                            let candidate = if upward && child == *node {
+                            if upward && child == *node {
                                 Some(parent)
                             } else if !upward && parent == *node {
                                 Some(child)
                             } else {
                                 None
-                            };
-                            candidate.filter(|value| !visited.contains(value))
+                            }
                         })
                         .collect::<BTreeSet<_>>();
                     (*node, candidates)
@@ -885,6 +884,7 @@ impl MutableHierarchy {
             let candidates = candidates_by_node
                 .iter()
                 .flat_map(|(_, values)| values.iter().copied())
+                .filter(|value| !visited.contains(value))
                 .collect::<BTreeSet<_>>();
             let candidate_nodes = candidates.iter().copied().collect::<Vec<_>>();
             let relations = candidate_nodes
