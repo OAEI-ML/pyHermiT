@@ -19,6 +19,7 @@ mod branching;
 mod cancel;
 pub mod datatypes;
 pub mod error;
+pub mod event_wire;
 pub mod existentials;
 pub mod merging;
 pub mod model;
