@@ -92,6 +92,27 @@ sha256 = "97888e7ecb8f8f4176ef6c92c138dfccd495900309ea3dda045628cf1ca602db"
 contains_external_bodies = false
 
 [[artifact]]
+path = "tests/data/datatypes/wpr3-native-solver-v1.json"
+origin = "project-generated Python/native datatype component-solver oracle"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "580fe765b2a86a6f6ad8ecbae1eb0c0813de3415db2cd3bc49d99c97d95b334b"
+contains_external_bodies = false
+
+[[artifact]]
+path = "tests/data/datatypes/wpr3-native-values-v1.json"
+origin = "project-generated Python/native semantic-value wire oracle"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "efb01c5d3eeda91d1f885b5c5af732498ee7f297c88706ebfa3bba7b536d7f85"
+contains_external_bodies = false
+
+[[artifact]]
+path = "tests/data/datatypes/xsd-regex-native-v1.json"
+origin = "project-generated Python/native XSD regex conformance oracle"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "6fa768213be8eb7d24fa338ce91803cfb65bd746d2c16beb6f7b524301c5d882"
+contains_external_bodies = false
+
+[[artifact]]
 path = "tests/data/hyperresolution/trace-v1.json"
 origin = "project-authored language-neutral WP09/WPR1 transition fixture"
 license_expression = "LGPL-3.0-or-later"
