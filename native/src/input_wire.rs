@@ -428,12 +428,6 @@ impl Document {
             .ok_or_else(|| InputWireError::wire("validated input section became unavailable"))
     }
 
-    fn section(&self, kind: SectionKind) -> Option<&[u8]> {
-        let section = self.sections.get(&kind)?;
-        self.bytes
-            .get(section.offset..section.offset + section.length)
-    }
-
     fn count(&self, kind: SectionKind) -> InputResult<u32> {
         self.sections
             .get(&kind)

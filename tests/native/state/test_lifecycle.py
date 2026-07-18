@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 
 import pytest
-from tests.native.wire._builder import valid_documents
+from tests.native.wire._builder import ONTOLOGY_FINGERPRINT, valid_documents
 
 import pyhermit._native as native
 from pyhermit.exceptions import (
@@ -151,7 +151,7 @@ def test_panic_is_redacted_and_permanently_poisons_only_one_session(
     assert session.poisoned
     with pytest.raises(BackendPoisonedError):
         _ = session.ontology_fingerprint
-    assert healthy.ontology_fingerprint == "11" * 32
+    assert healthy.ontology_fingerprint == ONTOLOGY_FINGERPRINT
     session.close()
     healthy.close()
 
@@ -180,7 +180,7 @@ def test_inherited_session_fails_before_touching_owned_state() -> None:
     _, status = os.waitpid(child, 0)
     assert os.waitstatus_to_exitcode(status) == 0
     assert result == "ReasonerStateError:NATIVE_FORK"
-    assert session.ontology_fingerprint == "11" * 32
+    assert session.ontology_fingerprint == ONTOLOGY_FINGERPRINT
     session.close()
 
 

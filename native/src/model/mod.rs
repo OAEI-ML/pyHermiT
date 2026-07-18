@@ -16,7 +16,7 @@ pub const CORE_API_VERSION: (u16, u16) = (0, 1);
 /// Exact `pyowl-core` model schema accepted by this native crate.
 pub const CORE_MODEL_SCHEMA_VERSION: u32 = 1;
 /// Exact `pyowl-core` flat-wire version accepted by this native crate.
-pub const CORE_WIRE_FORMAT_VERSION: (u16, u16) = (1, 0);
+pub const CORE_WIRE_FORMAT_VERSION: (u16, u16) = (1, 1);
 /// Exact `pyowl-core` adapter protocol accepted by this native crate.
 pub const CORE_ADAPTER_PROTOCOL_VERSION: u32 = 1;
 

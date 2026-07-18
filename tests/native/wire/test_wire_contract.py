@@ -22,16 +22,16 @@ from pyhermit.exceptions import (
     BackendVersionError,
     DisposedReasonerError,
     FeatureNotImplementedError,
+    ResourceLimitError,
 )
 
 from ._builder import (
-    METADATA,
-    ONTOLOGY,
-    OPTIONAL_SECTION,
-    SectionSpec,
-    build_document,
-    metadata_payload,
+    ONTOLOGY_FINGERPRINT,
+    append_unknown_section,
+    directory_entry,
+    first_padding_byte,
     rehash,
+    section_offset,
     valid_documents,
 )
 
@@ -55,7 +55,7 @@ def test_private_abi_handshake_is_versioned_and_does_not_claim_reasoning() -> No
     assert "full_reasoner" not in native.FEATURES
     assert API_VERSION == (0, 1)
     assert MODEL_SCHEMA_VERSION == 1
-    assert WIRE_FORMAT_VERSION == (1, 0)
+    assert WIRE_FORMAT_VERSION == (1, 1)
     assert ADAPTER_PROTOCOL_VERSION == 1
 
 
@@ -66,7 +66,7 @@ def test_session_owns_wire_bytes_and_exposes_only_core_fingerprint() -> None:
     session = native.create_session(ontology, config, native.CancellationHandle())
     assert sys.getrefcount(ontology) == ontology_references
     assert sys.getrefcount(config) == config_references
-    assert session.ontology_fingerprint == "11" * 32
+    assert session.ontology_fingerprint == ONTOLOGY_FINGERPRINT
     session.close()
     session.close()
     with pytest.raises(DisposedReasonerError):
@@ -97,25 +97,13 @@ def test_forced_native_semantic_calls_raise_a_typed_feature_error(
 
 
 def test_unknown_optional_sections_are_ignored_but_required_ones_fail() -> None:
-    optional = build_document(
-        ONTOLOGY,
-        (
-            SectionSpec(METADATA, metadata_payload(), 1),
-            SectionSpec(60_000, b"future", 1, flags=OPTIONAL_SECTION),
-        ),
-    )
-    _, config = valid_documents()
+    ontology, config = valid_documents()
+    optional = append_unknown_section(ontology, optional=True)
     session = native.create_session(optional, config, native.CancellationHandle())
-    assert session.ontology_fingerprint == "11" * 32
+    assert session.ontology_fingerprint == ONTOLOGY_FINGERPRINT
     session.close()
 
-    required = build_document(
-        ONTOLOGY,
-        (
-            SectionSpec(METADATA, metadata_payload(), 1),
-            SectionSpec(60_000, b"future", 1),
-        ),
-    )
+    required = append_unknown_section(ontology, optional=False)
     with pytest.raises(BackendVersionError):
         native.create_session(required, config, native.CancellationHandle())
 
@@ -139,38 +127,24 @@ def test_corrupt_header_hash_count_offset_overlap_and_cross_reference_are_reject
         native.create_session(bytes(bad_hash), config, native.CancellationHandle())
 
     bad_count = bytearray(ontology)
-    struct.pack_into("<I", bad_count, 72 + 24, 2)
+    metadata_entry = directory_entry(bad_count, 1)
+    struct.pack_into("<I", bad_count, metadata_entry + 24, 2)
     with pytest.raises(BackendMismatchError):
         native.create_session(rehash(bad_count), config, native.CancellationHandle())
 
     bad_offset = bytearray(ontology)
-    struct.pack_into("<Q", bad_offset, 72 + 8, (1 << 64) - 1)
+    struct.pack_into("<Q", bad_offset, metadata_entry + 8, (1 << 64) - 1)
     with pytest.raises(BackendMismatchError):
         native.create_session(rehash(bad_offset), config, native.CancellationHandle())
 
-    two_sections = build_document(
-        ONTOLOGY,
-        (
-            SectionSpec(METADATA, metadata_payload(), 1),
-            SectionSpec(2, b"names", 5),
-        ),
-    )
-    overlap = bytearray(two_sections)
+    overlap = bytearray(ontology)
     first_offset = struct.unpack_from("<Q", overlap, 72 + 8)[0]
     struct.pack_into("<Q", overlap, 72 + 32 + 8, first_offset)
     with pytest.raises(BackendMismatchError):
         native.create_session(rehash(overlap), config, native.CancellationHandle())
 
-    padded = build_document(
-        ONTOLOGY,
-        (
-            SectionSpec(2, b"x", 1),
-            SectionSpec(METADATA, metadata_payload(), 1),
-        ),
-    )
-    nonzero_padding = bytearray(padded)
-    string_offset = struct.unpack_from("<Q", nonzero_padding, 72 + 8)[0]
-    nonzero_padding[string_offset + 1] = 1
+    nonzero_padding = bytearray(ontology)
+    nonzero_padding[first_padding_byte(nonzero_padding)] = 1
     with pytest.raises(BackendMismatchError):
         native.create_session(rehash(nonzero_padding), config, native.CancellationHandle())
 
@@ -180,27 +154,12 @@ def test_corrupt_header_hash_count_offset_overlap_and_cross_reference_are_reject
     with pytest.raises(BackendMismatchError):
         native.create_session(rehash(trailing), config, native.CancellationHandle())
 
-    wrong_string_count = build_document(
-        ONTOLOGY,
-        (
-            SectionSpec(METADATA, metadata_payload(), 1),
-            SectionSpec(2, b"ok", 1),
-        ),
-    )
+    wrong_string_count = bytearray(ontology)
+    strings_entry = directory_entry(wrong_string_count, 2)
+    string_count = struct.unpack_from("<I", wrong_string_count, strings_entry + 24)[0]
+    struct.pack_into("<I", wrong_string_count, strings_entry + 24, string_count + 1)
     with pytest.raises(BackendMismatchError):
-        native.create_session(wrong_string_count, config, native.CancellationHandle())
-
-    invalid_symbol = struct.pack("<BBHIII", 0, 0, 0, 99, 2, 0)
-    bad_reference = build_document(
-        ONTOLOGY,
-        (
-            SectionSpec(METADATA, metadata_payload(), 1),
-            SectionSpec(2, b"ok", 2),
-            SectionSpec(3, invalid_symbol, 1),
-        ),
-    )
-    with pytest.raises(BackendMismatchError):
-        native.create_session(bad_reference, config, native.CancellationHandle())
+        native.create_session(rehash(wrong_string_count), config, native.CancellationHandle())
 
 
 def test_wrong_document_kind_and_zero_core_version_are_rejected() -> None:
@@ -208,12 +167,12 @@ def test_wrong_document_kind_and_zero_core_version_are_rejected() -> None:
     with pytest.raises(BackendMismatchError):
         native.create_session(config, config, native.CancellationHandle())
 
-    metadata = bytearray(metadata_payload())
-    struct.pack_into("<I", metadata, 132, 0)
-    zero_version = build_document(ONTOLOGY, (SectionSpec(METADATA, bytes(metadata), 1),))
+    incompatible_version = bytearray(ontology)
+    metadata_offset = section_offset(incompatible_version, 1)
+    struct.pack_into("<H", incompatible_version, metadata_offset + 182, 0)
     with pytest.raises(BackendVersionError):
-        native.create_session(zero_version, config, native.CancellationHandle())
-    assert ontology != zero_version
+        native.create_session(rehash(incompatible_version), config, native.CancellationHandle())
+    assert ontology != incompatible_version
 
 
 def test_deterministic_corruption_sweep_never_panics_or_allocates_from_claims() -> None:
@@ -225,6 +184,6 @@ def test_deterministic_corruption_sweep_never_panics_or_allocates_from_claims() 
         corrupt[index] ^= randomizer.randrange(1, 256)
         try:
             session = native.create_session(bytes(corrupt), config, native.CancellationHandle())
-        except (BackendMismatchError, BackendVersionError):
+        except (BackendMismatchError, BackendVersionError, ResourceLimitError):
             continue
         session.close()

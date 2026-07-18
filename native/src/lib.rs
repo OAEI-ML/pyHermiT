@@ -21,6 +21,7 @@ pub mod datatypes;
 pub mod error;
 pub mod event_wire;
 pub mod existentials;
+pub mod input_wire;
 pub mod merging;
 pub mod model;
 pub mod nominals;
@@ -46,22 +47,24 @@ use pyo3::types::{PyBytes, PySequence};
 
 pub use cancel::{CancellationHandle, CancellationState};
 use error::{ErrorKind, NativeError, NativeResult};
+use input_wire::{
+    decode_config, decode_ontology, DecodeLimits, DecodedConfig, DecodedOntology, InputWireError,
+};
 use model::{
-    CoreMetadata, ABI_VERSION, CORE_ADAPTER_PROTOCOL_VERSION, CORE_API_VERSION,
-    CORE_MODEL_SCHEMA_VERSION, CORE_WIRE_FORMAT_VERSION, IR_SCHEMA_VERSION,
+    ABI_VERSION, CORE_ADAPTER_PROTOCOL_VERSION, CORE_API_VERSION, CORE_MODEL_SCHEMA_VERSION,
+    CORE_WIRE_FORMAT_VERSION, IR_SCHEMA_VERSION,
 };
 use store::{replay_state_trace, TableauKernel, STATE_TRACE_MAGIC, STATE_TRACE_VERSION};
-use wire::{validate_owned, DocumentKind, ValidatedDocument, MAX_WIRE_BYTES};
 
 const EVENT_CAPACITY: usize = 256;
 const POLL_STRIDE_MAX: u64 = 1_000_000;
 const MAX_STATE_TRACE_BYTES: usize = 64 * 1024 * 1024;
 
 struct SessionOwned {
-    ontology: ValidatedDocument,
-    // Kept alive beside the ontology so the session owns exactly one validated
-    // copy of each caller-supplied document for its complete lifetime.
-    _config: ValidatedDocument,
+    ontology: DecodedOntology,
+    // Retained beside the ontology so all effective native configuration is owned
+    // and immutable for the complete session lifetime.
+    _config: DecodedConfig,
     kernel: TableauKernel,
     events: VecDeque<(String, u64)>,
 }
@@ -164,12 +167,7 @@ impl NativeSession {
     #[getter]
     fn ontology_fingerprint(&self, py: Python<'_>) -> PyResult<String> {
         self.control
-            .run(|owned| {
-                let metadata = owned.ontology.metadata.as_ref().ok_or_else(|| {
-                    NativeError::invariant("native ontology metadata is unavailable")
-                })?;
-                Ok(metadata.ontology_fingerprint_hex())
-            })
+            .run(|owned| Ok(hex_digest(&owned.ontology.metadata.ontology_fingerprint)))
             .map_err(|error| error.into_pyerr(py))
     }
 
@@ -362,18 +360,11 @@ fn create_session(
     cancellation: PyRef<'_, CancellationHandle>,
 ) -> PyResult<NativeSession> {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let ontology = validate_owned(
-            copy_capped_bytes(ir, MAX_WIRE_BYTES, "ontology wire")?,
-            DocumentKind::Ontology,
-        )?;
-        let metadata = ontology
-            .metadata
-            .as_ref()
-            .ok_or_else(|| NativeError::wire("ontology wire lacks core metadata"))?;
-        validate_core_metadata(metadata)?;
-        let config = validate_owned(
-            copy_capped_bytes(config, MAX_WIRE_BYTES, "configuration wire")?,
-            DocumentKind::Config,
+        let limits = DecodeLimits::default();
+        let (ontology, config) = decode_session_inputs(
+            copy_capped_bytes(ir, limits.max_wire_bytes, "ontology wire")?,
+            copy_capped_bytes(config, limits.max_wire_bytes, "configuration wire")?,
+            &limits,
         )?;
         Ok(NativeSession {
             control: Arc::new(SessionControl {
@@ -421,7 +412,27 @@ fn copy_capped_bytes(
     Ok(bytes.to_vec())
 }
 
-fn validate_core_metadata(metadata: &CoreMetadata) -> NativeResult<()> {
+fn decode_session_inputs(
+    ontology: Vec<u8>,
+    config: Vec<u8>,
+    limits: &DecodeLimits,
+) -> NativeResult<(DecodedOntology, DecodedConfig)> {
+    let ontology = decode_ontology(ontology, limits).map_err(map_input_wire_error)?;
+    validate_core_metadata(&ontology.metadata)?;
+    let config = decode_config(config, limits).map_err(map_input_wire_error)?;
+    Ok((ontology, config))
+}
+
+fn map_input_wire_error(error: InputWireError) -> NativeError {
+    let kind = match error.code {
+        "NATIVE_INPUT_VERSION" => ErrorKind::Version,
+        "NATIVE_INPUT_RESOURCE_LIMIT" => ErrorKind::Resource,
+        _ => ErrorKind::Wire,
+    };
+    NativeError::new(kind, error.code, error.message)
+}
+
+fn validate_core_metadata(metadata: &input_wire::OntologyMetadata) -> NativeResult<()> {
     if metadata.core_api_version != CORE_API_VERSION
         || metadata.core_model_schema_version != CORE_MODEL_SCHEMA_VERSION
         || metadata.core_wire_format_version != CORE_WIRE_FORMAT_VERSION
@@ -445,6 +456,16 @@ fn validate_core_metadata(metadata: &CoreMetadata) -> NativeResult<()> {
         ));
     }
     Ok(())
+}
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 #[pymodule]
@@ -472,24 +493,42 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wire::build_test_document;
 
-    const fn metadata() -> CoreMetadata {
-        CoreMetadata {
-            ontology_fingerprint: [7; 32],
-            structural_fingerprint: [1; 32],
-            logical_fingerprint: [2; 32],
-            signature_fingerprint: [3; 32],
-            core_api_version: CORE_API_VERSION,
-            core_model_schema_version: 1,
-            core_wire_format_version: CORE_WIRE_FORMAT_VERSION,
-            core_adapter_protocol_version: CORE_ADAPTER_PROTOCOL_VERSION,
-        }
+    fn decode_hex(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .filter_map(|pair| {
+                let text = std::str::from_utf8(pair).ok()?;
+                u8::from_str_radix(text, 16).ok()
+            })
+            .collect()
+    }
+
+    fn golden_document(name: &str) -> Vec<u8> {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/data/native-input-v1.json"))
+                .unwrap_or(serde_json::Value::Null);
+        fixture
+            .get("documents")
+            .and_then(|documents| documents.get(name))
+            .and_then(|document| document.get("hex"))
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(Vec::new, decode_hex)
+    }
+
+    fn decoded_session_input() -> NativeResult<(DecodedOntology, DecodedConfig)> {
+        decode_session_inputs(
+            golden_document("ontology"),
+            golden_document("config"),
+            &DecodeLimits::default(),
+        )
     }
 
     #[test]
     fn forced_semantic_calls_never_return_a_placeholder() -> NativeResult<()> {
         let cancellation = CancellationHandle::from_options(None, None)?;
+        let (ontology, config) = decoded_session_input()?;
         let session = NativeSession {
             control: Arc::new(SessionControl {
                 owner_pid: std::process::id(),
@@ -498,14 +537,8 @@ mod tests {
                 poisoned: AtomicBool::new(false),
                 cancellation: cancellation.state(),
                 owned: Mutex::new(Some(SessionOwned {
-                    ontology: validate_owned(
-                        build_test_document(DocumentKind::Ontology, Some(&metadata())),
-                        DocumentKind::Ontology,
-                    )?,
-                    _config: validate_owned(
-                        build_test_document(DocumentKind::Config, None),
-                        DocumentKind::Config,
-                    )?,
+                    ontology,
+                    _config: config,
                     kernel: TableauKernel::new(),
                     events: VecDeque::new(),
                 })),
@@ -517,6 +550,35 @@ mod tests {
         assert_eq!(
             result.err().map(|error| error.kind),
             Some(ErrorKind::Feature)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_session_input_owns_current_core_wire_records() -> NativeResult<()> {
+        let (ontology, config) = decoded_session_input()?;
+        assert_eq!(ontology.metadata.core_wire_format_version, (1, 1));
+        assert_eq!(ontology.metadata.core_api_version, CORE_API_VERSION);
+        assert_eq!(config.backend, input_wire::BackendChoice::Auto);
+        assert_eq!(
+            hex_digest(&ontology.metadata.ontology_fingerprint).len(),
+            64
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_session_input_rejects_core_wire_minor_drift() -> NativeResult<()> {
+        let (mut ontology, _config) = decoded_session_input()?;
+        ontology.metadata.core_wire_format_version = (1, 0);
+        let error = validate_core_metadata(&ontology.metadata).err();
+        assert_eq!(
+            error.as_ref().map(|value| value.kind),
+            Some(ErrorKind::Version)
+        );
+        assert_eq!(
+            error.as_ref().map(|value| value.code),
+            Some("NATIVE_CORE_VERSION")
         );
         Ok(())
     }
