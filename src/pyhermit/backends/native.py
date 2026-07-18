@@ -11,12 +11,14 @@ becomes a backend-neutral contract value.
 from __future__ import annotations
 
 import importlib
+import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from types import ModuleType
 from typing import NoReturn, Protocol, TypeVar, cast
 
 from pyhermit import __version__
+from pyhermit.backends.native_events import NativeSessionEvent, decode_events
 from pyhermit.backends.native_wire import (
     decode_check,
     decode_check_many,
@@ -38,7 +40,7 @@ from pyhermit.backends.protocol import (
 from pyhermit.backends.verify import VerifyBackendFactory
 from pyhermit.config import ReasonerConfig
 from pyhermit.core import current_core_versions
-from pyhermit.events import CancellationToken
+from pyhermit.events import CancellationToken, ProgressCallback, ProgressEvent
 from pyhermit.exceptions import (
     BackendMismatchError,
     BackendPoisonedError,
@@ -57,6 +59,7 @@ _SESSION_METHODS = (
     "classify_data_properties",
     "classify_object_properties",
     "close",
+    "drain_events",
     "realize",
     "reset_query_state",
 )
@@ -93,6 +96,8 @@ class _ExtensionSession(Protocol):
     def realize(self) -> bytes: ...
 
     def apply_delta(self, delta: bytes) -> bytes: ...
+
+    def drain_events(self) -> bytes: ...
 
     def reset_query_state(self) -> None: ...
 
@@ -208,6 +213,7 @@ class NativeBackendFactory:
                 cancellation,
                 observer_id,
                 ontology.ontology_fingerprint,
+                config.progress,
             )
             cancellation.check()
             return adapter
@@ -231,6 +237,7 @@ class NativeBackendSession:
         "_native",
         "_observer_id",
         "_poisoned",
+        "_progress",
     )
 
     def __init__(
@@ -240,12 +247,14 @@ class NativeBackendSession:
         cancellation: CancellationToken,
         observer_id: int,
         expected_fingerprint: str,
+        progress: ProgressCallback | None,
     ) -> None:
         self._native = native
         self._codec = codec
         self._cancellation = cancellation
         self._observer_id = observer_id
         self._expected_fingerprint = expected_fingerprint
+        self._progress = progress
         self._closed = False
         self._poisoned = False
         _ = self.ontology_fingerprint
@@ -267,7 +276,7 @@ class NativeBackendSession:
         encoded = None if query is None else self._codec.encode_query(query)
         if encoded is not None:
             _require_bytes(encoded, "encoded query")
-        return self._decode(decode_check, self._native.check(encoded))
+        return self._invoke(decode_check, lambda: self._native.check(encoded))
 
     def check_many(self, queries: object) -> tuple[CheckResult, ...]:
         self._begin_call()
@@ -279,7 +288,10 @@ class NativeBackendSession:
         )
         for value in encoded:
             _require_bytes(value, "encoded query")
-        result = self._decode(decode_check_many, self._native.check_many(encoded))
+        result = self._invoke(
+            decode_check_many,
+            lambda: self._native.check_many(encoded),
+        )
         if len(result) != len(values):
             self._poisoned = True
             raise BackendMismatchError(
@@ -289,30 +301,33 @@ class NativeBackendSession:
         return result
 
     def classify_classes(self) -> HierarchyIds:
-        self._begin_call()
-        return self._decode(decode_hierarchy, self._native.classify_classes())
+        return self._invoke(decode_hierarchy, self._native.classify_classes)
 
     def classify_object_properties(self) -> HierarchyIds:
-        self._begin_call()
-        return self._decode(decode_hierarchy, self._native.classify_object_properties())
+        return self._invoke(decode_hierarchy, self._native.classify_object_properties)
 
     def classify_data_properties(self) -> HierarchyIds:
-        self._begin_call()
-        return self._decode(decode_hierarchy, self._native.classify_data_properties())
+        return self._invoke(decode_hierarchy, self._native.classify_data_properties)
 
     def realize(self) -> RealizationIds:
-        self._begin_call()
-        return self._decode(decode_realization, self._native.realize())
+        return self._invoke(decode_realization, self._native.realize)
 
     def apply_delta(self, delta: CompiledDelta) -> DeltaOutcome:
         self._begin_call()
         encoded = self._codec.encode_delta(delta)
         _require_bytes(encoded, "encoded delta")
-        return self._decode(decode_delta, self._native.apply_delta(encoded))
+        return self._invoke(decode_delta, lambda: self._native.apply_delta(encoded))
 
     def reset_query_state(self) -> None:
-        self._require_usable()
-        self._native.reset_query_state()
+        self._begin_call()
+        started = time.perf_counter()
+        try:
+            self._native.reset_query_state()
+        except BaseException:
+            with suppress(Exception):
+                self._drain_events(started)
+            raise
+        self._drain_events(started)
         self._cancellation.check()
 
     def close(self) -> None:
@@ -334,6 +349,41 @@ class NativeBackendSession:
         except (BackendMismatchError, TypeError):
             self._poisoned = True
             raise
+
+    def _invoke(self, decoder: Callable[[bytes], _T], call: Callable[[], bytes]) -> _T:
+        self._begin_call()
+        started = time.perf_counter()
+        try:
+            value = self._decode(decoder, call())
+        except BaseException:
+            # Preserve the operation's public error.  A poisoned/panicking scheduler may
+            # legitimately reject a subsequent drain, and that must not disguise the cause.
+            with suppress(Exception):
+                self._drain_events(started)
+            raise
+        self._drain_events(started)
+        return value
+
+    def _drain_events(self, started: float) -> None:
+        try:
+            events = decode_events(self._native.drain_events())
+        except (BackendMismatchError, TypeError):
+            self._poisoned = True
+            raise
+        callback = self._progress
+        if callback is None:
+            return
+        elapsed = max(0.0, time.perf_counter() - started)
+        for event in events:
+            progress = _progress_event(event, elapsed)
+            try:
+                callback(progress)
+            except BaseException:
+                # Cancellation propagation is best-effort here: the user's original callback
+                # exception is the public error and must never be replaced by an observer fault.
+                with suppress(Exception):
+                    self._cancellation._interrupt("native progress callback raised")
+                raise
 
     def _require_usable(self) -> None:
         if self._closed:
@@ -373,6 +423,32 @@ def _require_bytes(value: object, label: str) -> None:
             f"{label} must be exact bytes",
             context={"reason": "input_codec_invalid"},
         )
+
+
+def _progress_event(event: NativeSessionEvent, elapsed: float) -> ProgressEvent:
+    kinds = {
+        "operation_started": "reasoning-started",
+        "check_completed": "reasoning-progress",
+        "query_state_reset": "query-state-reset",
+        "operation_completed": "reasoning-completed",
+        "operation_aborted": "reasoning-aborted",
+    }
+    details: dict[str, str | int | bool | None] = {
+        "error_code": event.error_code,
+        "native_sequence": event.sequence,
+        "operation": event.operation,
+        "query_hash": None if event.query_key is None else event.query_key.hex(),
+        "satisfiable": event.satisfiable,
+    }
+    return ProgressEvent(
+        version=1,
+        operation_id=f"native-{event.operation.replace('_', '-')}-{event.operation_id}",
+        kind=kinds[event.kind],
+        completed=event.completed,
+        total=event.total,
+        elapsed_seconds=0.0 if event.kind == "operation_started" else elapsed,
+        details=details,
+    )
 
 
 def _version_error(message: str, reason: str) -> NoReturn:

@@ -13,10 +13,15 @@ from types import ModuleType
 import pytest
 
 from pyhermit.backends.native import NativeBackendFactory
+from pyhermit.backends.native_events import (
+    EVENT_HEADER_LENGTH,
+    EVENT_MAGIC,
+    EVENT_RECORD_LENGTH,
+)
 from pyhermit.backends.native_wire import RESULT_HEADER_LENGTH, RESULT_MAGIC, ResultKind
 from pyhermit.backends.protocol import CompiledOntology, DeltaOutcome, EntityRef
 from pyhermit.config import ReasonerConfig
-from pyhermit.events import CancellationSource
+from pyhermit.events import CancellationSource, ProgressEvent
 from pyhermit.exceptions import BackendMismatchError, BackendPoisonedError, BackendVersionError
 
 
@@ -73,6 +78,7 @@ class _Session:
         self.last_queries: tuple[bytes, ...] = ()
         self.last_delta: bytes | None = None
         self.check_document = _check_document(ResultKind.CHECK, (True,))
+        self.events_document = _event_document(())
 
     def check(self, query: bytes | None) -> bytes:
         self.last_query = query
@@ -97,6 +103,11 @@ class _Session:
     def apply_delta(self, delta: bytes) -> bytes:
         self.last_delta = delta
         return _document(ResultKind.DELTA, 1, b"\x02" + b"\0" * 7)
+
+    def drain_events(self) -> bytes:
+        document = self.events_document
+        self.events_document = _event_document(())
+        return document
 
     def reset_query_state(self) -> None:
         return None
@@ -194,6 +205,46 @@ def _check_document(kind: ResultKind, values: tuple[bool, ...]) -> bytes:
     return _document(kind, len(values), payload)
 
 
+def _event_record(
+    *,
+    sequence: int,
+    kind: int,
+    completed: int = 0,
+    query_key: bytes | None = None,
+    satisfiable: int = 0,
+) -> bytes:
+    return struct.pack(
+        "<HBBIQQII32sB7xII",
+        1,
+        1,
+        kind,
+        int(query_key is not None),
+        sequence,
+        3,
+        completed,
+        1,
+        bytes(32) if query_key is None else query_key,
+        satisfiable,
+        0,
+        0,
+    )
+
+
+def _event_document(records: tuple[bytes, ...]) -> bytes:
+    payload = b"".join(records)
+    return struct.pack(
+        "<8sHHIQII32s",
+        EVENT_MAGIC,
+        1,
+        EVENT_RECORD_LENGTH,
+        0,
+        EVENT_HEADER_LENGTH + len(payload),
+        len(records),
+        0,
+        hashlib.sha256(payload).digest(),
+    ) + payload
+
+
 def _u32s(*values: int) -> bytes:
     return struct.pack(f"<{len(values)}I", *values)
 
@@ -261,3 +312,68 @@ def test_factory_rejects_an_incomplete_feature_handshake() -> None:
     extension.FEATURES = ("classification",)
     with pytest.raises(BackendVersionError, match="complete reasoner"):
         NativeBackendFactory(extension)
+
+
+def test_events_are_validated_and_callbacks_run_after_native_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_codec(monkeypatch)
+    extension, _handles, sessions = _extension()
+    events: list[ProgressEvent] = []
+    session = NativeBackendFactory(extension).create_session(
+        _compiled(), ReasonerConfig(progress=events.append), CancellationSource().token
+    )
+    sessions[0].events_document = _event_document(
+        (
+            _event_record(sequence=1, kind=1),
+            _event_record(
+                sequence=2,
+                kind=2,
+                completed=1,
+                query_key=bytes([4]) * 32,
+                satisfiable=2,
+            ),
+            _event_record(sequence=3, kind=4, completed=1),
+        )
+    )
+
+    assert session.check().satisfiable
+    assert [event.kind for event in events] == [
+        "reasoning-started",
+        "reasoning-progress",
+        "reasoning-completed",
+    ]
+    assert events[0].elapsed_seconds == 0.0
+    assert events[1].details["query_hash"] == "04" * 32
+
+
+def test_malformed_event_drain_poisons_and_callback_error_cancels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_codec(monkeypatch)
+    extension, _handles, sessions = _extension()
+    session = NativeBackendFactory(extension).create_session(
+        _compiled(), ReasonerConfig(), CancellationSource().token
+    )
+    sessions[0].events_document = b"corrupt"
+    with pytest.raises(BackendMismatchError):
+        session.check()
+    with pytest.raises(BackendPoisonedError):
+        session.check()
+    session.close()
+
+    source = CancellationSource()
+
+    def fail(_event: object) -> None:
+        raise RuntimeError("callback failed")
+
+    callback_session = NativeBackendFactory(extension).create_session(
+        _compiled(), ReasonerConfig(progress=fail), source.token
+    )
+    sessions[-1].events_document = _event_document((_event_record(sequence=1, kind=1),))
+    with pytest.raises(RuntimeError, match="callback failed"):
+        callback_session.check()
+    assert source.token.interrupted
+    source.begin_operation()
+    assert callback_session.check().satisfiable
+    callback_session.close()
