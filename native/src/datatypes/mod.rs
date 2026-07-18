@@ -12,6 +12,7 @@
 )]
 
 mod range;
+mod range_wire;
 mod scheduler;
 mod solver;
 mod value;
@@ -22,6 +23,11 @@ pub use range::{
     numeric_domain_contains, BinaryRange, BooleanRange, Cardinality, CardinalityClass,
     IEEEInterval, IEEERange, LengthFacet, LengthInterval, LengthRange, NumericDomain,
     NumericInterval, NumericRange, OrderedFacet, RangeLimits,
+};
+pub use range_wire::{
+    decode_data_range_semantic, decode_datatype_range_model, NativeDataRange,
+    NativeDataValueFamily, NativeDataWitness, NativeDatatypeRangeModel, NativeSymbolicDataWitness,
+    OpaqueRangePolicy, RangeWireLimits,
 };
 pub use scheduler::{
     DatatypeConstraintHandle, DatatypeScheduler, DatatypeVariable, ScheduledComponentResult,
