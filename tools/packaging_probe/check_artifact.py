@@ -181,8 +181,12 @@ def inspect_artifact(path: Path, *, pure: bool = False) -> dict[str, object]:
     else:
         for required in (
             "pyproject.toml",
+            "setup.cfg",
             "setup.py",
             "Cargo.toml",
+            "native/Cargo.toml",
+            "native/Cargo.lock",
+            "native/src/lib.rs",
             "LICENSE",
             "COPYING",
             "NOTICE.md",

@@ -3,8 +3,13 @@ include LICENSE
 include COPYING
 include NOTICE.md
 include pyproject.toml
+include setup.cfg
 include setup.py
 include Cargo.toml
+include native/Cargo.toml
+include native/Cargo.lock
+recursive-include native/src *.rs *.json *.py *.md
+recursive-include native/benches *.rs
 recursive-include src *.py *.pyi py.typed
 recursive-include specs *.md *.toml
 recursive-include tools/specs *.py *.toml *.md
