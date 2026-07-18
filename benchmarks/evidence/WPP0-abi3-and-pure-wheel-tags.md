@@ -38,5 +38,14 @@ The pure wheel installed in a fresh CPython 3.10 environment with Cargo and Java
 from `PATH`. Public import succeeded, no `pyhermit._native` module existed, and
 `backend_info()` selected the Python backend while reporting native as `not_installed`.
 
+## Compiler-free sdist smoke check
+
+A clean-source `python -m build --sdist` run produced
+`pyhermit-0.1.0.dev0.tar.gz`. The artifact inspector accepted all 184 members and found
+no Java or reference-probe material. With Cargo and Java absent from `PATH`, pip built
+and installed that sdist as a `py3-none-any` wheel under CPython 3.10. Public import
+again selected Python and no native module was present. The installed wheel SHA-256 was
+`2c09dce853c3b870c913957e4fb794d361ef167ccddae45ce6a827f5a62bf5ac`.
+
 This is a local macOS x86-64 proof, not a claim that the complete cibuildwheel platform
 matrix or release-signing gate has passed; those remain WPP0/LIC-001 release work.
