@@ -115,7 +115,11 @@ testpaths = [
   "tests/packaging",
   "tests/unit",
   "tests/conformance",
+  "tests/differential",
+  "tests/integration",
+  "tests/native",
   "tests/parity",
+  "tests/release",
 ]
 xfail_strict = true
 markers = [

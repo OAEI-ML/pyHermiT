@@ -1,0 +1,26 @@
+schema = 1
+status = "provisional-awaiting-dedicated-calibration"
+authority = "specs/performance.md"
+result_hash_required = true
+raw_samples_required = true
+dedicated_runner_required = true
+
+[thresholds]
+must_not_regress_median_percent = 10.0
+workload_group_geomean_regression_percent = 5.0
+native_over_python_geomean_minimum = 3.0
+peak_rss_regression_percent = 10.0
+interrupt_p95_milliseconds_maximum = 250.0
+native_over_java_geomean_ratio_maximum = 1.25
+native_over_java_single_workload_ratio_maximum = 2.0
+native_over_java_peak_rss_geomean_ratio_maximum = 1.25
+
+[calibration]
+accepted_baseline = ""
+machine_manifest = ""
+approved_by = ""
+approved_on = ""
+
+# Empty calibration identity fields are intentional and fail closed. A dedicated-runner
+# calibration PR must populate them and change status to "frozen"; target changes may not
+# share a PR with a measured regression.

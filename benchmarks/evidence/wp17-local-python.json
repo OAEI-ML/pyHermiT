@@ -1,0 +1,58 @@
+{
+  "backend": {
+    "accelerated": false,
+    "implementation_version": "python-tableau-v1",
+    "requested": "python",
+    "selected": "python"
+  },
+  "environment": {
+    "implementation": "CPython",
+    "machine": "x86_64",
+    "platform": "macOS-26.5.2-x86_64-i386-64bit",
+    "processor": "i386",
+    "python": "3.12.3"
+  },
+  "input_sha256": "71025acfc32b25e93f5c171599bfa187da5fd6b1a689ce2ffa305dd364e14e2a",
+  "medians": {
+    "classification_seconds": 1.9180708180065267,
+    "compile_seconds": 0.15255018504103646,
+    "consistency_seconds": 0.0320422220393084,
+    "load_seconds": 0.05162759398808703,
+    "realization_seconds": 0.4938428490422666
+  },
+  "peak_python_bytes": 5888268,
+  "peak_rss_bytes": 51838976,
+  "result_sha256": "d01d0a30c4cf412b37bc4b1dc37ea6ade921c37efc8bd2bffe7cc2755b830b2d",
+  "samples": [
+    {
+      "classification_seconds": 1.8912630850099958,
+      "compile_seconds": 0.6330906490329653,
+      "consistency_seconds": 0.04038732196204364,
+      "load_seconds": 0.05643659899942577,
+      "realization_seconds": 0.4628312230342999
+    },
+    {
+      "classification_seconds": 1.9180708180065267,
+      "compile_seconds": 0.15255018504103646,
+      "consistency_seconds": 0.03020067495526746,
+      "load_seconds": 0.05162759398808703,
+      "realization_seconds": 0.4938428490422666
+    },
+    {
+      "classification_seconds": 2.059367967012804,
+      "compile_seconds": 0.14884727098979056,
+      "consistency_seconds": 0.0320422220393084,
+      "load_seconds": 0.047080596967134625,
+      "realization_seconds": 0.5523734729504213
+    }
+  ],
+  "schema": "pyhermit.release-benchmark/1",
+  "status": "informational-local",
+  "workload": {
+    "classes": 8,
+    "family": "generated-taxonomy",
+    "individuals": 8,
+    "seed": 1729,
+    "size": "small"
+  }
+}

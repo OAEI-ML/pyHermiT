@@ -1,0 +1,96 @@
+{
+  "schema": "pyhermit.coverage-matrix/1",
+  "generated_on": "2026-07-18",
+  "revision": "5900222",
+  "constructor_contract": {
+    "source": "pyowl_core.MODEL_CONSTRUCTORS",
+    "count": 76,
+    "positive": ["tests/unit/normalize/test_handlers.py"],
+    "negative": ["tests/unit/profile/test_validator.py"],
+    "interaction": ["tests/conformance/test_normalization_reference.py"],
+    "status": "pass"
+  },
+  "operation_groups": [
+    {
+      "id": "lifecycle-and-diagnostics",
+      "members": ["ontology", "config", "backend", "interrupt", "dispose"],
+      "positive": ["tests/integration/facade/test_reasoner.py"],
+      "negative": ["tests/unit/contracts/test_config_events_exceptions.py"],
+      "interaction": ["tests/unit/backends/test_native_events.py"],
+      "backends": ["python", "native", "auto", "verify"],
+      "status": "pass"
+    },
+    {
+      "id": "consistency-and-entailment",
+      "members": ["is_consistent", "is_satisfiable", "is_subclass", "entails", "entails_all", "supports_entailment", "is_defined"],
+      "positive": ["tests/integration/facade/test_reasoner.py"],
+      "negative": ["tests/parity/test_goldens.py"],
+      "interaction": ["tests/differential/test_full_native_services.py"],
+      "backends": ["python", "native", "auto", "verify"],
+      "status": "pass"
+    },
+    {
+      "id": "precomputation",
+      "members": ["precompute", "is_precomputed", "precomputable"],
+      "positive": ["tests/integration/facade/test_reasoner.py"],
+      "negative": ["tests/integration/facade/test_reasoner.py"],
+      "interaction": ["tests/differential/test_full_native_services.py"],
+      "backends": ["python", "native", "auto", "verify"],
+      "status": "pass"
+    },
+    {
+      "id": "class-taxonomy",
+      "members": ["class_hierarchy", "equivalent_classes", "superclasses", "subclasses", "unsatisfiable_classes", "disjoint_classes"],
+      "positive": ["tests/integration/classification/test_classification_service.py"],
+      "negative": ["tests/integration/classification/test_classification_service.py"],
+      "interaction": ["tests/differential/test_full_native_services.py"],
+      "backends": ["python", "native", "auto", "verify"],
+      "status": "pass"
+    },
+    {
+      "id": "object-property-taxonomy",
+      "members": ["object_property_hierarchy", "equivalent_object_properties", "super_object_properties", "sub_object_properties", "inverse_object_properties", "disjoint_object_properties", "object_property_domains", "object_property_ranges"],
+      "positive": ["tests/integration/classification/test_property_classification.py"],
+      "negative": ["tests/integration/classification/test_property_classification.py"],
+      "interaction": ["tests/native/classification/test_native_classification.py"],
+      "backends": ["python", "native", "auto", "verify"],
+      "status": "pass"
+    },
+    {
+      "id": "data-property-taxonomy",
+      "members": ["data_property_hierarchy", "equivalent_data_properties", "super_data_properties", "sub_data_properties", "disjoint_data_properties", "data_property_domains"],
+      "positive": ["tests/integration/classification/test_property_classification.py"],
+      "negative": ["tests/integration/classification/test_property_classification.py"],
+      "interaction": ["tests/native/classification/test_native_classification.py"],
+      "backends": ["python", "native", "auto", "verify"],
+      "status": "pass"
+    },
+    {
+      "id": "realization-and-values",
+      "members": ["types", "has_type", "instances", "same_individuals", "different_individuals", "object_property_values", "object_property_instances", "has_object_property_relationship", "data_property_values", "has_data_property_relationship"],
+      "positive": ["tests/integration/realization/test_property_answers.py"],
+      "negative": ["tests/integration/realization/test_lifecycle_and_edges.py"],
+      "interaction": ["tests/native/realization/test_native_realization.py"],
+      "backends": ["python", "native", "auto", "verify"],
+      "status": "pass"
+    },
+    {
+      "id": "buffered-updates",
+      "members": ["add_axioms", "remove_axioms", "pending_additions", "pending_removals", "flush"],
+      "positive": ["tests/integration/facade/test_reasoner.py"],
+      "negative": ["tests/integration/facade/test_reasoner.py"],
+      "interaction": ["tests/differential/test_full_native_services.py"],
+      "backends": ["python", "native", "auto", "verify"],
+      "status": "pass"
+    }
+  ],
+  "high_risk_interactions": [
+    {"id": "nonhorn-choice-and-backjump", "status": "pass", "evidence": ["tests/unit/hyperresolution/test_rules.py", "tests/differential/test_full_native_services.py"]},
+    {"id": "cyclic-existentials-and-blocking", "status": "pass", "evidence": ["tests/unit/blocking/test_wpr2_trace.py", "tests/differential/test_full_native_services.py"]},
+    {"id": "nominals-cardinality-and-merge", "status": "pass", "evidence": ["tests/unit/expansion/test_nominals.py", "tests/unit/expansion/test_existentials_merging.py"]},
+    {"id": "roles-chains-inverses-transitivity", "status": "pass", "evidence": ["tests/unit/roles/test_automata.py", "tests/integration/realization/test_property_answers.py"]},
+    {"id": "datatype-facets-and-source-literals", "status": "pass", "evidence": ["tests/unit/datatypes/test_integration.py", "tests/unit/datatypes/test_literal_identities.py"]},
+    {"id": "shared-view-provider-zero-reparse", "status": "pass", "evidence": ["tests/integration/shared_snapshot/test_inputs.py", "tests/unit/inputs/test_capture.py"]},
+    {"id": "cancel-rollback-and-session-reuse", "status": "pass", "evidence": ["tests/unit/tableau/test_backend_session.py", "tests/unit/backends/test_native_events.py"]}
+  ]
+}

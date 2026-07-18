@@ -1,0 +1,118 @@
+{
+  "schema": "pyhermit.release-report/1",
+  "generated_on": "2026-07-18",
+  "revision": "5900222",
+  "package_version": "0.1.0.dev0",
+  "overall_status": "blocked",
+  "suites": [
+    {
+      "id": "python-complete-cp310",
+      "runtime": "CPython 3.10.11",
+      "backend": "python",
+      "status": "pass",
+      "tests": 916,
+      "subtests": 4,
+      "evidence": ["benchmarks/evidence/WP17-local-audit.md"]
+    },
+    {
+      "id": "python-complete-cp312",
+      "runtime": "CPython 3.12.3",
+      "backend": "python",
+      "status": "pass",
+      "tests": 916,
+      "subtests": 4,
+      "evidence": ["benchmarks/evidence/WP17-local-audit.md"]
+    },
+    {
+      "id": "native-complete-cp310",
+      "runtime": "CPython 3.10.11",
+      "backend": "native",
+      "status": "pass",
+      "tests": 916,
+      "subtests": 4,
+      "evidence": ["benchmarks/evidence/WP17-local-audit.md"]
+    },
+    {
+      "id": "native-complete-cp312",
+      "runtime": "CPython 3.12.3",
+      "backend": "native",
+      "status": "pass",
+      "tests": 916,
+      "subtests": 4,
+      "evidence": ["benchmarks/evidence/WP17-local-audit.md"]
+    },
+    {
+      "id": "rust-native-workspace",
+      "runtime": "Rust 1.97.1",
+      "backend": "native",
+      "status": "pass",
+      "tests": 225,
+      "subtests": 0,
+      "evidence": ["benchmarks/evidence/WP17-local-audit.md"]
+    }
+  ],
+  "backend_matrix": [
+    {"backend": "python", "status": "pass", "evidence": ["tests/parity/test_goldens.py"]},
+    {"backend": "native", "status": "pass", "evidence": ["tests/differential/test_full_native_services.py"]},
+    {"backend": "auto", "status": "pass", "evidence": ["tests/unit/backends/test_dispatch.py"]},
+    {"backend": "verify", "status": "pass", "evidence": ["tests/unit/backends/test_verify.py"]}
+  ],
+  "artifacts": [
+    {
+      "kind": "native-wheel",
+      "filename": "pyhermit-0.1.0.dev0-cp310-abi3-macosx_14_0_x86_64.whl",
+      "sha256": "c63bb23525f9defb447770e4723e29c5a327d403765c79cc57edbd7cc76583e8",
+      "source_revision": "5900222",
+      "status": "pass",
+      "evidence": "benchmarks/evidence/WPP0-abi3-and-pure-wheel-tags.md"
+    },
+    {
+      "kind": "pure-wheel",
+      "filename": "pyhermit-0.1.0.dev0-py3-none-any.whl",
+      "sha256": "e8be980329d8e7a8af76d3e54eae0d722219960eba91e3e290078701f1fc2978",
+      "source_revision": "5900222",
+      "status": "pass",
+      "evidence": "benchmarks/evidence/WPP0-abi3-and-pure-wheel-tags.md"
+    },
+    {
+      "kind": "sdist",
+      "filename": "pyhermit-0.1.0.dev0.tar.gz",
+      "sha256": "68b3755aeaae007362e178d827296547ab739ec8107e482bb5057d32504e6b3b",
+      "source_revision": "5900222",
+      "status": "pass",
+      "evidence": "benchmarks/evidence/WPP0-abi3-and-pure-wheel-tags.md"
+    }
+  ],
+  "external_gates": [
+    {
+      "id": "W3C-350",
+      "status": "blocked",
+      "reason": "The 266 licensed ontology bodies needed to execute all 350 checks are not redistributable in this checkout.",
+      "evidence": ["tests/data/w3c/approved-direct-dl-inventory.json", "specs/verification.md"]
+    },
+    {
+      "id": "JAVA-DIFFERENTIAL",
+      "status": "blocked",
+      "reason": "The larger release sample must run on the network-disabled pinned development oracle; Java remains excluded from runtime artifacts.",
+      "evidence": ["tools/reference/README.md", "specs/verification.md"]
+    },
+    {
+      "id": "HOSTED-PLATFORMS",
+      "status": "blocked",
+      "reason": "Eight configured wheel targets require hosted Linux, macOS, and Windows runners unavailable to this local audit.",
+      "evidence": [".github/workflows/wheels.yml", "benchmarks/evidence/WPP0-abi3-and-pure-wheel-tags.md"]
+    },
+    {
+      "id": "PERFORMANCE-CALIBRATION",
+      "status": "blocked",
+      "reason": "Dedicated-runner Python/native/Java baselines and frozen Java-relative thresholds have not been approved.",
+      "evidence": ["specs/performance.md"]
+    },
+    {
+      "id": "LIC-001",
+      "status": "blocked",
+      "reason": "Five owner/legal provenance and source-obligation checklist items remain open, so publication fails closed.",
+      "evidence": ["tools/specs/licensing.toml", "specs/deviations.md"]
+    }
+  ]
+}

@@ -18,6 +18,21 @@ attribution. No release may be published while the remaining `LIC-001` provenanc
 file-header, package-metadata, source-obligation, artifact-audit, and legal-review
 checklist in [`specs/deviations.md`](specs/deviations.md) is open.
 
+## Documentation and release state
+
+Start with the [user guide](docs/user-guide.md) for backend selection, standalone and
+shared-view loading, every service family, updates, concurrency, and errors. The
+[API reference](docs/api-reference.md) enumerates every stable facade member, and the
+[developer guide](docs/developer-guide.md) traces the core-view boundary through the
+private IR and Python/Rust engines. The [documentation index](docs/index.md) links the
+normative specifications and machine-readable evidence.
+
+WP17 local state is recorded in the [release report](reports/release-report-local.json),
+[coverage matrix](reports/coverage-matrix.json), and
+[benchmark audit](benchmarks/evidence/WP17-local-audit.md). They intentionally report
+`blocked` until the licensed W3C bodies, larger live-reference sample, hosted platform
+matrix, dedicated performance calibration, and `LIC-001` review have accepted evidence.
+
 ## Development
 
 Use Python 3.10 or newer and install a compatible `pyowl-core`:

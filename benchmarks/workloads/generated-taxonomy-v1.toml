@@ -1,0 +1,22 @@
+schema = 1
+family = "generated-taxonomy"
+license = "project-generated"
+seed = 1729
+
+[[size]]
+id = "small"
+classes = 8
+individuals = 8
+must_not_regress = true
+
+[[size]]
+id = "medium"
+classes = 200
+individuals = 2000
+must_not_regress = true
+
+[[size]]
+id = "large"
+classes = 2000
+individuals = 20000
+must_not_regress = true
