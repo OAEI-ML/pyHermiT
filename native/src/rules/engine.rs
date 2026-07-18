@@ -11,6 +11,7 @@ use crate::cancel::CancellationState;
 use crate::error::{ErrorKind, NativeError, NativeResult};
 use crate::merging::{MergeResult, MergingManager};
 use crate::model::{DependencySet, NodeHandle, NodeSort};
+use crate::session::OperationControl;
 use crate::store::TableauKernel;
 
 use super::joins::{IndexedJoinEvaluator, NaiveJoinEvaluator};
@@ -214,9 +215,9 @@ impl RuleEngine {
     /// the associated `TableauKernel` at the same operation boundary.
     pub fn checkpoint(
         &mut self,
-        cancellation: &CancellationState,
+        control: &dyn OperationControl,
     ) -> NativeResult<RuleEngineCheckpoint> {
-        cancellation.poll()?;
+        control.poll()?;
         self.check_checkpoint_registry_invariants()?;
         validate_mutable_state(&self.atom_ids, &self.atoms)?;
 
@@ -248,8 +249,7 @@ impl RuleEngine {
                 self.checkpoint_limits.max_total_checkpoint_bytes,
             ));
         }
-        cancellation.observe_memory(observed_bytes);
-        cancellation.poll()?;
+        control.observe_memory(observed_bytes)?;
 
         let sequence = self.next_checkpoint_sequence;
         let next_sequence = sequence
@@ -266,7 +266,7 @@ impl RuleEngine {
             disjunction_keys: self.disjunction_keys.clone(),
             initialized: self.initialized,
         };
-        cancellation.poll()?;
+        control.poll()?;
 
         self.checkpoints.insert(
             sequence,

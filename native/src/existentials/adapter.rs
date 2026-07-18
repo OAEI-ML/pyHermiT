@@ -4,7 +4,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::blocking::BlockingManager;
-use crate::cancel::CancellationState;
 use crate::error::{ErrorKind as NativeErrorKind, NativeError, NativeResult};
 use crate::model::{
     DependencySet as NativeDependencySet, NodeHandle, NodeKind as NativeNodeKind, NodeLifecycle,
@@ -12,6 +11,7 @@ use crate::model::{
 use crate::rules::{
     GroundAtom as NativeGroundAtom, PredicateKind, RuleEngine, RuleProgram, TermSort,
 };
+use crate::session::OperationControl;
 use crate::store::TableauKernel;
 
 use super::model::{
@@ -485,7 +485,7 @@ pub trait NativeDatatypeExpansion {
         kernel: &TableauKernel,
         node: NodeHandle,
         predicate_id: u32,
-        cancellation: &CancellationState,
+        control: &dyn OperationControl,
     ) -> NativeResult<bool>;
 }
 
@@ -509,9 +509,9 @@ impl NativeDatatypeExpansion for AssertedOnlyDatatypes {
         _kernel: &TableauKernel,
         _node: NodeHandle,
         _predicate_id: u32,
-        cancellation: &CancellationState,
+        control: &dyn OperationControl,
     ) -> NativeResult<bool> {
-        cancellation.poll()?;
+        control.poll()?;
         Ok(false)
     }
 }
@@ -519,19 +519,19 @@ impl NativeDatatypeExpansion for AssertedOnlyDatatypes {
 pub struct RuntimeExpansionAccess<'a, D> {
     engine: &'a mut RuleEngine,
     datatypes: &'a mut D,
-    cancellation: &'a CancellationState,
+    control: &'a dyn OperationControl,
 }
 
 impl<'a, D> RuntimeExpansionAccess<'a, D> {
     pub const fn new(
         engine: &'a mut RuleEngine,
         datatypes: &'a mut D,
-        cancellation: &'a CancellationState,
+        control: &'a dyn OperationControl,
     ) -> Self {
         Self {
             engine,
             datatypes,
-            cancellation,
+            control,
         }
     }
 }
@@ -546,7 +546,7 @@ impl<D: NativeDatatypeExpansion> ExpansionRuleAccess<RuntimeExpansionState<'_>>
         dependency: DependencySet,
         core: bool,
     ) -> Result<bool, ExpansionError> {
-        self.cancellation.poll().map_err(native_to_expansion)?;
+        self.control.poll().map_err(native_to_expansion)?;
         self.engine
             .dispatch_ground_atom(
                 state.kernel_mut(),
@@ -565,7 +565,7 @@ impl<D: NativeDatatypeExpansion> ExpansionRuleAccess<RuntimeExpansionState<'_>>
         node: NodeHandle,
         dependency: DependencySet,
     ) -> Result<(), ExpansionError> {
-        self.cancellation.poll().map_err(native_to_expansion)?;
+        self.control.poll().map_err(native_to_expansion)?;
         self.engine
             .register_node(state.kernel_mut(), node, native_dependency(&dependency)?)
             .map(|_changed| ())
@@ -592,25 +592,25 @@ impl<D: NativeDatatypeExpansion> ExpansionRuleAccess<RuntimeExpansionState<'_>>
     ) -> Result<bool, ExpansionError> {
         control.poll()?;
         self.datatypes
-            .value_satisfies(state.kernel(), node, predicate_id, self.cancellation)
+            .value_satisfies(state.kernel(), node, predicate_id, self.control)
             .map_err(native_to_expansion)
     }
 }
 
 pub struct NativeExpansionControl<'a> {
-    cancellation: &'a CancellationState,
+    control: &'a dyn OperationControl,
 }
 
 impl<'a> NativeExpansionControl<'a> {
     #[must_use]
-    pub const fn new(cancellation: &'a CancellationState) -> Self {
-        Self { cancellation }
+    pub const fn new(control: &'a dyn OperationControl) -> Self {
+        Self { control }
     }
 }
 
 impl ExpansionControl for NativeExpansionControl<'_> {
     fn poll(&mut self) -> Result<(), ExpansionError> {
-        self.cancellation.poll().map_err(native_to_expansion)
+        self.control.poll().map_err(native_to_expansion)
     }
 }
 
@@ -703,7 +703,7 @@ mod tests {
         BlockingProjection, BlockingRequirements, BlockingSignatureCache, BlockingVocabulary,
         CoreBlockingMode, DirectChecker, NeverCancel,
     };
-    use crate::cancel::CancellationHandle;
+    use crate::cancel::{CancellationHandle, CancellationState};
     use crate::existentials::{
         BranchTransition, ExistentialExpansionManager, ExpansionLimits, ExpansionStatus,
         ExpansionStrategy,
