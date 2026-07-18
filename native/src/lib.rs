@@ -75,6 +75,7 @@ use store::{replay_state_trace, TableauKernel, STATE_TRACE_MAGIC, STATE_TRACE_VE
 const EVENT_CAPACITY: usize = 256;
 const POLL_STRIDE_MAX: u64 = 1_000_000;
 const MAX_STATE_TRACE_BYTES: usize = 64 * 1024 * 1024;
+const PYTHON_VERSION_SOURCE: &str = include_str!("../../src/pyhermit/_version.py");
 
 struct SessionOwned {
     ontology: Arc<DecodedOntology>,
@@ -674,9 +675,22 @@ fn hex_digest(digest: &[u8; 32]) -> String {
     encoded
 }
 
+fn python_package_version() -> Option<&'static str> {
+    PYTHON_VERSION_SOURCE.lines().find_map(|line| {
+        line.strip_prefix("__version__ = \"")
+            .and_then(|value| value.strip_suffix('"'))
+            .filter(|value| !value.is_empty())
+    })
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    let version = python_package_version().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "canonical Python package version source is malformed",
+        )
+    })?;
+    module.add("__version__", version)?;
     module.add("ABI_VERSION", ABI_VERSION)?;
     module.add("IR_SCHEMA_VERSION", IR_SCHEMA_VERSION)?;
     module.add("STATE_TRACE_VERSION", STATE_TRACE_VERSION)?;
@@ -702,6 +716,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::*;
     use crate::program_bridge::LoadedRuleState;
+
+    #[test]
+    fn native_version_comes_from_the_python_distribution_source() {
+        assert_eq!(python_package_version(), Some("0.1.0.dev0"));
+    }
 
     fn decode_hex(value: &str) -> Vec<u8> {
         value
