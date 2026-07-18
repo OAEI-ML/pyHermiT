@@ -279,7 +279,15 @@ class CancellationToken:
             observer_id = self._next_observer_id
             self._next_observer_id += 1
             self._observers[observer_id] = observer
-            return observer_id
+            interrupted = self._cancelled.is_set()
+            reason = self._reason
+        if interrupted:
+            try:
+                observer.interrupt(reason)
+            except BaseException:
+                self._detach(observer_id)
+                raise
+        return observer_id
 
     def _detach(self, observer_id: int) -> None:
         if isinstance(observer_id, bool) or not isinstance(observer_id, int):
