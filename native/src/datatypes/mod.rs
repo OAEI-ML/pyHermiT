@@ -14,6 +14,7 @@
 mod range;
 mod range_wire;
 mod scheduler;
+mod semantic_solver;
 mod solver;
 mod value;
 mod xsd_regex;
@@ -33,6 +34,14 @@ pub use scheduler::{
     DatatypeConstraintHandle, DatatypeScheduler, DatatypeVariable, ScheduledComponentResult,
     ScheduledConstraint, ScheduledConstraintRecord, ScheduledDatatypeClash, SchedulerCheckResult,
     SchedulerCheckpoint, SchedulerDiagnostics, SchedulerLimits,
+};
+pub use semantic_solver::{
+    compile_datatype_constraint_component, solve_compiled_semantic_component,
+    solve_compiled_semantic_component_exhaustive, solve_semantic_component,
+    CompiledSemanticDatatypeConstraintComponent, SemanticCardinalityConstraint,
+    SemanticDatatypeConstraintComponent, SemanticEqualityConstraint, SemanticFixedValueConstraint,
+    SemanticInequalityConstraint, SemanticRangeConstraint, SemanticSolveResult,
+    SemanticSolverLimits,
 };
 pub use solver::{
     solve_component, CardinalityConstraint, ClashKind, ConstraintComponent, DatatypeClash,
