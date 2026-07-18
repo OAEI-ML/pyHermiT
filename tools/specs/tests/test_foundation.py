@@ -5,7 +5,9 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from tools.specs._compat import repository_root
 
@@ -47,25 +49,45 @@ print(json.dumps(added))
         self.assertIn("pyowl_core", added)
         self.assertNotIn("pyhermit._native", added)
 
-    def test_main_setup_build_modes_fail_closed(self) -> None:
+    def test_main_pep517_build_modes_fail_closed(self) -> None:
         root = repository_root()
         expectations = {"0": True, "auto": True, "1": True, "invalid": False}
-        for mode, expected_success in expectations.items():
-            with self.subTest(mode=mode):
-                environment = os.environ.copy()
-                environment["PYHERMIT_BUILD_NATIVE"] = mode
-                result = subprocess.run(
-                    [sys.executable, "setup.py", "--name"],
-                    check=False,
-                    cwd=root,
-                    env=environment,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                )
-                self.assertEqual(result.returncode == 0, expected_success, result.stdout)
-                if expected_success:
-                    self.assertIn("pyHermiT", result.stdout)
+        with tempfile.TemporaryDirectory(prefix="pyhermit-build-modes-") as temporary:
+            temporary_root = Path(temporary)
+            for mode, expected_success in expectations.items():
+                with self.subTest(mode=mode):
+                    output = temporary_root / f"dist-{mode}"
+                    output.mkdir()
+                    environment = os.environ.copy()
+                    environment.pop("PYTHONPATH", None)
+                    environment["PYHERMIT_BUILD_NATIVE"] = mode
+                    environment["CARGO"] = str(temporary_root / "missing-cargo")
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "build",
+                            "--sdist",
+                            "--outdir",
+                            str(output),
+                            str(root),
+                        ],
+                        check=False,
+                        cwd=temporary_root,
+                        env=environment,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                    )
+                    self.assertIn("Creating isolated environment", result.stdout)
+                    self.assertEqual(result.returncode == 0, expected_success, result.stdout)
+                    artifacts = tuple(output.glob("*.tar.gz"))
+                    if expected_success:
+                        self.assertEqual(len(artifacts), 1, result.stdout)
+                        self.assertTrue(artifacts[0].name.lower().startswith("pyhermit-"))
+                    else:
+                        self.assertFalse(artifacts, result.stdout)
+                        self.assertIn("PYHERMIT_BUILD_NATIVE", result.stdout)
 
     def test_package_marker_and_type_marker_exist(self) -> None:
         package = repository_root() / "src/pyhermit"

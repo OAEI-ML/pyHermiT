@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import pyowl_core
+import pyowl_core.model as owl
 import pytest
 
 import pyhermit._native as native
@@ -65,6 +66,50 @@ def native_runtime(
         source_literals=runtime.realization.source_literals,
     )
     return reference, session, mapper
+
+
+@pytest.mark.parametrize("force_quasi_order", (False, True))
+def test_multilevel_incoherent_class_matches_python_bottom(
+    force_quasi_order: bool,
+) -> None:
+    """Keep shared descendants visible while reducing an unsatisfiable class hierarchy."""
+
+    source = functional(
+        "Declaration(Class(:A))",
+        "Declaration(Class(:P))",
+        "Declaration(Class(:Q))",
+        "Declaration(Class(:R))",
+        "Declaration(Class(:T))",
+        "SubClassOf(:A :P)",
+        "SubClassOf(:A :Q)",
+        "SubClassOf(:P :R)",
+        "SubClassOf(:R :T)",
+        "DisjointClasses(:P :Q)",
+    )
+    expected_unsatisfiable = frozenset(
+        (owl.OWL_NOTHING, owl.Class(owl.IRI("urn:test:native-classification#A")))
+    )
+    with (
+        Reasoner(
+            source,
+            config=ReasonerConfig(
+                backend="python",
+                force_quasi_order_classification=force_quasi_order,
+            ),
+            load_options=OPTIONS,
+        ) as reference,
+        Reasoner(
+            source,
+            config=ReasonerConfig(
+                backend="native",
+                force_quasi_order_classification=force_quasi_order,
+            ),
+            load_options=OPTIONS,
+        ) as candidate,
+    ):
+        assert reference.unsatisfiable_classes() == expected_unsatisfiable
+        assert candidate.unsatisfiable_classes() == expected_unsatisfiable
+        assert candidate.class_hierarchy() == reference.class_hierarchy()
 
 
 @pytest.mark.parametrize("force_quasi_order", (False, True))
