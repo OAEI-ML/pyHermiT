@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::branching::{BranchTransition, DisjunctionBrancher, GroundAtomAccess};
@@ -22,6 +24,80 @@ type BindingKey = (TermSort, u32);
 type Bindings = BTreeMap<BindingKey, NodeHandle>;
 type DisjunctRank = (u8, PredicateKind, u32, Vec<(u32, u32, u32)>);
 
+const DEFAULT_MAX_RULE_CHECKPOINTS: u32 = 8;
+const DEFAULT_MAX_RULE_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+const BTREE_ENTRY_OVERHEAD_BYTES: u64 = 256;
+const ALLOCATION_OVERHEAD_BYTES: u64 = 64;
+
+static NEXT_RULE_ENGINE_OWNER: AtomicU64 = AtomicU64::new(1);
+
+/// Bounds operation-root snapshots owned by one rule engine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuleCheckpointLimits {
+    pub max_checkpoints: u32,
+    pub max_total_checkpoint_bytes: u64,
+}
+
+impl RuleCheckpointLimits {
+    pub fn new(max_checkpoints: u32, max_total_checkpoint_bytes: u64) -> NativeResult<Self> {
+        if max_checkpoints == 0 {
+            return Err(NativeError::wire(
+                "max_checkpoints must be strictly positive",
+            ));
+        }
+        if max_total_checkpoint_bytes == 0 {
+            return Err(NativeError::wire(
+                "max_total_checkpoint_bytes must be strictly positive",
+            ));
+        }
+        Ok(Self {
+            max_checkpoints,
+            max_total_checkpoint_bytes,
+        })
+    }
+}
+
+impl Default for RuleCheckpointLimits {
+    fn default() -> Self {
+        Self {
+            max_checkpoints: DEFAULT_MAX_RULE_CHECKPOINTS,
+            max_total_checkpoint_bytes: DEFAULT_MAX_RULE_CHECKPOINT_BYTES,
+        }
+    }
+}
+
+/// An opaque, owner-bound, one-shot snapshot token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuleEngineCheckpoint {
+    owner: u64,
+    sequence: u64,
+}
+
+impl RuleEngineCheckpoint {
+    #[must_use]
+    pub const fn owner(&self) -> u64 {
+        self.owner
+    }
+
+    #[must_use]
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuleEngineMutableSnapshot {
+    atom_ids: BTreeMap<GroundAtom, u32>,
+    atoms: Vec<GroundAtom>,
+    disjunction_keys: BTreeMap<Vec<GroundAtom>, u32>,
+    initialized: bool,
+}
+
+struct StoredRuleCheckpoint {
+    snapshot: RuleEngineMutableSnapshot,
+    estimated_bytes: u64,
+}
+
 pub struct RuleEngine {
     program: RuleProgram,
     join_program: JoinProgram,
@@ -34,6 +110,11 @@ pub struct RuleEngine {
     merger: MergingManager,
     limits: RuleLimits,
     initialized: bool,
+    checkpoint_owner: u64,
+    next_checkpoint_sequence: u64,
+    checkpoint_limits: RuleCheckpointLimits,
+    checkpoint_bytes: u64,
+    checkpoints: BTreeMap<u64, StoredRuleCheckpoint>,
 }
 
 impl RuleEngine {
@@ -59,13 +140,36 @@ impl RuleEngine {
         limits: RuleLimits,
         disjunction_learning: bool,
     ) -> NativeResult<Self> {
+        Self::with_limits_and_checkpoint_limits(
+            program,
+            source_nodes,
+            data_nodes,
+            limits,
+            RuleCheckpointLimits::default(),
+            disjunction_learning,
+        )
+    }
+
+    pub fn with_limits_and_checkpoint_limits(
+        program: RuleProgram,
+        source_nodes: BTreeMap<u32, NodeHandle>,
+        data_nodes: BTreeMap<u32, NodeHandle>,
+        limits: RuleLimits,
+        checkpoint_limits: RuleCheckpointLimits,
+        disjunction_learning: bool,
+    ) -> NativeResult<Self> {
         let limits = RuleLimits::new(
             limits.max_join_steps,
             limits.max_matches_per_generation,
             limits.cancellation_interval,
         )?;
+        let checkpoint_limits = RuleCheckpointLimits::new(
+            checkpoint_limits.max_checkpoints,
+            checkpoint_limits.max_total_checkpoint_bytes,
+        )?;
         let join_program = compile_join_program(&program)?;
         let merger = MergingManager::new(&program)?;
+        let checkpoint_owner = next_rule_engine_owner()?;
         Ok(Self {
             program,
             join_program,
@@ -78,6 +182,11 @@ impl RuleEngine {
             merger,
             limits,
             initialized: false,
+            checkpoint_owner,
+            next_checkpoint_sequence: 1,
+            checkpoint_limits,
+            checkpoint_bytes: 0,
+            checkpoints: BTreeMap::new(),
         })
     }
 
@@ -99,6 +208,207 @@ impl RuleEngine {
     #[must_use]
     pub const fn initialized(&self) -> bool {
         self.initialized
+    }
+
+    /// Capture all mutable state owned by this engine. The caller must capture
+    /// the associated `TableauKernel` at the same operation boundary.
+    pub fn checkpoint(
+        &mut self,
+        cancellation: &CancellationState,
+    ) -> NativeResult<RuleEngineCheckpoint> {
+        cancellation.poll()?;
+        self.check_checkpoint_registry_invariants()?;
+        validate_mutable_state(&self.atom_ids, &self.atoms)?;
+
+        let observed_count = u64::try_from(self.checkpoints.len())
+            .map_err(|_| NativeError::invariant("rule checkpoint count exceeds u64"))?
+            .checked_add(1)
+            .ok_or_else(|| NativeError::invariant("rule checkpoint count overflow"))?;
+        let allowed_count = u64::from(self.checkpoint_limits.max_checkpoints);
+        if observed_count > allowed_count {
+            return Err(resource_limit(
+                "rule checkpoint count limit exceeded",
+                "max_checkpoints",
+                observed_count,
+                allowed_count,
+            ));
+        }
+
+        let estimated_bytes =
+            estimate_snapshot_bytes(&self.atom_ids, &self.atoms, &self.disjunction_keys)?;
+        let observed_bytes = self
+            .checkpoint_bytes
+            .checked_add(estimated_bytes)
+            .ok_or_else(|| NativeError::invariant("rule checkpoint byte counter overflow"))?;
+        if observed_bytes > self.checkpoint_limits.max_total_checkpoint_bytes {
+            return Err(resource_limit(
+                "rule checkpoint memory limit exceeded",
+                "max_total_checkpoint_bytes",
+                observed_bytes,
+                self.checkpoint_limits.max_total_checkpoint_bytes,
+            ));
+        }
+        cancellation.observe_memory(observed_bytes);
+        cancellation.poll()?;
+
+        let sequence = self.next_checkpoint_sequence;
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| NativeError::invariant("rule checkpoint sequence exhausted"))?;
+        if self.checkpoints.contains_key(&sequence) {
+            return Err(NativeError::invariant(
+                "rule checkpoint sequence is already active",
+            ));
+        }
+        let snapshot = RuleEngineMutableSnapshot {
+            atom_ids: self.atom_ids.clone(),
+            atoms: self.atoms.clone(),
+            disjunction_keys: self.disjunction_keys.clone(),
+            initialized: self.initialized,
+        };
+        cancellation.poll()?;
+
+        self.checkpoints.insert(
+            sequence,
+            StoredRuleCheckpoint {
+                snapshot,
+                estimated_bytes,
+            },
+        );
+        self.checkpoint_bytes = observed_bytes;
+        self.next_checkpoint_sequence = next_sequence;
+        Ok(RuleEngineCheckpoint {
+            owner: self.checkpoint_owner,
+            sequence,
+        })
+    }
+
+    /// Restore this engine only. Session integrations should prefer
+    /// `rollback_with_kernel` so the paired kernel snapshot is restored too.
+    pub fn rollback(&mut self, checkpoint: RuleEngineCheckpoint) -> NativeResult<()> {
+        self.validate_checkpoint(checkpoint)?;
+        let snapshot = self.consume_rollback(checkpoint.sequence)?;
+        self.restore_mutable_snapshot(snapshot);
+        Ok(())
+    }
+
+    /// Atomically restore a pre-captured kernel clone and its engine snapshot.
+    /// Every fallible precondition is checked before either live owner changes.
+    pub fn rollback_with_kernel(
+        &mut self,
+        kernel: &mut TableauKernel,
+        kernel_checkpoint: TableauKernel,
+        checkpoint: RuleEngineCheckpoint,
+    ) -> NativeResult<()> {
+        self.validate_checkpoint(checkpoint)?;
+        kernel_checkpoint.check_invariants()?;
+
+        let snapshot = self.consume_rollback(checkpoint.sequence)?;
+        self.restore_mutable_snapshot(snapshot);
+        kernel.restore_full_checkpoint(kernel_checkpoint);
+        Ok(())
+    }
+
+    /// Release an unused token. Released and previously consumed tokens are
+    /// rejected rather than treated as idempotent.
+    pub fn release_checkpoint(&mut self, checkpoint: RuleEngineCheckpoint) -> NativeResult<()> {
+        self.validate_checkpoint(checkpoint)?;
+        let stored = self
+            .checkpoints
+            .remove(&checkpoint.sequence)
+            .ok_or_else(|| NativeError::invariant("validated rule checkpoint disappeared"))?;
+        self.checkpoint_bytes = self.checkpoint_bytes.saturating_sub(stored.estimated_bytes);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn checkpoint_count(&self) -> usize {
+        self.checkpoints.len()
+    }
+
+    #[must_use]
+    pub const fn checkpoint_bytes(&self) -> u64 {
+        self.checkpoint_bytes
+    }
+
+    #[must_use]
+    pub fn interned_atom_count(&self) -> usize {
+        self.atoms.len()
+    }
+
+    #[must_use]
+    pub fn disjunction_key_count(&self) -> usize {
+        self.disjunction_keys.len()
+    }
+
+    fn validate_checkpoint(&self, checkpoint: RuleEngineCheckpoint) -> NativeResult<()> {
+        if checkpoint.owner != self.checkpoint_owner {
+            return Err(NativeError::wire(
+                "rule checkpoint belongs to a different engine",
+            ));
+        }
+        self.check_checkpoint_registry_invariants()?;
+        let stored = self
+            .checkpoints
+            .get(&checkpoint.sequence)
+            .ok_or_else(|| NativeError::wire("rule checkpoint is stale or already consumed"))?;
+        validate_mutable_state(&stored.snapshot.atom_ids, &stored.snapshot.atoms)
+    }
+
+    fn check_checkpoint_registry_invariants(&self) -> NativeResult<()> {
+        let mut bytes = 0_u64;
+        for (sequence, stored) in &self.checkpoints {
+            if *sequence >= self.next_checkpoint_sequence {
+                return Err(NativeError::invariant(
+                    "active rule checkpoint is outside the issued sequence",
+                ));
+            }
+            bytes = bytes.checked_add(stored.estimated_bytes).ok_or_else(|| {
+                NativeError::invariant("active rule checkpoint byte counter overflow")
+            })?;
+        }
+        if bytes != self.checkpoint_bytes {
+            return Err(NativeError::invariant(
+                "active rule checkpoint byte accounting is inconsistent",
+            ));
+        }
+        if self.checkpoints.len()
+            > usize::try_from(self.checkpoint_limits.max_checkpoints).map_err(|_| {
+                NativeError::invariant("rule checkpoint limit cannot fit this platform")
+            })?
+        {
+            return Err(NativeError::invariant(
+                "active rule checkpoint count exceeds its configured bound",
+            ));
+        }
+        if bytes > self.checkpoint_limits.max_total_checkpoint_bytes {
+            return Err(NativeError::invariant(
+                "active rule checkpoint bytes exceed their configured bound",
+            ));
+        }
+        Ok(())
+    }
+
+    fn consume_rollback(&mut self, sequence: u64) -> NativeResult<RuleEngineMutableSnapshot> {
+        let selected = self
+            .checkpoints
+            .remove(&sequence)
+            .ok_or_else(|| NativeError::invariant("validated rule checkpoint disappeared"))?;
+        self.checkpoints
+            .retain(|candidate, _stored| *candidate < sequence);
+        self.checkpoint_bytes = self
+            .checkpoints
+            .values()
+            .map(|stored| stored.estimated_bytes)
+            .sum();
+        Ok(selected.snapshot)
+    }
+
+    fn restore_mutable_snapshot(&mut self, snapshot: RuleEngineMutableSnapshot) {
+        self.atom_ids = snapshot.atom_ids;
+        self.atoms = snapshot.atoms;
+        self.disjunction_keys = snapshot.disjunction_keys;
+        self.initialized = snapshot.initialized;
     }
 
     /// Establish an operation root after seeding reflexive equality and clauses
@@ -1100,6 +1410,124 @@ impl RuleEngine {
     }
 }
 
+fn next_rule_engine_owner() -> NativeResult<u64> {
+    NEXT_RULE_ENGINE_OWNER
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |owner| {
+            owner.checked_add(1)
+        })
+        .map_err(|_| NativeError::invariant("rule engine owner sequence exhausted"))
+}
+
+fn validate_mutable_state(
+    atom_ids: &BTreeMap<GroundAtom, u32>,
+    atoms: &[GroundAtom],
+) -> NativeResult<()> {
+    if atom_ids.len() != atoms.len() {
+        return Err(NativeError::invariant(
+            "rule atom registry maps and vectors have different lengths",
+        ));
+    }
+    for (index, atom) in atoms.iter().enumerate() {
+        let expected = u32::try_from(index)
+            .map_err(|_| NativeError::invariant("rule atom registry exceeds u32"))?;
+        if atom_ids.get(atom).copied() != Some(expected) {
+            return Err(NativeError::invariant(
+                "rule atom registry is not a canonical bijection",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn estimate_snapshot_bytes(
+    atom_ids: &BTreeMap<GroundAtom, u32>,
+    atoms: &[GroundAtom],
+    disjunction_keys: &BTreeMap<Vec<GroundAtom>, u32>,
+) -> NativeResult<u64> {
+    let mut total = btree_allocation_bytes::<u64, StoredRuleCheckpoint>(1)?;
+    checked_estimate_add(
+        &mut total,
+        btree_allocation_bytes::<GroundAtom, u32>(atom_ids.len())?,
+    )?;
+    for atom in atom_ids.keys() {
+        checked_estimate_add(
+            &mut total,
+            vector_allocation_bytes::<NodeHandle>(atom.arguments.len())?,
+        )?;
+    }
+    checked_estimate_add(
+        &mut total,
+        vector_allocation_bytes::<GroundAtom>(atoms.len())?,
+    )?;
+    for atom in atoms {
+        checked_estimate_add(
+            &mut total,
+            vector_allocation_bytes::<NodeHandle>(atom.arguments.len())?,
+        )?;
+    }
+    checked_estimate_add(
+        &mut total,
+        btree_allocation_bytes::<Vec<GroundAtom>, u32>(disjunction_keys.len())?,
+    )?;
+    for atoms in disjunction_keys.keys() {
+        checked_estimate_add(
+            &mut total,
+            vector_allocation_bytes::<GroundAtom>(atoms.len())?,
+        )?;
+        for atom in atoms {
+            checked_estimate_add(
+                &mut total,
+                vector_allocation_bytes::<NodeHandle>(atom.arguments.len())?,
+            )?;
+        }
+    }
+    Ok(total)
+}
+
+fn btree_allocation_bytes<K, V>(count: usize) -> NativeResult<u64> {
+    if count == 0 {
+        return Ok(0);
+    }
+    let entry_bytes = allocation_bytes::<(K, V)>(count)?;
+    let count = u64::try_from(count)
+        .map_err(|_| NativeError::invariant("rule snapshot entry count exceeds u64"))?;
+    entry_bytes
+        .checked_add(
+            count
+                .checked_mul(BTREE_ENTRY_OVERHEAD_BYTES)
+                .ok_or_else(|| {
+                    NativeError::invariant("rule snapshot tree overhead estimate overflow")
+                })?,
+        )
+        .ok_or_else(|| NativeError::invariant("rule snapshot tree estimate overflow"))
+}
+
+fn vector_allocation_bytes<T>(count: usize) -> NativeResult<u64> {
+    if count == 0 {
+        return Ok(0);
+    }
+    allocation_bytes::<T>(count)?
+        .checked_add(ALLOCATION_OVERHEAD_BYTES)
+        .ok_or_else(|| NativeError::invariant("rule snapshot vector estimate overflow"))
+}
+
+fn allocation_bytes<T>(count: usize) -> NativeResult<u64> {
+    let count = u64::try_from(count)
+        .map_err(|_| NativeError::invariant("rule snapshot allocation count exceeds u64"))?;
+    let element = u64::try_from(size_of::<T>())
+        .map_err(|_| NativeError::invariant("rule snapshot element size exceeds u64"))?;
+    count
+        .checked_mul(element)
+        .ok_or_else(|| NativeError::invariant("rule snapshot allocation estimate overflow"))
+}
+
+fn checked_estimate_add(total: &mut u64, amount: u64) -> NativeResult<()> {
+    *total = total
+        .checked_add(amount)
+        .ok_or_else(|| NativeError::invariant("rule snapshot byte estimate overflow"))?;
+    Ok(())
+}
+
 impl GroundAtomAccess for RuleEngine {
     fn atom_is_satisfied(&self, kernel: &TableauKernel, atom_id: u32) -> NativeResult<bool> {
         self.atom_is_satisfied_impl(kernel, self.atom_for_id(atom_id)?)
@@ -1260,6 +1688,15 @@ mod tests {
 
     fn cancellation() -> NativeResult<Arc<CancellationState>> {
         Ok(CancellationHandle::from_options(None, None)?.state())
+    }
+
+    fn mutable_state(engine: &RuleEngine) -> RuleEngineMutableSnapshot {
+        RuleEngineMutableSnapshot {
+            atom_ids: engine.atom_ids.clone(),
+            atoms: engine.atoms.clone(),
+            disjunction_keys: engine.disjunction_keys.clone(),
+            initialized: engine.initialized,
+        }
     }
 
     #[test]
@@ -1608,6 +2045,176 @@ mod tests {
         assert!(engine
             .take_pending_annotated_equality(&mut kernel)?
             .is_none());
+        kernel.check_invariants()
+    }
+
+    #[test]
+    fn paired_rollback_restores_all_engine_owners_and_kernel_exactly() -> NativeResult<()> {
+        let program = RuleProgram::new(vec![concept(0)?, concept(1)?, concept(2)?], Vec::new())?;
+        let mut kernel = TableauKernel::new();
+        let node = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        let mut engine = RuleEngine::new(program, BTreeMap::new(), BTreeMap::new(), true)?;
+        assert!(engine.apply_ground_head(
+            &mut kernel,
+            vec![atom(0, node)?, atom(1, node)?],
+            DependencySet::empty(),
+            &[1],
+            &[],
+        )?);
+        engine.initialized = true;
+        kernel.begin_operation()?;
+
+        let expected_engine = mutable_state(&engine);
+        let expected_kernel = kernel.canonical_snapshot()?;
+        let checkpoint = engine.checkpoint(cancellation()?.as_ref())?;
+        let kernel_checkpoint = kernel.clone();
+
+        let replacement = atom(2, node)?;
+        engine.atom_ids.clear();
+        engine.atom_ids.insert(replacement.clone(), 0);
+        engine.atoms.clear();
+        engine.atoms.push(replacement);
+        engine.disjunction_keys.clear();
+        engine.initialized = false;
+        let _extra = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+
+        engine.rollback_with_kernel(&mut kernel, kernel_checkpoint, checkpoint)?;
+        assert_eq!(mutable_state(&engine), expected_engine);
+        assert_eq!(kernel.canonical_snapshot()?, expected_kernel);
+        assert_eq!(engine.checkpoint_count(), 0);
+        assert_eq!(engine.checkpoint_bytes(), 0);
+        kernel.check_invariants()
+    }
+
+    #[test]
+    fn rollback_tokens_reject_foreign_stale_and_reused_access() -> NativeResult<()> {
+        let program = RuleProgram::new(vec![concept(0)?, concept(1)?], Vec::new())?;
+        let mut first = RuleEngine::new(program.clone(), BTreeMap::new(), BTreeMap::new(), true)?;
+        let mut second = RuleEngine::new(program, BTreeMap::new(), BTreeMap::new(), true)?;
+        let first_token = first.checkpoint(cancellation()?.as_ref())?;
+        let mut kernel = TableauKernel::new();
+        let kernel_checkpoint = kernel.clone();
+        let _node = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        let live_kernel = kernel.canonical_snapshot()?;
+        let live_engine = mutable_state(&second);
+
+        let foreign_error = second
+            .rollback_with_kernel(&mut kernel, kernel_checkpoint, first_token)
+            .err()
+            .ok_or_else(|| NativeError::invariant("foreign checkpoint unexpectedly succeeded"))?;
+        assert_eq!(foreign_error.kind, ErrorKind::Wire);
+        assert_eq!(mutable_state(&second), live_engine);
+        assert_eq!(kernel.canonical_snapshot()?, live_kernel);
+
+        let older = second.checkpoint(cancellation()?.as_ref())?;
+        let _first_id = second.atom_id(GroundAtom::new(0, vec![NodeHandle::new(0, 0)])?)?;
+        let newer = second.checkpoint(cancellation()?.as_ref())?;
+        let _second_id = second.atom_id(GroundAtom::new(1, vec![NodeHandle::new(0, 0)])?)?;
+        second.rollback(older)?;
+        for stale in [older, newer] {
+            let error = second.rollback(stale).err().ok_or_else(|| {
+                NativeError::invariant("consumed rule checkpoint unexpectedly succeeded")
+            })?;
+            assert_eq!(error.kind, ErrorKind::Wire);
+            let release_error = second.release_checkpoint(stale).err().ok_or_else(|| {
+                NativeError::invariant("stale rule checkpoint release unexpectedly succeeded")
+            })?;
+            assert_eq!(release_error.kind, ErrorKind::Wire);
+        }
+        first.release_checkpoint(first_token)
+    }
+
+    #[test]
+    fn checkpoint_creation_is_atomic_under_cancellation_and_resource_limits() -> NativeResult<()> {
+        let program = RuleProgram::new(vec![concept(0)?], Vec::new())?;
+        let mut cancelled =
+            RuleEngine::new(program.clone(), BTreeMap::new(), BTreeMap::new(), true)?;
+        let control = cancellation()?;
+        assert!(control.interrupt(Some("test interruption".to_owned()))?);
+        let before = mutable_state(&cancelled);
+        let error = cancelled
+            .checkpoint(control.as_ref())
+            .err()
+            .ok_or_else(|| NativeError::invariant("cancelled checkpoint unexpectedly succeeded"))?;
+        assert_eq!(error.kind, ErrorKind::Cancelled);
+        assert_eq!(mutable_state(&cancelled), before);
+        assert_eq!(cancelled.checkpoint_count(), 0);
+
+        let mut byte_limited = RuleEngine::with_limits_and_checkpoint_limits(
+            program.clone(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            RuleLimits::default(),
+            RuleCheckpointLimits::new(1, 1)?,
+            true,
+        )?;
+        let byte_error = byte_limited
+            .checkpoint(cancellation()?.as_ref())
+            .err()
+            .ok_or_else(|| {
+                NativeError::invariant("byte-limited checkpoint unexpectedly succeeded")
+            })?;
+        assert_eq!(byte_error.kind, ErrorKind::Resource);
+        assert_eq!(byte_limited.checkpoint_count(), 0);
+        assert_eq!(byte_limited.checkpoint_bytes(), 0);
+
+        let mut count_limited = RuleEngine::with_limits_and_checkpoint_limits(
+            program,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            RuleLimits::default(),
+            RuleCheckpointLimits::new(1, DEFAULT_MAX_RULE_CHECKPOINT_BYTES)?,
+            true,
+        )?;
+        let token = count_limited.checkpoint(cancellation()?.as_ref())?;
+        let count_error = count_limited
+            .checkpoint(cancellation()?.as_ref())
+            .err()
+            .ok_or_else(|| {
+                NativeError::invariant("count-limited checkpoint unexpectedly succeeded")
+            })?;
+        assert_eq!(count_error.kind, ErrorKind::Resource);
+        assert_eq!(count_limited.checkpoint_count(), 1);
+        count_limited.release_checkpoint(token)?;
+        assert_eq!(count_limited.checkpoint_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn paired_rollback_preserves_deterministic_reuse() -> NativeResult<()> {
+        let program = RuleProgram::new(vec![concept(0)?, concept(1)?], Vec::new())?;
+        let mut kernel = TableauKernel::new();
+        let node = kernel.create_node(NodeKind::Root, None, false, None, None, None)?;
+        kernel.begin_operation()?;
+        let mut engine = RuleEngine::new(program, BTreeMap::new(), BTreeMap::new(), true)?;
+
+        let first_token = engine.checkpoint(cancellation()?.as_ref())?;
+        let first_kernel_checkpoint = kernel.clone();
+        assert!(engine.apply_ground_head(
+            &mut kernel,
+            vec![atom(1, node)?, atom(0, node)?],
+            DependencySet::empty(),
+            &[4],
+            &[9],
+        )?);
+        let first_engine = mutable_state(&engine);
+        let first_kernel = kernel.canonical_snapshot()?;
+        engine.rollback_with_kernel(&mut kernel, first_kernel_checkpoint, first_token)?;
+
+        let second_token = engine.checkpoint(cancellation()?.as_ref())?;
+        let second_kernel_checkpoint = kernel.clone();
+        assert!(engine.apply_ground_head(
+            &mut kernel,
+            vec![atom(1, node)?, atom(0, node)?],
+            DependencySet::empty(),
+            &[4],
+            &[9],
+        )?);
+        assert_eq!(mutable_state(&engine), first_engine);
+        assert_eq!(kernel.canonical_snapshot()?, first_kernel);
+        engine.rollback_with_kernel(&mut kernel, second_kernel_checkpoint, second_token)?;
+        assert_eq!(engine.interned_atom_count(), 0);
+        assert_eq!(engine.disjunction_key_count(), 0);
         kernel.check_invariants()
     }
 }
