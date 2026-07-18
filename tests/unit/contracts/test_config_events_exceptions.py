@@ -149,6 +149,37 @@ def test_cancellation_source_resets_the_same_token_between_operations() -> None:
         retained.check()
 
 
+def test_cancellation_observer_tracks_operation_resets_and_interrupts() -> None:
+    class Observer:
+        def __init__(self) -> None:
+            self.resets: list[tuple[float | None, int | None]] = []
+            self.interruptions: list[str | None] = []
+
+        def reset(
+            self,
+            timeout: float | None = None,
+            max_memory_bytes: int | None = None,
+        ) -> None:
+            self.resets.append((timeout, max_memory_bytes))
+
+        def interrupt(self, reason: str | None = None) -> bool:
+            self.interruptions.append(reason)
+            return True
+
+    source = CancellationSource()
+    observer = Observer()
+    observer_id = source.token._attach(observer)
+
+    source.begin_operation(timeout=2.5, max_memory_bytes=128)
+    assert source.interrupt("native-stop")
+    assert observer.resets == [(2.5, 128)]
+    assert observer.interruptions == ["native-stop"]
+
+    source.token._detach(observer_id)
+    source.begin_operation(timeout=None, max_memory_bytes=None)
+    assert observer.resets == [(2.5, 128)]
+
+
 def test_exception_taxonomy_and_canonical_diagnostic() -> None:
     error = FeatureNotImplementedError("keys are not available", feature_id="OWL_HAS_KEY")
     assert isinstance(error, (PyHermiTError, NotImplementedError))

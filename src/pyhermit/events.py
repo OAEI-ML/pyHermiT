@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TypeAlias
+from typing import Protocol, TypeAlias
 
 from .exceptions import (
     ReasonerInterruptedError,
@@ -114,6 +114,18 @@ ProgressCallback: TypeAlias = Callable[[ProgressEvent], None]
 WarningCallback: TypeAlias = Callable[[WarningEvent], None]
 
 
+class _CancellationObserver(Protocol):
+    """Internal bridge implemented by a backend's retained cancellation handle."""
+
+    def reset(
+        self,
+        timeout: float | None = None,
+        max_memory_bytes: int | None = None,
+    ) -> None: ...
+
+    def interrupt(self, reason: str | None = None) -> object: ...
+
+
 class CancellationToken:
     """Read-only cancellation state polled by either complete backend.
 
@@ -127,6 +139,8 @@ class CancellationToken:
         "_lock",
         "_max_memory_bytes",
         "_memory_bytes",
+        "_next_observer_id",
+        "_observers",
         "_reason",
         "_work",
     )
@@ -153,6 +167,8 @@ class CancellationToken:
         self._lock = threading.Lock()
         self._max_memory_bytes = max_memory_bytes
         self._memory_bytes = 0
+        self._next_observer_id = 1
+        self._observers: dict[int, _CancellationObserver] = {}
         self._reason: str | None = None
         self._work = 0
 
@@ -226,7 +242,10 @@ class CancellationToken:
                 return False
             self._reason = reason
             self._cancelled.set()
-            return True
+            observers = tuple(self._observers.values())
+        for observer in observers:
+            observer.interrupt(reason)
+        return True
 
     def _begin_operation(
         self,
@@ -247,6 +266,26 @@ class CancellationToken:
             self._reason = None
             self._work = 0
             self._cancelled.clear()
+            observers = tuple(self._observers.values())
+        for observer in observers:
+            observer.reset(timeout, max_memory_bytes)
+
+    def _attach(self, observer: _CancellationObserver) -> int:
+        if not callable(getattr(observer, "reset", None)) or not callable(
+            getattr(observer, "interrupt", None)
+        ):
+            raise TypeError("cancellation observer must provide reset and interrupt")
+        with self._lock:
+            observer_id = self._next_observer_id
+            self._next_observer_id += 1
+            self._observers[observer_id] = observer
+            return observer_id
+
+    def _detach(self, observer_id: int) -> None:
+        if isinstance(observer_id, bool) or not isinstance(observer_id, int):
+            raise TypeError("observer_id must be an integer")
+        with self._lock:
+            self._observers.pop(observer_id, None)
 
 
 class CancellationSource:

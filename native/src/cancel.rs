@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
@@ -13,38 +13,21 @@ use crate::error::{ErrorKind, NativeError, NativeResult};
 pub struct CancellationState {
     interrupted: AtomicBool,
     reason: Mutex<Option<String>>,
-    deadline: Option<Instant>,
+    deadline_nanos: AtomicU64,
     memory_bytes: AtomicU64,
-    max_memory_bytes: Option<u64>,
+    max_memory_bytes: AtomicU64,
 }
 
 impl CancellationState {
     fn new(timeout: Option<f64>, max_memory_bytes: Option<u64>) -> NativeResult<Self> {
-        let deadline = match timeout {
-            None => None,
-            Some(value) if value.is_finite() && value > 0.0 => {
-                let duration = Duration::try_from_secs_f64(value).map_err(|_| {
-                    NativeError::wire("cancellation timeout cannot be represented safely")
-                })?;
-                Instant::now().checked_add(duration)
-            }
-            Some(_) => {
-                return Err(NativeError::wire(
-                    "cancellation timeout must be finite and strictly positive",
-                ));
-            }
-        };
-        if max_memory_bytes == Some(0) {
-            return Err(NativeError::wire(
-                "max_memory_bytes must be positive when supplied",
-            ));
-        }
+        let deadline_nanos = validate_deadline(timeout)?;
+        let max_memory_bytes = validate_memory_limit(max_memory_bytes)?;
         Ok(Self {
             interrupted: AtomicBool::new(false),
             reason: Mutex::new(None),
-            deadline,
+            deadline_nanos: AtomicU64::new(deadline_nanos),
             memory_bytes: AtomicU64::new(0),
-            max_memory_bytes,
+            max_memory_bytes: AtomicU64::new(max_memory_bytes),
         })
     }
 
@@ -54,20 +37,39 @@ impl CancellationState {
                 "cancellation reason must be nonempty when supplied",
             ));
         }
-        if self
-            .interrupted
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Ok(false);
-        }
         let mut stored = self
             .reason
             .lock()
             .map_err(|_| NativeError::invariant("cancellation reason mutex is poisoned"))?;
+        if self.interrupted.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         *stored = reason;
+        self.interrupted.store(true, Ordering::Release);
         drop(stored);
         Ok(true)
+    }
+
+    /// Start a fresh serialized public operation while retaining this shared handle.
+    ///
+    /// The caller guarantees that the previous operation has returned. Validation completes
+    /// before any live state changes, so an invalid reset leaves the old cancellation state
+    /// untouched. All fields are then published before the interrupted flag is cleared.
+    pub fn reset(&self, timeout: Option<f64>, max_memory_bytes: Option<u64>) -> NativeResult<()> {
+        let deadline_nanos = validate_deadline(timeout)?;
+        let max_memory_bytes = validate_memory_limit(max_memory_bytes)?;
+        let mut reason = self
+            .reason
+            .lock()
+            .map_err(|_| NativeError::invariant("cancellation reason mutex is poisoned"))?;
+        *reason = None;
+        self.memory_bytes.store(0, Ordering::Release);
+        self.max_memory_bytes
+            .store(max_memory_bytes, Ordering::Release);
+        self.deadline_nanos.store(deadline_nanos, Ordering::Release);
+        self.interrupted.store(false, Ordering::Release);
+        drop(reason);
+        Ok(())
     }
 
     pub fn observe_memory(&self, amount: u64) {
@@ -75,10 +77,8 @@ impl CancellationState {
     }
 
     pub fn poll(&self) -> NativeResult<()> {
-        if self
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
+        let deadline_nanos = self.deadline_nanos.load(Ordering::Acquire);
+        if deadline_nanos != 0 && monotonic_nanos() >= deadline_nanos {
             return Err(NativeError::new(
                 ErrorKind::Timeout,
                 "REASONER_TIMEOUT",
@@ -99,10 +99,8 @@ impl CancellationState {
             ));
         }
         let observed = self.memory_bytes.load(Ordering::Acquire);
-        if self
-            .max_memory_bytes
-            .is_some_and(|allowed| observed > allowed)
-        {
+        let allowed = self.max_memory_bytes.load(Ordering::Acquire);
+        if allowed != 0 && observed > allowed {
             return Err(NativeError::new(
                 ErrorKind::Resource,
                 "RESOURCE_LIMIT",
@@ -110,10 +108,7 @@ impl CancellationState {
             )
             .with_context("limit", "max_memory_bytes")
             .with_context("observed", observed.to_string())
-            .with_context(
-                "allowed",
-                self.max_memory_bytes.unwrap_or_default().to_string(),
-            ));
+            .with_context("allowed", allowed.to_string()));
         }
         Ok(())
     }
@@ -122,6 +117,43 @@ impl CancellationState {
     pub fn interrupted(&self) -> bool {
         self.interrupted.load(Ordering::Acquire)
     }
+}
+
+fn validate_deadline(timeout: Option<f64>) -> NativeResult<u64> {
+    let Some(value) = timeout else {
+        return Ok(0);
+    };
+    if !value.is_finite() || value <= 0.0 {
+        return Err(NativeError::wire(
+            "cancellation timeout must be finite and strictly positive",
+        ));
+    }
+    let duration = Duration::try_from_secs_f64(value)
+        .map_err(|_| NativeError::wire("cancellation timeout cannot be represented safely"))?;
+    let duration_nanos = u64::try_from(duration.as_nanos())
+        .ok()
+        .filter(|nanos| *nanos != 0)
+        .ok_or_else(|| NativeError::wire("cancellation timeout cannot be represented safely"))?;
+    monotonic_nanos()
+        .checked_add(duration_nanos)
+        .filter(|deadline| *deadline != 0)
+        .ok_or_else(|| NativeError::wire("cancellation timeout cannot be represented safely"))
+}
+
+fn validate_memory_limit(max_memory_bytes: Option<u64>) -> NativeResult<u64> {
+    match max_memory_bytes {
+        None => Ok(0),
+        Some(0) => Err(NativeError::wire(
+            "max_memory_bytes must be positive when supplied",
+        )),
+        Some(value) => Ok(value),
+    }
+}
+
+fn monotonic_nanos() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let elapsed = EPOCH.get_or_init(Instant::now).elapsed().as_nanos();
+    u64::try_from(elapsed).unwrap_or(u64::MAX)
 }
 
 #[pyclass(module = "pyhermit._native", frozen, skip_from_py_object)]
@@ -266,6 +298,18 @@ impl CancellationHandle {
         self.state.observe_memory(memory_bytes);
     }
 
+    #[pyo3(signature = (timeout=None, max_memory_bytes=None))]
+    fn reset(
+        &self,
+        py: Python<'_>,
+        timeout: Option<f64>,
+        max_memory_bytes: Option<u64>,
+    ) -> PyResult<()> {
+        self.state
+            .reset(timeout, max_memory_bytes)
+            .map_err(|error| error.into_pyerr(py))
+    }
+
     #[getter]
     fn interrupted(&self) -> bool {
         self.state.interrupted()
@@ -291,6 +335,16 @@ mod tests {
         assert_eq!(
             handle.state.poll().err().map(|error| error.kind),
             Some(ErrorKind::Cancelled)
+        );
+
+        handle.state.reset(None, Some(16))?;
+        assert!(!handle.state.interrupted());
+        handle.state.observe_memory(9);
+        handle.state.poll()?;
+        handle.state.observe_memory(17);
+        assert_eq!(
+            handle.state.poll().err().map(|error| error.kind),
+            Some(ErrorKind::Resource)
         );
         Ok(())
     }
