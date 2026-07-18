@@ -41,11 +41,21 @@ from `PATH`. Public import succeeded, no `pyhermit._native` module existed, and
 ## Compiler-free sdist smoke check
 
 A clean-source `python -m build --sdist` run produced
-`pyhermit-0.1.0.dev0.tar.gz`. The artifact inspector accepted all 184 members and found
-no Java or reference-probe material. With Cargo and Java absent from `PATH`, pip built
-and installed that sdist as a `py3-none-any` wheel under CPython 3.10. Public import
-again selected Python and no native module was present. The installed wheel SHA-256 was
-`2c09dce853c3b870c913957e4fb794d361ef167ccddae45ce6a827f5a62bf5ac`.
+`pyhermit-0.1.0.dev0.tar.gz`. The artifact inspector accepted all 256 members and found
+the locked native Cargo manifest, lockfile, complete Rust source/benchmark trees, and no
+Java or reference-probe material.
+
+With Cargo and Java absent from `PATH`, the default optional-extension path built and
+installed a working Python-only local wheel under CPython 3.10. The locally built file
+retained a platform/ABI3 tag because the optional Rust extension had been declared
+before its missing-compiler failure, but contained no native module; public import
+selected Python. The separately published fallback remains the explicitly forced
+`py3-none-any` wheel described above.
+
+With `PYHERMIT_BUILD_NATIVE=1` and Cargo restored, the same sdist produced a
+`cp310-abi3` wheel containing the extension. Its SHA-256 was
+`7c04593492117d171e0b0c4e744956dc053fc67e0be74556e7d06f1f87f20ac1`, and the
+repository artifact inspector accepted all 93 members as Java-free.
 
 This is a local macOS x86-64 proof, not a claim that the complete cibuildwheel platform
 matrix or release-signing gate has passed; those remain WPP0/LIC-001 release work.
