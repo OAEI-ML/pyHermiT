@@ -65,7 +65,7 @@ use model::{
 use native_tableau::ProductionTableau;
 use program_bridge::load_permanent_rule_state;
 use result_wire::{
-    encode_check, encode_check_many, encode_delta, encode_hierarchy, encode_realization,
+    encode_check, encode_check_many, encode_delta, encode_hierarchy, encode_realization_ids,
     CheckStatistics, CheckWireResult, DeltaWireOutcome,
 };
 use services::{ClassificationCache, ClassificationDomain, RealizationCache};
@@ -301,7 +301,7 @@ impl NativeSession {
                     &control.cancellation,
                 )?;
                 control.cancellation.poll()?;
-                encode_realization(&realization.to_wire_result())
+                encode_realization_ids(realization.as_ref())
             })
         });
         result.map_err(|error| error.into_pyerr(py))
