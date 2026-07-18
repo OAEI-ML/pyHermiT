@@ -99,6 +99,13 @@ sha256 = "580fe765b2a86a6f6ad8ecbae1eb0c0813de3415db2cd3bc49d99c97d95b334b"
 contains_external_bodies = false
 
 [[artifact]]
+path = "tests/data/datatypes/wpr3-native-semantic-solver-v1.json"
+origin = "project-generated Python/native semantic datatype range-solver oracle"
+license_expression = "LGPL-3.0-or-later"
+sha256 = "e7c9149be803be2b5632b39fe4e5d7c8a07073a2c9d88df1e4255791e2e74f12"
+contains_external_bodies = false
+
+[[artifact]]
 path = "tests/data/datatypes/wpr3-native-values-v1.json"
 origin = "project-generated Python/native semantic-value wire oracle"
 license_expression = "LGPL-3.0-or-later"
