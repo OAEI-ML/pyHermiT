@@ -165,6 +165,21 @@ def test_valid_handoff_retains_owner_and_read_only_buffers(
     ]
 
 
+def test_descriptor_digest_is_derived_when_core_uses_the_minimal_public_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
+    view = _View()
+    del view.encoded.descriptor_digest
+
+    result = negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
+
+    assert result.lease is not None
+    assert result.lease.descriptor_digest == hashlib.sha256(
+        view.encoded.descriptor
+    ).digest()
+
+
 @pytest.mark.parametrize(
     ("field", "invalid"),
     [

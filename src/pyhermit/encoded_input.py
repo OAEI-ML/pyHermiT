@@ -174,8 +174,8 @@ def _validate_encoded_view(
     descriptor = _required_attribute(encoded, "descriptor")
     if type(descriptor) is not bytes or not descriptor:
         raise _protocol_error("encoded descriptor must be nonempty exact bytes")
-    descriptor_digest = _required_attribute(encoded, "descriptor_digest")
     authoritative_digest = hashlib.sha256(descriptor).digest()
+    descriptor_digest = getattr(encoded, "descriptor_digest", authoritative_digest)
     if type(descriptor_digest) is not bytes or descriptor_digest != authoritative_digest:
         raise _protocol_error("encoded descriptor digest does not match its bytes")
 
