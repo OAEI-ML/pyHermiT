@@ -15,9 +15,12 @@ Packaging references:
 
 The Rust extension owns a complete backend session and all hot mutable reasoning state.
 It is not a collection of per-row helper functions. pyowl-core supplies the captured public
-ontology view; pyHermiT performs backend-neutral private compilation, transfers that frozen
-IR once, then invokes
-coarse operations such as check batches, classification, or realization.
+ontology view. The implemented compatibility path performs backend-neutral private compilation
+in Python and transfers that frozen IR once. The successor optimized path in
+`native-structural-ingestion.md` instead compiles a public encoded structural view
+transactionally inside Rust and creates the same complete native session without Python
+ontology-sized IR or the input-wire round trip. Both invoke coarse operations such as check
+batches, classification, or realization.
 
 The extension module is private:
 

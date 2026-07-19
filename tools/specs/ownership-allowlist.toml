@@ -71,3 +71,45 @@ owners = ["WP00", "WP17"]
 left = "tools/specs/"
 right = "tools/specs/licensing.toml"
 reason = "WP00 creates the fail-closed LIC-001 gate; WP17 closes it only with final evidence."
+
+[[allow]]
+owners = ["WPR4", "WP18"]
+left = "src/pyhermit/backends/native.py"
+right = "src/pyhermit/backends/native.py"
+reason = "WPR4 delivers the complete native adapter; successor WP18 adds the negotiated encoded compilation entry point after WPR4 is complete."
+
+[[allow]]
+owners = ["WPR0", "WP18"]
+left = "src/pyhermit/_native.pyi"
+right = "src/pyhermit/_native.pyi"
+reason = "WPR0 freezes the original private extension surface; successor WP18 adds the versioned coarse encoded-view call."
+
+[[allow]]
+owners = ["WPR4", "WP18"]
+left = "native/src/session.rs"
+right = "native/src/session.rs"
+reason = "WPR4 owns the original complete session; successor WP18 adds direct publication from the new native compiler after WPR4 is complete."
+
+[[allow]]
+owners = ["WPR4", "WP18"]
+left = "tests/differential/"
+right = "tests/differential/encoded_compiler/"
+reason = "WPR4 owns the original backend differential suite; successor WP18 adds a separately scoped compiler-parity lane."
+
+[[allow]]
+owners = ["WP17", "WP18"]
+left = "benchmarks/"
+right = "benchmarks/encoded_ingestion/"
+reason = "WP17 owns the original release corpus; successor WP18 adds a disjoint encoded-ingestion lane against that frozen baseline."
+
+[[allow]]
+owners = ["WP17", "WP18"]
+left = "reports/"
+right = "reports/performance/encoded-ingestion/"
+reason = "WP17 publishes original release evidence; successor WP18 publishes separately scoped encoded-ingestion evidence."
+
+[[allow]]
+owners = ["WP17", "WP18"]
+left = "docs/"
+right = "docs/native-structural-ingestion.md"
+reason = "WP17 publishes original documentation; successor WP18 adds one separately named encoded-ingestion guide."

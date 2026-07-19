@@ -171,3 +171,10 @@ brief = "WP17-release-integration.md"
 wave = 12
 depends = ["WP16", "WPR4", "WPP0"]
 owns = ["benchmarks/", "docs/", "README.md", "NOTICE.md", "tools/specs/licensing.toml", "tests/release/", "tests/data/deviations/", "reports/"]
+
+[[package]]
+id = "WP18"
+brief = "WP18-native-structural-compiler.md"
+wave = 13
+depends = ["WP17", "WPR4"]
+owns = ["src/pyhermit/encoded_input.py", "src/pyhermit/compile_dispatch.py", "src/pyhermit/backends/native.py", "src/pyhermit/_native.pyi", "native/src/encoded/", "native/src/profile/", "native/src/normalize/", "native/src/clauses/", "native/src/session.rs", "tests/native/encoded_input/", "tests/differential/encoded_compiler/", "tests/integration/encoded_consumers/", "benchmarks/encoded_ingestion/", "reports/performance/encoded-ingestion/", "docs/native-structural-ingestion.md"]

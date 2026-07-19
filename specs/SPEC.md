@@ -422,6 +422,12 @@ The native engine is the production performance target. It MUST:
 - keep Python/Rust boundary time separately measurable; and
 - retain exact output parity when an optimization is enabled or disabled.
 
+When the captured core advertises a compatible `EncodedStructuralView`, the optimized path also
+MUST satisfy `native-structural-ingestion.md`: profile validation, normalization, clausification,
+and permanent-session construction occur as one transactional Rust compilation without scalar
+Python ontology expansion or a serialized private ontology IR. Scalar Python and scalar-wire
+native paths remain complete compatibility paths.
+
 No work package may claim a speedup using a smaller semantic workload, warmed cache on
 only one side, omitted answers, relaxed timeout, or different ontology revision.
 
@@ -452,6 +458,9 @@ A 1.0 release is permitted only when all of the following are true:
     overlay/composite/native transfer behavior.
 12. `deviations.md` LIC-001 is closed by an owner/legal-reviewed licensing/provenance/source
     strategy; while it is open, release is prohibited regardless of other gates.
+13. The successor encoded-native compiler, when advertised, passes exact compiler-manifest and
+    reasoning parity plus the no-materialization, copy, RSS, end-to-end, and consumer gates in
+    `native-structural-ingestion.md`; capability presence alone is not a performance claim.
 
 Passing only a profile subset, only deterministic ontologies, only TBox reasoning, or
 only one backend is not completion.

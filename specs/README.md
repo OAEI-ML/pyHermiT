@@ -33,6 +33,7 @@ release gates in [`verification.md`](verification.md) apply to the whole product
 | [`datatypes.md`](datatypes.md) | Required datatype map, lexical/value equality, restrictions, and datatype satisfiability |
 | [`reasoning-services.md`](reasoning-services.md) | Consistency, satisfiability, entailment, classification, realization, and lifecycle behavior |
 | [`native-backend.md`](native-backend.md) | Rust accelerator, Python parity, FFI boundary, concurrency, safety, and wheel behavior |
+| [`native-structural-ingestion.md`](native-structural-ingestion.md) | successor encoded-view validation, native normalization/clausification, copy budgets, and end-to-end gates |
 | [`verification.md`](verification.md) | Differential oracle, conformance suites, fuzzing, backend parity, and release gates |
 | [`performance.md`](performance.md) | Benchmarks, baselines, budgets, profiling, and regression policy |
 | [`deviations.md`](deviations.md) | Bug-fix precedence, deviation records, provenance, and licensing controls |

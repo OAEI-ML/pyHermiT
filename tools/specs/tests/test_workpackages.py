@@ -17,9 +17,9 @@ class WorkPackageManifestTests(unittest.TestCase):
             root / "tools/specs/ownership-allowlist.toml",
         )
 
-        self.assertEqual(summary["packages"], 24)
-        self.assertEqual(summary["waves"], 13)
-        self.assertEqual(summary["allowed_collisions"], 12)
+        self.assertEqual(summary["packages"], 25)
+        self.assertEqual(summary["waves"], 14)
+        self.assertEqual(summary["allowed_collisions"], 19)
 
     def _validate_fixture(self, packages: str, allowances: str = "schema = 1\n") -> None:
         with tempfile.TemporaryDirectory() as temporary:

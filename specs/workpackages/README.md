@@ -56,6 +56,8 @@ WP00
                                             └───────────────────────────┼─ WPR4
                                                                          │
                                                 WP16 + WPR4 ─ WPP0 ─ WP17
+                                                                         │
+                                                  pyowl-core WP17 ────────┴─ WP18
 ```
 
 For exact edges, use the manifest; the diagram compresses multi-parent dependencies.
@@ -77,6 +79,7 @@ For exact edges, use the manifest; the diagram compresses multi-parent dependenc
 | 10 | WP16 facade/lifecycle/updates; WPR4 Rust full-session/services integration |
 | 11 | WPP0 wheel/sdist release matrix |
 | 12 | WP17 final conformance, performance, documentation, and release audit |
+| 13 | WP18 encoded structural compiler after the pyowl-core schema candidate freezes |
 
 An agent can pick any ready package in a wave. Multiple packages in one wave should not
 share owned production paths.
@@ -109,6 +112,7 @@ share owned production paths.
 | WPR4 | [`WPR4-rust-services.md`](WPR4-rust-services.md) | Complete native session, classification, realization, adapter |
 | WPP0 | [`WPP0-packaging.md`](WPP0-packaging.md) | Same-version native/pure wheels and compiler-free sdist matrix |
 | WP17 | [`WP17-release-integration.md`](WP17-release-integration.md) | Exact full-system gates, benchmark targets, docs, release audit |
+| WP18 | [`WP18-native-structural-compiler.md`](WP18-native-structural-compiler.md) | Direct encoded-view validation/normalization/clausification and Rust session handoff |
 
 ## Shared-path ownership
 
@@ -117,3 +121,5 @@ dispatcher, work-package manifest, and release workflows are shared. WP00 create
 initial forms, WP16 owns the final public facade/dispatcher, WPP0 owns final build and
 release changes, and WP17 may make only reviewed integration corrections. Other agents
 must coordinate changes rather than opportunistically editing them.
+WP18 is a successor package and may make only the coordinated encoded-capability, compiler-schema,
+and dependency/release amendments named in its brief; it does not reopen completed semantics.
