@@ -39,7 +39,7 @@ class _EncodedStructuralView:
             "roots": memoryview(b"roots"),
         }
         self.segments: tuple[object, ...] = ()
-        self.structural_fingerprint = owner.structural_fingerprint
+        self.structural_fingerprint = owl.Fingerprint("sha256", 1, b"e" * 32)
 
 
 class _View:
@@ -153,6 +153,8 @@ def test_valid_handoff_retains_owner_and_read_only_buffers(
     assert lease is not None
     assert cast(object, lease.owner) is view
     assert lease.encoded_view is view.encoded
+    assert lease.structural_fingerprint is view.encoded.structural_fingerprint
+    assert lease.structural_fingerprint != view.structural_fingerprint
     assert tuple(lease.buffers) == ("components", "roots")
     assert lease.buffer_count == 2
     assert lease.buffer_bytes == 15
@@ -188,6 +190,7 @@ def test_descriptor_digest_is_derived_when_core_uses_the_minimal_public_surface(
         ("model_schema", 2),
         ("descriptor", b""),
         ("descriptor_digest", b"x" * 32),
+        ("structural_fingerprint", object()),
         ("buffers", {}),
         ("buffers", {"writable": memoryview(bytearray(b"bad"))}),
         ("segments", []),

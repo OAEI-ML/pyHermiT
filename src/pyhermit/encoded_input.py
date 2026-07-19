@@ -180,8 +180,8 @@ def _validate_encoded_view(
         raise _protocol_error("encoded descriptor digest does not match its bytes")
 
     fingerprint = _required_attribute(encoded, "structural_fingerprint")
-    if type(fingerprint) is not owl.Fingerprint or fingerprint != owner.structural_fingerprint:
-        raise _protocol_error("encoded structural fingerprint diverges from its owner")
+    if type(fingerprint) is not owl.Fingerprint:
+        raise _protocol_error("encoded structural fingerprint must be an exact Fingerprint")
     encoded_scope = _required_attribute(encoded, "scope")
     if encoded_scope is not scope:
         raise _protocol_error("encoded view scope diverges from the request")
