@@ -8,6 +8,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod model;
+
 use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
