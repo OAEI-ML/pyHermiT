@@ -1,4 +1,4 @@
-"""Exact scalar/encoded differential for the named-class compiler phase."""
+"""Exact scalar/encoded differential for named classes and the first ABox phase."""
 
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
@@ -16,6 +16,8 @@ from pyhermit import ReasonerConfig
 from pyhermit.clauses.compiler import compile_captured_bundle
 from pyhermit.clauses.model import (
     DLClause,
+    GroundAtom,
+    IndividualTerm,
     PredicateKind,
     SymbolKind,
     SymbolValue,
@@ -75,6 +77,21 @@ def _atom_payload(predicate_id: int) -> dict[str, object]:
     }
 
 
+def _ground_atom_payload(
+    value: GroundAtom,
+    predicate_remap: dict[int, int],
+) -> dict[str, object]:
+    arguments = []
+    for argument in value.arguments:
+        assert isinstance(argument, IndividualTerm)
+        arguments.append({"individual_id": argument.individual_id})
+    return {
+        "predicate_id": predicate_remap[value.predicate_id],
+        "arguments": arguments,
+        "provenance_ids": list(value.provenance_ids),
+    }
+
+
 def _scalar_atom_key(predicate_id: int) -> dict[str, object]:
     return {
         "type": "Atom",
@@ -109,13 +126,23 @@ def _expected_manifest(
         ReasonerConfig(),
     )
     class_domain = program.symbols.domain(SymbolKind.CLASS_EXPRESSION)
+    individual_domain = program.symbols.domain(SymbolKind.INDIVIDUAL)
     entity_domain = program.symbols.domain(SymbolKind.ENTITY)
     entity_id_by_key = {value.key_hex: value.identifier for value in entity_domain.values}
     declared_class_ids = {
         value.entity_id for value in ontology.declared_entities if value.kind == "class"
     }
+    declared_individual_ids = {
+        value.entity_id
+        for value in ontology.declared_entities
+        if value.kind == "named_individual"
+    }
 
-    fragment_kinds = {PredicateKind.CONCEPT, PredicateKind.DISJOINT_GUARD}
+    fragment_kinds = {
+        PredicateKind.CONCEPT,
+        PredicateKind.DISJOINT_GUARD,
+        PredicateKind.NAMED_INDIVIDUAL,
+    }
     fragment_predicates = [
         value
         for value in program.predicates.predicates
@@ -171,6 +198,11 @@ def _expected_manifest(
         }
         for identifier, (_key, clause, body, head) in enumerate(projected)
     ]
+    positive_facts = [
+        _ground_atom_payload(value, predicate_remap)
+        for value in program.positive_facts
+        if value.predicate_id in predicate_remap
+    ]
 
     return {
         "schema_version": 1,
@@ -188,8 +220,19 @@ def _expected_manifest(
             }
             for value in class_domain.values
         ],
+        "individual_symbols": [_symbol_payload(value) for value in individual_domain.values],
+        "individual_signature": [
+            {
+                "individual_id": value.identifier,
+                "entity_id": entity_id_by_key[value.key_hex],
+                "declared": entity_id_by_key[value.key_hex] in declared_individual_ids,
+            }
+            for value in individual_domain.values
+        ],
+        "named_individuals": list(ontology.named_individuals),
         "predicates": predicates,
         "clauses": clauses,
+        "positive_facts": positive_facts,
         "provenance": [
             {
                 "provenance_id": value.provenance_id,
@@ -240,6 +283,8 @@ def test_named_disjoint_classes_match_linear_guards_and_normalization_shortcuts(
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(Class(:C))",
+            "Declaration(NamedIndividual(:i))",
+            "ClassAssertion(:A :i)",
             "DisjointClasses(:A :B)",
             # owl:Nothing is removed, so this merges provenance into the same
             # normalized disjoint record as the preceding source axiom.
@@ -252,7 +297,59 @@ def test_named_disjoint_classes_match_linear_guards_and_normalization_shortcuts(
         options=OPTIONS,
     )
 
-    assert _native_manifest(snapshot) == _expected_manifest(snapshot, compiled_roots=4)
+    assert _native_manifest(snapshot) == _expected_manifest(snapshot, compiled_roots=5)
+
+
+def test_named_class_assertions_and_individual_signature_match_scalar() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(NamedIndividual(:declared))",
+            "ClassAssertion(:A :declared)",
+            # This source provenance merges with the builtin owl:Thing fact.
+            "ClassAssertion(owl:Thing :declared)",
+            # Undeclared named individuals remain in the exact individual
+            # domain/signature and receive the same builtin facts as scalar.
+            "ClassAssertion(owl:Nothing :implicit)",
+        ),
+        options=OPTIONS,
+    )
+
+    assert _native_manifest(snapshot) == _expected_manifest(snapshot, compiled_roots=3)
+
+
+def test_double_digit_individual_and_fact_ids_preserve_scalar_order() -> None:
+    declarations = [f"Declaration(NamedIndividual(:i{index}))" for index in range(12)]
+    assertions = [f"ClassAssertion(owl:Thing :i{index})" for index in range(12)]
+    snapshot = pyowl_core.load_snapshot(
+        functional(*declarations, *assertions),
+        options=OPTIONS,
+    )
+
+    assert _native_manifest(snapshot) == _expected_manifest(
+        snapshot,
+        compiled_roots=len(assertions),
+    )
+
+
+def test_complex_or_annotated_class_assertion_is_deferred_to_scalar() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(NamedIndividual(:i))",
+            "ClassAssertion(ObjectSomeValuesFrom(:p :A) :i)",
+            'ClassAssertion(Annotation(:note "source") :A :i)',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 2
+    assert manifest["named_individuals"] == [0]
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
 def test_complex_named_class_root_is_deferred_without_breaking_scalar_fallback() -> None:
@@ -295,4 +392,30 @@ def test_hostile_class_kind_rolls_back_and_valid_retry_is_byte_exact() -> None:
 
     # No partially compiled domain, predicate, clause, or provenance table is
     # retained across the failed transaction.
+    assert native._encoded_named_class_manifest_v1(**buffers) == baseline
+
+
+def test_hostile_individual_kind_rolls_back_and_valid_retry_is_byte_exact() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(NamedIndividual(:i))",
+            "ClassAssertion(:A :i)",
+        ),
+        options=OPTIONS,
+    )
+    encoded = produce_encoded_structural_view_v1(snapshot)
+    buffers = dict(encoded.buffers)
+    baseline = native._encoded_named_class_manifest_v1(**buffers)
+    scalar_bytes = bytes(buffers["scalar_bytes"])
+    assert b"named_individual" in scalar_bytes
+    hostile = dict(buffers)
+    hostile["scalar_bytes"] = memoryview(
+        scalar_bytes.replace(b"named_individual", b"xxxxxxxxxxxxxxxx", 1)
+    )
+
+    with pytest.raises(BackendMismatchError) as caught:
+        native._validate_encoded_columns_v1(**hostile)
+    assert caught.value.code == "NATIVE_ENCODED_VIEW_INVALID"
+
     assert native._encoded_named_class_manifest_v1(**buffers) == baseline

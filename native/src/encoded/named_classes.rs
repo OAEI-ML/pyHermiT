@@ -1,11 +1,12 @@
-//! Transactional named-class signature and axiom compilation.
+//! Transactional named-class, named-individual, and axiom compilation.
 //!
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
-//! compiles named-only `SubClassOf`, `EquivalentClasses`, and `DisjointClasses`
-//! axioms into the existing native predicate, clause, and provenance records.
-//! Predicate and clause identifiers are dense within this fragment and must be
-//! remapped when a later phase assembles the complete program; no fragment is
-//! publishable on its own.
+//! a scalar-compatible named `individual` domain. It compiles named-only
+//! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, and `ClassAssertion`
+//! axioms into the existing native predicate, clause, fact, and provenance
+//! records. Predicate and clause identifiers are dense within this fragment
+//! and must be remapped when a later phase assembles the complete program; no
+//! fragment is publishable on its own.
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #![forbid(unsafe_code)]
@@ -19,8 +20,8 @@ use super::model::{ComponentValue, NodeId, NodeRef, ValidatedModel};
 use super::symbols::{RootHandler, SymbolPhase};
 use super::{ByteSource, EncodedResult, EncodedValidationError};
 use crate::input_wire::{
-    DecodedAtom, DecodedClause, DecodedPredicate, DecodedProvenanceEntry, DecodedSymbolDomain,
-    DecodedSymbolValue, DecodedTerm, PredicateKind, SymbolKind, TermSort,
+    DecodedAtom, DecodedClause, DecodedGroundAtom, DecodedPredicate, DecodedProvenanceEntry,
+    DecodedSymbolDomain, DecodedSymbolValue, DecodedTerm, PredicateKind, SymbolKind, TermSort,
 };
 
 const NAMED_CLASS_PHASE_SCHEMA_VERSION: u16 = 1;
@@ -28,6 +29,7 @@ const ENTITY_TAG: u16 = 2;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
 const DISJOINT_CLASSES_TAG: u16 = 63;
+const CLASS_ASSERTION_TAG: u16 = 112;
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
 const DISJOINT_GUARD_DOMAIN: &[u8] = b"pyhermit:linear-disjoint-classes:v1\0";
 const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
@@ -36,8 +38,11 @@ const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NamedClassPhaseLimits {
     pub max_class_symbols: usize,
+    pub max_individual_symbols: usize,
     pub max_compiled_roots: usize,
+    pub max_predicates: usize,
     pub max_clauses: usize,
+    pub max_facts: usize,
     pub max_provenance: usize,
     pub max_owned_bytes: usize,
     pub max_work: u64,
@@ -48,8 +53,11 @@ impl Default for NamedClassPhaseLimits {
     fn default() -> Self {
         Self {
             max_class_symbols: 16_000_000,
+            max_individual_symbols: 16_000_000,
             max_compiled_roots: 100_000_000,
+            max_predicates: 100_000_000,
             max_clauses: 100_000_000,
+            max_facts: 100_000_000,
             max_provenance: 100_000_000,
             max_owned_bytes: 512 * 1024 * 1024,
             max_work: 2_000_000_000,
@@ -66,13 +74,25 @@ pub struct ClassSignatureBinding {
     pub declared: bool,
 }
 
+/// Stable declaration/signature bridge between entity and individual domains.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IndividualSignatureBinding {
+    pub individual_id: u32,
+    pub entity_id: u32,
+    pub declared: bool,
+}
+
 /// Owned output of the named-class compiler transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamedClassPhase {
     pub class_domain: DecodedSymbolDomain,
     pub class_signature: Vec<ClassSignatureBinding>,
+    pub individual_domain: DecodedSymbolDomain,
+    pub individual_signature: Vec<IndividualSignatureBinding>,
+    pub named_individuals: Vec<u32>,
     pub predicates: Vec<DecodedPredicate>,
     pub clauses: Vec<DecodedClause>,
+    pub positive_facts: Vec<DecodedGroundAtom>,
     pub provenance: Vec<DecodedProvenanceEntry>,
     pub compiled_roots: usize,
     pub deferred_roots: usize,
@@ -95,6 +115,21 @@ impl NamedClassPhase {
             .iter()
             .map(|binding| ClassSignatureManifest {
                 class_expression_id: binding.class_expression_id,
+                entity_id: binding.entity_id,
+                declared: binding.declared,
+            })
+            .collect();
+        let individual_symbols = self
+            .individual_domain
+            .values
+            .iter()
+            .map(symbol_manifest)
+            .collect();
+        let individual_signature = self
+            .individual_signature
+            .iter()
+            .map(|binding| IndividualSignatureManifest {
+                individual_id: binding.individual_id,
                 entity_id: binding.entity_id,
                 declared: binding.declared,
             })
@@ -130,6 +165,11 @@ impl NamedClassPhase {
                 join_order: &clause.join_order,
             })
             .collect();
+        let positive_facts = self
+            .positive_facts
+            .iter()
+            .map(ground_atom_manifest)
+            .collect();
         let provenance = self
             .provenance
             .iter()
@@ -150,8 +190,12 @@ impl NamedClassPhase {
             deferred_roots: self.deferred_roots,
             class_expression_symbols,
             class_signature,
+            individual_symbols,
+            individual_signature,
+            named_individuals: &self.named_individuals,
             predicates,
             clauses,
+            positive_facts,
             provenance,
         })
         .map_err(|_| {
@@ -174,8 +218,12 @@ struct NamedClassManifest<'a> {
     deferred_roots: usize,
     class_expression_symbols: Vec<SymbolManifest<'a>>,
     class_signature: Vec<ClassSignatureManifest>,
+    individual_symbols: Vec<SymbolManifest<'a>>,
+    individual_signature: Vec<IndividualSignatureManifest>,
+    named_individuals: &'a [u32],
     predicates: Vec<PredicateManifest<'a>>,
     clauses: Vec<ClauseManifest<'a>>,
+    positive_facts: Vec<GroundAtomManifest<'a>>,
     provenance: Vec<ProvenanceManifest>,
 }
 
@@ -206,6 +254,13 @@ struct ClassSignatureManifest {
 }
 
 #[derive(Serialize)]
+struct IndividualSignatureManifest {
+    individual_id: u32,
+    entity_id: u32,
+    declared: bool,
+}
+
+#[derive(Serialize)]
 struct PredicateManifest<'a> {
     predicate_id: u32,
     kind: &'static str,
@@ -228,31 +283,65 @@ struct ClauseManifest<'a> {
 }
 
 #[derive(Serialize)]
+struct GroundAtomManifest<'a> {
+    predicate_id: u32,
+    arguments: Vec<TermManifest>,
+    provenance_ids: &'a [u32],
+}
+
+#[derive(Serialize)]
 struct AtomManifest {
     predicate_id: u32,
     arguments: Vec<TermManifest>,
 }
 
 #[derive(Serialize)]
-struct TermManifest {
-    index: u32,
-    sort: &'static str,
+#[serde(untagged)]
+enum TermManifest {
+    Variable {
+        index: u32,
+        sort: &'static str,
+    },
+    Individual {
+        individual_id: u32,
+    },
+    Data {
+        source_literal_id: u32,
+        data_identity_id: u32,
+    },
 }
 
 fn atom_manifest(atom: &DecodedAtom) -> AtomManifest {
     AtomManifest {
         predicate_id: atom.predicate_id,
-        arguments: atom.arguments.iter().filter_map(term_manifest).collect(),
+        arguments: atom.arguments.iter().map(term_manifest).collect(),
     }
 }
 
-const fn term_manifest(term: &DecodedTerm) -> Option<TermManifest> {
+fn ground_atom_manifest(atom: &DecodedGroundAtom) -> GroundAtomManifest<'_> {
+    GroundAtomManifest {
+        predicate_id: atom.predicate_id,
+        arguments: atom.arguments.iter().map(term_manifest).collect(),
+        provenance_ids: &atom.provenance_ids,
+    }
+}
+
+const fn term_manifest(term: &DecodedTerm) -> TermManifest {
     match term {
-        DecodedTerm::Variable { index, sort } => Some(TermManifest {
+        DecodedTerm::Variable { index, sort } => TermManifest::Variable {
             index: *index,
             sort: term_sort_name(*sort),
-        }),
-        DecodedTerm::Individual { .. } | DecodedTerm::Data { .. } => None,
+        },
+        DecodedTerm::Individual { individual_id } => TermManifest::Individual {
+            individual_id: *individual_id,
+        },
+        DecodedTerm::Data {
+            source_literal_id,
+            data_identity_id,
+        } => TermManifest::Data {
+            source_literal_id: *source_literal_id,
+            data_identity_id: *data_identity_id,
+        },
     }
 }
 
@@ -288,6 +377,20 @@ struct NormalizedDisjoint {
     classes: Vec<u32>,
     provenance: Vec<[u8; 32]>,
     guard_digest: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RawFact {
+    class_id: u32,
+    individual_id: u32,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedFact {
+    class_id: u32,
+    individual_id: u32,
+    provenance: Vec<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -357,7 +460,7 @@ impl PhaseBudget {
     }
 }
 
-/// Compile the bounded named-class fragment without publishing a session.
+/// Compile the bounded named class and named `ABox` fragment without publishing a session.
 pub fn compile_named_class_phase<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
@@ -367,11 +470,36 @@ pub fn compile_named_class_phase<B: ByteSource>(
     let declared_class_ids = declared_class_ids(symbols, &mut budget)?;
     let (class_domain, class_signature) =
         class_signature(symbols, &declared_class_ids, &mut budget)?;
+    let declared_individual_ids = declared_individual_ids(symbols, &mut budget)?;
+    let (individual_domain, individual_signature) =
+        individual_signature(symbols, &declared_individual_ids, &mut budget)?;
+    let mut named_individuals = Vec::new();
+    budget.claim_owned(
+        individual_domain
+            .values
+            .len()
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("named-individual ID output overflowed")
+            })?,
+    )?;
+    named_individuals
+        .try_reserve_exact(individual_domain.values.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("named-individual ID output allocation failed")
+        })?;
+    named_individuals.extend(
+        individual_domain
+            .values
+            .iter()
+            .map(|value| value.identifier),
+    );
     let thing = class_id_by_display(&class_domain, THING_DISPLAY)?;
     let nothing = class_id_by_display(&class_domain, NOTHING_DISPLAY)?;
 
     let mut raw_edges = Vec::<RawEdge>::new();
     let mut raw_disjoints = Vec::<RawDisjoint>::new();
+    let mut raw_facts = Vec::<RawFact>::new();
     let mut compiled_roots = 0_usize;
     let mut deferred_roots = 0_usize;
     for root in &symbols.roots {
@@ -476,6 +604,40 @@ pub fn compile_named_class_phase<B: ByteSource>(
                     }
                 }
             }
+            RootHandler::ClassAssertion => {
+                match named_class_assertion(
+                    model,
+                    symbols,
+                    &class_signature,
+                    &class_domain,
+                    &individual_signature,
+                    &individual_domain,
+                    root.node,
+                    &mut budget,
+                )? {
+                    Some(fact) => {
+                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class compiled-root count overflowed",
+                            )
+                        })?;
+                        budget.claim_owned(size_of::<RawFact>())?;
+                        raw_facts.try_reserve(1).map_err(|_| {
+                            EncodedValidationError::resource(
+                                "named class-assertion allocation failed",
+                            )
+                        })?;
+                        raw_facts.push(fact);
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
             _ => {
                 deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
                     EncodedValidationError::resource("named-class deferred-root count overflowed")
@@ -491,9 +653,17 @@ pub fn compile_named_class_phase<B: ByteSource>(
 
     let edges = normalize_edges(raw_edges, &mut budget)?;
     let disjoints = normalize_disjoints(raw_disjoints, &class_domain, &mut budget)?;
-    let (provenance, provenance_keys) = freeze_provenance(&edges, &disjoints, &mut budget)?;
-    let (predicates, predicate_by_class, guard_predicates) =
-        freeze_predicates(&edges, &disjoints, nothing, &mut budget)?;
+    let facts = normalize_facts(raw_facts, &mut budget)?;
+    let (provenance, provenance_keys) = freeze_provenance(&edges, &disjoints, &facts, &mut budget)?;
+    let (predicates, predicate_by_class, guard_predicates, named_predicate) = freeze_predicates(
+        &edges,
+        &disjoints,
+        &facts,
+        thing,
+        nothing,
+        !individual_domain.values.is_empty(),
+        &mut budget,
+    )?;
     let clauses = freeze_clauses(
         &edges,
         &disjoints,
@@ -503,11 +673,24 @@ pub fn compile_named_class_phase<B: ByteSource>(
         &provenance_keys,
         &mut budget,
     )?;
+    let positive_facts = freeze_positive_facts(
+        &facts,
+        &individual_domain,
+        thing,
+        &predicate_by_class,
+        named_predicate,
+        &provenance_keys,
+        &mut budget,
+    )?;
     Ok(NamedClassPhase {
         class_domain,
         class_signature,
+        individual_domain,
+        individual_signature,
+        named_individuals,
         predicates,
         clauses,
+        positive_facts,
         provenance,
         compiled_roots,
         deferred_roots,
@@ -580,6 +763,85 @@ fn class_signature(
     Ok((
         DecodedSymbolDomain {
             kind: SymbolKind::ClassExpression,
+            values,
+        },
+        bindings,
+    ))
+}
+
+fn declared_individual_ids(
+    symbols: &SymbolPhase,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u32>> {
+    let mut identifiers = Vec::new();
+    for entity in &symbols.declared_entities {
+        budget.claim_work(1)?;
+        if entity.kind != "named_individual" {
+            continue;
+        }
+        budget.claim_owned(size_of::<u32>())?;
+        identifiers.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("declared-individual signature allocation failed")
+        })?;
+        identifiers.push(entity.entity_id);
+    }
+    budget.claim_work(sort_work(identifiers.len()))?;
+    identifiers.sort_unstable();
+    identifiers.dedup();
+    Ok(identifiers)
+}
+
+fn individual_signature(
+    symbols: &SymbolPhase,
+    declared_individual_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(DecodedSymbolDomain, Vec<IndividualSignatureBinding>)> {
+    let mut values = Vec::new();
+    let mut bindings = Vec::new();
+    for entity in &symbols.entity_domain.values {
+        budget.claim_work(1)?;
+        if !entity.display.starts_with("named_individual:") {
+            continue;
+        }
+        let following = values.len().checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("named-individual symbol count overflowed")
+        })?;
+        PhaseBudget::count(
+            following,
+            budget.limits.max_individual_symbols,
+            "individual symbol count",
+        )?;
+        budget.claim_owned(size_of::<DecodedSymbolValue>())?;
+        budget.claim_owned(size_of::<IndividualSignatureBinding>())?;
+        budget.claim_owned(entity.key.len())?;
+        budget.claim_owned(entity.display.len())?;
+        values.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("named-individual symbol allocation failed")
+        })?;
+        bindings.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("named-individual signature allocation failed")
+        })?;
+        let individual_id = u32::try_from(values.len()).map_err(|_| {
+            EncodedValidationError::resource("named-individual symbol ID exceeds u32")
+        })?;
+        values.push(DecodedSymbolValue {
+            identifier: individual_id,
+            key: entity.key.clone(),
+            display: entity.display.clone(),
+            generated: entity.generated,
+            query_local: entity.query_local,
+        });
+        bindings.push(IndividualSignatureBinding {
+            individual_id,
+            entity_id: entity.identifier,
+            declared: declared_individual_ids
+                .binary_search(&entity.identifier)
+                .is_ok(),
+        });
+    }
+    Ok((
+        DecodedSymbolDomain {
+            kind: SymbolKind::Individual,
             values,
         },
         bindings,
@@ -825,6 +1087,48 @@ fn named_disjoint_classes<B: ByteSource>(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn named_class_assertion<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    class_signature: &[ClassSignatureBinding],
+    class_domain: &DecodedSymbolDomain,
+    individual_signature: &[IndividualSignatureBinding],
+    individual_domain: &DecodedSymbolDomain,
+    root: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<RawFact>> {
+    let node = model.node(root)?;
+    if node.tag() != CLASS_ASSERTION_TAG || node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "class-assertion root no longer has schema-1 shape",
+        ));
+    }
+    if !annotations_are_empty(model, node, 2)? {
+        return Ok(None);
+    }
+    let Some(class_id) = named_class_field(model, symbols, class_signature, node, 0)? else {
+        return Ok(None);
+    };
+    let Some(individual_id) =
+        named_individual_field(model, symbols, individual_signature, node, 1)?
+    else {
+        return Ok(None);
+    };
+    let provenance = class_assertion_digest(
+        class_domain,
+        class_id,
+        individual_domain,
+        individual_id,
+        budget,
+    )?;
+    Ok(Some(RawFact {
+        class_id,
+        individual_id,
+        provenance,
+    }))
+}
+
 fn annotations_are_empty<B: ByteSource>(
     model: &ValidatedModel<B>,
     node: NodeRef,
@@ -883,6 +1187,47 @@ fn named_class_id<B: ByteSource>(
         .binary_search_by_key(&entity_id, |binding| binding.entity_id)
         .ok()
         .map(|index| signature[index].class_expression_id))
+}
+
+fn named_individual_field<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    signature: &[IndividualSignatureBinding],
+    node: NodeRef,
+    relative_field: usize,
+) -> EncodedResult<Option<u32>> {
+    let field_index = node
+        .fields()
+        .start
+        .checked_add(relative_field)
+        .ok_or_else(|| EncodedValidationError::invariant("individual field index overflowed"))?;
+    let component = required_component(model.field(field_index)?, "named-individual field")?;
+    let ComponentValue::Node(identifier) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(
+            "individual field did not resolve to a node",
+        ));
+    };
+    named_individual_id(model, symbols, signature, identifier)
+}
+
+fn named_individual_id<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    signature: &[IndividualSignatureBinding],
+    identifier: NodeId,
+) -> EncodedResult<Option<u32>> {
+    if model.node(identifier)?.tag() != ENTITY_TAG {
+        return Ok(None);
+    }
+    let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
+        EncodedValidationError::invariant(
+            "named individual is absent from the reachable entity-node mapping",
+        )
+    })?;
+    Ok(signature
+        .binary_search_by_key(&entity_id, |binding| binding.entity_id)
+        .ok()
+        .map(|index| signature[index].individual_id))
 }
 
 fn retain_edge(
@@ -992,9 +1337,51 @@ fn normalize_disjoints(
     Ok(normalized)
 }
 
+fn normalize_facts(
+    mut raw: Vec<RawFact>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedFact>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_by_key(|fact| (fact.class_id, fact.individual_id, fact.provenance));
+    let mut normalized = Vec::<NormalizedFact>::new();
+    for fact in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.class_id == fact.class_id && previous.individual_id == fact.individual_id {
+                if previous.provenance.last() != Some(&fact.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "named class-assertion provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(fact.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedFact>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("normalized class-assertion allocation failed")
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("named class-assertion provenance allocation failed")
+        })?;
+        provenance.push(fact.provenance);
+        normalized.push(NormalizedFact {
+            class_id: fact.class_id,
+            individual_id: fact.individual_id,
+            provenance,
+        });
+    }
+    Ok(normalized)
+}
+
 fn freeze_provenance(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
+    facts: &[NormalizedFact],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(Vec<DecodedProvenanceEntry>, Vec<ProvenanceKey>)> {
     let builtin: [u8; 32] = Sha256::digest(BUILTIN_PROVENANCE_INPUT).into();
@@ -1022,6 +1409,16 @@ fn freeze_provenance(
             &mut keys,
             ProvenanceKey {
                 source_sha256: disjoint.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    for fact in facts {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: fact.provenance.clone(),
                 generated: false,
             },
             budget,
@@ -1089,6 +1486,7 @@ fn push_provenance_key(
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PredicateOwner {
     Concept(u32),
+    NamedIndividual,
     DisjointGuard {
         digest: [u8; 32],
         sequence: u32,
@@ -1104,16 +1502,27 @@ struct PendingPredicate {
 
 type PredicateIndex = Vec<(u32, u32)>;
 type GuardPredicateIndex = Vec<([u8; 32], u32, u32)>;
-type FrozenPredicates = (Vec<DecodedPredicate>, PredicateIndex, GuardPredicateIndex);
+type FrozenPredicates = (
+    Vec<DecodedPredicate>,
+    PredicateIndex,
+    GuardPredicateIndex,
+    Option<u32>,
+);
 
 fn freeze_predicates(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
+    facts: &[NormalizedFact],
+    thing: u32,
     nothing: u32,
+    has_individuals: bool,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<FrozenPredicates> {
     let mut class_ids = Vec::new();
     push_u32(&mut class_ids, nothing, "predicate class", budget)?;
+    if has_individuals {
+        push_u32(&mut class_ids, thing, "predicate class", budget)?;
+    }
     for edge in edges {
         push_u32(&mut class_ids, edge.sub_class, "predicate class", budget)?;
         push_u32(&mut class_ids, edge.super_class, "predicate class", budget)?;
@@ -1123,11 +1532,26 @@ fn freeze_predicates(
             push_u32(&mut class_ids, *class_id, "predicate class", budget)?;
         }
     }
+    for fact in facts {
+        push_u32(&mut class_ids, fact.class_id, "predicate class", budget)?;
+    }
     budget.claim_work(sort_work(class_ids.len()))?;
     class_ids.sort_unstable();
     class_ids.dedup();
 
     let mut ordered = Vec::<PendingPredicate>::new();
+    if has_individuals {
+        let key = named_individual_predicate_key();
+        budget.claim_owned(size_of::<PendingPredicate>())?;
+        budget.claim_owned(key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("named-individual predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::NamedIndividual,
+        });
+    }
     for class_id in class_ids {
         let key = concept_predicate_key(class_id);
         budget.claim_owned(size_of::<PendingPredicate>())?;
@@ -1168,10 +1592,16 @@ fn freeze_predicates(
     }
     budget.claim_work(sort_work(ordered.len()))?;
     ordered.sort_by(|left, right| left.key.cmp(&right.key));
+    PhaseBudget::count(
+        ordered.len(),
+        budget.limits.max_predicates,
+        "predicate count",
+    )?;
 
     let mut predicates = Vec::new();
     let mut predicate_by_class = Vec::new();
     let mut guard_predicates = Vec::new();
+    let mut named_predicate = None;
     budget.claim_owned(
         ordered
             .len()
@@ -1217,6 +1647,21 @@ fn freeze_predicates(
                 });
                 predicate_by_class.push((class_id, predicate_id));
             }
+            PredicateOwner::NamedIndividual => {
+                budget.claim_owned("named-individual".len())?;
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::NamedIndividual,
+                    argument_sorts: vec![TermSort::Object],
+                    symbol_id: None,
+                    role_id: None,
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: Vec::new(),
+                    internal_key: Some("named-individual".to_owned()),
+                });
+                named_predicate = Some(predicate_id);
+            }
             PredicateOwner::DisjointGuard {
                 digest,
                 sequence,
@@ -1240,7 +1685,12 @@ fn freeze_predicates(
     }
     predicate_by_class.sort_unstable_by_key(|(class_id, _)| *class_id);
     guard_predicates.sort_unstable_by_key(|(digest, sequence, _)| (*digest, *sequence));
-    Ok((predicates, predicate_by_class, guard_predicates))
+    Ok((
+        predicates,
+        predicate_by_class,
+        guard_predicates,
+        named_predicate,
+    ))
 }
 
 fn freeze_clauses(
@@ -1330,6 +1780,164 @@ fn freeze_clauses(
         clauses.push(clause);
     }
     Ok(clauses)
+}
+
+fn freeze_positive_facts(
+    facts: &[NormalizedFact],
+    individual_domain: &DecodedSymbolDomain,
+    thing: u32,
+    predicate_by_class: &[(u32, u32)],
+    named_predicate: Option<u32>,
+    provenance_keys: &[ProvenanceKey],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedGroundAtom>> {
+    let builtin: [u8; 32] = Sha256::digest(BUILTIN_PROVENANCE_INPUT).into();
+    let builtin_provenance = provenance_id(provenance_keys, &[builtin], true)?;
+    let thing_predicate = if individual_domain.values.is_empty() {
+        None
+    } else {
+        Some(predicate_id(predicate_by_class, thing)?)
+    };
+    let named_predicate = match (individual_domain.values.is_empty(), named_predicate) {
+        (true, None) => None,
+        (false, Some(identifier)) => Some(identifier),
+        _ => {
+            return Err(EncodedValidationError::invariant(
+                "named-individual predicate presence disagrees with its domain",
+            ));
+        }
+    };
+    let expected = individual_domain
+        .values
+        .len()
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(facts.len()))
+        .ok_or_else(|| EncodedValidationError::resource("positive-fact count overflowed"))?;
+    budget.claim_work(facts.len())?;
+    let merged_count = expected
+        .checked_sub(facts.iter().filter(|fact| fact.class_id == thing).count())
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("positive-fact merge count underflowed")
+        })?;
+    PhaseBudget::count(merged_count, budget.limits.max_facts, "positive fact count")?;
+    let mut pending = Vec::<(u32, u32, u32)>::new();
+    budget.claim_owned(
+        expected
+            .checked_mul(size_of::<(u32, u32, u32)>())
+            .ok_or_else(|| EncodedValidationError::resource("positive-fact input overflowed"))?,
+    )?;
+    pending
+        .try_reserve_exact(expected)
+        .map_err(|_| EncodedValidationError::resource("positive-fact input allocation failed"))?;
+    for individual in &individual_domain.values {
+        budget.claim_work(1)?;
+        let named = named_predicate.ok_or_else(|| {
+            EncodedValidationError::invariant("named-individual predicate index is incomplete")
+        })?;
+        let top = thing_predicate.ok_or_else(|| {
+            EncodedValidationError::invariant("top concept predicate index is incomplete")
+        })?;
+        pending.push((named, individual.identifier, builtin_provenance));
+        pending.push((top, individual.identifier, builtin_provenance));
+    }
+    for fact in facts {
+        budget.claim_work(1)?;
+        if usize::try_from(fact.individual_id)
+            .ok()
+            .is_none_or(|identifier| identifier >= individual_domain.values.len())
+        {
+            return Err(EncodedValidationError::invariant(
+                "named class-assertion individual ID is dangling",
+            ));
+        }
+        pending.push((
+            predicate_id(predicate_by_class, fact.class_id)?,
+            fact.individual_id,
+            provenance_id(provenance_keys, &fact.provenance, false)?,
+        ));
+    }
+    budget.claim_work(sort_work(pending.len()))?;
+    pending.sort_unstable();
+
+    let mut merged = Vec::<(u32, u32, Vec<u32>)>::new();
+    for (predicate, individual, provenance) in pending {
+        budget.claim_work(1)?;
+        if let Some(previous) = merged.last_mut() {
+            if previous.0 == predicate && previous.1 == individual {
+                if previous.2.last() != Some(&provenance) {
+                    budget.claim_owned(size_of::<u32>())?;
+                    previous.2.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "positive-fact provenance allocation failed",
+                        )
+                    })?;
+                    previous.2.push(provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<(u32, u32, Vec<u32>)>() + size_of::<u32>())?;
+        merged.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("positive-fact merge allocation failed")
+        })?;
+        let mut provenance_ids = Vec::new();
+        provenance_ids.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("positive-fact provenance allocation failed")
+        })?;
+        provenance_ids.push(provenance);
+        merged.push((predicate, individual, provenance_ids));
+    }
+    PhaseBudget::count(merged.len(), budget.limits.max_facts, "positive fact count")?;
+    if merged.len() != merged_count {
+        return Err(EncodedValidationError::invariant(
+            "positive-fact merge count disagrees with its exact bound",
+        ));
+    }
+
+    let mut ordered = Vec::<(Vec<u8>, DecodedGroundAtom)>::new();
+    budget.claim_owned(
+        merged
+            .len()
+            .checked_mul(size_of::<(Vec<u8>, DecodedGroundAtom)>() + size_of::<DecodedTerm>())
+            .ok_or_else(|| EncodedValidationError::resource("positive-fact output overflowed"))?,
+    )?;
+    ordered
+        .try_reserve_exact(merged.len())
+        .map_err(|_| EncodedValidationError::resource("positive-fact output allocation failed"))?;
+    for (predicate_id, individual_id, provenance_ids) in merged {
+        budget.claim_owned(
+            provenance_ids
+                .len()
+                .checked_mul(size_of::<u32>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("positive-fact provenance output overflowed")
+                })?,
+        )?;
+        let key = ground_fact_key(predicate_id, individual_id, &provenance_ids);
+        budget.claim_owned(key.len())?;
+        ordered.push((
+            key,
+            DecodedGroundAtom {
+                predicate_id,
+                arguments: vec![DecodedTerm::Individual { individual_id }],
+                provenance_ids,
+            },
+        ));
+    }
+    budget.claim_work(sort_work(ordered.len()))?;
+    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut output = Vec::new();
+    budget.claim_owned(
+        ordered
+            .len()
+            .checked_mul(size_of::<DecodedGroundAtom>())
+            .ok_or_else(|| EncodedValidationError::resource("positive-fact result overflowed"))?,
+    )?;
+    output
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| EncodedValidationError::resource("positive-fact result allocation failed"))?;
+    output.extend(ordered.into_iter().map(|(_, fact)| fact));
+    Ok(output)
 }
 
 fn push_clause(
@@ -1481,6 +2089,26 @@ fn subclass_digest(
     Ok(Sha256::digest(encoded).into())
 }
 
+fn class_assertion_digest(
+    class_domain: &DecodedSymbolDomain,
+    class_id: u32,
+    individual_domain: &DecodedSymbolDomain,
+    individual_id: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<[u8; 32]> {
+    let mut encoded = Vec::new();
+    push_varint(&mut encoded, u64::from(CLASS_ASSERTION_TAG), budget)?;
+    push_node(&mut encoded, class_key(class_domain, class_id)?, budget)?;
+    push_node(
+        &mut encoded,
+        individual_key(individual_domain, individual_id)?,
+        budget,
+    )?;
+    push_empty_set(&mut encoded, budget)?;
+    budget.claim_work(encoded.len())?;
+    Ok(Sha256::digest(encoded).into())
+}
+
 fn equivalent_digest(
     domain: &DecodedSymbolDomain,
     classes: &[u32],
@@ -1547,6 +2175,17 @@ fn class_key(domain: &DecodedSymbolDomain, identifier: u32) -> EncodedResult<&[u
         .ok_or_else(|| EncodedValidationError::invariant("class-expression ID is dangling"))
 }
 
+fn individual_key(domain: &DecodedSymbolDomain, identifier: u32) -> EncodedResult<&[u8]> {
+    domain
+        .values
+        .get(
+            usize::try_from(identifier)
+                .map_err(|_| EncodedValidationError::invariant("individual ID exceeds usize"))?,
+        )
+        .map(|value| value.key.as_slice())
+        .ok_or_else(|| EncodedValidationError::invariant("individual ID is dangling"))
+}
+
 fn push_node(
     target: &mut Vec<u8>,
     encoded_node: &[u8],
@@ -1609,6 +2248,11 @@ fn concept_predicate_key(class_id: u32) -> Vec<u8> {
     .into_bytes()
 }
 
+fn named_individual_predicate_key() -> Vec<u8> {
+    b"{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":\"named-individual\",\"kind\":\"named_individual\",\"role_id\":null,\"symbol_id\":null}"
+        .to_vec()
+}
+
 fn disjoint_guard_predicate_key(sequence: u32, internal_key: &str) -> Vec<u8> {
     format!(
         "{{\"annotation\":[{sequence}],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":\"{internal_key}\",\"kind\":\"disjoint_guard\",\"role_id\":null,\"symbol_id\":null}}"
@@ -1636,6 +2280,18 @@ fn atom_json(predicate_id: u32) -> String {
     format!(
         "{{\"arguments\":[{{\"index\":0,\"schema_version\":1,\"sort\":\"object\",\"type\":\"Variable\"}}],\"predicate_id\":{predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}"
     )
+}
+
+fn ground_fact_key(predicate_id: u32, individual_id: u32, provenance_ids: &[u32]) -> Vec<u8> {
+    let provenance = provenance_ids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"arguments\":[{{\"individual_id\":{individual_id},\"schema_version\":1,\"type\":\"IndividualTerm\"}}],\"predicate_id\":{predicate_id},\"provenance_ids\":[{provenance}],\"schema_version\":1,\"type\":\"GroundAtom\"}}"
+    )
+    .into_bytes()
 }
 
 fn required_component<T>(value: Option<T>, name: &'static str) -> EncodedResult<T> {
@@ -1766,6 +2422,32 @@ mod tests {
         owned
     }
 
+    fn class_assertion() -> OwnedColumns {
+        OwnedColumns {
+            root_kinds: vec![super::super::ROOT_AXIOM],
+            root_ids: le32(&[5]),
+            node_tags: le16(&[1, 1, 2, 2, CLASS_ASSERTION_TAG]),
+            node_field_offsets: le64(&[0, 1, 2, 4, 6, 9]),
+            field_kinds: vec![
+                super::super::COMPONENT_TEXT,
+                super::super::COMPONENT_TEXT,
+                super::super::COMPONENT_ENUM,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_ENUM,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_SET,
+            ],
+            field_values: le64(&[0, 5, 10, 1, 15, 2, 3, 4, 0]),
+            field_lengths: le64(&[5, 5, 5, 0, 16, 0, 0, 0, 0]),
+            item_kinds: Vec::new(),
+            item_values: Vec::new(),
+            item_lengths: Vec::new(),
+            scalar_bytes: b"urn:Aurn:iclassnamed_individual".to_vec(),
+        }
+    }
+
     #[test]
     fn equivalent_named_classes_freeze_existing_native_records() -> EncodedResult<()> {
         let owned = equivalent_classes();
@@ -1836,6 +2518,53 @@ mod tests {
         );
         assert_eq!(phase.clauses.len(), 5);
         assert!(phase.clauses.iter().any(|clause| clause.body.len() == 2));
+        Ok(())
+    }
+
+    #[test]
+    fn named_class_assertion_freezes_signature_and_builtin_facts() -> EncodedResult<()> {
+        let owned = class_assertion();
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let symbols = compile_symbol_phase(&model, SymbolPhaseLimits::default())?;
+        let phase = compile_named_class_phase(&model, &symbols, NamedClassPhaseLimits::default())?;
+
+        assert_eq!(phase.compiled_roots, 1);
+        assert_eq!(phase.deferred_roots, 0);
+        assert_eq!(phase.individual_domain.kind, SymbolKind::Individual);
+        assert_eq!(phase.individual_domain.values.len(), 1);
+        assert_eq!(phase.individual_signature.len(), 1);
+        assert!(!phase.individual_signature[0].declared);
+        assert_eq!(phase.named_individuals, [0]);
+        assert_eq!(phase.predicates.len(), 4);
+        assert_eq!(phase.clauses.len(), 1);
+        assert_eq!(phase.positive_facts.len(), 3);
+        assert_eq!(phase.provenance.len(), 2);
+        assert!(phase.predicates.iter().any(|predicate| {
+            predicate.kind == PredicateKind::NamedIndividual
+                && predicate.internal_key.as_deref() == Some("named-individual")
+        }));
+        assert!(phase.positive_facts.iter().all(|fact| {
+            fact.arguments == [DecodedTerm::Individual { individual_id: 0 }]
+                && !fact.provenance_ids.is_empty()
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn fact_limit_rolls_back_without_mutating_symbol_transaction() -> EncodedResult<()> {
+        let owned = class_assertion();
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let symbols = compile_symbol_phase(&model, SymbolPhaseLimits::default())?;
+        let before = symbols.clone();
+        let limits = NamedClassPhaseLimits {
+            max_facts: 0,
+            ..NamedClassPhaseLimits::default()
+        };
+        let error = compile_named_class_phase(&model, &symbols, limits).err();
+        assert!(error.is_some_and(|value| {
+            value.code == "NATIVE_ENCODED_RESOURCE_LIMIT" && value.message.contains("fact")
+        }));
+        assert_eq!(symbols, before);
         Ok(())
     }
 }
