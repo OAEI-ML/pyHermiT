@@ -5,10 +5,10 @@
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
-//! plus named data-property domains, ranges, and functionality axioms into the
-//! existing native predicate, clause, fact, and provenance records. Exact nested
-//! annotations participate in source provenance, with segmented anonymous
-//! scopes remapped before hashing.
+//! plus named data-property domains, ranges, functionality, and named datatype
+//! definitions into the existing native predicate, clause, fact, and provenance
+//! records. Exact nested annotations participate in source provenance, with
+//! segmented anonymous scopes remapped before hashing.
 //! Predicate and clause identifiers are dense within this fragment and must be
 //! remapped when a later phase assembles the complete program; no fragment is
 //! publishable on its own.
@@ -47,6 +47,7 @@ const REFLEXIVE_OBJECT_PROPERTY_TAG: u16 = 78;
 const DATA_PROPERTY_DOMAIN_TAG: u16 = 93;
 const DATA_PROPERTY_RANGE_TAG: u16 = 94;
 const FUNCTIONAL_DATA_PROPERTY_TAG: u16 = 95;
+const DATATYPE_DEFINITION_TAG: u16 = 100;
 const OBJECT_INVERSE_OF_TAG: u16 = 10;
 const SAME_INDIVIDUAL_TAG: u16 = 110;
 const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
@@ -144,6 +145,7 @@ pub struct NamedClassPhase {
     normalized_object_characteristics: Vec<NormalizedObjectCharacteristic>,
     normalized_data_domains: Vec<NormalizedDataDomain>,
     normalized_data_ranges: Vec<NormalizedDataRange>,
+    normalized_datatype_definitions: Vec<NormalizedDatatypeDefinition>,
     normalized_data_functionalities: Vec<NormalizedDataFunctionality>,
     normalized_facts: Vec<NormalizedFact>,
     normalized_object_facts: Vec<NormalizedObjectFact>,
@@ -518,6 +520,20 @@ struct NormalizedDataRange {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RawDatatypeDefinition {
+    left_range: u32,
+    right_range: u32,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NormalizedDatatypeDefinition {
+    left_range: u32,
+    right_range: u32,
+    provenance: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RawDataFunctionality {
     role_id: u32,
     provenance: [u8; 32],
@@ -794,6 +810,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut raw_object_characteristics = Vec::<RawObjectCharacteristic>::new();
     let mut raw_data_domains = Vec::<RawDataDomain>::new();
     let mut raw_data_ranges = Vec::<RawDataRange>::new();
+    let mut raw_datatype_definitions = Vec::<RawDatatypeDefinition>::new();
     let mut raw_data_functionalities = Vec::<RawDataFunctionality>::new();
     let mut raw_facts = Vec::<RawFact>::new();
     let mut raw_object_facts = Vec::<RawObjectFact>::new();
@@ -1065,6 +1082,39 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                             )
                         })?;
                         raw_data_ranges.push(range);
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
+            RootHandler::DatatypeDefinition => {
+                match named_datatype_definition(
+                    model,
+                    symbols,
+                    &data_range_domain,
+                    root.node,
+                    scope_maps,
+                    &mut budget,
+                )? {
+                    Some(definition) => {
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            definition.provenance,
+                            &mut budget,
+                        )?;
+                        budget.claim_owned(size_of::<RawDatatypeDefinition>())?;
+                        raw_datatype_definitions.try_reserve(1).map_err(|_| {
+                            EncodedValidationError::resource(
+                                "named datatype-definition allocation failed",
+                            )
+                        })?;
+                        raw_datatype_definitions.push(definition);
                     }
                     None => {
                         deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
@@ -1356,6 +1406,8 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalize_object_characteristics(raw_object_characteristics, &mut budget)?;
     let data_domains = normalize_data_domains(raw_data_domains, &mut budget)?;
     let data_ranges = normalize_data_ranges(raw_data_ranges, &mut budget)?;
+    let datatype_definitions =
+        normalize_datatype_definitions(raw_datatype_definitions, &mut budget)?;
     let data_functionalities =
         normalize_data_functionalities(raw_data_functionalities, &mut budget)?;
     let facts = normalize_facts(raw_facts, &mut budget)?;
@@ -1370,6 +1422,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &object_characteristics,
         &data_domains,
         &data_ranges,
+        &datatype_definitions,
         &data_functionalities,
         &facts,
         &object_facts,
@@ -1397,6 +1450,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &object_characteristics,
         &data_domains,
         &data_ranges,
+        &datatype_definitions,
         &data_functionalities,
         &facts,
         &object_facts,
@@ -1422,6 +1476,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &object_characteristics,
         &data_domains,
         &data_ranges,
+        &datatype_definitions,
         &data_functionalities,
         thing,
         nothing,
@@ -1486,6 +1541,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_object_characteristics: object_characteristics,
         normalized_data_domains: data_domains,
         normalized_data_ranges: data_ranges,
+        normalized_datatype_definitions: datatype_definitions,
         normalized_data_functionalities: data_functionalities,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
@@ -2055,6 +2111,25 @@ fn named_data_range<B: ByteSource>(
     let property = node_field(model, node, 0, "data-property range role")?;
     let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
     let range = node_field(model, node, 1, "data-property range value")?;
+    let Some(range_id) = named_data_range_id(model, symbols, data_range_domain, range, budget)?
+    else {
+        return Ok(None);
+    };
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    Ok(Some(RawDataRange {
+        role_id,
+        range_id,
+        provenance,
+    }))
+}
+
+fn named_data_range_id<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    data_range_domain: &DecodedSymbolDomain,
+    range: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<u32>> {
     let range_node = model.node(range)?;
     if range_node.tag() != ENTITY_TAG {
         return Ok(None);
@@ -2090,10 +2165,44 @@ fn named_data_range<B: ByteSource>(
     let range_id = u32::try_from(range_id).map_err(|_| {
         EncodedValidationError::resource("data-property range symbol ID exceeds u32")
     })?;
+    Ok(Some(range_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn named_datatype_definition<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    data_range_domain: &DecodedSymbolDomain,
+    root: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<RawDatatypeDefinition>> {
+    let node = model.node(root)?;
+    if node.tag() != DATATYPE_DEFINITION_TAG || node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "datatype-definition root no longer has schema-1 shape",
+        ));
+    }
+    let datatype = node_field(model, node, 0, "defined datatype")?;
+    let left_range = named_data_range_id(model, symbols, data_range_domain, datatype, budget)?
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("datatype-definition subject is not a named datatype")
+        })?;
+    let data_range = node_field(model, node, 1, "datatype defining range")?;
+    let Some(right_range) =
+        named_data_range_id(model, symbols, data_range_domain, data_range, budget)?
+    else {
+        return Ok(None);
+    };
+    let (left_range, right_range) = if left_range <= right_range {
+        (left_range, right_range)
+    } else {
+        (right_range, left_range)
+    };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
-    Ok(Some(RawDataRange {
-        role_id,
-        range_id,
+    Ok(Some(RawDatatypeDefinition {
+        left_range,
+        right_range,
         provenance,
     }))
 }
@@ -2977,6 +3086,49 @@ fn normalize_data_ranges(
     Ok(normalized)
 }
 
+fn normalize_datatype_definitions(
+    mut raw: Vec<RawDatatypeDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedDatatypeDefinition>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_unstable();
+    let mut normalized = Vec::<NormalizedDatatypeDefinition>::new();
+    for definition in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.left_range == definition.left_range
+                && previous.right_range == definition.right_range
+            {
+                if previous.provenance.last() != Some(&definition.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "datatype-definition provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(definition.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedDatatypeDefinition>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("normalized datatype-definition allocation failed")
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("datatype-definition provenance allocation failed")
+        })?;
+        provenance.push(definition.provenance);
+        normalized.push(NormalizedDatatypeDefinition {
+            left_range: definition.left_range,
+            right_range: definition.right_range,
+            provenance,
+        });
+    }
+    Ok(normalized)
+}
+
 fn normalize_data_functionalities(
     mut raw: Vec<RawDataFunctionality>,
     budget: &mut PhaseBudget,
@@ -3168,6 +3320,7 @@ fn freeze_provenance(
     object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
     data_ranges: &[NormalizedDataRange],
+    datatype_definitions: &[NormalizedDatatypeDefinition],
     data_functionalities: &[NormalizedDataFunctionality],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
@@ -3241,6 +3394,16 @@ fn freeze_provenance(
             &mut keys,
             ProvenanceKey {
                 source_sha256: range.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    for definition in datatype_definitions {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: definition.provenance.clone(),
                 generated: false,
             },
             budget,
@@ -3415,6 +3578,7 @@ fn freeze_predicates(
     object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
     data_ranges: &[NormalizedDataRange],
+    datatype_definitions: &[NormalizedDatatypeDefinition],
     data_functionalities: &[NormalizedDataFunctionality],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
@@ -3637,6 +3801,20 @@ fn freeze_predicates(
             &mut data_range_ids,
             range.range_id,
             "predicate data range",
+            budget,
+        )?;
+    }
+    for definition in datatype_definitions {
+        push_u32(
+            &mut data_range_ids,
+            definition.left_range,
+            "predicate defined datatype",
+            budget,
+        )?;
+        push_u32(
+            &mut data_range_ids,
+            definition.right_range,
+            "predicate datatype defining range",
             budget,
         )?;
     }
@@ -3924,6 +4102,7 @@ fn freeze_clauses(
     object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
     data_ranges: &[NormalizedDataRange],
+    datatype_definitions: &[NormalizedDatatypeDefinition],
     data_functionalities: &[NormalizedDataFunctionality],
     thing: u32,
     nothing: u32,
@@ -3937,6 +4116,18 @@ fn freeze_clauses(
     provenance_keys: &[ProvenanceKey],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<DecodedClause>> {
+    let datatype_definition_clauses =
+        datatype_definitions
+            .iter()
+            .try_fold(0_usize, |count, definition| {
+                count
+                    .checked_add(usize::from(definition.left_range != definition.right_range) * 2)
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "datatype-definition clause count overflowed",
+                        )
+                    })
+            })?;
     let mut following = edges
         .len()
         .checked_add(1)
@@ -3944,6 +4135,7 @@ fn freeze_clauses(
         .and_then(|value| value.checked_add(object_characteristics.len()))
         .and_then(|value| value.checked_add(data_domains.len()))
         .and_then(|value| value.checked_add(data_ranges.len()))
+        .and_then(|value| value.checked_add(datatype_definition_clauses))
         .and_then(|value| value.checked_add(data_functionalities.len()))
         .ok_or_else(|| EncodedValidationError::resource("named-class clause count overflowed"))?;
     for disjoint in disjoints {
@@ -4019,6 +4211,13 @@ fn freeze_clauses(
         let data_range = predicate_id(predicate_by_data_range, range.range_id)?;
         let provenance = provenance_id(provenance_keys, &range.provenance, false)?;
         push_data_range_clause(&mut ordered, role, data_range, provenance, budget)?;
+    }
+    for definition in datatype_definitions {
+        let left = predicate_id(predicate_by_data_range, definition.left_range)?;
+        let right = predicate_id(predicate_by_data_range, definition.right_range)?;
+        let provenance = provenance_id(provenance_keys, &definition.provenance, false)?;
+        push_datatype_definition_clause(&mut ordered, left, right, provenance, budget)?;
+        push_datatype_definition_clause(&mut ordered, right, left, provenance, budget)?;
     }
     for functionality in data_functionalities {
         let role = data_predicate_id(predicate_by_data_role, functionality.role_id)?;
@@ -4812,6 +5011,45 @@ fn push_data_range_clause(
     Ok(())
 }
 
+fn push_datatype_definition_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    sub_range_predicate_id: u32,
+    super_range_predicate_id: u32,
+    provenance_id: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    if sub_range_predicate_id == super_range_predicate_id {
+        return Ok(());
+    }
+    let body = variable_atom_at(sub_range_predicate_id, 0, TermSort::Data);
+    let head = variable_atom_at(super_range_predicate_id, 0, TermSort::Data);
+    let key = datatype_definition_rule_key(sub_range_predicate_id, super_range_predicate_id);
+    budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>() + key.len())?;
+    budget.claim_owned(
+        2_usize
+            .checked_mul(size_of::<DecodedAtom>())
+            .and_then(|value| value.checked_add(2 * size_of::<DecodedTerm>()))
+            .and_then(|value| value.checked_add(2 * size_of::<u32>()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("datatype-definition clause payload overflowed")
+            })?,
+    )?;
+    clauses.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("datatype-definition clause allocation failed")
+    })?;
+    clauses.push((
+        key,
+        DecodedClause {
+            clause_id: 0,
+            body: vec![body],
+            head: vec![head],
+            provenance_ids: vec![provenance_id],
+            join_order: vec![0],
+        },
+    ));
+    Ok(())
+}
+
 fn push_data_functionality_clause(
     clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
     role_predicate_id: u32,
@@ -5488,6 +5726,21 @@ fn data_range_rule_key(role_predicate_id: u32, range_predicate_id: u32) -> Vec<u
     format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
 }
 
+fn datatype_definition_rule_key(
+    sub_range_predicate_id: u32,
+    super_range_predicate_id: u32,
+) -> Vec<u8> {
+    let body = format!(
+        "{{\"arguments\":[{}],\"predicate_id\":{sub_range_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
+        variable_json(0, TermSort::Data),
+    );
+    let head = format!(
+        "{{\"arguments\":[{}],\"predicate_id\":{super_range_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
+        variable_json(0, TermSort::Data),
+    );
+    format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
+}
+
 fn data_functionality_rule_key(role_predicate_id: u32, equality_predicate_id: u32) -> Vec<u8> {
     let role_atom = |value: u32| {
         format!(
@@ -5754,6 +6007,7 @@ fn merge_named_class_phases_impl(
         object_characteristics,
         data_domains,
         data_ranges,
+        datatype_definitions,
         data_functionalities,
         facts,
         object_facts,
@@ -5781,6 +6035,7 @@ fn merge_named_class_phases_impl(
         &object_characteristics,
         &data_domains,
         &data_ranges,
+        &datatype_definitions,
         &data_functionalities,
         &facts,
         &object_facts,
@@ -5808,6 +6063,7 @@ fn merge_named_class_phases_impl(
         &object_characteristics,
         &data_domains,
         &data_ranges,
+        &datatype_definitions,
         &data_functionalities,
         &facts,
         &object_facts,
@@ -5833,6 +6089,7 @@ fn merge_named_class_phases_impl(
         &object_characteristics,
         &data_domains,
         &data_ranges,
+        &datatype_definitions,
         &data_functionalities,
         thing,
         nothing,
@@ -5942,6 +6199,7 @@ fn merge_named_class_phases_impl(
         normalized_object_characteristics: object_characteristics,
         normalized_data_domains: data_domains,
         normalized_data_ranges: data_ranges,
+        normalized_datatype_definitions: datatype_definitions,
         normalized_data_functionalities: data_functionalities,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
@@ -6239,6 +6497,7 @@ type NormalizedSources = (
     Vec<NormalizedObjectCharacteristic>,
     Vec<NormalizedDataDomain>,
     Vec<NormalizedDataRange>,
+    Vec<NormalizedDatatypeDefinition>,
     Vec<NormalizedDataFunctionality>,
     Vec<NormalizedFact>,
     Vec<NormalizedObjectFact>,
@@ -6266,6 +6525,7 @@ fn merge_normalized_sources(
     let mut raw_object_characteristics = Vec::new();
     let mut raw_data_domains = Vec::new();
     let mut raw_data_ranges = Vec::new();
+    let mut raw_datatype_definitions = Vec::new();
     let mut raw_data_functionalities = Vec::new();
     let mut raw_facts = Vec::new();
     let mut raw_object_facts = Vec::new();
@@ -6501,6 +6761,36 @@ fn merge_normalized_sources(
                 }
             }
         }
+        for definition in &phase.normalized_datatype_definitions {
+            if definition.provenance.is_empty() {
+                return Err(EncodedValidationError::invariant(
+                    "merged datatype definition lost provenance",
+                ));
+            }
+            let left_range = mapped_id(data_range_map, definition.left_range, "defined datatype")?;
+            let right_range = mapped_id(
+                data_range_map,
+                definition.right_range,
+                "datatype defining range",
+            )?;
+            let (left_range, right_range) = if left_range <= right_range {
+                (left_range, right_range)
+            } else {
+                (right_range, left_range)
+            };
+            for provenance in &definition.provenance {
+                budget.claim_work(1)?;
+                budget.claim_owned(size_of::<RawDatatypeDefinition>())?;
+                raw_datatype_definitions.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource("merged datatype-definition allocation failed")
+                })?;
+                raw_datatype_definitions.push(RawDatatypeDefinition {
+                    left_range,
+                    right_range,
+                    provenance: *provenance,
+                });
+            }
+        }
         if !phase.normalized_data_functionalities.is_empty() {
             let source_roles = source_data_roles
                 .and_then(|roles| roles.get(phase_index))
@@ -6730,6 +7020,7 @@ fn merge_normalized_sources(
         normalize_object_characteristics(raw_object_characteristics, budget)?,
         normalize_data_domains(raw_data_domains, budget)?,
         normalize_data_ranges(raw_data_ranges, budget)?,
+        normalize_datatype_definitions(raw_datatype_definitions, budget)?,
         normalize_data_functionalities(raw_data_functionalities, budget)?,
         normalize_facts(raw_facts, budget)?,
         normalize_object_facts(raw_object_facts, budget)?,

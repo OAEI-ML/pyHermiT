@@ -1512,6 +1512,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     | encoded::symbols::RootHandler::DataPropertyDomain
                     | encoded::symbols::RootHandler::DataPropertyRange
                     | encoded::symbols::RootHandler::FunctionalDataProperty
+                    | encoded::symbols::RootHandler::DatatypeDefinition
             )
         });
         let (scope_maps, scope_map_owned) =
