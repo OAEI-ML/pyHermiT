@@ -2,7 +2,8 @@
 //!
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
 //! a scalar-compatible named `individual` domain and the exact semantic
-//! `source_literal` domain needed by later datatype/ABox phases. It compiles named-only
+//! `source_literal` domain plus scalar-compatible plain-string `data_value`
+//! identities needed by later datatype/ABox phases. It compiles named-only
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
@@ -63,6 +64,9 @@ const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
 const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
 const OBJECT_PROPERTY_PREFIX: &str = "object_property:";
 const DATA_PROPERTY_PREFIX: &str = "data_property:";
+const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
+const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
+const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema#";
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 
@@ -74,6 +78,8 @@ pub struct NamedClassPhaseLimits {
     pub max_data_range_symbols: usize,
     pub max_individual_symbols: usize,
     pub max_source_literal_symbols: usize,
+    pub max_data_value_symbols: usize,
+    pub max_literal_characters: usize,
     pub max_compiled_roots: usize,
     pub max_predicates: usize,
     pub max_clauses: usize,
@@ -95,6 +101,8 @@ impl Default for NamedClassPhaseLimits {
             max_data_range_symbols: 16_000_000,
             max_individual_symbols: 16_000_000,
             max_source_literal_symbols: 16_000_000,
+            max_data_value_symbols: 16_000_000,
+            max_literal_characters: 1_000_000,
             max_compiled_roots: 100_000_000,
             max_predicates: 100_000_000,
             max_clauses: 100_000_000,
@@ -133,6 +141,7 @@ pub struct NamedClassPhase {
     pub data_range_domain: DecodedSymbolDomain,
     pub individual_domain: DecodedSymbolDomain,
     pub source_literal_domain: DecodedSymbolDomain,
+    pub data_value_domain: DecodedSymbolDomain,
     pub individual_signature: Vec<IndividualSignatureBinding>,
     pub named_individuals: Vec<u32>,
     pub predicates: Vec<DecodedPredicate>,
@@ -159,6 +168,7 @@ pub struct NamedClassPhase {
     normalized_negative_object_facts: Vec<NormalizedObjectFact>,
     normalized_equalities: Vec<NormalizedEqualityFact>,
     normalized_inequalities: Vec<NormalizedInequalityFact>,
+    source_data_identity_ids: Vec<Option<u32>>,
     manifest_limit: usize,
 }
 
@@ -194,6 +204,12 @@ impl NamedClassPhase {
             .collect();
         let source_literal_symbols = self
             .source_literal_domain
+            .values
+            .iter()
+            .map(symbol_manifest)
+            .collect();
+        let data_value_symbols = self
+            .data_value_domain
             .values
             .iter()
             .map(symbol_manifest)
@@ -271,6 +287,7 @@ impl NamedClassPhase {
             data_range_symbols,
             individual_symbols,
             source_literal_symbols,
+            data_value_symbols,
             individual_signature,
             named_individuals: &self.named_individuals,
             predicates,
@@ -302,6 +319,7 @@ struct NamedClassManifest<'a> {
     data_range_symbols: Vec<SymbolManifest<'a>>,
     individual_symbols: Vec<SymbolManifest<'a>>,
     source_literal_symbols: Vec<SymbolManifest<'a>>,
+    data_value_symbols: Vec<SymbolManifest<'a>>,
     individual_signature: Vec<IndividualSignatureManifest>,
     named_individuals: &'a [u32],
     predicates: Vec<PredicateManifest<'a>>,
@@ -798,7 +816,8 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let declared_individual_ids = declared_individual_ids(symbols, &mut budget)?;
     let (individual_domain, individual_signature) =
         individual_signature(symbols, &declared_individual_ids, &mut budget)?;
-    let source_literal_domain = source_literal_domain(model, symbols, &mut budget)?;
+    let (source_literal_domain, data_value_domain, source_data_identity_ids) =
+        literal_symbol_domains(model, symbols, &mut budget)?;
     let mut named_individuals = Vec::new();
     budget.claim_owned(
         individual_domain
@@ -1601,6 +1620,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         data_range_domain,
         individual_domain,
         source_literal_domain,
+        data_value_domain,
         individual_signature,
         named_individuals,
         predicates,
@@ -1627,6 +1647,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_negative_object_facts: negative_object_facts,
         normalized_equalities: equalities,
         normalized_inequalities: inequalities,
+        source_data_identity_ids,
         manifest_limit: limits.max_manifest_bytes,
     })
 }
@@ -1741,12 +1762,37 @@ fn named_data_range_domain(
     })
 }
 
-fn source_literal_domain<B: ByteSource>(
+#[derive(Debug, Eq, PartialEq)]
+struct RawLiteralSymbol {
+    key: Vec<u8>,
+    display: String,
+    data_identity_key: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ExtractedLiteral {
+    display: String,
+    data_identity_key: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StringDatatypeKind {
+    PlainLiteral,
+    String,
+    NormalizedString,
+    Token,
+    Language,
+    Name,
+    NcName,
+    NmToken,
+}
+
+fn literal_symbol_domains<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     budget: &mut PhaseBudget,
-) -> EncodedResult<DecodedSymbolDomain> {
-    let mut candidates = Vec::<(Vec<u8>, String)>::new();
+) -> EncodedResult<(DecodedSymbolDomain, DecodedSymbolDomain, Vec<Option<u32>>)> {
+    let mut candidates = Vec::<RawLiteralSymbol>::new();
     for node_index in 0..model.summary().node_count {
         budget.claim_work(1)?;
         let node = model.node_at(node_index)?.ok_or_else(|| {
@@ -1764,42 +1810,78 @@ fn source_literal_domain<B: ByteSource>(
             "source-literal symbol count",
         )?;
         let key = canonical::canonical_node_key(model, node.id(), &[], budget)?;
-        let display = literal_display(model, symbols, node, budget)?;
-        budget.claim_owned(size_of::<(Vec<u8>, String)>())?;
+        let extracted = extract_literal(model, symbols, node, budget)?;
+        budget.claim_owned(size_of::<RawLiteralSymbol>())?;
         candidates.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("source-literal candidate allocation failed")
         })?;
-        candidates.push((key, display));
+        candidates.push(RawLiteralSymbol {
+            key,
+            display: extracted.display,
+            data_identity_key: extracted.data_identity_key,
+        });
     }
     budget.claim_work(sort_work(candidates.len()))?;
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut values = Vec::<DecodedSymbolValue>::new();
-    budget.claim_owned(
-        candidates
-            .len()
-            .checked_mul(size_of::<DecodedSymbolValue>())
-            .ok_or_else(|| {
-                EncodedValidationError::resource("source-literal symbol output overflowed")
-            })?,
-    )?;
-    values.try_reserve_exact(candidates.len()).map_err(|_| {
-        EncodedValidationError::resource("source-literal symbol output allocation failed")
+    candidates.sort_by(|left, right| left.key.cmp(&right.key));
+    let mut unique = Vec::<RawLiteralSymbol>::new();
+    unique.try_reserve_exact(candidates.len()).map_err(|_| {
+        EncodedValidationError::resource("source-literal deduplication allocation failed")
     })?;
-    for (key, display) in candidates {
-        if let Some(previous) = values.last() {
-            if previous.key == key {
-                if previous.display != display {
+    for candidate in candidates {
+        if let Some(previous) = unique.last() {
+            if previous.key == candidate.key {
+                if previous.display != candidate.display
+                    || previous.data_identity_key != candidate.data_identity_key
+                {
                     return Err(EncodedValidationError::invariant(
-                        "source-literal key has conflicting display metadata",
+                        "source-literal key has conflicting metadata",
                     ));
                 }
                 continue;
             }
         }
-        let identifier = u32::try_from(values.len()).map_err(|_| {
-            EncodedValidationError::resource("source-literal symbol ID exceeds u32")
+        unique.push(candidate);
+    }
+
+    let mut data_keys = Vec::<Vec<u8>>::new();
+    for candidate in &unique {
+        let Some(key) = &candidate.data_identity_key else {
+            continue;
+        };
+        budget.claim_owned(key.len().saturating_add(size_of::<Vec<u8>>()))?;
+        data_keys
+            .try_reserve(1)
+            .map_err(|_| EncodedValidationError::resource("data-value key allocation failed"))?;
+        data_keys.push(key.clone());
+    }
+    budget.claim_work(sort_work(data_keys.len()))?;
+    data_keys.sort_unstable();
+    data_keys.dedup();
+    PhaseBudget::count(
+        data_keys.len(),
+        budget.limits.max_data_value_symbols,
+        "data-value symbol count",
+    )?;
+
+    let mut data_values = Vec::<DecodedSymbolValue>::new();
+    budget.claim_owned(
+        data_keys
+            .len()
+            .checked_mul(size_of::<DecodedSymbolValue>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("data-value symbol output overflowed")
+            })?,
+    )?;
+    data_values
+        .try_reserve_exact(data_keys.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("data-value symbol output allocation failed")
         })?;
-        values.push(DecodedSymbolValue {
+    for key in data_keys {
+        let identifier = u32::try_from(data_values.len())
+            .map_err(|_| EncodedValidationError::resource("data-value symbol ID exceeds u32"))?;
+        let display = data_value_display(&key, budget)?;
+        data_values.push(DecodedSymbolValue {
             identifier,
             key,
             display,
@@ -1807,18 +1889,74 @@ fn source_literal_domain<B: ByteSource>(
             query_local: false,
         });
     }
-    Ok(DecodedSymbolDomain {
-        kind: SymbolKind::SourceLiteral,
-        values,
-    })
+
+    let mut source_values = Vec::<DecodedSymbolValue>::new();
+    let mut source_data_identity_ids = Vec::<Option<u32>>::new();
+    budget.claim_owned(
+        unique
+            .len()
+            .checked_mul(size_of::<DecodedSymbolValue>() + size_of::<Option<u32>>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("source-literal symbol output overflowed")
+            })?,
+    )?;
+    source_values.try_reserve_exact(unique.len()).map_err(|_| {
+        EncodedValidationError::resource("source-literal symbol output allocation failed")
+    })?;
+    source_data_identity_ids
+        .try_reserve_exact(unique.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("source data-identity mapping allocation failed")
+        })?;
+    for candidate in unique {
+        let identifier = u32::try_from(source_values.len()).map_err(|_| {
+            EncodedValidationError::resource("source-literal symbol ID exceeds u32")
+        })?;
+        let data_identity_id = candidate
+            .data_identity_key
+            .as_ref()
+            .map(|key| {
+                budget.claim_work(binary_search_work(data_values.len()))?;
+                let index = data_values
+                    .binary_search_by(|value| value.key.cmp(key))
+                    .map_err(|_| {
+                        EncodedValidationError::invariant(
+                            "source literal data identity disappeared",
+                        )
+                    })?;
+                u32::try_from(index).map_err(|_| {
+                    EncodedValidationError::resource("data-value symbol ID exceeds u32")
+                })
+            })
+            .transpose()?;
+        source_values.push(DecodedSymbolValue {
+            identifier,
+            key: candidate.key,
+            display: candidate.display,
+            generated: false,
+            query_local: false,
+        });
+        source_data_identity_ids.push(data_identity_id);
+    }
+    Ok((
+        DecodedSymbolDomain {
+            kind: SymbolKind::SourceLiteral,
+            values: source_values,
+        },
+        DecodedSymbolDomain {
+            kind: SymbolKind::DataValue,
+            values: data_values,
+        },
+        source_data_identity_ids,
+    ))
 }
 
-fn literal_display<B: ByteSource>(
+fn extract_literal<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     literal: NodeRef,
     budget: &mut PhaseBudget,
-) -> EncodedResult<String> {
+) -> EncodedResult<ExtractedLiteral> {
     if literal.tag() != LITERAL_TAG || literal.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
             "literal node no longer has schema-1 shape",
@@ -1881,10 +2019,255 @@ fn literal_display<B: ByteSource>(
     display.push_str(&lexical_repr);
     display.push_str("^^");
     display.push_str(datatype_iri);
-    if let Some(language) = language {
+    if let Some(language) = &language {
         display.push('@');
-        display.push_str(&language);
+        display.push_str(language.as_str());
     }
+    let data_identity_key =
+        string_data_identity_key(&lexical, datatype_iri, language.as_deref(), budget)?;
+    Ok(ExtractedLiteral {
+        display,
+        data_identity_key,
+    })
+}
+
+fn string_data_identity_key(
+    lexical: &str,
+    datatype_iri: &str,
+    language: Option<&str>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<Vec<u8>>> {
+    let kind = if datatype_iri == RDF_PLAIN_LITERAL_IRI {
+        StringDatatypeKind::PlainLiteral
+    } else if let Some(local) = datatype_iri.strip_prefix(XSD_NAMESPACE) {
+        match local {
+            "string" => StringDatatypeKind::String,
+            "normalizedString" => StringDatatypeKind::NormalizedString,
+            "token" => StringDatatypeKind::Token,
+            "language" => StringDatatypeKind::Language,
+            "Name" => StringDatatypeKind::Name,
+            "NCName" => StringDatatypeKind::NcName,
+            "NMTOKEN" => StringDatatypeKind::NmToken,
+            _ => return Ok(None),
+        }
+    } else {
+        return Ok(None);
+    };
+    let character_count = lexical.chars().count();
+    PhaseBudget::count(
+        character_count,
+        budget.limits.max_literal_characters,
+        "literal character count",
+    )?;
+    budget.claim_work(character_count)?;
+    let transformed = transform_string_literal(lexical, kind, budget)?;
+    if !transformed.chars().all(is_xml_character) || !valid_string_lexical(&transformed, kind) {
+        return Err(EncodedValidationError::invariant(
+            "string literal is outside its datatype lexical space",
+        ));
+    }
+    let identity_language = if kind == StringDatatypeKind::PlainLiteral {
+        language
+    } else {
+        None
+    };
+    let payload_len = string_identity_payload_len(&transformed, identity_language)?;
+    budget.claim_owned(payload_len)?;
+    let payload = serde_json::to_vec(&("plain-string-v1", transformed.as_str(), identity_language))
+        .map_err(|_| EncodedValidationError::invariant("string data identity encoding failed"))?;
+    if payload.len() != payload_len {
+        return Err(EncodedValidationError::invariant(
+            "string data identity length disagrees with canonical JSON",
+        ));
+    }
+    let key_len = DATA_IDENTITY_PREFIX
+        .len()
+        .checked_add(payload.len())
+        .ok_or_else(|| EncodedValidationError::resource("data identity key length overflowed"))?;
+    budget.claim_work(payload.len())?;
+    budget.claim_owned(key_len)?;
+    let mut key = Vec::new();
+    key.try_reserve_exact(key_len)
+        .map_err(|_| EncodedValidationError::resource("data identity key allocation failed"))?;
+    key.extend_from_slice(DATA_IDENTITY_PREFIX);
+    key.extend_from_slice(&payload);
+    Ok(Some(key))
+}
+
+fn string_identity_payload_len(text: &str, language: Option<&str>) -> EncodedResult<usize> {
+    const PREFIX: &str = "[\"plain-string-v1\",";
+    let text_len = json_string_content_len(text)?;
+    let language_len = language.map_or(Ok(4_usize), |value| {
+        json_string_content_len(value).and_then(|length| {
+            length
+                .checked_add(2)
+                .ok_or_else(|| EncodedValidationError::resource("language JSON length overflowed"))
+        })
+    })?;
+    PREFIX
+        .len()
+        .checked_add(2)
+        .and_then(|value| value.checked_add(text_len))
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_add(language_len))
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| EncodedValidationError::resource("string identity JSON length overflowed"))
+}
+
+fn json_string_content_len(value: &str) -> EncodedResult<usize> {
+    value.chars().try_fold(0_usize, |length, character| {
+        let encoded = match character {
+            '"' | '\\' | '\u{0008}' | '\t' | '\n' | '\u{000c}' | '\r' => 2,
+            value if u32::from(value) <= 0x1f => 6,
+            value => value.len_utf8(),
+        };
+        length.checked_add(encoded).ok_or_else(|| {
+            EncodedValidationError::resource("JSON string content length overflowed")
+        })
+    })
+}
+
+fn transform_string_literal(
+    lexical: &str,
+    kind: StringDatatypeKind,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<String> {
+    budget.claim_owned(lexical.len())?;
+    let mut transformed = String::new();
+    transformed.try_reserve_exact(lexical.len()).map_err(|_| {
+        EncodedValidationError::resource("string literal transformation allocation failed")
+    })?;
+    match kind {
+        StringDatatypeKind::PlainLiteral | StringDatatypeKind::String => {
+            transformed.push_str(lexical);
+        }
+        StringDatatypeKind::NormalizedString => {
+            for character in lexical.chars() {
+                transformed.push(if matches!(character, '\t' | '\n' | '\r') {
+                    ' '
+                } else {
+                    character
+                });
+            }
+        }
+        StringDatatypeKind::Token
+        | StringDatatypeKind::Language
+        | StringDatatypeKind::Name
+        | StringDatatypeKind::NcName
+        | StringDatatypeKind::NmToken => {
+            let mut pending_space = false;
+            for character in lexical.chars() {
+                if matches!(character, ' ' | '\t' | '\n' | '\r') {
+                    pending_space = !transformed.is_empty();
+                } else {
+                    if pending_space {
+                        transformed.push(' ');
+                        pending_space = false;
+                    }
+                    transformed.push(character);
+                }
+            }
+        }
+    }
+    Ok(transformed)
+}
+
+fn valid_string_lexical(value: &str, kind: StringDatatypeKind) -> bool {
+    match kind {
+        StringDatatypeKind::PlainLiteral
+        | StringDatatypeKind::String
+        | StringDatatypeKind::NormalizedString
+        | StringDatatypeKind::Token => true,
+        StringDatatypeKind::Language => valid_language_lexical(value),
+        StringDatatypeKind::Name => {
+            let mut characters = value.chars();
+            characters
+                .next()
+                .is_some_and(|first| is_name_start(first, true))
+                && characters.all(|character| is_name_character(character, true))
+        }
+        StringDatatypeKind::NcName => {
+            let mut characters = value.chars();
+            characters
+                .next()
+                .is_some_and(|first| is_name_start(first, false))
+                && characters.all(|character| is_name_character(character, false))
+        }
+        StringDatatypeKind::NmToken => {
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|character| is_name_character(character, true))
+        }
+    }
+}
+
+fn valid_language_lexical(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    (1..=8).contains(&first.len())
+        && first.bytes().all(|byte| byte.is_ascii_alphabetic())
+        && parts.all(|part| {
+            (1..=8).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
+const fn is_xml_character(value: char) -> bool {
+    let codepoint = value as u32;
+    matches!(codepoint, 0x9 | 0xa | 0xd)
+        || (codepoint >= 0x20 && codepoint <= 0xd7ff)
+        || (codepoint >= 0xe000 && codepoint <= 0xfffd)
+        || (codepoint >= 0x1_0000 && codepoint <= 0x10_ffff)
+}
+
+const fn is_name_start(value: char, allow_colon: bool) -> bool {
+    let codepoint = value as u32;
+    (allow_colon && value == ':')
+        || value == '_'
+        || (codepoint >= 0x41 && codepoint <= 0x5a)
+        || (codepoint >= 0x61 && codepoint <= 0x7a)
+        || (codepoint >= 0xc0 && codepoint <= 0xd6)
+        || (codepoint >= 0xd8 && codepoint <= 0xf6)
+        || (codepoint >= 0xf8 && codepoint <= 0x2ff)
+        || (codepoint >= 0x370 && codepoint <= 0x37d)
+        || (codepoint >= 0x37f && codepoint <= 0x1fff)
+        || (codepoint >= 0x200c && codepoint <= 0x200d)
+        || (codepoint >= 0x2070 && codepoint <= 0x218f)
+        || (codepoint >= 0x2c00 && codepoint <= 0x2fef)
+        || (codepoint >= 0x3001 && codepoint <= 0xd7ff)
+        || (codepoint >= 0xf900 && codepoint <= 0xfdcf)
+        || (codepoint >= 0xfdf0 && codepoint <= 0xfffd)
+        || (codepoint >= 0x1_0000 && codepoint <= 0xe_ffff)
+}
+
+const fn is_name_character(value: char, allow_colon: bool) -> bool {
+    let codepoint = value as u32;
+    is_name_start(value, allow_colon)
+        || matches!(value, '-' | '.')
+        || (codepoint >= 0x30 && codepoint <= 0x39)
+        || codepoint == 0xb7
+        || (codepoint >= 0x300 && codepoint <= 0x36f)
+        || (codepoint >= 0x203f && codepoint <= 0x2040)
+}
+
+fn data_value_display(key: &[u8], budget: &mut PhaseBudget) -> EncodedResult<String> {
+    const DIGEST_HEX_BYTES: usize = 64;
+    budget.claim_work(key.len())?;
+    budget.claim_owned(DIGEST_HEX_BYTES)?;
+    let digest = crate::model::hex(&Sha256::digest(key));
+    let display_len = "data-value:"
+        .len()
+        .checked_add(digest.len())
+        .ok_or_else(|| EncodedValidationError::resource("data-value display length overflowed"))?;
+    budget.claim_owned(display_len)?;
+    let mut display = String::new();
+    display
+        .try_reserve_exact(display_len)
+        .map_err(|_| EncodedValidationError::resource("data-value display allocation failed"))?;
+    display.push_str("data-value:");
+    display.push_str(&digest);
     Ok(display)
 }
 
@@ -7190,6 +7573,10 @@ fn merge_named_class_phases_impl(
         .iter()
         .map(|(_, phase)| &phase.source_literal_domain)
         .collect::<Vec<_>>();
+    let data_value_domains = phases
+        .iter()
+        .map(|(_, phase)| &phase.data_value_domain)
+        .collect::<Vec<_>>();
     let (entity_domain, entity_maps) = merge_symbol_domains(
         &entity_domains,
         SymbolKind::Entity,
@@ -7218,11 +7605,25 @@ fn merge_named_class_phases_impl(
         "individual",
         &mut budget,
     )?;
-    let (source_literal_domain, _source_literal_maps) = merge_symbol_domains(
+    let (source_literal_domain, source_literal_maps) = merge_symbol_domains(
         &source_literal_domains,
         SymbolKind::SourceLiteral,
         limits.max_source_literal_symbols,
         "source-literal",
+        &mut budget,
+    )?;
+    let (data_value_domain, data_value_maps) = merge_symbol_domains(
+        &data_value_domains,
+        SymbolKind::DataValue,
+        limits.max_data_value_symbols,
+        "data-value",
+        &mut budget,
+    )?;
+    let source_data_identity_ids = merge_source_data_identity_ids(
+        phases,
+        &source_literal_maps,
+        &data_value_maps,
+        source_literal_domain.values.len(),
         &mut budget,
     )?;
     let class_signature = merge_class_signatures(
@@ -7447,6 +7848,7 @@ fn merge_named_class_phases_impl(
         data_range_domain,
         individual_domain,
         source_literal_domain,
+        data_value_domain,
         individual_signature,
         named_individuals,
         predicates,
@@ -7473,6 +7875,7 @@ fn merge_named_class_phases_impl(
         normalized_negative_object_facts: negative_object_facts,
         normalized_equalities: equalities,
         normalized_inequalities: inequalities,
+        source_data_identity_ids,
         manifest_limit: limits.max_manifest_bytes,
     })
 }
@@ -7583,6 +7986,80 @@ fn validate_dense_symbols(domain: &DecodedSymbolDomain, name: &'static str) -> E
         }
     }
     Ok(())
+}
+
+fn merge_source_data_identity_ids(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    source_literal_maps: &[Vec<u32>],
+    data_value_maps: &[Vec<u32>],
+    source_literal_count: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<Option<u32>>> {
+    if source_literal_maps.len() != phases.len() || data_value_maps.len() != phases.len() {
+        return Err(EncodedValidationError::invariant(
+            "literal symbol mappings do not align with their slices",
+        ));
+    }
+    budget.claim_owned(
+        source_literal_count
+            .checked_mul(size_of::<Option<Option<u32>>>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("merged source data-identity mapping overflowed")
+            })?,
+    )?;
+    let mut merged = vec![None::<Option<u32>>; source_literal_count];
+    for (phase_index, (_, phase)) in phases.iter().enumerate() {
+        if phase.source_data_identity_ids.len() != phase.source_literal_domain.values.len() {
+            return Err(EncodedValidationError::invariant(
+                "source data-identity mapping no longer covers its literal domain",
+            ));
+        }
+        for (source_index, data_identity_id) in
+            phase.source_data_identity_ids.iter().copied().enumerate()
+        {
+            budget.claim_work(1)?;
+            let global_source = mapped_id(
+                &source_literal_maps[phase_index],
+                u32::try_from(source_index).map_err(|_| {
+                    EncodedValidationError::resource("source-literal ID exceeds u32")
+                })?,
+                "source literal",
+            )?;
+            let global_data = data_identity_id
+                .map(|identifier| {
+                    mapped_id(
+                        &data_value_maps[phase_index],
+                        identifier,
+                        "source data identity",
+                    )
+                })
+                .transpose()?;
+            let slot = merged
+                .get_mut(usize::try_from(global_source).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant("merged source-literal mapping is dangling")
+                })?;
+            match slot {
+                Some(existing) if *existing != global_data => {
+                    return Err(EncodedValidationError::invariant(
+                        "merged source literal has conflicting data identities",
+                    ));
+                }
+                Some(_) => {}
+                None => *slot = Some(global_data),
+            }
+        }
+    }
+    merged
+        .into_iter()
+        .map(|value| {
+            value.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "merged source data-identity mapping is incomplete",
+                )
+            })
+        })
+        .collect()
 }
 
 fn mapped_id(mapping: &[u32], identifier: u32, name: &'static str) -> EncodedResult<u32> {

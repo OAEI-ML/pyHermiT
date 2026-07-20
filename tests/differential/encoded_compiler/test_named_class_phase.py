@@ -142,6 +142,18 @@ def _expected_source_literal_symbols(
     ]
 
 
+def _expected_data_value_symbols(
+    snapshot: pyowl_core.OntologyView,
+) -> list[dict[str, object]]:
+    _normalized, program, _ontology = compile_captured_bundle(
+        capture_ontology(snapshot).captured,
+        ReasonerConfig(),
+    )
+    return [
+        _symbol_payload(value) for value in program.symbols.domain(SymbolKind.DATA_VALUE).values
+    ]
+
+
 def _projected_atom_payload(
     value: Atom,
     predicate_remap: dict[int, int],
@@ -227,6 +239,7 @@ def _expected_manifest(
     data_range_domain = program.symbols.domain(SymbolKind.DATA_RANGE)
     individual_domain = program.symbols.domain(SymbolKind.INDIVIDUAL)
     source_literal_domain = program.symbols.domain(SymbolKind.SOURCE_LITERAL)
+    data_value_domain = program.symbols.domain(SymbolKind.DATA_VALUE)
     entity_domain = program.symbols.domain(SymbolKind.ENTITY)
     named_data_ranges = [
         value for value in data_range_domain.values if value.display.startswith("datatype:")
@@ -547,6 +560,7 @@ def _expected_manifest(
         "source_literal_symbols": [
             _symbol_payload(value) for value in source_literal_domain.values
         ],
+        "data_value_symbols": [_symbol_payload(value) for value in data_value_domain.values],
         "individual_signature": [
             {
                 "individual_id": value.identifier,
@@ -680,6 +694,65 @@ def test_source_literal_symbols_follow_source_local_root_selection() -> None:
     assert selected_keys == {
         cast(str, value["key_hex"]) for value in _expected_source_literal_symbols(snapshot)
     }
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_string_data_value_symbols_match_scalar_and_collapse_aliases() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "same")',
+            'DataPropertyAssertion(:p :i "same"^^xsd:string)',
+            'DataPropertyAssertion(:p :i "  a   b  "^^xsd:token)',
+            'DataPropertyAssertion(:p :i "a b"^^xsd:string)',
+            'DataPropertyAssertion(:p :i "normalized"^^xsd:normalizedString)',
+            'DataPropertyAssertion(:p :i "en-US"^^xsd:language)',
+            'DataPropertyAssertion(:p :i "ns:item"^^xsd:Name)',
+            'DataPropertyAssertion(:p :i "item"^^xsd:NCName)',
+            'DataPropertyAssertion(:p :i "ns:item-1"^^xsd:NMTOKEN)',
+            'DataPropertyAssertion(:p :i "bonjour"@FR)',
+            'DataPropertyAssertion(:p :i "café"^^xsd:string)',
+            'DataPropertyAssertion(:p :i "non\u00a0breaking"^^xsd:string)',
+            'DataPropertyAssertion(:p :i "zero\u200bwidth"^^xsd:string)',
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+    source_symbols = cast(list[object], actual["source_literal_symbols"])
+    data_symbols = cast(list[dict[str, object]], actual["data_value_symbols"])
+
+    assert data_symbols == _expected_data_value_symbols(snapshot)
+    assert len(data_symbols) < len(source_symbols)
+    assert all(cast(str, value["display"]).startswith("data-value:") for value in data_symbols)
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_string_aliases_share_one_global_data_identity() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "shared")',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "shared"^^xsd:string)',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual["data_value_symbols"] == _expected_data_value_symbols(composite)
+    assert len(cast(list[object], actual["source_literal_symbols"])) == 2
+    assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
