@@ -5,10 +5,10 @@
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
-//! plus named data-property domains, ranges, functionality, and named datatype
-//! definitions into the existing native predicate, clause, fact, and provenance
-//! records. Exact nested annotations participate in source provenance, with
-//! segmented anonymous scopes remapped before hashing.
+//! plus named data-property domains, ranges, functionality, named datatype
+//! definitions, and named-class keys into the existing native predicate,
+//! clause, fact, and provenance records. Exact nested annotations participate
+//! in source provenance, with segmented anonymous scopes remapped before hashing.
 //! Predicate and clause identifiers are dense within this fragment and must be
 //! remapped when a later phase assembles the complete program; no fragment is
 //! publishable on its own.
@@ -48,6 +48,7 @@ const DATA_PROPERTY_DOMAIN_TAG: u16 = 93;
 const DATA_PROPERTY_RANGE_TAG: u16 = 94;
 const FUNCTIONAL_DATA_PROPERTY_TAG: u16 = 95;
 const DATATYPE_DEFINITION_TAG: u16 = 100;
+const HAS_KEY_TAG: u16 = 101;
 const OBJECT_INVERSE_OF_TAG: u16 = 10;
 const SAME_INDIVIDUAL_TAG: u16 = 110;
 const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
@@ -146,6 +147,7 @@ pub struct NamedClassPhase {
     normalized_data_domains: Vec<NormalizedDataDomain>,
     normalized_data_ranges: Vec<NormalizedDataRange>,
     normalized_datatype_definitions: Vec<NormalizedDatatypeDefinition>,
+    normalized_keys: Vec<NormalizedKey>,
     normalized_data_functionalities: Vec<NormalizedDataFunctionality>,
     normalized_facts: Vec<NormalizedFact>,
     normalized_object_facts: Vec<NormalizedObjectFact>,
@@ -533,6 +535,22 @@ struct NormalizedDatatypeDefinition {
     provenance: Vec<[u8; 32]>,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RawKey {
+    class_id: u32,
+    object_role_ids: Vec<u32>,
+    data_role_ids: Vec<u32>,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NormalizedKey {
+    class_id: u32,
+    object_role_ids: Vec<u32>,
+    data_role_ids: Vec<u32>,
+    provenance: Vec<[u8; 32]>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RawDataFunctionality {
     role_id: u32,
@@ -811,6 +829,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut raw_data_domains = Vec::<RawDataDomain>::new();
     let mut raw_data_ranges = Vec::<RawDataRange>::new();
     let mut raw_datatype_definitions = Vec::<RawDatatypeDefinition>::new();
+    let mut raw_keys = Vec::<RawKey>::new();
     let mut raw_data_functionalities = Vec::<RawDataFunctionality>::new();
     let mut raw_facts = Vec::<RawFact>::new();
     let mut raw_object_facts = Vec::<RawObjectFact>::new();
@@ -1125,6 +1144,39 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     }
                 }
             }
+            RootHandler::HasKey => {
+                match named_key(
+                    model,
+                    symbols,
+                    object_roles,
+                    data_roles,
+                    &class_signature,
+                    root.node,
+                    scope_maps,
+                    &mut budget,
+                )? {
+                    Some(key) => {
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            key.provenance,
+                            &mut budget,
+                        )?;
+                        budget.claim_owned(size_of::<RawKey>())?;
+                        raw_keys.try_reserve(1).map_err(|_| {
+                            EncodedValidationError::resource("named key allocation failed")
+                        })?;
+                        raw_keys.push(key);
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
             RootHandler::FunctionalDataProperty => {
                 let Some(data_roles) = data_roles else {
                     deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
@@ -1408,6 +1460,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let data_ranges = normalize_data_ranges(raw_data_ranges, &mut budget)?;
     let datatype_definitions =
         normalize_datatype_definitions(raw_datatype_definitions, &mut budget)?;
+    let keys = normalize_keys(raw_keys, &mut budget)?;
     let data_functionalities =
         normalize_data_functionalities(raw_data_functionalities, &mut budget)?;
     let facts = normalize_facts(raw_facts, &mut budget)?;
@@ -1423,6 +1476,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &data_domains,
         &data_ranges,
         &datatype_definitions,
+        &keys,
         &data_functionalities,
         &facts,
         &object_facts,
@@ -1443,6 +1497,8 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         equality_predicate,
         data_equality_predicate,
         inequality_predicate,
+        data_inequality_predicate,
+        ordering_predicate,
     ) = freeze_predicates(
         &edges,
         &disjoints,
@@ -1451,6 +1507,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &data_domains,
         &data_ranges,
         &datatype_definitions,
+        &keys,
         &data_functionalities,
         &facts,
         &object_facts,
@@ -1477,6 +1534,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &data_domains,
         &data_ranges,
         &datatype_definitions,
+        &keys,
         &data_functionalities,
         thing,
         nothing,
@@ -1486,7 +1544,11 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &predicate_by_data_range,
         equality_predicate,
         data_equality_predicate,
+        data_inequality_predicate,
+        ordering_predicate,
+        named_predicate,
         &guard_predicates,
+        &scalar_predicate_ids,
         &provenance_keys,
         &mut budget,
     )?;
@@ -1504,6 +1566,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         object_characteristics
             .iter()
             .any(|value| value.kind != ObjectCharacteristicKind::Reflexive),
+        !keys.is_empty(),
         inequality_predicate,
         &provenance_keys,
         &scalar_predicate_ids,
@@ -1542,6 +1605,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_data_domains: data_domains,
         normalized_data_ranges: data_ranges,
         normalized_datatype_definitions: datatype_definitions,
+        normalized_keys: keys,
         normalized_data_functionalities: data_functionalities,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
@@ -2203,6 +2267,119 @@ fn named_datatype_definition<B: ByteSource>(
     Ok(Some(RawDatatypeDefinition {
         left_range,
         right_range,
+        provenance,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn named_key<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
+    class_signature: &[ClassSignatureBinding],
+    root: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<RawKey>> {
+    let node = model.node(root)?;
+    if node.tag() != HAS_KEY_TAG || node.field_count() != 4 {
+        return Err(EncodedValidationError::invariant(
+            "has-key root no longer has schema-1 shape",
+        ));
+    }
+    let Some(class_id) = named_class_field(model, symbols, class_signature, node, 0)? else {
+        return Ok(None);
+    };
+    let object_component = required_component(
+        model.field(node.fields().start + 1)?,
+        "has-key object properties",
+    )?;
+    let ComponentValue::Collection(object_properties) = model.resolve(object_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "has-key object properties did not resolve to a collection",
+        ));
+    };
+    let data_component = required_component(
+        model.field(node.fields().start + 2)?,
+        "has-key data properties",
+    )?;
+    let ComponentValue::Collection(data_properties) = model.resolve(data_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "has-key data properties did not resolve to a collection",
+        ));
+    };
+    if object_properties.is_empty() && data_properties.is_empty() {
+        return Err(EncodedValidationError::invariant(
+            "has-key root no longer contains a property",
+        ));
+    }
+    if !object_properties.is_empty() && object_roles.is_none() {
+        return Ok(None);
+    }
+    if !data_properties.is_empty() && data_roles.is_none() {
+        return Ok(None);
+    }
+
+    let role_count = object_properties
+        .len()
+        .checked_add(data_properties.len())
+        .ok_or_else(|| EncodedValidationError::resource("has-key role count overflowed"))?;
+    budget.claim_owned(
+        role_count.checked_mul(size_of::<u32>()).ok_or_else(|| {
+            EncodedValidationError::resource("has-key role allocation overflowed")
+        })?,
+    )?;
+    let mut object_role_ids = Vec::new();
+    object_role_ids
+        .try_reserve_exact(object_properties.len())
+        .map_err(|_| EncodedValidationError::resource("has-key object-role allocation failed"))?;
+    for item_index in object_properties.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "has-key object property")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "has-key object property did not resolve to a node",
+            ));
+        };
+        let roles = object_roles.ok_or_else(|| {
+            EncodedValidationError::invariant("has-key object role domain disappeared")
+        })?;
+        object_role_ids.push(named_object_role_id(
+            model, symbols, roles, identifier, budget,
+        )?);
+    }
+    let mut data_role_ids = Vec::new();
+    data_role_ids
+        .try_reserve_exact(data_properties.len())
+        .map_err(|_| EncodedValidationError::resource("has-key data-role allocation failed"))?;
+    for item_index in data_properties.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "has-key data property")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "has-key data property did not resolve to a node",
+            ));
+        };
+        let roles = data_roles.ok_or_else(|| {
+            EncodedValidationError::invariant("has-key data role domain disappeared")
+        })?;
+        data_role_ids.push(named_data_role_id(
+            model, symbols, roles, identifier, budget,
+        )?);
+    }
+    budget.claim_work(
+        sort_work(object_role_ids.len()).saturating_add(sort_work(data_role_ids.len())),
+    )?;
+    object_role_ids.sort_unstable();
+    object_role_ids.dedup();
+    data_role_ids.sort_unstable();
+    data_role_ids.dedup();
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    Ok(Some(RawKey {
+        class_id,
+        object_role_ids,
+        data_role_ids,
         provenance,
     }))
 }
@@ -3129,6 +3306,49 @@ fn normalize_datatype_definitions(
     Ok(normalized)
 }
 
+fn normalize_keys(
+    mut raw: Vec<RawKey>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedKey>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_unstable();
+    let mut normalized = Vec::<NormalizedKey>::new();
+    for key in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.class_id == key.class_id
+                && previous.object_role_ids == key.object_role_ids
+                && previous.data_role_ids == key.data_role_ids
+            {
+                if previous.provenance.last() != Some(&key.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource("has-key provenance allocation failed")
+                    })?;
+                    previous.provenance.push(key.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedKey>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("normalized has-key allocation failed")
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("has-key provenance allocation failed")
+        })?;
+        provenance.push(key.provenance);
+        normalized.push(NormalizedKey {
+            class_id: key.class_id,
+            object_role_ids: key.object_role_ids,
+            data_role_ids: key.data_role_ids,
+            provenance,
+        });
+    }
+    Ok(normalized)
+}
+
 fn normalize_data_functionalities(
     mut raw: Vec<RawDataFunctionality>,
     budget: &mut PhaseBudget,
@@ -3321,6 +3541,7 @@ fn freeze_provenance(
     data_domains: &[NormalizedDataDomain],
     data_ranges: &[NormalizedDataRange],
     datatype_definitions: &[NormalizedDatatypeDefinition],
+    normalized_keys: &[NormalizedKey],
     data_functionalities: &[NormalizedDataFunctionality],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
@@ -3404,6 +3625,16 @@ fn freeze_provenance(
             &mut keys,
             ProvenanceKey {
                 source_sha256: definition.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    for key in normalized_keys {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: key.provenance.clone(),
                 generated: false,
             },
             budget,
@@ -3538,7 +3769,8 @@ enum PredicateOwner {
     DataRole(u32),
     DataRange(u32),
     Equality(TermSort),
-    Inequality,
+    Inequality(TermSort),
+    OrderingGuard,
     NamedIndividual,
     DisjointGuard {
         digest: [u8; 32],
@@ -3568,6 +3800,8 @@ type FrozenPredicates = (
     Option<u32>,
     Option<u32>,
     Option<u32>,
+    Option<u32>,
+    Option<u32>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -3579,6 +3813,7 @@ fn freeze_predicates(
     data_domains: &[NormalizedDataDomain],
     data_ranges: &[NormalizedDataRange],
     datatype_definitions: &[NormalizedDatatypeDefinition],
+    keys: &[NormalizedKey],
     data_functionalities: &[NormalizedDataFunctionality],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
@@ -3619,6 +3854,9 @@ fn freeze_predicates(
     for domain in data_domains {
         push_u32(&mut class_ids, domain.class_id, "predicate class", budget)?;
     }
+    for key in keys {
+        push_u32(&mut class_ids, key.class_id, "predicate key class", budget)?;
+    }
     for fact in facts {
         push_u32(&mut class_ids, fact.class_id, "predicate class", budget)?;
     }
@@ -3628,6 +3866,7 @@ fn freeze_predicates(
 
     let mut ordered = Vec::<PendingPredicate>::new();
     if !equalities.is_empty()
+        || !keys.is_empty()
         || object_characteristics
             .iter()
             .any(|value| value.kind != ObjectCharacteristicKind::Reflexive)
@@ -3656,7 +3895,7 @@ fn freeze_predicates(
         });
     }
     if !inequalities.is_empty() {
-        let key = inequality_predicate_key();
+        let key = inequality_predicate_key(TermSort::Object);
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
         ordered.try_reserve(1).map_err(|_| {
@@ -3664,10 +3903,34 @@ fn freeze_predicates(
         })?;
         ordered.push(PendingPredicate {
             key,
-            owner: PredicateOwner::Inequality,
+            owner: PredicateOwner::Inequality(TermSort::Object),
         });
     }
-    if has_individuals {
+    if keys.iter().any(|key| !key.data_role_ids.is_empty()) {
+        let key = inequality_predicate_key(TermSort::Data);
+        budget.claim_owned(size_of::<PendingPredicate>())?;
+        budget.claim_owned(key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("data inequality predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::Inequality(TermSort::Data),
+        });
+    }
+    if !keys.is_empty() {
+        let key = ordering_predicate_key();
+        budget.claim_owned(size_of::<PendingPredicate>())?;
+        budget.claim_owned(key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("ordering-guard predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::OrderingGuard,
+        });
+    }
+    if has_individuals || !keys.is_empty() {
         let key = named_individual_predicate_key();
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
@@ -3707,6 +3970,16 @@ fn freeze_predicates(
             "predicate object role",
             budget,
         )?;
+    }
+    for key in keys {
+        for role_id in &key.object_role_ids {
+            push_u32(
+                &mut object_role_ids,
+                *role_id,
+                "predicate key object role",
+                budget,
+            )?;
+        }
     }
     for fact in object_facts {
         push_u32(
@@ -3779,6 +4052,16 @@ fn freeze_predicates(
             "predicate data role",
             budget,
         )?;
+    }
+    for key in keys {
+        for role_id in &key.data_role_ids {
+            push_u32(
+                &mut data_role_ids,
+                *role_id,
+                "predicate key data role",
+                budget,
+            )?;
+        }
     }
     budget.claim_work(sort_work(data_role_ids.len()))?;
     data_role_ids.sort_unstable();
@@ -3878,6 +4161,8 @@ fn freeze_predicates(
     let mut equality_predicate = None;
     let mut data_equality_predicate = None;
     let mut inequality_predicate = None;
+    let mut data_inequality_predicate = None;
+    let mut ordering_predicate = None;
     budget.claim_owned(
         ordered
             .len()
@@ -4022,12 +4307,12 @@ fn freeze_predicates(
                     TermSort::Data => data_equality_predicate = Some(predicate_id),
                 }
             }
-            PredicateOwner::Inequality => {
+            PredicateOwner::Inequality(sort) => {
                 budget.claim_owned(size_of::<TermSort>())?;
                 predicates.push(DecodedPredicate {
                     predicate_id,
                     kind: PredicateKind::Inequality,
-                    argument_sorts: vec![TermSort::Object, TermSort::Object],
+                    argument_sorts: vec![sort, sort],
                     symbol_id: None,
                     role_id: None,
                     cardinality: None,
@@ -4035,7 +4320,25 @@ fn freeze_predicates(
                     annotation: Vec::new(),
                     internal_key: None,
                 });
-                inequality_predicate = Some(predicate_id);
+                match sort {
+                    TermSort::Object => inequality_predicate = Some(predicate_id),
+                    TermSort::Data => data_inequality_predicate = Some(predicate_id),
+                }
+            }
+            PredicateOwner::OrderingGuard => {
+                budget.claim_owned(size_of::<TermSort>() + "canonical-object-order".len())?;
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::OrderingGuard,
+                    argument_sorts: vec![TermSort::Object, TermSort::Object],
+                    symbol_id: None,
+                    role_id: None,
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: Vec::new(),
+                    internal_key: Some("canonical-object-order".to_owned()),
+                });
+                ordering_predicate = Some(predicate_id);
             }
             PredicateOwner::NamedIndividual => {
                 budget.claim_owned("named-individual".len())?;
@@ -4091,6 +4394,8 @@ fn freeze_predicates(
         equality_predicate,
         data_equality_predicate,
         inequality_predicate,
+        data_inequality_predicate,
+        ordering_predicate,
     ))
 }
 
@@ -4103,6 +4408,7 @@ fn freeze_clauses(
     data_domains: &[NormalizedDataDomain],
     data_ranges: &[NormalizedDataRange],
     datatype_definitions: &[NormalizedDatatypeDefinition],
+    keys: &[NormalizedKey],
     data_functionalities: &[NormalizedDataFunctionality],
     thing: u32,
     nothing: u32,
@@ -4112,7 +4418,11 @@ fn freeze_clauses(
     predicate_by_data_range: &[(u32, u32)],
     equality_predicate: Option<u32>,
     data_equality_predicate: Option<u32>,
+    data_inequality_predicate: Option<u32>,
+    ordering_predicate: Option<u32>,
+    named_predicate: Option<u32>,
     guard_predicates: &[([u8; 32], u32, u32)],
+    scalar_predicate_ids: &[u32],
     provenance_keys: &[ProvenanceKey],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<DecodedClause>> {
@@ -4136,6 +4446,7 @@ fn freeze_clauses(
         .and_then(|value| value.checked_add(data_domains.len()))
         .and_then(|value| value.checked_add(data_ranges.len()))
         .and_then(|value| value.checked_add(datatype_definition_clauses))
+        .and_then(|value| value.checked_add(keys.len()))
         .and_then(|value| value.checked_add(data_functionalities.len()))
         .ok_or_else(|| EncodedValidationError::resource("named-class clause count overflowed"))?;
     for disjoint in disjoints {
@@ -4219,6 +4530,57 @@ fn freeze_clauses(
         push_datatype_definition_clause(&mut ordered, left, right, provenance, budget)?;
         push_datatype_definition_clause(&mut ordered, right, left, provenance, budget)?;
     }
+    for key in keys {
+        let class = predicate_id(predicate_by_class, key.class_id)?;
+        let mut object_roles = Vec::new();
+        budget.claim_owned(
+            key.object_role_ids
+                .len()
+                .checked_mul(size_of::<u32>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("has-key object predicate IDs overflowed")
+                })?,
+        )?;
+        object_roles
+            .try_reserve_exact(key.object_role_ids.len())
+            .map_err(|_| {
+                EncodedValidationError::resource("has-key object predicate allocation failed")
+            })?;
+        for role_id in &key.object_role_ids {
+            object_roles.push(object_predicate_id(predicate_by_object_role, *role_id)?);
+        }
+        let mut data_roles = Vec::new();
+        budget.claim_owned(
+            key.data_role_ids
+                .len()
+                .checked_mul(size_of::<u32>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("has-key data predicate IDs overflowed")
+                })?,
+        )?;
+        data_roles
+            .try_reserve_exact(key.data_role_ids.len())
+            .map_err(|_| {
+                EncodedValidationError::resource("has-key data predicate allocation failed")
+            })?;
+        for role_id in &key.data_role_ids {
+            data_roles.push(data_predicate_id(predicate_by_data_role, *role_id)?);
+        }
+        let provenance = provenance_id(provenance_keys, &key.provenance, false)?;
+        push_key_clause(
+            &mut ordered,
+            class,
+            &object_roles,
+            &data_roles,
+            equality_predicate,
+            data_inequality_predicate,
+            ordering_predicate,
+            named_predicate,
+            provenance,
+            scalar_predicate_ids,
+            budget,
+        )?;
+    }
     for functionality in data_functionalities {
         let role = data_predicate_id(predicate_by_data_role, functionality.role_id)?;
         let equality = data_equality_predicate.ok_or_else(|| {
@@ -4287,6 +4649,7 @@ fn freeze_positive_facts(
     named_predicate: Option<u32>,
     equality_predicate: Option<u32>,
     has_object_functionality: bool,
+    has_keys: bool,
     inequality_predicate: Option<u32>,
     provenance_keys: &[ProvenanceKey],
     scalar_predicate_ids: &[u32],
@@ -4299,9 +4662,13 @@ fn freeze_positive_facts(
     } else {
         Some(predicate_id(predicate_by_class, thing)?)
     };
-    let named_predicate = match (individual_domain.values.is_empty(), named_predicate) {
-        (true, None) => None,
-        (false, Some(identifier)) => Some(identifier),
+    let named_predicate = match (
+        individual_domain.values.is_empty(),
+        has_keys,
+        named_predicate,
+    ) {
+        (true, false, None) | (true, true, Some(_)) => None,
+        (false, _, Some(identifier)) => Some(identifier),
         _ => {
             return Err(EncodedValidationError::invariant(
                 "named-individual predicate presence disagrees with its domain",
@@ -4309,7 +4676,7 @@ fn freeze_positive_facts(
         }
     };
     let equality_predicate = match (
-        equalities.is_empty() && !has_object_functionality,
+        equalities.is_empty() && !has_object_functionality && !has_keys,
         equality_predicate,
     ) {
         (true, None) => None,
@@ -5050,6 +5417,586 @@ fn push_datatype_definition_clause(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_key_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    class_predicate_id: u32,
+    object_role_predicate_ids: &[u32],
+    data_role_predicate_ids: &[u32],
+    equality_predicate_id: Option<u32>,
+    data_inequality_predicate_id: Option<u32>,
+    ordering_predicate_id: Option<u32>,
+    named_predicate_id: Option<u32>,
+    provenance_id: u32,
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let equality = equality_predicate_id
+        .ok_or_else(|| EncodedValidationError::invariant("has-key clause lost object equality"))?;
+    let ordering = ordering_predicate_id.ok_or_else(|| {
+        EncodedValidationError::invariant("has-key clause lost its ordering guard")
+    })?;
+    let named = named_predicate_id.ok_or_else(|| {
+        EncodedValidationError::invariant("has-key clause lost its named-individual predicate")
+    })?;
+    let data_inequality = if data_role_predicate_ids.is_empty() {
+        None
+    } else {
+        Some(data_inequality_predicate_id.ok_or_else(|| {
+            EncodedValidationError::invariant("has-key clause lost data inequality")
+        })?)
+    };
+    let body_count = 5_usize
+        .checked_add(
+            object_role_predicate_ids
+                .len()
+                .checked_mul(3)
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("has-key body atom count overflowed")
+                })?,
+        )
+        .and_then(|value| value.checked_add(data_role_predicate_ids.len().checked_mul(2)?))
+        .ok_or_else(|| EncodedValidationError::resource("has-key body atom count overflowed"))?;
+    let head_count = 1_usize
+        .checked_add(data_role_predicate_ids.len())
+        .ok_or_else(|| EncodedValidationError::resource("has-key head atom count overflowed"))?;
+    let mut body = Vec::new();
+    let mut head = Vec::new();
+    budget.claim_owned(
+        body_count
+            .checked_add(head_count)
+            .and_then(|value| value.checked_mul(size_of::<DecodedAtom>()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("has-key atom allocation overflowed")
+            })?,
+    )?;
+    body.try_reserve_exact(body_count)
+        .map_err(|_| EncodedValidationError::resource("has-key body allocation failed"))?;
+    head.try_reserve_exact(head_count)
+        .map_err(|_| EncodedValidationError::resource("has-key head allocation failed"))?;
+
+    let left = 0_u32;
+    let right = 1_u32;
+    head.push(object_variable_atom(equality, left, right));
+    body.push(variable_atom_at(class_predicate_id, left, TermSort::Object));
+    body.push(variable_atom_at(
+        class_predicate_id,
+        right,
+        TermSort::Object,
+    ));
+    body.push(variable_atom_at(named, left, TermSort::Object));
+    body.push(variable_atom_at(named, right, TermSort::Object));
+    body.push(object_variable_atom(ordering, left, right));
+    let mut next_index = 2_u32;
+    for role in object_role_predicate_ids {
+        let target = next_index;
+        next_index = next_index.checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("has-key variable count exceeds u32")
+        })?;
+        body.push(object_variable_atom(*role, left, target));
+        body.push(object_variable_atom(*role, right, target));
+        body.push(variable_atom_at(named, target, TermSort::Object));
+    }
+    for role in data_role_predicate_ids {
+        let left_target = next_index;
+        let right_target = next_index.checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("has-key variable count exceeds u32")
+        })?;
+        next_index = next_index.checked_add(2).ok_or_else(|| {
+            EncodedValidationError::resource("has-key variable count exceeds u32")
+        })?;
+        body.push(data_variable_atom(*role, left, left_target));
+        body.push(data_variable_atom(*role, right, right_target));
+        head.push(data_equality_variable_atom(
+            data_inequality.ok_or_else(|| {
+                EncodedValidationError::invariant("has-key data inequality disappeared")
+            })?,
+            left_target,
+            right_target,
+        ));
+    }
+    let mut symmetric_predicates = vec![equality, ordering];
+    if let Some(predicate) = data_inequality {
+        symmetric_predicates.push(predicate);
+    }
+    let (body, head) = canonicalize_variable_rule(
+        body,
+        head,
+        &symmetric_predicates,
+        scalar_predicate_ids,
+        budget,
+    )?;
+    let join_order = plan_key_join(&body, ordering, scalar_predicate_ids, budget)?;
+    let key = variable_rule_key(&body, &head)?;
+    budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>() + key.len())?;
+    budget.claim_owned(
+        body.len()
+            .checked_add(1)
+            .and_then(|value| value.checked_mul(size_of::<u32>()))
+            .ok_or_else(|| EncodedValidationError::resource("has-key clause IDs overflowed"))?,
+    )?;
+    clauses
+        .try_reserve(1)
+        .map_err(|_| EncodedValidationError::resource("has-key clause allocation failed"))?;
+    clauses.push((
+        key,
+        DecodedClause {
+            clause_id: 0,
+            body,
+            head,
+            provenance_ids: vec![provenance_id],
+            join_order,
+        },
+    ));
+    Ok(())
+}
+
+fn canonicalize_variable_rule(
+    mut body: Vec<DecodedAtom>,
+    mut head: Vec<DecodedAtom>,
+    symmetric_predicates: &[u32],
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(Vec<DecodedAtom>, Vec<DecodedAtom>)> {
+    for atom in body.iter_mut().chain(&mut head) {
+        canonicalize_symmetric_variable_atom(atom, symmetric_predicates)?;
+    }
+    body = sort_atoms_by_alpha_skeleton(body, scalar_predicate_ids, budget)?;
+    head = sort_atoms_by_alpha_skeleton(head, scalar_predicate_ids, budget)?;
+    let mut variables = Vec::<(u32, TermSort)>::new();
+    for atom in body.iter().chain(&head) {
+        for argument in &atom.arguments {
+            let DecodedTerm::Variable { index, sort } = argument else {
+                return Err(EncodedValidationError::invariant(
+                    "has-key rule contains a non-variable term",
+                ));
+            };
+            variables.push((*index, *sort));
+        }
+    }
+    budget.claim_work(sort_work(variables.len()))?;
+    variables.sort_unstable();
+    variables.dedup();
+    let maximum_passes = variables.len().checked_add(2).ok_or_else(|| {
+        EncodedValidationError::resource("has-key alpha-canonical pass count overflowed")
+    })?;
+    for _ in 0..maximum_passes {
+        budget.claim_work(body.len().saturating_add(head.len()))?;
+        let mut mapping = Vec::<((u32, TermSort), u32)>::new();
+        budget.claim_owned(
+            variables
+                .len()
+                .checked_mul(size_of::<((u32, TermSort), u32)>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("has-key variable mapping overflowed")
+                })?,
+        )?;
+        mapping.try_reserve_exact(variables.len()).map_err(|_| {
+            EncodedValidationError::resource("has-key variable mapping allocation failed")
+        })?;
+        for atom in body.iter().chain(&head) {
+            for argument in &atom.arguments {
+                let DecodedTerm::Variable { index, sort } = argument else {
+                    return Err(EncodedValidationError::invariant(
+                        "has-key rule contains a non-variable term",
+                    ));
+                };
+                if mapping.iter().all(|(source, _)| *source != (*index, *sort)) {
+                    let mapped = u32::try_from(mapping.len()).map_err(|_| {
+                        EncodedValidationError::resource("has-key variable ID exceeds u32")
+                    })?;
+                    mapping.push(((*index, *sort), mapped));
+                }
+            }
+        }
+        let renamed_body = rename_variable_atoms(
+            &body,
+            &mapping,
+            symmetric_predicates,
+            scalar_predicate_ids,
+            budget,
+        )?;
+        let renamed_head = rename_variable_atoms(
+            &head,
+            &mapping,
+            symmetric_predicates,
+            scalar_predicate_ids,
+            budget,
+        )?;
+        let mut first_occurrence = Vec::new();
+        for atom in renamed_body.iter().chain(&renamed_head) {
+            for argument in &atom.arguments {
+                let DecodedTerm::Variable { index, .. } = argument else {
+                    return Err(EncodedValidationError::invariant(
+                        "has-key rule contains a non-variable term",
+                    ));
+                };
+                if !first_occurrence.contains(index) {
+                    first_occurrence.push(*index);
+                }
+            }
+        }
+        let dense = first_occurrence
+            .iter()
+            .enumerate()
+            .all(|(index, value)| usize::try_from(*value).ok() == Some(index));
+        if renamed_body == body && renamed_head == head && dense {
+            return Ok((renamed_body, renamed_head));
+        }
+        body = renamed_body;
+        head = renamed_head;
+    }
+    Err(EncodedValidationError::invariant(
+        "has-key alpha-canonical ordering did not converge",
+    ))
+}
+
+fn rename_variable_atoms(
+    atoms: &[DecodedAtom],
+    mapping: &[((u32, TermSort), u32)],
+    symmetric_predicates: &[u32],
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedAtom>> {
+    let mut renamed = Vec::new();
+    budget.claim_owned(
+        atoms
+            .len()
+            .checked_mul(size_of::<DecodedAtom>())
+            .ok_or_else(|| EncodedValidationError::resource("has-key atom rename overflowed"))?,
+    )?;
+    renamed
+        .try_reserve_exact(atoms.len())
+        .map_err(|_| EncodedValidationError::resource("has-key atom rename allocation failed"))?;
+    for atom in atoms {
+        let mut arguments = Vec::new();
+        budget.claim_owned(
+            atom.arguments
+                .len()
+                .checked_mul(size_of::<DecodedTerm>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("has-key term rename overflowed")
+                })?,
+        )?;
+        arguments
+            .try_reserve_exact(atom.arguments.len())
+            .map_err(|_| EncodedValidationError::resource("has-key term allocation failed"))?;
+        for argument in &atom.arguments {
+            let DecodedTerm::Variable { index, sort } = argument else {
+                return Err(EncodedValidationError::invariant(
+                    "has-key rule contains a non-variable term",
+                ));
+            };
+            let mapped = mapping
+                .iter()
+                .find(|(source, _)| *source == (*index, *sort))
+                .map(|(_, target)| *target)
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant("has-key variable mapping is incomplete")
+                })?;
+            arguments.push(DecodedTerm::Variable {
+                index: mapped,
+                sort: *sort,
+            });
+        }
+        let mut value = DecodedAtom {
+            predicate_id: atom.predicate_id,
+            arguments,
+        };
+        canonicalize_symmetric_variable_atom(&mut value, symmetric_predicates)?;
+        renamed.push(value);
+    }
+    sort_atoms_by_canonical_key(renamed, scalar_predicate_ids, budget)
+}
+
+fn canonicalize_symmetric_variable_atom(
+    atom: &mut DecodedAtom,
+    symmetric_predicates: &[u32],
+) -> EncodedResult<()> {
+    if !symmetric_predicates.contains(&atom.predicate_id) {
+        return Ok(());
+    }
+    let [left, right] = atom.arguments.as_mut_slice() else {
+        return Err(EncodedValidationError::invariant(
+            "symmetric has-key atom is not binary",
+        ));
+    };
+    let DecodedTerm::Variable {
+        index: left_index,
+        sort: left_sort,
+    } = left
+    else {
+        return Err(EncodedValidationError::invariant(
+            "symmetric has-key atom contains a non-variable term",
+        ));
+    };
+    let DecodedTerm::Variable {
+        index: right_index,
+        sort: right_sort,
+    } = right
+    else {
+        return Err(EncodedValidationError::invariant(
+            "symmetric has-key atom contains a non-variable term",
+        ));
+    };
+    if left_sort != right_sort {
+        return Err(EncodedValidationError::invariant(
+            "symmetric has-key atom mixes term sorts",
+        ));
+    }
+    if right_index < left_index {
+        std::mem::swap(left, right);
+    }
+    Ok(())
+}
+
+fn sort_atoms_by_alpha_skeleton(
+    atoms: Vec<DecodedAtom>,
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedAtom>> {
+    budget.claim_work(sort_work(atoms.len()))?;
+    let mut ordered = Vec::new();
+    ordered
+        .try_reserve_exact(atoms.len())
+        .map_err(|_| EncodedValidationError::resource("has-key alpha sort allocation failed"))?;
+    for atom in &atoms {
+        if atom
+            .arguments
+            .iter()
+            .any(|argument| !matches!(argument, DecodedTerm::Variable { .. }))
+        {
+            return Err(EncodedValidationError::invariant(
+                "has-key alpha skeleton contains a non-variable term",
+            ));
+        }
+    }
+    for atom in atoms {
+        ordered.push((
+            scalar_predicate_id(scalar_predicate_ids, atom.predicate_id)?,
+            atom,
+        ));
+    }
+    ordered.sort_by(|(left_predicate, left), (right_predicate, right)| {
+        left_predicate.cmp(right_predicate).then_with(|| {
+            left.arguments
+                .iter()
+                .zip(&right.arguments)
+                .find_map(|(left_term, right_term)| {
+                    let DecodedTerm::Variable {
+                        index: left_index,
+                        sort: left_sort,
+                    } = left_term
+                    else {
+                        return None;
+                    };
+                    let DecodedTerm::Variable {
+                        index: right_index,
+                        sort: right_sort,
+                    } = right_term
+                    else {
+                        return None;
+                    };
+                    let left_key = (alpha_sort_rank(*left_sort), *left_index);
+                    let right_key = (alpha_sort_rank(*right_sort), *right_index);
+                    (left_key != right_key).then(|| left_key.cmp(&right_key))
+                })
+                .unwrap_or_else(|| left.arguments.len().cmp(&right.arguments.len()))
+        })
+    });
+    ordered.dedup_by(|left, right| left.1 == right.1);
+    Ok(ordered.into_iter().map(|(_, atom)| atom).collect())
+}
+
+const fn alpha_sort_rank(sort: TermSort) -> u8 {
+    match sort {
+        TermSort::Data => 0,
+        TermSort::Object => 1,
+    }
+}
+
+fn sort_atoms_by_canonical_key(
+    atoms: Vec<DecodedAtom>,
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedAtom>> {
+    let mut ordered = Vec::new();
+    budget.claim_owned(
+        atoms
+            .len()
+            .checked_mul(size_of::<(Vec<u8>, DecodedAtom)>())
+            .ok_or_else(|| EncodedValidationError::resource("has-key atom sort overflowed"))?,
+    )?;
+    ordered
+        .try_reserve_exact(atoms.len())
+        .map_err(|_| EncodedValidationError::resource("has-key atom sort allocation failed"))?;
+    for atom in atoms {
+        let scalar_id = scalar_predicate_id(scalar_predicate_ids, atom.predicate_id)?;
+        let key = variable_atom_key_with_predicate(&atom, scalar_id)?;
+        budget.claim_owned(key.len())?;
+        ordered.push((key, atom));
+    }
+    budget.claim_work(sort_work(ordered.len()))?;
+    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+    ordered.dedup_by(|left, right| left.0 == right.0);
+    Ok(ordered.into_iter().map(|(_, atom)| atom).collect())
+}
+
+fn variable_atom_key(atom: &DecodedAtom) -> EncodedResult<Vec<u8>> {
+    variable_atom_key_with_predicate(atom, atom.predicate_id)
+}
+
+fn variable_atom_key_with_predicate(
+    atom: &DecodedAtom,
+    predicate_id: u32,
+) -> EncodedResult<Vec<u8>> {
+    let mut arguments = Vec::new();
+    arguments
+        .try_reserve_exact(atom.arguments.len())
+        .map_err(|_| EncodedValidationError::resource("has-key atom key allocation failed"))?;
+    for argument in &atom.arguments {
+        let DecodedTerm::Variable { index, sort } = argument else {
+            return Err(EncodedValidationError::invariant(
+                "has-key atom key contains a non-variable term",
+            ));
+        };
+        arguments.push(variable_json(*index, *sort));
+    }
+    Ok(format!(
+        "{{\"arguments\":[{}],\"predicate_id\":{},\"schema_version\":1,\"type\":\"Atom\"}}",
+        arguments.join(","),
+        predicate_id,
+    )
+    .into_bytes())
+}
+
+fn scalar_predicate_id(scalar_predicate_ids: &[u32], local_id: u32) -> EncodedResult<u32> {
+    scalar_predicate_ids
+        .get(usize::try_from(local_id).map_err(|_| {
+            EncodedValidationError::invariant("has-key local predicate ID exceeds usize")
+        })?)
+        .copied()
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("has-key scalar predicate mapping is incomplete")
+        })
+}
+
+fn variable_rule_key(body: &[DecodedAtom], head: &[DecodedAtom]) -> EncodedResult<Vec<u8>> {
+    let body = body
+        .iter()
+        .map(variable_atom_key)
+        .collect::<EncodedResult<Vec<_>>>()?
+        .into_iter()
+        .map(|value| {
+            String::from_utf8(value)
+                .map_err(|_| EncodedValidationError::invariant("has-key body key is not UTF-8"))
+        })
+        .collect::<EncodedResult<Vec<_>>>()?
+        .join(",");
+    let head = head
+        .iter()
+        .map(variable_atom_key)
+        .collect::<EncodedResult<Vec<_>>>()?
+        .into_iter()
+        .map(|value| {
+            String::from_utf8(value)
+                .map_err(|_| EncodedValidationError::invariant("has-key head key is not UTF-8"))
+        })
+        .collect::<EncodedResult<Vec<_>>>()?
+        .join(",");
+    Ok(format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes())
+}
+
+fn plan_key_join(
+    body: &[DecodedAtom],
+    ordering_predicate_id: u32,
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u32>> {
+    let mut remaining = (0..body.len()).collect::<Vec<_>>();
+    let mut bound = Vec::<(u32, TermSort)>::new();
+    let mut result = Vec::new();
+    let mut atom_keys = Vec::new();
+    atom_keys
+        .try_reserve_exact(body.len())
+        .map_err(|_| EncodedValidationError::resource("has-key join key allocation failed"))?;
+    for atom in body {
+        let scalar_id = scalar_predicate_id(scalar_predicate_ids, atom.predicate_id)?;
+        let key = variable_atom_key_with_predicate(atom, scalar_id)?;
+        budget.claim_owned(key.len())?;
+        atom_keys.push(key);
+    }
+    budget.claim_owned(
+        body.len()
+            .checked_mul(3)
+            .and_then(|value| value.checked_mul(size_of::<usize>()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("has-key join allocation overflowed")
+            })?,
+    )?;
+    result
+        .try_reserve_exact(body.len())
+        .map_err(|_| EncodedValidationError::resource("has-key join allocation failed"))?;
+    while !remaining.is_empty() {
+        budget.claim_work(remaining.len())?;
+        let mut selected = None::<(usize, (u8, u8, usize, usize, &Vec<u8>))>;
+        for (position, index) in remaining.iter().copied().enumerate() {
+            let mut variables = Vec::new();
+            for argument in &body[index].arguments {
+                let DecodedTerm::Variable {
+                    index: variable,
+                    sort,
+                } = argument
+                else {
+                    return Err(EncodedValidationError::invariant(
+                        "has-key join contains a non-variable term",
+                    ));
+                };
+                if !variables.contains(&(*variable, *sort)) {
+                    variables.push((*variable, *sort));
+                }
+            }
+            let shared = variables
+                .iter()
+                .filter(|value| bound.contains(value))
+                .count();
+            let new = variables.len().saturating_sub(shared);
+            let rank = (
+                u8::from(body[index].predicate_id == ordering_predicate_id && new > 0),
+                u8::from(shared == 0),
+                new,
+                body[index].arguments.len(),
+                &atom_keys[index],
+            );
+            if selected
+                .as_ref()
+                .is_none_or(|(_, previous)| rank < *previous)
+            {
+                selected = Some((position, rank));
+            }
+        }
+        let (position, _) = selected.ok_or_else(|| {
+            EncodedValidationError::invariant("has-key join planner lost its candidates")
+        })?;
+        let index = remaining.remove(position);
+        result.push(
+            u32::try_from(index)
+                .map_err(|_| EncodedValidationError::resource("has-key join index exceeds u32"))?,
+        );
+        for argument in &body[index].arguments {
+            let DecodedTerm::Variable { index, sort } = argument else {
+                return Err(EncodedValidationError::invariant(
+                    "has-key join contains a non-variable term",
+                ));
+            };
+            if !bound.contains(&(*index, *sort)) {
+                bound.push((*index, *sort));
+            }
+        }
+    }
+    Ok(result)
+}
+
 fn push_data_functionality_clause(
     clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
     role_predicate_id: u32,
@@ -5534,12 +6481,22 @@ fn named_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
             })?))
         }
         PredicateKind::Inequality
-            if binary_object
+            if equality_sort.is_some()
                 && predicate.symbol_id.is_none()
                 && predicate.annotation.is_empty()
                 && predicate.internal_key.is_none() =>
         {
-            Ok(inequality_predicate_key())
+            Ok(inequality_predicate_key(equality_sort.ok_or_else(
+                || EncodedValidationError::invariant("inequality predicate lost its term sort"),
+            )?))
+        }
+        PredicateKind::OrderingGuard
+            if binary_object
+                && predicate.symbol_id.is_none()
+                && predicate.annotation.is_empty()
+                && predicate.internal_key.as_deref() == Some("canonical-object-order") =>
+        {
+            Ok(ordering_predicate_key())
         }
         PredicateKind::NamedIndividual
             if unary_object
@@ -5593,8 +6550,16 @@ fn equality_predicate_key(sort: TermSort) -> Vec<u8> {
     .into_bytes()
 }
 
-fn inequality_predicate_key() -> Vec<u8> {
-    b"{\"annotation\":[],\"argument_sorts\":[\"object\",\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"inequality\",\"role_id\":null,\"symbol_id\":null}"
+fn inequality_predicate_key(sort: TermSort) -> Vec<u8> {
+    let sort = term_sort_name(sort);
+    format!(
+        "{{\"annotation\":[],\"argument_sorts\":[\"{sort}\",\"{sort}\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"inequality\",\"role_id\":null,\"symbol_id\":null}}"
+    )
+    .into_bytes()
+}
+
+fn ordering_predicate_key() -> Vec<u8> {
+    b"{\"annotation\":[],\"argument_sorts\":[\"object\",\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":\"canonical-object-order\",\"kind\":\"ordering_guard\",\"role_id\":null,\"symbol_id\":null}"
         .to_vec()
 }
 
@@ -6008,6 +6973,7 @@ fn merge_named_class_phases_impl(
         data_domains,
         data_ranges,
         datatype_definitions,
+        keys,
         data_functionalities,
         facts,
         object_facts,
@@ -6036,6 +7002,7 @@ fn merge_named_class_phases_impl(
         &data_domains,
         &data_ranges,
         &datatype_definitions,
+        &keys,
         &data_functionalities,
         &facts,
         &object_facts,
@@ -6056,6 +7023,8 @@ fn merge_named_class_phases_impl(
         equality_predicate,
         data_equality_predicate,
         inequality_predicate,
+        data_inequality_predicate,
+        ordering_predicate,
     ) = freeze_predicates(
         &edges,
         &disjoints,
@@ -6064,6 +7033,7 @@ fn merge_named_class_phases_impl(
         &data_domains,
         &data_ranges,
         &datatype_definitions,
+        &keys,
         &data_functionalities,
         &facts,
         &object_facts,
@@ -6090,6 +7060,7 @@ fn merge_named_class_phases_impl(
         &data_domains,
         &data_ranges,
         &datatype_definitions,
+        &keys,
         &data_functionalities,
         thing,
         nothing,
@@ -6099,7 +7070,11 @@ fn merge_named_class_phases_impl(
         &predicate_by_data_range,
         equality_predicate,
         data_equality_predicate,
+        data_inequality_predicate,
+        ordering_predicate,
+        named_predicate,
         &guard_predicates,
+        &scalar_predicate_ids,
         &provenance_keys,
         &mut budget,
     )?;
@@ -6117,6 +7092,7 @@ fn merge_named_class_phases_impl(
         object_characteristics
             .iter()
             .any(|value| value.kind != ObjectCharacteristicKind::Reflexive),
+        !keys.is_empty(),
         inequality_predicate,
         &provenance_keys,
         &scalar_predicate_ids,
@@ -6200,6 +7176,7 @@ fn merge_named_class_phases_impl(
         normalized_data_domains: data_domains,
         normalized_data_ranges: data_ranges,
         normalized_datatype_definitions: datatype_definitions,
+        normalized_keys: keys,
         normalized_data_functionalities: data_functionalities,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
@@ -6498,6 +7475,7 @@ type NormalizedSources = (
     Vec<NormalizedDataDomain>,
     Vec<NormalizedDataRange>,
     Vec<NormalizedDatatypeDefinition>,
+    Vec<NormalizedKey>,
     Vec<NormalizedDataFunctionality>,
     Vec<NormalizedFact>,
     Vec<NormalizedObjectFact>,
@@ -6526,6 +7504,7 @@ fn merge_normalized_sources(
     let mut raw_data_domains = Vec::new();
     let mut raw_data_ranges = Vec::new();
     let mut raw_datatype_definitions = Vec::new();
+    let mut raw_keys = Vec::new();
     let mut raw_data_functionalities = Vec::new();
     let mut raw_facts = Vec::new();
     let mut raw_object_facts = Vec::new();
@@ -6791,6 +7770,111 @@ fn merge_normalized_sources(
                 });
             }
         }
+        for key in &phase.normalized_keys {
+            if key.provenance.is_empty() {
+                return Err(EncodedValidationError::invariant(
+                    "merged has-key source lost provenance",
+                ));
+            }
+            let class_id = mapped_id(class_map, key.class_id, "has-key class")?;
+            budget.claim_owned(
+                key.object_role_ids
+                    .len()
+                    .checked_add(key.data_role_ids.len())
+                    .and_then(|value| value.checked_mul(size_of::<u32>()))
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "merged has-key role mapping allocation overflowed",
+                        )
+                    })?,
+            )?;
+            let mut object_role_ids = Vec::new();
+            let mut data_role_ids = Vec::new();
+            if !key.object_role_ids.is_empty() {
+                let source_roles = source_object_roles
+                    .and_then(|roles| roles.get(phase_index))
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "merged has-key source lost its object-role domain",
+                        )
+                    })?;
+                let merged_roles = merged_object_roles.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged has-key source lost its global object-role domain",
+                    )
+                })?;
+                object_role_ids
+                    .try_reserve_exact(key.object_role_ids.len())
+                    .map_err(|_| {
+                        EncodedValidationError::resource(
+                            "merged has-key object-role allocation failed",
+                        )
+                    })?;
+                for role_id in &key.object_role_ids {
+                    object_role_ids.push(remap_object_role(
+                        source_roles,
+                        merged_roles,
+                        *role_id,
+                        budget,
+                    )?);
+                }
+                budget.claim_work(sort_work(object_role_ids.len()))?;
+                object_role_ids.sort_unstable();
+                object_role_ids.dedup();
+            }
+            if !key.data_role_ids.is_empty() {
+                let source_roles = source_data_roles
+                    .and_then(|roles| roles.get(phase_index))
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "merged has-key source lost its data-role domain",
+                        )
+                    })?;
+                let merged_roles = merged_data_roles.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged has-key source lost its global data-role domain",
+                    )
+                })?;
+                data_role_ids
+                    .try_reserve_exact(key.data_role_ids.len())
+                    .map_err(|_| {
+                        EncodedValidationError::resource(
+                            "merged has-key data-role allocation failed",
+                        )
+                    })?;
+                for role_id in &key.data_role_ids {
+                    data_role_ids.push(remap_data_role(
+                        source_roles,
+                        merged_roles,
+                        *role_id,
+                        budget,
+                    )?);
+                }
+                budget.claim_work(sort_work(data_role_ids.len()))?;
+                data_role_ids.sort_unstable();
+                data_role_ids.dedup();
+            }
+            let role_bytes = object_role_ids
+                .len()
+                .checked_add(data_role_ids.len())
+                .and_then(|value| value.checked_mul(size_of::<u32>()))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("merged has-key role allocation overflowed")
+                })?;
+            for provenance in &key.provenance {
+                budget.claim_work(1)?;
+                budget.claim_owned(size_of::<RawKey>().saturating_add(role_bytes))?;
+                raw_keys.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource("merged has-key allocation failed")
+                })?;
+                raw_keys.push(RawKey {
+                    class_id,
+                    object_role_ids: object_role_ids.clone(),
+                    data_role_ids: data_role_ids.clone(),
+                    provenance: *provenance,
+                });
+            }
+        }
         if !phase.normalized_data_functionalities.is_empty() {
             let source_roles = source_data_roles
                 .and_then(|roles| roles.get(phase_index))
@@ -7021,6 +8105,7 @@ fn merge_normalized_sources(
         normalize_data_domains(raw_data_domains, budget)?,
         normalize_data_ranges(raw_data_ranges, budget)?,
         normalize_datatype_definitions(raw_datatype_definitions, budget)?,
+        normalize_keys(raw_keys, budget)?,
         normalize_data_functionalities(raw_data_functionalities, budget)?,
         normalize_facts(raw_facts, budget)?,
         normalize_object_facts(raw_object_facts, budget)?,

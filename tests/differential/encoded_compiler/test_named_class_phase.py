@@ -202,6 +202,7 @@ def _expected_manifest(
     include_data_domains: bool = False,
     include_data_ranges: bool = False,
     include_datatype_definitions: bool = False,
+    include_keys: bool = False,
     include_data_functionalities: bool = False,
     include_object_assertions: bool = False,
     include_negative_object_assertions: bool = False,
@@ -234,12 +235,14 @@ def _expected_manifest(
         PredicateKind.EQUALITY,
         PredicateKind.INEQUALITY,
         PredicateKind.NAMED_INDIVIDUAL,
+        PredicateKind.ORDERING_GUARD,
     }
     constraint_provenance_ids: set[int] = set()
     characteristic_provenance_ids: set[int] = set()
     data_domain_provenance_ids: set[int] = set()
     data_range_provenance_ids: set[int] = set()
     datatype_definition_provenance_ids: set[int] = set()
+    key_provenance_ids: set[int] = set()
     data_functionality_provenance_ids: set[int] = set()
     assertion_provenance_ids: set[int] = set()
     negative_assertion_provenance_ids: set[int] = set()
@@ -249,6 +252,7 @@ def _expected_manifest(
         or include_data_domains
         or include_data_ranges
         or include_datatype_definitions
+        or include_keys
         or include_data_functionalities
         or include_object_assertions
         or include_negative_object_assertions
@@ -297,6 +301,12 @@ def _expected_manifest(
             for record in normalized.records
             if isinstance(record.statement, owl.DatatypeDefinition)
         }
+    if include_keys:
+        key_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if isinstance(record.statement, owl.HasKey)
+        }
     if include_data_functionalities:
         data_functionality_provenance_ids = {
             provenance_id_by_key[(record.provenance_sha256, record.generated)]
@@ -340,6 +350,11 @@ def _expected_manifest(
         clause.clause_id
         for clause in program.clauses
         if datatype_definition_provenance_ids.intersection(clause.provenance_ids)
+    }
+    key_clauses = {
+        clause.clause_id
+        for clause in program.clauses
+        if key_provenance_ids.intersection(clause.provenance_ids)
     }
     data_functionality_clauses = {
         clause.clause_id
@@ -389,6 +404,14 @@ def _expected_manifest(
         if predicates_by_id[atom.predicate_id].kind is PredicateKind.DATA_RANGE
     }
     selected_data_range_predicates = data_range_predicates | datatype_definition_predicates
+    key_role_predicates = {
+        atom.predicate_id
+        for clause in program.clauses
+        if clause.clause_id in key_clauses
+        for atom in clause.body + clause.head
+        if predicates_by_id[atom.predicate_id].kind
+        in {PredicateKind.OBJECT_ROLE, PredicateKind.DATA_ROLE}
+    }
     data_functionality_role_predicates = {
         atom.predicate_id
         for clause in program.clauses
@@ -414,6 +437,7 @@ def _expected_manifest(
         | data_domain_role_predicates
         | data_range_role_predicates
         | data_functionality_role_predicates
+        | key_role_predicates
         | assertion_role_predicates
         | negative_assertion_role_predicates
     )
@@ -459,6 +483,7 @@ def _expected_manifest(
             and clause.clause_id not in data_domain_clauses
             and clause.clause_id not in data_range_clauses
             and clause.clause_id not in datatype_definition_clauses
+            and clause.clause_id not in key_clauses
             and clause.clause_id not in data_functionality_clauses
         ):
             continue
@@ -922,6 +947,39 @@ def test_annotated_named_datatype_definitions_match_scalar_exactly() -> None:
         snapshot,
         compiled_roots=3,
         include_datatype_definitions=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_annotated_named_keys_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(AnnotationProperty(:meta))",
+            (
+                'HasKey(Annotation(Annotation(:meta "nested") :note "mixed") '
+                ":A (:p ObjectInverseOf(:q)) (:d :e))"
+            ),
+            'HasKey(Annotation(:note "object"@en) :B (:q) ())',
+            "HasKey(Annotation(:note _:source) :C () (:e))",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=3,
+        include_keys=True,
     )
     assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
@@ -1409,6 +1467,61 @@ def test_composite_datatype_definitions_remap_distinct_local_domains_exactly() -
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_composite_anonymous_named_keys_group_sources_exactly() -> None:
+    source = functional(
+        "Declaration(Class(:A))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(DataProperty(:d))",
+        "Declaration(AnnotationProperty(:note))",
+        "HasKey(Annotation(:note _:same) :A (:p) (:d))",
+    )
+    left = pyowl_core.load_snapshot(source, options=OPTIONS)
+    right = pyowl_core.load_snapshot(source, options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_keys=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_named_keys_remap_distinct_local_domains_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:Z))",
+            "Declaration(ObjectProperty(:z))",
+            "Declaration(DataProperty(:zd))",
+            "HasKey(:Z (:z) (:zd))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:a))",
+            "Declaration(DataProperty(:ad))",
+            "HasKey(:A (:a) (:ad))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_keys=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_composite_anonymous_functional_data_properties_group_sources_exactly() -> None:
     source = functional(
         "Declaration(DataProperty(:p))",
@@ -1546,6 +1659,34 @@ def test_complex_datatype_definition_still_defers_the_whole_root() -> None:
     assert manifest["deferred_roots"] == 1
     assert all(
         predicate["kind"] != PredicateKind.DATA_RANGE.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_complex_has_key_still_defers_the_whole_root() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "HasKey(ObjectIntersectionOf(:A :B) (:p) (:d))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
+    assert all(
+        predicate["kind"]
+        not in {
+            PredicateKind.OBJECT_ROLE.value,
+            PredicateKind.DATA_ROLE.value,
+            PredicateKind.ORDERING_GUARD.value,
+        }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
