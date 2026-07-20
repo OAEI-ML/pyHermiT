@@ -69,9 +69,9 @@ releases native memory/caches, and makes subsequent semantic/update calls raise
 readable. It never closes/invalidates the shared core view.
 
 `diagnostics()` returns a sorted immutable scalar mapping. Its stable cross-consumer fields are
-the ingestion path, lowercase SHA-256 compiler digest, compiler/native schema versions, and the
-bounded encoded-ingestion counters defined by `native-structural-ingestion.md`. It remains
-readable after disposal.
+the ingestion path, lowercase SHA-256 compiler digest, latest successful
+`consumer_compile_seconds`, compiler/native schema versions, and the bounded encoded-ingestion
+counters defined by `native-structural-ingestion.md`. It remains readable after disposal.
 
 `interrupt` may be called safely from another thread. It targets the currently active
 operation(s), is not a permanent disposed state, and does not carry over to a later

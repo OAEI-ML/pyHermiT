@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import threading
 from io import BytesIO
@@ -11,6 +12,7 @@ import pyowl_core.model as owl
 import pytest
 
 import pyhermit
+import pyhermit.facade as facade_module
 from pyhermit import (
     ConcurrentMutationError,
     DisposedReasonerError,
@@ -91,6 +93,7 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
     expected_keys = {
         "compiler_cache_schema_version",
         "compiler_digest",
+        "consumer_compile_seconds",
         "encoded_buffer_bytes",
         "encoded_buffer_count",
         "encoded_compiler_gil_released",
@@ -119,6 +122,9 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
     assert diagnostics["compiler_cache_schema_version"] == pyhermit.COMPILER_CACHE_SCHEMA_VERSION
     assert diagnostics["ir_schema_version"] == pyhermit.COMPILED_IR_SCHEMA_VERSION
     assert diagnostics["implementation_version"] == reasoner.backend.implementation_version
+    assert type(diagnostics["consumer_compile_seconds"]) is float
+    assert math.isfinite(diagnostics["consumer_compile_seconds"])
+    assert diagnostics["consumer_compile_seconds"] >= 0.0
     if reasoner.backend.name in {"native", "verify"}:
         assert diagnostics["native_abi_version"] == pyhermit.NATIVE_ABI_VERSION
     encoded = {key: value for key, value in diagnostics.items() if key.startswith("encoded_")}
@@ -140,6 +146,31 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
 
     reasoner.dispose()
     assert reasoner.diagnostics() == diagnostics
+
+
+def test_consumer_compile_seconds_measures_each_successful_compilation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = iter((10.0, 10.25, 20.0, 20.75))
+    monkeypatch.setattr(facade_module, "perf_counter", lambda: next(ticks))
+    reasoner = Reasoner(
+        functional("Declaration(Class(:A))", "Declaration(Class(:B))"),
+        config=config(),
+        load_options=OPTIONS,
+    )
+
+    assert reasoner.diagnostics()["consumer_compile_seconds"] == pytest.approx(0.25)
+    reasoner.add_axioms(
+        (
+            owl.SubClassOf(
+                owl.Class(owl.IRI("urn:test#A")),
+                owl.Class(owl.IRI("urn:test#B")),
+            ),
+        )
+    )
+    reasoner.flush()
+
+    assert reasoner.diagnostics()["consumer_compile_seconds"] == pytest.approx(0.75)
 
 
 def test_public_compiler_diagnostics_change_only_with_compilation_identity() -> None:
@@ -234,12 +265,14 @@ def test_failed_flush_keeps_old_revision_and_pending_batch() -> None:
     missing = owl.Class(owl.IRI("urn:test#Missing"))
     invalid = owl.SubClassOf(a, missing)
     before = reasoner.ontology
+    diagnostics_before = reasoner.diagnostics()
     reasoner.add_axioms((invalid,))
 
     with pytest.raises(OntologyProfileError):
         reasoner.flush()
 
     assert reasoner.ontology is before
+    assert reasoner.diagnostics() == diagnostics_before
     assert reasoner.pending_additions() == frozenset((invalid,))
     assert reasoner.is_consistent()
     reasoner.remove_axioms((invalid,))

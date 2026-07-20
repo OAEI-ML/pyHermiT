@@ -12,7 +12,7 @@ selects the transitive answer; `direct=True` selects immediate quotient-graph ne
 | `Reasoner.ontology` | Retained immutable `OntologyView`; a compatible supplied view is returned by identity. |
 | `Reasoner.config` | Frozen `ReasonerConfig` used to create the session. |
 | `Reasoner.backend` | Selected immutable `BackendInfo`, including name, version, capabilities, and acceleration state. |
-| `Reasoner.diagnostics` | Immutable sorted scalar mapping describing the compiler identity, ingestion path, and bounded encoded-ingestion counters. |
+| `Reasoner.diagnostics` | Immutable sorted scalar mapping describing compiler identity, `consumer_compile_seconds`, ingestion path, and bounded encoded-ingestion counters. |
 | `Reasoner.interrupt` | Requests cooperative cancellation of the active operation; it is a no-op when idle. |
 | `Reasoner.dispose` | Idempotently closes private state; later semantic or update operations fail. |
 

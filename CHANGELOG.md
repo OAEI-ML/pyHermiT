@@ -14,7 +14,8 @@ release; dates describe repository evidence, not package-index publication.
   selection is fail-closed; semantic failures never fall back silently.
 - Added immutable public compiler/ingestion diagnostics and import-light compiler-cache,
   compiled-IR, and native-ABI schema constants for cache and provenance consumers; the public
-  compiler digest is canonical across backend and ingestion-path selection.
+  compiler digest is canonical across backend and ingestion-path selection, and the latest
+  successful consumer compilation duration is measured independently of core loading.
 - Added deterministic normalization/private IR, hyperresolution, branching and
   backjumping, equality/nominal/cardinality handling, existential blocking, role
   automata, and datatype semantics with Python/native parity evidence.

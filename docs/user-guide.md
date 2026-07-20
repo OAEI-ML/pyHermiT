@@ -158,7 +158,9 @@ Record `pyhermit.__version__`, `backend_info()`, `reasoner.backend`,
 `scalar-python`, `scalar-wire`, and `encoded-native` ingestion-path vocabulary. Its lowercase
 SHA-256 `compiler_digest` covers the canonical compiler manifest and is independent of the
 selected backend/ingestion path. The path-specific private session-cache key is deliberately not
-exposed as that digest. The public
+exposed as that digest. `consumer_compile_seconds` is the monotonic wall duration of the latest
+successful private compilation and permanent-session preparation from an already validated core
+view; input acquisition, parsing, and profile validation are outside that interval. The public
 `COMPILER_CACHE_SCHEMA_VERSION`, `COMPILED_IR_SCHEMA_VERSION`, and `NATIVE_ABI_VERSION`
 constants support import-light cache partitioning.
 
@@ -167,6 +169,8 @@ zero/false accounting for the permanent-session compiler boundary. They are not 
 unimplemented placeholders: a native validation-only encoded preflight is deliberately excluded,
 and the selected session still consumes the scalar private wire. Do
 not compare a warm shared view to a cold file load as if they were the same workload.
+General parser, core-wire, scalar-materialization, and public-model-copy deltas are not inferred
+from an input shape and are omitted until their owning boundary exposes an authoritative counter.
 The required methodology separates load, validation, compilation, first/repeated
 reasoning, classification, realization, updates, and peak RSS; see
 [the performance specification](../specs/performance.md).

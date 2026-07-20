@@ -50,9 +50,13 @@ The stable public `Reasoner.diagnostics()` path vocabulary is `scalar-python`, `
 `encoded-native`; `scalar-native` is reserved for a future semantically distinct path. The mapping
 also exposes `compiler_digest`, `compiler_cache_schema_version`, `ir_schema_version`,
 `implementation_version`, optional `native_abi_version`, and the shared pyELK/Exact/OAEI
-`encoded_*` counter ledger. Those counters account only for structural-view compilation into the
-permanent session. On current scalar paths they are contractual zero/false measurements even when
-the native adapter performs a validation-only encoded preflight; they are not placeholders.
+`encoded_*` counter ledger. `consumer_compile_seconds` measures the latest successful private
+compile and permanent-session preparation from an already validated core view. Those counters
+account only for structural-view compilation into the permanent session. On current scalar paths
+they are contractual zero/false measurements even when the native adapter performs a
+validation-only encoded preflight; they are not placeholders. Parser, core-wire,
+scalar-materialization, and general public-model-copy deltas are omitted unless pyHermiT owns an
+authoritative counter for the measured boundary.
 `compiler_digest` is the lowercase SHA-256 of the canonical complete compiler manifest with the
 backend/configuration-specific private session-cache fingerprint excluded, so scalar and encoded
 paths over the same compilation identity must report the same value.

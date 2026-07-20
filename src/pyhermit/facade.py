@@ -12,6 +12,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from enum import Enum
+from time import perf_counter
 from types import MappingProxyType
 from typing import TypeVar, cast
 
@@ -81,6 +82,7 @@ class _Runtime:
     classification: ClassificationService
     realization: RealizationService
     result_mapper: CompiledResultMapper | None
+    consumer_compile_seconds: float
 
 
 def _canonical_compiler_digest(compiled: CompiledOntology) -> str:
@@ -166,10 +168,12 @@ class Reasoner:
 
         with self._state_lock:
             compiler_digest = self._runtime.compiler_digest
+            consumer_compile_seconds = self._runtime.consumer_compile_seconds
             backend = self._factory.info
         values: dict[str, bool | int | float | str] = {
             "compiler_cache_schema_version": COMPILER_CACHE_SCHEMA_VERSION,
             "compiler_digest": compiler_digest,
+            "consumer_compile_seconds": consumer_compile_seconds,
             "encoded_buffer_bytes": 0,
             "encoded_buffer_count": 0,
             "encoded_compiler_gil_released": False,
@@ -555,6 +559,7 @@ class Reasoner:
         validate_encoded = getattr(self._factory, "_validate_encoded_handoff", None)
         if callable(validate_encoded):
             validate_encoded(validated.view)
+        compile_started = perf_counter()
         bundle = compile_captured_bundle(
             validated.captured,
             self._config,
@@ -562,7 +567,7 @@ class Reasoner:
         )
         session = self._factory.create_session(bundle[2], self._config, self._cancellation.token)
         try:
-            return self._services(bundle, session)
+            return self._services(bundle, session, compile_started=compile_started)
         except BaseException:
             session.close()
             raise
@@ -571,6 +576,8 @@ class Reasoner:
         self,
         bundle: tuple[NormalizedOntology, ClauseProgram, CompiledOntology],
         session: BackendSession,
+        *,
+        compile_started: float,
     ) -> _Runtime:
         normalized, program, compiled = bundle
         executor = CompiledQueryExecutor(
@@ -629,6 +636,7 @@ class Reasoner:
             classification,
             realization,
             result_mapper,
+            perf_counter() - compile_started,
         )
 
     def _temporary_check(self, axioms: tuple[owl.AxiomNode, ...]) -> CheckResult:
@@ -665,6 +673,7 @@ class Reasoner:
             config=self._config,
             cancelled=self._cancelled,
         )
+        compile_started = perf_counter()
         bundle = compile_captured_bundle(
             validated.captured,
             self._config,
@@ -679,13 +688,13 @@ class Reasoner:
         )
         outcome = old.session.apply_delta(cast(BackendCompiledDelta, delta))
         if outcome is DeltaOutcome.APPLIED_INCREMENTALLY:
-            runtime = self._services(bundle, old.session)
+            runtime = self._services(bundle, old.session, compile_started=compile_started)
         else:
             session = self._factory.create_session(
                 bundle[2], self._config, self._cancellation.token
             )
             try:
-                runtime = self._services(bundle, session)
+                runtime = self._services(bundle, session, compile_started=compile_started)
             except BaseException:
                 session.close()
                 raise
