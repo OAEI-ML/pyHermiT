@@ -125,7 +125,13 @@ class _InputCodec(Protocol):
 class NativeBackendFactory:
     """Validate extension metadata and create one retained coarse native session."""
 
-    __slots__ = ("_create_session", "_handle_type", "_info", "_validate_encoded")
+    __slots__ = (
+        "_create_session",
+        "_handle_type",
+        "_info",
+        "_validate_encoded",
+        "_validate_encoded_selection",
+    )
 
     def __init__(self, module: ModuleType) -> None:
         if not isinstance(module, ModuleType):
@@ -138,6 +144,7 @@ class NativeBackendFactory:
         create_session = getattr(module, "create_session", None)
         self_test = getattr(module, "self_test", None)
         validate_encoded = getattr(module, "_validate_encoded_columns_v1", None)
+        validate_encoded_selection = getattr(module, "_validate_encoded_selection_v1", None)
         if not isinstance(implementation, str) or not implementation:
             _version_error("native implementation version is invalid", "metadata_invalid")
         if implementation != __version__:
@@ -165,6 +172,8 @@ class NativeBackendFactory:
             _version_error("native extension surface is incomplete", "metadata_invalid")
         if validate_encoded is not None and not callable(validate_encoded):
             _version_error("native encoded validator is invalid", "metadata_invalid")
+        if validate_encoded_selection is not None and not callable(validate_encoded_selection):
+            _version_error("native encoded selection validator is invalid", "metadata_invalid")
         try:
             self_test()
         except Exception as error:
@@ -176,6 +185,7 @@ class NativeBackendFactory:
         self._handle_type = handle_type
         self._create_session = create_session
         self._validate_encoded = validate_encoded
+        self._validate_encoded_selection = validate_encoded_selection
         self._info = BackendInfo(
             name="native",
             package_version=__version__,
@@ -207,6 +217,22 @@ class NativeBackendFactory:
         lease = negotiation.lease
         if lease is None:
             return
+        selection_validator = self._validate_encoded_selection
+        if selection_validator is not None:
+            root_slices = lease.overlay_root_slices()
+            if root_slices is not None:
+                for root_slice in root_slices:
+                    result = selection_validator(
+                        posting_mode=root_slice.posting_mode,
+                        postings=root_slice.root_ids,
+                        **{name: root_slice.lease.buffers[name] for name in ENCODED_BUFFER_WIDTHS},
+                    )
+                    if result is not None:
+                        raise BackendMismatchError(
+                            "native encoded validator returned an incompatible result",
+                            context={"reason": "encoded_validator_result_invalid"},
+                        )
+                return
         for local in lease.local_leases():
             result = validator(**{name: local.buffers[name] for name in ENCODED_BUFFER_WIDTHS})
             if result is not None:

@@ -15,13 +15,15 @@ use serde::Serialize;
 use super::model::{
     ComponentKind, ComponentRef, ComponentValue, NodeId, RootKind, ScalarRef, ValidatedModel,
 };
-use super::{ByteSource, EncodedResult, EncodedValidationError};
+use super::{u32_at, ByteSource, EncodedResult, EncodedValidationError};
 use crate::input_wire::{DecodedEntity, DecodedSymbolDomain, DecodedSymbolValue, SymbolKind};
 
 const SYMBOL_PHASE_SCHEMA_VERSION: u16 = 1;
 const ENTITY_TAG: u16 = 2;
 const IRI_TAG: u16 = 1;
 const DECLARATION_TAG: u16 = 60;
+const POSTINGS_ALL: u8 = 0;
+const POSTINGS_EXCLUDE: u8 = 2;
 
 const BUILTIN_ENTITIES: &[(EntityKind, &str)] = &[
     (EntityKind::Class, "http://www.w3.org/2002/07/owl#Thing"),
@@ -437,28 +439,161 @@ impl PhaseBudget {
     }
 }
 
+#[derive(Clone, Copy)]
+struct RootExclusions<S: ByteSource> {
+    postings: S,
+    count: usize,
+    cursor: usize,
+    selected_count: usize,
+}
+
+impl<S: ByteSource> RootExclusions<S> {
+    fn new(postings: S, root_count: usize) -> EncodedResult<Self> {
+        if postings.len() % 4 != 0 {
+            return Err(EncodedValidationError::protocol(
+                "encoded root exclusions contain a partial u32",
+            ));
+        }
+        let count = postings.len() / 4;
+        if count == 0 {
+            return Err(EncodedValidationError::protocol(
+                "encoded root exclusions are empty",
+            ));
+        }
+        let mut previous = 0_usize;
+        for index in 0..count {
+            let current =
+                usize::try_from(u32_at(postings, index, "root exclusion")?).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "encoded root exclusion exceeds the platform index width",
+                    )
+                })?;
+            if current <= previous || current > root_count {
+                return Err(EncodedValidationError::protocol(
+                    "encoded root exclusions are not sorted unique in-range IDs",
+                ));
+            }
+            previous = current;
+        }
+        Ok(Self {
+            postings,
+            count,
+            cursor: 0,
+            selected_count: root_count - count,
+        })
+    }
+
+    fn excludes(&mut self, root_index: usize) -> EncodedResult<bool> {
+        if self.cursor >= self.count {
+            return Ok(false);
+        }
+        let current = usize::try_from(u32_at(self.postings, self.cursor, "root exclusion")?)
+            .map_err(|_| {
+                EncodedValidationError::resource(
+                    "encoded root exclusion exceeds the platform index width",
+                )
+            })?;
+        let local_root_id = root_index
+            .checked_add(1)
+            .ok_or_else(|| EncodedValidationError::resource("encoded root index overflowed"))?;
+        if current == local_root_id {
+            self.cursor += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RootSelection<S: ByteSource> {
+    All,
+    Exclude(RootExclusions<S>),
+}
+
+impl<S: ByteSource> RootSelection<S> {
+    const fn selected_count(&self, root_count: usize) -> usize {
+        match self {
+            Self::All => root_count,
+            Self::Exclude(exclusions) => exclusions.selected_count,
+        }
+    }
+
+    const fn validation_work(&self) -> usize {
+        match self {
+            Self::All => 0,
+            Self::Exclude(exclusions) => exclusions.count,
+        }
+    }
+
+    fn excludes(&mut self, root_index: usize) -> EncodedResult<bool> {
+        match self {
+            Self::All => Ok(false),
+            Self::Exclude(exclusions) => exclusions.excludes(root_index),
+        }
+    }
+}
+
 /// Validate and own the root-dispatch/entity-symbol seed without publishing it.
 pub fn compile_symbol_phase<B: ByteSource>(
     model: &ValidatedModel<B>,
     limits: SymbolPhaseLimits,
 ) -> EncodedResult<SymbolPhase> {
+    compile_symbol_phase_with_selection(model, limits, RootSelection::<&[u8]>::All)
+}
+
+/// Compile only roots selected by source-local ALL or EXCLUDE overlay postings.
+pub fn compile_symbol_phase_selected<B: ByteSource, S: ByteSource>(
+    model: &ValidatedModel<B>,
+    limits: SymbolPhaseLimits,
+    posting_mode: u8,
+    postings: S,
+) -> EncodedResult<SymbolPhase> {
+    let selection = match posting_mode {
+        POSTINGS_ALL if postings.is_empty() => RootSelection::All,
+        POSTINGS_ALL => {
+            return Err(EncodedValidationError::protocol(
+                "ALL encoded root selection carries exclusions",
+            ));
+        }
+        POSTINGS_EXCLUDE => {
+            RootSelection::Exclude(RootExclusions::new(postings, model.summary().root_count)?)
+        }
+        _ => {
+            return Err(EncodedValidationError::protocol(
+                "encoded root selection mode is unsupported",
+            ));
+        }
+    };
+    compile_symbol_phase_with_selection(model, limits, selection)
+}
+
+fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
+    model: &ValidatedModel<B>,
+    limits: SymbolPhaseLimits,
+    mut selection: RootSelection<S>,
+) -> EncodedResult<SymbolPhase> {
     let summary = model.summary();
     let mut budget = PhaseBudget::new(limits);
+    budget.claim_work(selection.validation_work())?;
+    let selected_root_count = selection.selected_count(summary.root_count);
     let mut roots = Vec::new();
     budget.claim_owned(
-        summary
-            .root_count
+        selected_root_count
             .checked_mul(size_of::<DispatchedRoot>())
             .ok_or_else(|| {
                 EncodedValidationError::resource("encoded root dispatch allocation overflowed")
             })?,
     )?;
     roots
-        .try_reserve_exact(summary.root_count)
+        .try_reserve_exact(selected_root_count)
         .map_err(|_| EncodedValidationError::resource("encoded root dispatch allocation failed"))?;
     let mut declarations = Vec::<DeclaredIdentity>::new();
     for root_index in 0..summary.root_count {
         budget.claim_work(1)?;
+        if selection.excludes(root_index)? {
+            continue;
+        }
         let root = model
             .root(root_index)?
             .ok_or_else(|| EncodedValidationError::invariant("validated root row disappeared"))?;
@@ -1184,6 +1319,59 @@ mod tests {
         assert_eq!(manifest["schema_version"], 1);
         assert_eq!(manifest["root_dispatch"][0]["handler"], "Declaration");
         assert_eq!(manifest["declared_entities"][0]["iri"], "urn:C");
+        Ok(())
+    }
+
+    #[test]
+    fn source_local_root_exclusions_filter_dispatch_before_owned_compilation() -> EncodedResult<()>
+    {
+        let owned = declaration("urn:C");
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let exclusions = le32(&[1]);
+
+        let phase = compile_symbol_phase_selected(
+            &model,
+            SymbolPhaseLimits::default(),
+            POSTINGS_EXCLUDE,
+            exclusions.as_slice(),
+        )?;
+
+        assert!(phase.roots.is_empty());
+        assert!(phase.declared_entities.is_empty());
+        assert_eq!(phase.entity_domain.values.len(), BUILTIN_ENTITIES.len());
+        let all = compile_symbol_phase_selected(
+            &model,
+            SymbolPhaseLimits::default(),
+            POSTINGS_ALL,
+            &[][..],
+        )?;
+        assert_eq!(all.roots.len(), 1);
+        assert_eq!(all.declared_entities.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn source_local_root_exclusions_reject_hostile_postings() -> EncodedResult<()> {
+        let owned = declaration("urn:C");
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        for (mode, postings, message) in [
+            (POSTINGS_ALL, le32(&[1]), "ALL"),
+            (1, le32(&[1]), "unsupported"),
+            (POSTINGS_EXCLUDE, Vec::new(), "empty"),
+            (POSTINGS_EXCLUDE, vec![1, 0], "partial"),
+            (POSTINGS_EXCLUDE, le32(&[2]), "in-range"),
+        ] {
+            let error = compile_symbol_phase_selected(
+                &model,
+                SymbolPhaseLimits::default(),
+                mode,
+                postings.as_slice(),
+            )
+            .err();
+            assert!(error.is_some_and(|value| {
+                value.code == "NATIVE_ENCODED_VIEW_INVALID" && value.message.contains(message)
+            }));
+        }
         Ok(())
     }
 

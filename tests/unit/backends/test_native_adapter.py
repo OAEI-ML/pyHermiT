@@ -129,12 +129,17 @@ class _EncodedLease:
         self,
         buffers: dict[str, memoryview],
         local: tuple[_EncodedLease, ...] | None = None,
+        root_slices: tuple[object, ...] | None = None,
     ) -> None:
         self.buffers = buffers
         self._local = local
+        self._root_slices = root_slices
 
     def local_leases(self) -> tuple[_EncodedLease, ...]:
         return (self,) if self._local is None else self._local
+
+    def overlay_root_slices(self) -> tuple[object, ...] | None:
+        return self._root_slices
 
 
 def _compiled() -> CompiledOntology:
@@ -432,6 +437,51 @@ def test_encoded_handoff_preflights_each_unique_segment_source(
     NativeBackendFactory(extension)._validate_encoded_handoff(object())  # type: ignore[arg-type]
 
     assert observed == [top_buffers["scalar_bytes"], source_buffers["scalar_bytes"]]
+
+
+def test_encoded_handoff_reuses_overlay_sources_with_exact_root_selections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    base_buffers = {name: memoryview(b"base") for name in ENCODED_BUFFER_WIDTHS}
+    delta_buffers = {name: memoryview(b"delta") for name in ENCODED_BUFFER_WIDTHS}
+    base = _EncodedLease(base_buffers)
+    postings = memoryview(b"\x01\x00\x00\x00")
+    delta_postings = memoryview(b"")
+    delta = _EncodedLease(delta_buffers)
+    delta._root_slices = (
+        SimpleNamespace(lease=base, posting_mode=2, root_ids=postings),
+        SimpleNamespace(lease=delta, posting_mode=0, root_ids=delta_postings),
+    )
+    observed: list[tuple[int, memoryview, dict[str, memoryview]]] = []
+
+    def unexpected_columns(**_buffers: memoryview) -> None:
+        raise AssertionError("overlay handoff must use the selection-aware validator")
+
+    def validate_selection(
+        *, posting_mode: int, postings: memoryview, **buffers: memoryview
+    ) -> None:
+        observed.append((posting_mode, postings, buffers))
+
+    extension._validate_encoded_columns_v1 = unexpected_columns
+    extension._validate_encoded_selection_v1 = validate_selection
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=delta),
+    )
+
+    NativeBackendFactory(extension)._validate_encoded_handoff(object())  # type: ignore[arg-type]
+
+    assert [(mode, selected) for mode, selected, _buffers in observed] == [
+        (2, postings),
+        (0, delta_postings),
+    ]
+    assert observed[0][1] is postings
+    assert observed[1][1] is delta_postings
+    assert all(
+        observed[0][2][name] is base_buffers[name] and observed[1][2][name] is delta_buffers[name]
+        for name in ENCODED_BUFFER_WIDTHS
+    )
 
 
 def test_encoded_handoff_is_fail_closed_after_advertised_input_is_observed(

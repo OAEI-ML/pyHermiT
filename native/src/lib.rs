@@ -637,6 +637,68 @@ fn validate_encoded_columns_v1(
     }
 }
 
+#[pyfunction(name = "_validate_encoded_selection_v1")]
+#[pyo3(signature = (*, posting_mode, postings, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn validate_encoded_selection_v1(
+    py: Python<'_>,
+    posting_mode: u8,
+    postings: &Bound<'_, PyAny>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let postings = borrowed_py_bytes(postings, "root postings")?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let symbols = encoded::symbols::compile_symbol_phase_selected(
+            &model,
+            encoded::symbols::SymbolPhaseLimits::default(),
+            posting_mode,
+            postings,
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::named_classes::compile_named_class_phase(
+            &model,
+            &symbols,
+            encoded::named_classes::NamedClassPhaseLimits::default(),
+        )
+        .map(drop)
+        .map_err(encoded_validation_error)
+    }));
+    match result {
+        Ok(value) => value.map_err(|error| error.into_pyerr(py)),
+        Err(_) => Err(NativeError::new(
+            ErrorKind::Poisoned,
+            "NATIVE_PANIC",
+            "native encoded-selection validation panic was contained",
+        )
+        .into_pyerr(py)),
+    }
+}
+
 #[pyfunction(name = "_encoded_symbol_manifest_v1")]
 #[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
 #[allow(clippy::too_many_arguments)]
@@ -995,6 +1057,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CancellationHandle>()?;
     module.add_class::<NativeSession>()?;
     module.add_function(wrap_pyfunction!(validate_encoded_columns_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_encoded_selection_v1, module)?)?;
     module.add_function(wrap_pyfunction!(encoded_symbol_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(encoded_named_class_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(self_test, module)?)?;

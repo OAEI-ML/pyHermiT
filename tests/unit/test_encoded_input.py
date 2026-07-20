@@ -143,6 +143,33 @@ def _segment(
     )
 
 
+def _postings(*root_ids: int) -> memoryview:
+    return memoryview(b"".join(root_id.to_bytes(4, "little") for root_id in root_ids))
+
+
+def _set_local_root_count(owner: _View, root_count: int) -> None:
+    buffers = dict(owner.encoded.buffers)
+    buffers["root_kinds"] = memoryview(b"\x02" * root_count)
+    buffers["root_ids"] = _postings(*range(1, root_count + 1))
+    owner.encoded.buffers = buffers
+    raw_direct = owner.encoded.segments[0]
+    direct = EncodedStructuralSegmentLease(
+        segment=raw_direct,
+        role=1,
+        owner=_as_view(owner),
+        source=None,
+        posting_mode=0,
+        root_ids=memoryview(b""),
+        anonymous_scope_map=memoryview(b""),
+        member_token=None,
+    )
+    owner.encoded.structural_fingerprint = encoded_input._encoded_fingerprint(
+        buffers,
+        (direct,),
+        owner.encoded.descriptor,
+    )
+
+
 def test_native_capability_absence_does_not_request_core_buffers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -238,6 +265,169 @@ def test_overlay_segment_graph_retains_and_orders_each_local_column_owner(
         owner.encoded,
         source_owner.encoded,
     )
+    root_slices = lease.overlay_root_slices()
+    assert root_slices is not None
+    assert tuple(root_slice.lease.encoded_view for root_slice in root_slices) == (
+        source_owner.encoded,
+        owner.encoded,
+    )
+    assert tuple(root_slice.posting_mode for root_slice in root_slices) == (0, 0)
+    assert root_slices[0].lease is lease.segments[0].source
+    assert all(
+        root_slices[0].lease.buffers[name].obj is source_owner.encoded.buffers[name].obj
+        for name in ENCODED_BUFFER_WIDTHS
+    )
+
+
+def test_overlay_exclusion_selects_only_immediate_source_roots_without_column_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
+    source_owner = _View()
+    _set_local_root_count(source_owner, 2)
+    source_result = negotiate_encoded_input(_as_view(source_owner), {ENCODED_SCHEMA_NAME: 1})
+    source_lease = source_result.lease
+    assert source_lease is not None
+    owner = _View()
+    raw_segment = _segment(
+        role=2,
+        owner=source_owner,
+        source=source_owner.encoded,
+        posting_mode=2,
+        root_ids=_postings(1),
+    )
+    fingerprint_segment = EncodedStructuralSegmentLease(
+        segment=raw_segment,
+        role=2,
+        owner=_as_view(source_owner),
+        source=source_lease,
+        posting_mode=2,
+        root_ids=raw_segment.root_ids,
+        anonymous_scope_map=memoryview(b""),
+        member_token=None,
+    )
+    owner.encoded.segments = (raw_segment,)
+    owner.encoded.structural_fingerprint = encoded_input._encoded_fingerprint(
+        owner.encoded.buffers,
+        (fingerprint_segment,),
+        owner.encoded.descriptor,
+    )
+
+    result = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1})
+
+    lease = result.lease
+    assert lease is not None
+    root_slices = lease.overlay_root_slices()
+    assert root_slices is not None
+    assert tuple(root_slice.lease.encoded_view for root_slice in root_slices) == (
+        source_owner.encoded,
+        owner.encoded,
+    )
+    assert root_slices[0].lease is lease.segments[0].source
+    assert root_slices[1].lease is lease
+    assert tuple(root_slice.posting_mode for root_slice in root_slices) == (2, 0)
+    assert root_slices[0].root_ids is lease.segments[0].root_ids
+    assert bytes(root_slices[0].root_ids) == _postings(1)
+    assert root_slices[1].root_ids.nbytes == 0
+    assert all(
+        root_slices[0].lease.buffers[name].obj is source_owner.encoded.buffers[name].obj
+        for name in ENCODED_BUFFER_WIDTHS
+    )
+
+
+def test_nested_overlay_exclusions_remain_source_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
+    base_owner = _View()
+    _set_local_root_count(base_owner, 2)
+    base_lease = negotiate_encoded_input(_as_view(base_owner), {ENCODED_SCHEMA_NAME: 1}).lease
+    assert base_lease is not None
+    inner_owner = _View()
+    _set_local_root_count(inner_owner, 2)
+    raw_inner_base = _segment(
+        role=2,
+        owner=base_owner,
+        source=base_owner.encoded,
+        posting_mode=2,
+        root_ids=_postings(1),
+    )
+    raw_inner_delta = _segment(role=3, owner=inner_owner, source=None)
+    inner_segments = (
+        EncodedStructuralSegmentLease(
+            raw_inner_base,
+            2,
+            _as_view(base_owner),
+            base_lease,
+            2,
+            raw_inner_base.root_ids,
+            memoryview(b""),
+            None,
+        ),
+        EncodedStructuralSegmentLease(
+            raw_inner_delta,
+            3,
+            _as_view(inner_owner),
+            None,
+            0,
+            memoryview(b""),
+            memoryview(b""),
+            None,
+        ),
+    )
+    inner_owner.encoded.segments = (raw_inner_base, raw_inner_delta)
+    inner_owner.encoded.structural_fingerprint = encoded_input._encoded_fingerprint(
+        inner_owner.encoded.buffers,
+        inner_segments,
+        inner_owner.encoded.descriptor,
+    )
+    inner_lease = negotiate_encoded_input(_as_view(inner_owner), {ENCODED_SCHEMA_NAME: 1}).lease
+    assert inner_lease is not None
+    outer_owner = _View()
+    raw_outer_base = _segment(
+        role=2,
+        owner=inner_owner,
+        source=inner_owner.encoded,
+        posting_mode=2,
+        root_ids=_postings(2),
+    )
+    outer_segment = EncodedStructuralSegmentLease(
+        raw_outer_base,
+        2,
+        _as_view(inner_owner),
+        inner_lease,
+        2,
+        raw_outer_base.root_ids,
+        memoryview(b""),
+        None,
+    )
+    outer_owner.encoded.segments = (raw_outer_base,)
+    outer_owner.encoded.structural_fingerprint = encoded_input._encoded_fingerprint(
+        outer_owner.encoded.buffers,
+        (outer_segment,),
+        outer_owner.encoded.descriptor,
+    )
+
+    lease = negotiate_encoded_input(_as_view(outer_owner), {ENCODED_SCHEMA_NAME: 1}).lease
+
+    assert lease is not None
+    root_slices = lease.overlay_root_slices()
+    assert root_slices is not None
+    assert tuple(root_slice.lease.encoded_view for root_slice in root_slices) == (
+        base_owner.encoded,
+        inner_owner.encoded,
+        outer_owner.encoded,
+    )
+    assert tuple(root_slice.posting_mode for root_slice in root_slices) == (2, 2, 0)
+    assert tuple(bytes(root_slice.root_ids) for root_slice in root_slices) == (
+        bytes(_postings(1)),
+        bytes(_postings(2)),
+        b"",
+    )
+    inner_source = lease.segments[0].source
+    assert inner_source is not None
+    assert root_slices[0].root_ids is inner_source.segments[0].root_ids
+    assert root_slices[1].root_ids is lease.segments[0].root_ids
 
 
 @pytest.mark.parametrize("defect", ["role", "posting", "scope_map", "cycle"])

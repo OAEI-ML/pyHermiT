@@ -41,6 +41,44 @@ def test_private_validator_accepts_an_empty_borrowed_canonical_model() -> None:
     assert all(type(column) is memoryview and column.readonly for column in columns.values())
 
 
+def test_private_selection_validator_accepts_all_and_rejects_hostile_exclusions() -> None:
+    columns = _empty_columns()
+    empty = memoryview(b"")
+
+    assert (
+        native._validate_encoded_selection_v1(
+            posting_mode=0,
+            postings=empty,
+            **columns,
+        )
+        is None
+    )
+    with pytest.raises(BackendMismatchError, match="empty"):
+        native._validate_encoded_selection_v1(
+            posting_mode=2,
+            postings=empty,
+            **columns,
+        )
+    with pytest.raises(BackendMismatchError, match="partial u32"):
+        native._validate_encoded_selection_v1(
+            posting_mode=2,
+            postings=memoryview(b"\x01"),
+            **columns,
+        )
+    with pytest.raises(BackendMismatchError, match="unsupported"):
+        native._validate_encoded_selection_v1(
+            posting_mode=1,
+            postings=memoryview(struct.pack("<I", 1)),
+            **columns,
+        )
+    with pytest.raises(BackendMismatchError, match="exact memoryview"):
+        native._validate_encoded_selection_v1(
+            posting_mode=0,
+            postings=b"",  # type: ignore[arg-type]
+            **columns,
+        )
+
+
 def test_private_validator_rejects_hostile_envelopes_and_structure() -> None:
     columns = _empty_columns()
 

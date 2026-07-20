@@ -65,6 +65,15 @@ class EncodedStructuralSegmentLease:
 
 
 @dataclass(frozen=True, slots=True, eq=False)
+class EncodedStructuralRootSlice:
+    """One retained local column set plus its source-local root selection."""
+
+    lease: EncodedStructuralLease
+    posting_mode: int
+    root_ids: memoryview
+
+
+@dataclass(frozen=True, slots=True, eq=False)
 class EncodedStructuralLease:
     """Validated encoded envelope and the exact public owner that keeps it alive."""
 
@@ -108,6 +117,22 @@ class EncodedStructuralLease:
                 if segment.source is not None
             )
         return tuple(ordered)
+
+    def overlay_root_slices(self) -> tuple[EncodedStructuralRootSlice, ...] | None:
+        """Resolve a direct/overlay chain into zero-copy source-local root slices.
+
+        ``EXCLUDE`` postings address only the local roots of their immediate
+        source.  Returning ``None`` for non-overlay families keeps composite
+        identity and scope rewriting outside this deliberately bounded lane.
+        """
+
+        roles = tuple(segment.role for segment in self.segments)
+        if roles not in {
+            (_SEGMENT_OVERLAY_BASE,),
+            (_SEGMENT_OVERLAY_BASE, _SEGMENT_OVERLAY_DELTA),
+        }:
+            return None
+        return _resolve_direct_overlay_root_slices(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +611,52 @@ def _validate_segment_family(
         raise _protocol_error("encoded composite without a bridge has local roots")
 
 
+def _resolve_direct_overlay_root_slices(
+    lease: EncodedStructuralLease,
+) -> tuple[EncodedStructuralRootSlice, ...] | None:
+    roles = tuple(segment.role for segment in lease.segments)
+    if roles == (_SEGMENT_DIRECT,):
+        direct = lease.segments[0]
+        return (EncodedStructuralRootSlice(lease, _POSTINGS_ALL, direct.root_ids),)
+    if roles not in {
+        (_SEGMENT_OVERLAY_BASE,),
+        (_SEGMENT_OVERLAY_BASE, _SEGMENT_OVERLAY_DELTA),
+    }:
+        return None
+
+    base = lease.segments[0]
+    source = base.source
+    if source is None:
+        raise _protocol_error("validated overlay base lost its retained source")
+    inherited = _resolve_direct_overlay_root_slices(source)
+    if inherited is None:
+        return None
+    selected = list(inherited)
+    if base.posting_mode == _POSTINGS_EXCLUDE:
+        source_indexes = [
+            index for index, root_slice in enumerate(selected) if root_slice.lease is source
+        ]
+        if len(source_indexes) != 1:
+            raise _protocol_error("validated overlay source has no unique local root slice")
+        source_index = source_indexes[0]
+        selected[source_index] = _exclude_root_slice(selected[source_index], base.root_ids)
+    elif base.posting_mode != _POSTINGS_ALL:
+        raise _protocol_error("validated overlay base has an unsupported posting mode")
+
+    local_postings = lease.segments[1].root_ids if len(lease.segments) == 2 else memoryview(b"")
+    selected.append(EncodedStructuralRootSlice(lease, _POSTINGS_ALL, local_postings))
+    return tuple(selected)
+
+
+def _exclude_root_slice(
+    root_slice: EncodedStructuralRootSlice,
+    exclusions: memoryview,
+) -> EncodedStructuralRootSlice:
+    if root_slice.posting_mode != _POSTINGS_ALL:
+        raise _protocol_error("validated overlay root slice has an unsupported posting mode")
+    return EncodedStructuralRootSlice(root_slice.lease, _POSTINGS_EXCLUDE, exclusions)
+
+
 def _encoded_fingerprint(
     buffers: Mapping[str, memoryview],
     segments: tuple[EncodedStructuralSegmentLease, ...],
@@ -705,6 +776,7 @@ __all__ = [
     "ENCODED_SCHEMA_VERSION",
     "EncodedInputNegotiation",
     "EncodedStructuralLease",
+    "EncodedStructuralRootSlice",
     "EncodedStructuralSegmentLease",
     "negotiate_encoded_input",
 ]

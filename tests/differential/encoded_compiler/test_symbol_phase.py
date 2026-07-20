@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import struct
 from typing import cast
 
 import pyowl_core
@@ -137,6 +138,34 @@ def test_encoded_root_and_entity_seed_manifest_matches_scalar_compiler_exactly()
         ],
     }
     assert observed == expected
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_private_selection_preflight_accepts_source_local_exclusion() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional("Declaration(Class(:A))", "Declaration(Class(:B))"),
+        options=OPTIONS,
+    )
+    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+
+    assert (
+        native._validate_encoded_selection_v1(
+            posting_mode=2,
+            postings=memoryview(struct.pack("<I", 1)),
+            root_kinds=buffers["root_kinds"],
+            root_ids=buffers["root_ids"],
+            node_tags=buffers["node_tags"],
+            node_field_offsets=buffers["node_field_offsets"],
+            field_kinds=buffers["field_kinds"],
+            field_values=buffers["field_values"],
+            field_lengths=buffers["field_lengths"],
+            item_kinds=buffers["item_kinds"],
+            item_values=buffers["item_values"],
+            item_lengths=buffers["item_lengths"],
+            scalar_bytes=buffers["scalar_bytes"],
+        )
+        is None
+    )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
