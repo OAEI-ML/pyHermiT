@@ -1,11 +1,11 @@
 //! Transactional named-class signature and axiom compilation.
 //!
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
-//! compiles the named-only `SubClassOf`/`EquivalentClasses` family into the
-//! existing native predicate, clause, and provenance records.  Predicate and
-//! clause identifiers are dense within this fragment and must be remapped when
-//! a later phase assembles the complete program; no fragment is publishable on
-//! its own.
+//! compiles named-only `SubClassOf`, `EquivalentClasses`, and `DisjointClasses`
+//! axioms into the existing native predicate, clause, and provenance records.
+//! Predicate and clause identifiers are dense within this fragment and must be
+//! remapped when a later phase assembles the complete program; no fragment is
+//! publishable on its own.
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #![forbid(unsafe_code)]
@@ -27,7 +27,9 @@ const NAMED_CLASS_PHASE_SCHEMA_VERSION: u16 = 1;
 const ENTITY_TAG: u16 = 2;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
+const DISJOINT_CLASSES_TAG: u16 = 63;
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
+const DISJOINT_GUARD_DOMAIN: &[u8] = b"pyhermit:linear-disjoint-classes:v1\0";
 const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
 const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
 
@@ -275,6 +277,25 @@ struct NormalizedEdge {
     provenance: Vec<[u8; 32]>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RawDisjoint {
+    classes: Vec<u32>,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedDisjoint {
+    classes: Vec<u32>,
+    provenance: Vec<[u8; 32]>,
+    guard_digest: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NamedDisjointOutput {
+    edges: Vec<RawEdge>,
+    disjoint: Option<RawDisjoint>,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ProvenanceKey {
     source_sha256: Vec<[u8; 32]>,
@@ -350,6 +371,7 @@ pub fn compile_named_class_phase<B: ByteSource>(
     let nothing = class_id_by_display(&class_domain, NOTHING_DISPLAY)?;
 
     let mut raw_edges = Vec::<RawEdge>::new();
+    let mut raw_disjoints = Vec::<RawDisjoint>::new();
     let mut compiled_roots = 0_usize;
     let mut deferred_roots = 0_usize;
     for root in &symbols.roots {
@@ -415,6 +437,45 @@ pub fn compile_named_class_phase<B: ByteSource>(
                     }
                 }
             }
+            RootHandler::DisjointClasses => {
+                match named_disjoint_classes(
+                    model,
+                    symbols,
+                    &class_signature,
+                    &class_domain,
+                    root.node,
+                    thing,
+                    nothing,
+                    &mut budget,
+                )? {
+                    Some(output) => {
+                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class compiled-root count overflowed",
+                            )
+                        })?;
+                        for edge in output.edges {
+                            retain_edge(&mut raw_edges, edge, thing, nothing, &mut budget)?;
+                        }
+                        if let Some(disjoint) = output.disjoint {
+                            budget.claim_owned(size_of::<RawDisjoint>())?;
+                            raw_disjoints.try_reserve(1).map_err(|_| {
+                                EncodedValidationError::resource(
+                                    "named disjoint-classes allocation failed",
+                                )
+                            })?;
+                            raw_disjoints.push(disjoint);
+                        }
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
             _ => {
                 deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
                     EncodedValidationError::resource("named-class deferred-root count overflowed")
@@ -429,12 +490,16 @@ pub fn compile_named_class_phase<B: ByteSource>(
     }
 
     let edges = normalize_edges(raw_edges, &mut budget)?;
-    let (provenance, provenance_keys) = freeze_provenance(&edges, &mut budget)?;
-    let (predicates, predicate_by_class) = freeze_predicates(&edges, nothing, &mut budget)?;
+    let disjoints = normalize_disjoints(raw_disjoints, &class_domain, &mut budget)?;
+    let (provenance, provenance_keys) = freeze_provenance(&edges, &disjoints, &mut budget)?;
+    let (predicates, predicate_by_class, guard_predicates) =
+        freeze_predicates(&edges, &disjoints, nothing, &mut budget)?;
     let clauses = freeze_clauses(
         &edges,
+        &disjoints,
         nothing,
         &predicate_by_class,
+        &guard_predicates,
         &provenance_keys,
         &mut budget,
     )?;
@@ -647,6 +712,119 @@ fn named_equivalent_classes<B: ByteSource>(
     Ok(Some(edges))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn named_disjoint_classes<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    signature: &[ClassSignatureBinding],
+    domain: &DecodedSymbolDomain,
+    root: NodeId,
+    thing: u32,
+    nothing: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<NamedDisjointOutput>> {
+    let node = model.node(root)?;
+    if node.tag() != DISJOINT_CLASSES_TAG || node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-classes root no longer has schema-1 shape",
+        ));
+    }
+    if !annotations_are_empty(model, node, 1)? {
+        return Ok(None);
+    }
+    let expressions_component = required_component(
+        model.field(node.fields().start)?,
+        "disjoint-classes expressions",
+    )?;
+    let ComponentValue::Collection(expressions) = model.resolve(expressions_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-classes expressions did not resolve to a collection",
+        ));
+    };
+    let mut classes = Vec::new();
+    budget.claim_owned(
+        expressions
+            .len()
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("disjoint-classes member allocation overflowed")
+            })?,
+    )?;
+    classes.try_reserve_exact(expressions.len()).map_err(|_| {
+        EncodedValidationError::resource("disjoint-classes member allocation failed")
+    })?;
+    for item_index in expressions.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "disjoint-classes member")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "disjoint-classes member did not resolve to a node",
+            ));
+        };
+        let Some(class_id) = named_class_id(model, symbols, signature, identifier)? else {
+            return Ok(None);
+        };
+        classes.push(class_id);
+    }
+    if classes.len() < 2 {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-classes root has fewer than two members",
+        ));
+    }
+    let provenance = class_set_axiom_digest(
+        domain,
+        DISJOINT_CLASSES_TAG,
+        &classes,
+        "disjoint-classes",
+        budget,
+    )?;
+    let mut live = Vec::new();
+    budget.claim_owned(classes.len().checked_mul(size_of::<u32>()).ok_or_else(|| {
+        EncodedValidationError::resource("live disjoint-class allocation overflowed")
+    })?)?;
+    live.try_reserve_exact(classes.len())
+        .map_err(|_| EncodedValidationError::resource("live disjoint-class allocation failed"))?;
+    live.extend(classes.into_iter().filter(|class_id| *class_id != nothing));
+
+    if live.contains(&thing) {
+        let mut edges = Vec::new();
+        let edge_count = live.len().saturating_sub(1);
+        budget.claim_owned(
+            edge_count
+                .checked_mul(size_of::<RawEdge>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "top disjoint-class edge allocation overflowed",
+                    )
+                })?,
+        )?;
+        edges.try_reserve_exact(edge_count).map_err(|_| {
+            EncodedValidationError::resource("top disjoint-class edge allocation failed")
+        })?;
+        for class_id in live {
+            if class_id != thing {
+                edges.push(RawEdge {
+                    sub_class: class_id,
+                    super_class: nothing,
+                    provenance,
+                });
+            }
+        }
+        return Ok(Some(NamedDisjointOutput {
+            edges,
+            disjoint: None,
+        }));
+    }
+
+    Ok(Some(NamedDisjointOutput {
+        edges: Vec::new(),
+        disjoint: (live.len() >= 2).then_some(RawDisjoint {
+            classes: live,
+            provenance,
+        }),
+    }))
+}
+
 fn annotations_are_empty<B: ByteSource>(
     model: &ValidatedModel<B>,
     node: NodeRef,
@@ -767,8 +945,56 @@ fn normalize_edges(
     Ok(normalized)
 }
 
+fn normalize_disjoints(
+    mut raw: Vec<RawDisjoint>,
+    domain: &DecodedSymbolDomain,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedDisjoint>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_by(|left, right| {
+        left.classes
+            .cmp(&right.classes)
+            .then_with(|| left.provenance.cmp(&right.provenance))
+    });
+    let mut normalized = Vec::<NormalizedDisjoint>::new();
+    for value in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.classes == value.classes {
+                if previous.provenance.last() != Some(&value.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "disjoint-class provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(value.provenance);
+                }
+                continue;
+            }
+        }
+        let guard_digest = disjoint_guard_digest(domain, &value.classes, budget)?;
+        budget.claim_owned(size_of::<NormalizedDisjoint>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("normalized disjoint-class allocation failed")
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("disjoint-class provenance allocation failed")
+        })?;
+        provenance.push(value.provenance);
+        normalized.push(NormalizedDisjoint {
+            classes: value.classes,
+            provenance,
+            guard_digest,
+        });
+    }
+    Ok(normalized)
+}
+
 fn freeze_provenance(
     edges: &[NormalizedEdge],
+    disjoints: &[NormalizedDisjoint],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(Vec<DecodedProvenanceEntry>, Vec<ProvenanceKey>)> {
     let builtin: [u8; 32] = Sha256::digest(BUILTIN_PROVENANCE_INPUT).into();
@@ -786,6 +1012,16 @@ fn freeze_provenance(
             &mut keys,
             ProvenanceKey {
                 source_sha256: edge.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    for disjoint in disjoints {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: disjoint.provenance.clone(),
                 generated: false,
             },
             budget,
@@ -850,11 +1086,29 @@ fn push_provenance_key(
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PredicateOwner {
+    Concept(u32),
+    DisjointGuard {
+        digest: [u8; 32],
+        sequence: u32,
+        internal_key: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingPredicate {
+    key: Vec<u8>,
+    owner: PredicateOwner,
+}
+
 type PredicateIndex = Vec<(u32, u32)>;
-type FrozenPredicates = (Vec<DecodedPredicate>, PredicateIndex);
+type GuardPredicateIndex = Vec<([u8; 32], u32, u32)>;
+type FrozenPredicates = (Vec<DecodedPredicate>, PredicateIndex, GuardPredicateIndex);
 
 fn freeze_predicates(
     edges: &[NormalizedEdge],
+    disjoints: &[NormalizedDisjoint],
     nothing: u32,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<FrozenPredicates> {
@@ -864,34 +1118,68 @@ fn freeze_predicates(
         push_u32(&mut class_ids, edge.sub_class, "predicate class", budget)?;
         push_u32(&mut class_ids, edge.super_class, "predicate class", budget)?;
     }
+    for disjoint in disjoints {
+        for class_id in &disjoint.classes {
+            push_u32(&mut class_ids, *class_id, "predicate class", budget)?;
+        }
+    }
     budget.claim_work(sort_work(class_ids.len()))?;
     class_ids.sort_unstable();
     class_ids.dedup();
 
-    let mut ordered = Vec::<(String, u32)>::new();
+    let mut ordered = Vec::<PendingPredicate>::new();
     for class_id in class_ids {
-        // The scalar predicate identity is canonical JSON ending in
-        // `"symbol_id":<id>}`.  Retaining the closing delimiter matters:
-        // lexicographically, `10}` precedes `1}` even though the bare decimal
-        // string `"1"` precedes `"10"`.
-        let key = format!("{class_id}}}");
-        budget.claim_owned(size_of::<(String, u32)>())?;
+        let key = concept_predicate_key(class_id);
+        budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
         ordered.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("named-class predicate ordering allocation failed")
         })?;
-        ordered.push((key, class_id));
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::Concept(class_id),
+        });
+    }
+    for disjoint in disjoints {
+        let internal_key = crate::model::hex(&disjoint.guard_digest);
+        budget.claim_owned(internal_key.len())?;
+        for index in 0..disjoint.classes.len() {
+            let sequence = u32::try_from(index).map_err(|_| {
+                EncodedValidationError::resource("disjoint-guard sequence exceeds u32")
+            })?;
+            let key = disjoint_guard_predicate_key(sequence, &internal_key);
+            budget.claim_owned(size_of::<PendingPredicate>())?;
+            budget.claim_owned(key.len())?;
+            budget.claim_owned(internal_key.len())?;
+            ordered.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource(
+                    "disjoint-guard predicate ordering allocation failed",
+                )
+            })?;
+            ordered.push(PendingPredicate {
+                key,
+                owner: PredicateOwner::DisjointGuard {
+                    digest: disjoint.guard_digest,
+                    sequence,
+                    internal_key: internal_key.clone(),
+                },
+            });
+        }
     }
     budget.claim_work(sort_work(ordered.len()))?;
-    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+    ordered.sort_by(|left, right| left.key.cmp(&right.key));
 
     let mut predicates = Vec::new();
     let mut predicate_by_class = Vec::new();
+    let mut guard_predicates = Vec::new();
     budget.claim_owned(
         ordered
             .len()
             .checked_mul(
-                size_of::<DecodedPredicate>() + size_of::<(u32, u32)>() + size_of::<TermSort>(),
+                size_of::<DecodedPredicate>()
+                    + size_of::<(u32, u32)>()
+                    + size_of::<([u8; 32], u32, u32)>()
+                    + size_of::<TermSort>(),
             )
             .ok_or_else(|| {
                 EncodedValidationError::resource("named-class predicate output overflowed")
@@ -905,38 +1193,82 @@ fn freeze_predicates(
         .map_err(|_| {
             EncodedValidationError::resource("named-class predicate index allocation failed")
         })?;
-    for (identifier, (_, class_id)) in ordered.into_iter().enumerate() {
+    guard_predicates
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("disjoint-guard predicate index allocation failed")
+        })?;
+    for (identifier, pending) in ordered.into_iter().enumerate() {
         let predicate_id = u32::try_from(identifier).map_err(|_| {
             EncodedValidationError::resource("named-class predicate ID exceeds u32")
         })?;
-        predicates.push(DecodedPredicate {
-            predicate_id,
-            kind: PredicateKind::Concept,
-            argument_sorts: vec![TermSort::Object],
-            symbol_id: Some(class_id),
-            role_id: None,
-            cardinality: None,
-            filler_predicate_id: None,
-            annotation: Vec::new(),
-            internal_key: None,
-        });
-        predicate_by_class.push((class_id, predicate_id));
+        match pending.owner {
+            PredicateOwner::Concept(class_id) => {
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::Concept,
+                    argument_sorts: vec![TermSort::Object],
+                    symbol_id: Some(class_id),
+                    role_id: None,
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: Vec::new(),
+                    internal_key: None,
+                });
+                predicate_by_class.push((class_id, predicate_id));
+            }
+            PredicateOwner::DisjointGuard {
+                digest,
+                sequence,
+                internal_key,
+            } => {
+                budget.claim_owned(size_of::<u32>())?;
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::DisjointGuard,
+                    argument_sorts: vec![TermSort::Object],
+                    symbol_id: None,
+                    role_id: None,
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: vec![sequence],
+                    internal_key: Some(internal_key),
+                });
+                guard_predicates.push((digest, sequence, predicate_id));
+            }
+        }
     }
     predicate_by_class.sort_unstable_by_key(|(class_id, _)| *class_id);
-    Ok((predicates, predicate_by_class))
+    guard_predicates.sort_unstable_by_key(|(digest, sequence, _)| (*digest, *sequence));
+    Ok((predicates, predicate_by_class, guard_predicates))
 }
 
 fn freeze_clauses(
     edges: &[NormalizedEdge],
+    disjoints: &[NormalizedDisjoint],
     nothing: u32,
     predicate_by_class: &[(u32, u32)],
+    guard_predicates: &[([u8; 32], u32, u32)],
     provenance_keys: &[ProvenanceKey],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<DecodedClause>> {
-    let following = edges
+    let mut following = edges
         .len()
         .checked_add(1)
         .ok_or_else(|| EncodedValidationError::resource("named-class clause count overflowed"))?;
+    for disjoint in disjoints {
+        let count = disjoint
+            .classes
+            .len()
+            .checked_mul(3)
+            .and_then(|value| value.checked_sub(2))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("disjoint-class clause count overflowed")
+            })?;
+        following = following.checked_add(count).ok_or_else(|| {
+            EncodedValidationError::resource("named-class clause count overflowed")
+        })?;
+    }
     PhaseBudget::count(following, budget.limits.max_clauses, "clause count")?;
     let builtin: [u8; 32] = Sha256::digest(BUILTIN_PROVENANCE_INPUT).into();
     let mut ordered = Vec::<(Vec<u8>, DecodedClause)>::new();
@@ -944,8 +1276,8 @@ fn freeze_clauses(
     let bottom_provenance = provenance_id(provenance_keys, &[builtin], true)?;
     push_clause(
         &mut ordered,
-        bottom_predicate,
-        None,
+        &[bottom_predicate],
+        &[],
         bottom_provenance,
         budget,
     )?;
@@ -953,7 +1285,30 @@ fn freeze_clauses(
         let body = predicate_id(predicate_by_class, edge.sub_class)?;
         let head = predicate_id(predicate_by_class, edge.super_class)?;
         let provenance = provenance_id(provenance_keys, &edge.provenance, false)?;
-        push_clause(&mut ordered, body, Some(head), provenance, budget)?;
+        push_clause(&mut ordered, &[body], &[head], provenance, budget)?;
+    }
+    for disjoint in disjoints {
+        let provenance = provenance_id(provenance_keys, &disjoint.provenance, false)?;
+        let mut previous = None;
+        for (index, class_id) in disjoint.classes.iter().copied().enumerate() {
+            let sequence = u32::try_from(index).map_err(|_| {
+                EncodedValidationError::resource("disjoint-guard sequence exceeds u32")
+            })?;
+            let current = guard_predicate_id(guard_predicates, disjoint.guard_digest, sequence)?;
+            let member = predicate_id(predicate_by_class, class_id)?;
+            if let Some(previous_id) = previous {
+                push_clause(
+                    &mut ordered,
+                    &[previous_id, member],
+                    &[],
+                    provenance,
+                    budget,
+                )?;
+                push_clause(&mut ordered, &[previous_id], &[current], provenance, budget)?;
+            }
+            push_clause(&mut ordered, &[member], &[current], provenance, budget)?;
+            previous = Some(current);
+        }
     }
     budget.claim_work(sort_work(ordered.len()))?;
     ordered.sort_by(|left, right| left.0.cmp(&right.0));
@@ -979,19 +1334,48 @@ fn freeze_clauses(
 
 fn push_clause(
     clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
-    body_predicate: u32,
-    head_predicate: Option<u32>,
+    body_predicates: &[u32],
+    head_predicates: &[u32],
     provenance_id: u32,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
-    let key = rule_key(body_predicate, head_predicate);
+    let mut body_ids = body_predicates.to_vec();
+    let mut head_ids = head_predicates.to_vec();
+    budget.claim_owned(
+        body_ids
+            .len()
+            .checked_add(head_ids.len())
+            .and_then(|value| value.checked_mul(size_of::<u32>()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("named-class clause ID payload overflowed")
+            })?,
+    )?;
+    body_ids.sort_unstable();
+    body_ids.dedup();
+    head_ids.sort_unstable();
+    head_ids.dedup();
+    if body_ids.iter().any(|value| head_ids.contains(value)) {
+        return Ok(());
+    }
+    let body_count = body_ids.len();
+    let key = rule_key(&body_ids, &head_ids);
     budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>())?;
     budget.claim_owned(key.len())?;
-    let atom_count = 1_usize + usize::from(head_predicate.is_some());
+    let atom_count = body_ids
+        .len()
+        .checked_add(head_ids.len())
+        .ok_or_else(|| EncodedValidationError::resource("named-class atom count overflowed"))?;
     budget.claim_owned(
         atom_count
             .checked_mul(size_of::<DecodedAtom>() + size_of::<DecodedTerm>())
-            .and_then(|value| value.checked_add(2 * size_of::<u32>()))
+            .and_then(|value| {
+                value.checked_add(
+                    body_ids
+                        .len()
+                        .checked_add(1)?
+                        .checked_mul(size_of::<u32>())?,
+                )
+            })
             .ok_or_else(|| {
                 EncodedValidationError::resource("named-class clause payload size overflowed")
             })?,
@@ -1003,10 +1387,13 @@ fn push_clause(
         key,
         DecodedClause {
             clause_id: 0,
-            body: vec![variable_atom(body_predicate)],
-            head: head_predicate.map(variable_atom).into_iter().collect(),
+            body: body_ids.into_iter().map(variable_atom).collect(),
+            head: head_ids.into_iter().map(variable_atom).collect(),
             provenance_ids: vec![provenance_id],
-            join_order: vec![0],
+            join_order: (0..u32::try_from(body_count).map_err(|_| {
+                EncodedValidationError::resource("named-class join order exceeds u32")
+            })?)
+                .collect(),
         },
     ));
     Ok(())
@@ -1029,6 +1416,22 @@ fn predicate_id(index: &[(u32, u32)], class_id: u32) -> EncodedResult<u32> {
         .map(|position| index[position].1)
         .ok_or_else(|| {
             EncodedValidationError::invariant("named-class predicate index is incomplete")
+        })
+}
+
+fn guard_predicate_id(
+    index: &[([u8; 32], u32, u32)],
+    digest: [u8; 32],
+    sequence: u32,
+) -> EncodedResult<u32> {
+    index
+        .binary_search_by_key(&(digest, sequence), |(candidate, position, _)| {
+            (*candidate, *position)
+        })
+        .ok()
+        .map(|position| index[position].2)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("disjoint-guard predicate index is incomplete")
         })
 }
 
@@ -1083,14 +1486,29 @@ fn equivalent_digest(
     classes: &[u32],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<[u8; 32]> {
+    class_set_axiom_digest(
+        domain,
+        EQUIVALENT_CLASSES_TAG,
+        classes,
+        "equivalent-classes",
+        budget,
+    )
+}
+
+fn class_set_axiom_digest(
+    domain: &DecodedSymbolDomain,
+    tag: u16,
+    classes: &[u32],
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<[u8; 32]> {
     let mut encoded = Vec::new();
-    push_varint(&mut encoded, u64::from(EQUIVALENT_CLASSES_TAG), budget)?;
+    push_varint(&mut encoded, u64::from(tag), budget)?;
     push_byte(&mut encoded, 6, budget)?;
     push_varint(
         &mut encoded,
-        u64::try_from(classes.len()).map_err(|_| {
-            EncodedValidationError::resource("equivalent-classes arity exceeds u64")
-        })?,
+        u64::try_from(classes.len())
+            .map_err(|_| EncodedValidationError::resource(format!("{name} arity exceeds u64")))?,
         budget,
     )?;
     for class_id in classes {
@@ -1099,6 +1517,22 @@ fn equivalent_digest(
     push_empty_set(&mut encoded, budget)?;
     budget.claim_work(encoded.len())?;
     Ok(Sha256::digest(encoded).into())
+}
+
+fn disjoint_guard_digest(
+    domain: &DecodedSymbolDomain,
+    classes: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<[u8; 32]> {
+    let mut digest = Sha256::new();
+    digest.update(DISJOINT_GUARD_DOMAIN);
+    budget.claim_work(DISJOINT_GUARD_DOMAIN.len())?;
+    for class_id in classes {
+        let key = class_key(domain, *class_id)?;
+        budget.claim_work(key.len())?;
+        digest.update(key);
+    }
+    Ok(digest.finalize().into())
 }
 
 fn class_key(domain: &DecodedSymbolDomain, identifier: u32) -> EncodedResult<&[u8]> {
@@ -1168,14 +1602,34 @@ fn push_bytes(target: &mut Vec<u8>, value: &[u8], budget: &mut PhaseBudget) -> E
     Ok(())
 }
 
-fn rule_key(body_predicate: u32, head_predicate: Option<u32>) -> Vec<u8> {
-    let body = atom_json(body_predicate);
-    match head_predicate {
-        Some(predicate) => {
-            format!("{{\"body\":[{body}],\"head\":[{}]}}", atom_json(predicate)).into_bytes()
-        }
-        None => format!("{{\"body\":[{body}],\"head\":[]}}").into_bytes(),
-    }
+fn concept_predicate_key(class_id: u32) -> Vec<u8> {
+    format!(
+        "{{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"concept\",\"role_id\":null,\"symbol_id\":{class_id}}}"
+    )
+    .into_bytes()
+}
+
+fn disjoint_guard_predicate_key(sequence: u32, internal_key: &str) -> Vec<u8> {
+    format!(
+        "{{\"annotation\":[{sequence}],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":\"{internal_key}\",\"kind\":\"disjoint_guard\",\"role_id\":null,\"symbol_id\":null}}"
+    )
+    .into_bytes()
+}
+
+fn rule_key(body_predicates: &[u32], head_predicates: &[u32]) -> Vec<u8> {
+    let body = body_predicates
+        .iter()
+        .copied()
+        .map(atom_json)
+        .collect::<Vec<_>>()
+        .join(",");
+    let head = head_predicates
+        .iter()
+        .copied()
+        .map(atom_json)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
 }
 
 fn atom_json(predicate_id: u32) -> String {
@@ -1306,6 +1760,12 @@ mod tests {
         }
     }
 
+    fn disjoint_classes() -> OwnedColumns {
+        let mut owned = equivalent_classes();
+        owned.node_tags = le16(&[1, 1, 2, 2, 63]);
+        owned
+    }
+
     #[test]
     fn equivalent_named_classes_freeze_existing_native_records() -> EncodedResult<()> {
         let owned = equivalent_classes();
@@ -1354,6 +1814,28 @@ mod tests {
             value.code == "NATIVE_ENCODED_RESOURCE_LIMIT" && value.message.contains("clause")
         }));
         assert_eq!(symbols, before);
+        Ok(())
+    }
+
+    #[test]
+    fn disjoint_named_classes_compile_linear_guard_records() -> EncodedResult<()> {
+        let owned = disjoint_classes();
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let symbols = compile_symbol_phase(&model, SymbolPhaseLimits::default())?;
+        let phase = compile_named_class_phase(&model, &symbols, NamedClassPhaseLimits::default())?;
+
+        assert_eq!(phase.compiled_roots, 1);
+        assert_eq!(phase.deferred_roots, 0);
+        assert_eq!(
+            phase
+                .predicates
+                .iter()
+                .filter(|predicate| predicate.kind == PredicateKind::DisjointGuard)
+                .count(),
+            2
+        );
+        assert_eq!(phase.clauses.len(), 5);
+        assert!(phase.clauses.iter().any(|clause| clause.body.len() == 2));
         Ok(())
     }
 }

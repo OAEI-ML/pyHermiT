@@ -91,10 +91,10 @@ def _scalar_atom_key(predicate_id: int) -> dict[str, object]:
     }
 
 
-def _rule_key(body: int, head: int | None) -> bytes:
+def _rule_key(body: tuple[int, ...], head: tuple[int, ...]) -> bytes:
     payload = {
-        "body": [_scalar_atom_key(body)],
-        "head": [] if head is None else [_scalar_atom_key(head)],
+        "body": [_scalar_atom_key(value) for value in body],
+        "head": [_scalar_atom_key(value) for value in head],
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
 
@@ -115,14 +115,15 @@ def _expected_manifest(
         value.entity_id for value in ontology.declared_entities if value.kind == "class"
     }
 
-    concept_predicates = [
+    fragment_kinds = {PredicateKind.CONCEPT, PredicateKind.DISJOINT_GUARD}
+    fragment_predicates = [
         value
         for value in program.predicates.predicates
-        if value.kind is PredicateKind.CONCEPT
+        if value.kind in fragment_kinds
     ]
     predicate_remap = {
         value.predicate_id: identifier
-        for identifier, value in enumerate(concept_predicates)
+        for identifier, value in enumerate(fragment_predicates)
     }
     predicates = [
         {
@@ -136,31 +137,35 @@ def _expected_manifest(
             "annotation": list(value.annotation),
             "internal_key": value.internal_key,
         }
-        for identifier, value in enumerate(concept_predicates)
+        for identifier, value in enumerate(fragment_predicates)
     ]
 
     expected_variable = Variable(0, TermSort.OBJECT)
-    projected: list[tuple[bytes, DLClause, int, int | None]] = []
+    projected: list[tuple[bytes, DLClause, tuple[int, ...], tuple[int, ...]]] = []
     for clause in program.clauses:
-        if len(clause.body) != 1 or clause.body[0].arguments != (expected_variable,):
+        if not clause.body or any(
+            atom.arguments != (expected_variable,) for atom in clause.body + clause.head
+        ):
             continue
-        body = predicate_remap.get(clause.body[0].predicate_id)
-        if body is None or len(clause.head) > 1:
+        body = tuple(
+            predicate_remap[atom.predicate_id]
+            for atom in clause.body
+            if atom.predicate_id in predicate_remap
+        )
+        head = tuple(
+            predicate_remap[atom.predicate_id]
+            for atom in clause.head
+            if atom.predicate_id in predicate_remap
+        )
+        if len(body) != len(clause.body) or len(head) != len(clause.head):
             continue
-        head: int | None = None
-        if clause.head:
-            if clause.head[0].arguments != (expected_variable,):
-                continue
-            head = predicate_remap.get(clause.head[0].predicate_id)
-            if head is None:
-                continue
         projected.append((_rule_key(body, head), clause, body, head))
     projected.sort(key=lambda value: value[0])
     clauses = [
         {
             "clause_id": identifier,
-            "body": [_atom_payload(body)],
-            "head": [] if head is None else [_atom_payload(head)],
+            "body": [_atom_payload(value) for value in body],
+            "head": [_atom_payload(value) for value in head],
             "provenance_ids": list(clause.provenance_ids),
             "join_order": list(clause.join_order),
         }
@@ -227,6 +232,27 @@ def test_double_digit_fragment_ids_preserve_scalar_predicate_and_clause_order() 
         snapshot,
         compiled_roots=len(inclusions),
     )
+
+
+def test_named_disjoint_classes_match_linear_guards_and_normalization_shortcuts() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "DisjointClasses(:A :B)",
+            # owl:Nothing is removed, so this merges provenance into the same
+            # normalized disjoint record as the preceding source axiom.
+            "DisjointClasses(:A :B owl:Nothing)",
+            # owl:Thing forces every other live member to bottom.
+            "DisjointClasses(:C owl:Thing)",
+            # A set containing only one live member normalizes away entirely.
+            "DisjointClasses(:C owl:Nothing)",
+        ),
+        options=OPTIONS,
+    )
+
+    assert _native_manifest(snapshot) == _expected_manifest(snapshot, compiled_roots=4)
 
 
 def test_complex_named_class_root_is_deferred_without_breaking_scalar_fallback() -> None:
