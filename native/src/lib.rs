@@ -551,6 +551,35 @@ fn encoded_validation_error(error: encoded::EncodedValidationError) -> NativeErr
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn borrowed_encoded_columns<'a, 'py>(
+    root_kinds: &'a Bound<'py, PyAny>,
+    root_ids: &'a Bound<'py, PyAny>,
+    node_tags: &'a Bound<'py, PyAny>,
+    node_field_offsets: &'a Bound<'py, PyAny>,
+    field_kinds: &'a Bound<'py, PyAny>,
+    field_values: &'a Bound<'py, PyAny>,
+    field_lengths: &'a Bound<'py, PyAny>,
+    item_kinds: &'a Bound<'py, PyAny>,
+    item_values: &'a Bound<'py, PyAny>,
+    item_lengths: &'a Bound<'py, PyAny>,
+    scalar_bytes: &'a Bound<'py, PyAny>,
+) -> NativeResult<encoded::EncodedColumns<BorrowedPyBytes<'a, 'py>>> {
+    Ok(encoded::EncodedColumns {
+        root_kinds: borrowed_py_bytes(root_kinds, "root_kinds")?,
+        root_ids: borrowed_py_bytes(root_ids, "root_ids")?,
+        node_tags: borrowed_py_bytes(node_tags, "node_tags")?,
+        node_field_offsets: borrowed_py_bytes(node_field_offsets, "node_field_offsets")?,
+        field_kinds: borrowed_py_bytes(field_kinds, "field_kinds")?,
+        field_values: borrowed_py_bytes(field_values, "field_values")?,
+        field_lengths: borrowed_py_bytes(field_lengths, "field_lengths")?,
+        item_kinds: borrowed_py_bytes(item_kinds, "item_kinds")?,
+        item_values: borrowed_py_bytes(item_values, "item_values")?,
+        item_lengths: borrowed_py_bytes(item_lengths, "item_lengths")?,
+        scalar_bytes: borrowed_py_bytes(scalar_bytes, "scalar_bytes")?,
+    })
+}
+
 #[pyfunction(name = "_validate_encoded_columns_v1")]
 #[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
 #[allow(clippy::too_many_arguments)]
@@ -569,22 +598,27 @@ fn validate_encoded_columns_v1(
     scalar_bytes: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let columns = encoded::EncodedColumns {
-            root_kinds: borrowed_py_bytes(root_kinds, "root_kinds")?,
-            root_ids: borrowed_py_bytes(root_ids, "root_ids")?,
-            node_tags: borrowed_py_bytes(node_tags, "node_tags")?,
-            node_field_offsets: borrowed_py_bytes(node_field_offsets, "node_field_offsets")?,
-            field_kinds: borrowed_py_bytes(field_kinds, "field_kinds")?,
-            field_values: borrowed_py_bytes(field_values, "field_values")?,
-            field_lengths: borrowed_py_bytes(field_lengths, "field_lengths")?,
-            item_kinds: borrowed_py_bytes(item_kinds, "item_kinds")?,
-            item_values: borrowed_py_bytes(item_values, "item_values")?,
-            item_lengths: borrowed_py_bytes(item_lengths, "item_lengths")?,
-            scalar_bytes: borrowed_py_bytes(scalar_bytes, "scalar_bytes")?,
-        };
-        encoded::validate_columns(columns, encoded::EncodedLimits::default())
-            .map(drop)
-            .map_err(encoded_validation_error)
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        encoded::symbols::compile_symbol_phase(
+            &model,
+            encoded::symbols::SymbolPhaseLimits::default(),
+        )
+        .map(drop)
+        .map_err(encoded_validation_error)
     }));
     match result {
         Ok(value) => value.map_err(|error| error.into_pyerr(py)),
@@ -592,6 +626,59 @@ fn validate_encoded_columns_v1(
             ErrorKind::Poisoned,
             "NATIVE_PANIC",
             "native encoded-column validation panic was contained",
+        )
+        .into_pyerr(py)),
+    }
+}
+
+#[pyfunction(name = "_encoded_symbol_manifest_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_symbol_manifest_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let phase = encoded::symbols::compile_symbol_phase(
+            &model,
+            encoded::symbols::SymbolPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        phase
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    }));
+    match result {
+        Ok(value) => value.map_err(|error| error.into_pyerr(py)),
+        Err(_) => Err(NativeError::new(
+            ErrorKind::Poisoned,
+            "NATIVE_PANIC",
+            "native encoded-symbol manifest panic was contained",
         )
         .into_pyerr(py)),
     }
@@ -843,6 +930,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CancellationHandle>()?;
     module.add_class::<NativeSession>()?;
     module.add_function(wrap_pyfunction!(validate_encoded_columns_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(encoded_symbol_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(self_test, module)?)?;
     module.add_function(wrap_pyfunction!(create_session, module)?)?;
     Ok(())
