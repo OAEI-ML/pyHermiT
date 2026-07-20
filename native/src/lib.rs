@@ -655,6 +655,15 @@ fn validate_encoded_columns_v1(
             encoded::complex_roles::ComplexRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
+        let role_characteristics =
+            encoded::role_characteristics::compile_role_characteristic_phase(
+                &model,
+                &symbols,
+                &object_roles,
+                &data_roles,
+                encoded::role_characteristics::RoleCharacteristicPhaseLimits::default(),
+            )
+            .map_err(encoded_validation_error)?;
         let hierarchy = encoded::object_role_hierarchy::compile_object_role_hierarchy_phase(
             &object_roles,
             &simple_roles,
@@ -696,6 +705,7 @@ fn validate_encoded_columns_v1(
             &simple_roles,
             &data_inclusions,
             &complex_roles,
+            &role_characteristics,
             &role_model,
             encoded::role_clauses::RoleClausePhaseLimits::default(),
         )
@@ -799,6 +809,15 @@ fn validate_encoded_selection_v1(
             encoded::complex_roles::ComplexRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
+        let role_characteristics =
+            encoded::role_characteristics::compile_role_characteristic_phase(
+                &model,
+                &symbols,
+                &object_roles,
+                &data_roles,
+                encoded::role_characteristics::RoleCharacteristicPhaseLimits::default(),
+            )
+            .map_err(encoded_validation_error)?;
         let hierarchy = encoded::object_role_hierarchy::compile_object_role_hierarchy_phase(
             &object_roles,
             &simple_roles,
@@ -840,6 +859,7 @@ fn validate_encoded_selection_v1(
             &simple_roles,
             &data_inclusions,
             &complex_roles,
+            &role_characteristics,
             &role_model,
             encoded::role_clauses::RoleClausePhaseLimits::default(),
         )
@@ -1011,6 +1031,7 @@ struct EncodedSliceProgram {
     data_role_hierarchy: encoded::data_role_hierarchy::DataRoleHierarchyPhase,
     simple_roles: encoded::simple_roles::SimpleRolePhase,
     complex_roles: encoded::complex_roles::ComplexRolePhase,
+    role_characteristics: encoded::role_characteristics::RoleCharacteristicPhase,
     object_role_hierarchy: encoded::object_role_hierarchy::ObjectRoleHierarchyPhase,
     role_semantics: encoded::role_semantics::RoleSemanticsPhase,
     role_automata: encoded::role_automata::RoleAutomataPhase,
@@ -1084,6 +1105,14 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         .map_err(|_| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "encoded complex-role slice transaction allocation failed",
+            ))
+        })?;
+    let mut role_characteristic_phases = Vec::new();
+    role_characteristic_phases
+        .try_reserve_exact(slices.len())
+        .map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded role-characteristic slice transaction allocation failed",
             ))
         })?;
     let mut source_work = 0_u64;
@@ -1380,21 +1409,64 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     "encoded slice complex-role ownership overflowed",
                 ))
             })?;
+        let role_characteristic_limits =
+            encoded::role_characteristics::RoleCharacteristicPhaseLimits {
+                max_owned_bytes: limits
+                    .max_owned_bytes
+                    .checked_sub(after_complex_role_owned)
+                    .ok_or_else(|| {
+                        encoded_validation_error(encoded::EncodedValidationError::resource(
+                            "encoded slice complex-role ownership exceeded its aggregate limit",
+                        ))
+                    })?,
+                max_work: limits
+                    .max_work
+                    .checked_sub(after_complex_role_work)
+                    .ok_or_else(|| {
+                        encoded_validation_error(encoded::EncodedValidationError::resource(
+                            "encoded slice complex-role work exceeded its aggregate limit",
+                        ))
+                    })?,
+                ..encoded::role_characteristics::RoleCharacteristicPhaseLimits::default()
+            };
+        let role_characteristics =
+            encoded::role_characteristics::compile_role_characteristic_phase(
+                &model,
+                &symbols,
+                &object_roles,
+                &data_roles,
+                role_characteristic_limits,
+            )
+            .map_err(encoded_validation_error)?;
+        let after_role_characteristic_work = after_complex_role_work
+            .checked_add(role_characteristics.work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice role-characteristic work overflowed",
+                ))
+            })?;
+        let after_role_characteristic_owned = after_complex_role_owned
+            .checked_add(role_characteristics.owned_bytes)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice role-characteristic ownership overflowed",
+                ))
+            })?;
         let named_limits = encoded::named_classes::NamedClassPhaseLimits {
             max_owned_bytes: limits
                 .max_owned_bytes
-                .checked_sub(after_complex_role_owned)
+                .checked_sub(after_role_characteristic_owned)
                 .ok_or_else(|| {
                     encoded_validation_error(encoded::EncodedValidationError::resource(
-                        "encoded slice complex-role ownership exceeded its aggregate limit",
+                        "encoded slice role-characteristic ownership exceeded its aggregate limit",
                     ))
                 })?,
             max_work: limits
                 .max_work
-                .checked_sub(after_complex_role_work)
+                .checked_sub(after_role_characteristic_work)
                 .ok_or_else(|| {
                     encoded_validation_error(encoded::EncodedValidationError::resource(
-                        "encoded slice complex-role work exceeded its aggregate limit",
+                        "encoded slice role-characteristic work exceeded its aggregate limit",
                     ))
                 })?,
             ..limits
@@ -1402,14 +1474,14 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         let named =
             encoded::named_classes::compile_named_class_phase(&model, &symbols, named_limits)
                 .map_err(encoded_validation_error)?;
-        source_work = after_complex_role_work
+        source_work = after_role_characteristic_work
             .checked_add(named.work)
             .ok_or_else(|| {
                 encoded_validation_error(encoded::EncodedValidationError::resource(
                     "encoded slice source work overflowed",
                 ))
             })?;
-        source_owned = after_complex_role_owned
+        source_owned = after_role_characteristic_owned
             .checked_add(named.owned_bytes)
             .ok_or_else(|| {
                 encoded_validation_error(encoded::EncodedValidationError::resource(
@@ -1429,6 +1501,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         data_inclusion_phases.push(data_inclusions);
         simple_role_phases.push(simple_roles);
         complex_role_phases.push(complex_roles);
+        role_characteristic_phases.push(role_characteristics);
     }
     let named_classes = encoded::named_classes::merge_named_class_phases(&phases, limits)
         .map_err(encoded_validation_error)?;
@@ -1665,7 +1738,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                 "encoded merged complex-role work overflowed",
             ))
         })?;
-    let hierarchy_limits = encoded::object_role_hierarchy::ObjectRoleHierarchyLimits {
+    let role_characteristic_limits = encoded::role_characteristics::RoleCharacteristicPhaseLimits {
         max_owned_bytes: limits
             .max_owned_bytes
             .checked_sub(merged_complex_owned)
@@ -1682,6 +1755,48 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     "encoded merged complex roles exceeded the program work limit",
                 ))
             })?,
+        ..encoded::role_characteristics::RoleCharacteristicPhaseLimits::default()
+    };
+    let role_characteristics = encoded::role_characteristics::merge_role_characteristic_phases(
+        &object_role_phases,
+        &data_role_phases,
+        &role_characteristic_phases,
+        &object_roles,
+        &data_roles,
+        role_characteristic_limits,
+    )
+    .map_err(encoded_validation_error)?;
+    let merged_characteristic_owned = merged_complex_owned
+        .checked_add(role_characteristics.owned_bytes)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged role-characteristic ownership overflowed",
+            ))
+        })?;
+    let merged_characteristic_work = merged_complex_work
+        .checked_add(role_characteristics.work)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged role-characteristic work overflowed",
+            ))
+        })?;
+    let hierarchy_limits = encoded::object_role_hierarchy::ObjectRoleHierarchyLimits {
+        max_owned_bytes: limits
+            .max_owned_bytes
+            .checked_sub(merged_characteristic_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged role characteristics exceeded the program ownership limit",
+                ))
+            })?,
+        max_work: limits
+            .max_work
+            .checked_sub(merged_characteristic_work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged role characteristics exceeded the program work limit",
+                ))
+            })?,
         ..encoded::object_role_hierarchy::ObjectRoleHierarchyLimits::default()
     };
     let object_role_hierarchy =
@@ -1691,14 +1806,14 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
             hierarchy_limits,
         )
         .map_err(encoded_validation_error)?;
-    let merged_hierarchy_owned = merged_complex_owned
+    let merged_hierarchy_owned = merged_characteristic_owned
         .checked_add(object_role_hierarchy.owned_bytes)
         .ok_or_else(|| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "encoded merged role-hierarchy ownership overflowed",
             ))
         })?;
-    let merged_hierarchy_work = merged_complex_work
+    let merged_hierarchy_work = merged_characteristic_work
         .checked_add(object_role_hierarchy.work)
         .ok_or_else(|| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
@@ -1858,6 +1973,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         &simple_roles,
         &data_inclusions,
         &complex_roles,
+        &role_characteristics,
         &role_model,
         role_clause_limits,
     )
@@ -1870,6 +1986,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         data_role_hierarchy,
         simple_roles,
         complex_roles,
+        role_characteristics,
         object_role_hierarchy,
         role_semantics,
         role_automata,
@@ -1977,6 +2094,20 @@ fn encoded_complex_object_role_slices_manifest_v1(
     contain_encoded_selection(py, || {
         compile_encoded_slice_program(slices)?
             .complex_roles
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
+#[pyfunction(name = "_encoded_role_characteristic_slices_manifest_v1")]
+#[pyo3(signature = (*, slices))]
+fn encoded_role_characteristic_slices_manifest_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        compile_encoded_slice_program(slices)?
+            .role_characteristics
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
     })
@@ -2152,8 +2283,8 @@ fn compile_encoded_role_automata_program<B: encoded::ByteSource>(
 }
 
 struct EncodedRoleProgram {
-    role_model: encoded::role_model::RoleModelPhase,
-    role_clauses: encoded::role_clauses::RoleClausePhase,
+    model: encoded::role_model::RoleModelPhase,
+    clauses: encoded::role_clauses::RoleClausePhase,
 }
 
 fn compile_encoded_role_model_program<B: encoded::ByteSource>(
@@ -2194,6 +2325,13 @@ fn compile_encoded_role_model_program<B: encoded::ByteSource>(
         &object_roles,
         encoded::complex_roles::ComplexRolePhaseLimits::default(),
     )?;
+    let role_characteristics = encoded::role_characteristics::compile_role_characteristic_phase(
+        model,
+        &symbols,
+        &object_roles,
+        &data_roles,
+        encoded::role_characteristics::RoleCharacteristicPhaseLimits::default(),
+    )?;
     let hierarchy = encoded::object_role_hierarchy::compile_object_role_hierarchy_phase(
         &object_roles,
         &simple_roles,
@@ -2231,12 +2369,13 @@ fn compile_encoded_role_model_program<B: encoded::ByteSource>(
         &simple_roles,
         &data_inclusions,
         &complex_roles,
+        &role_characteristics,
         &role_model,
         encoded::role_clauses::RoleClausePhaseLimits::default(),
     )?;
     Ok(EncodedRoleProgram {
-        role_model,
-        role_clauses,
+        model: role_model,
+        clauses: role_clauses,
     })
 }
 
@@ -2853,6 +2992,67 @@ fn encoded_object_role_automata_manifest_v1(
     })
 }
 
+#[pyfunction(name = "_encoded_role_characteristic_manifest_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_role_characteristic_manifest_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let symbols = encoded::symbols::compile_symbol_phase(
+            &model,
+            encoded::symbols::SymbolPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let object_roles = encoded::object_roles::compile_object_role_phase(
+            &symbols,
+            encoded::object_roles::ObjectRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let data_roles = encoded::data_roles::compile_data_role_phase(
+            &symbols,
+            encoded::data_roles::DataRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::role_characteristics::compile_role_characteristic_phase(
+            &model,
+            &symbols,
+            &object_roles,
+            &data_roles,
+            encoded::role_characteristics::RoleCharacteristicPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?
+        .canonical_manifest_json()
+        .map_err(encoded_validation_error)
+    })
+}
+
 #[pyfunction(name = "_encoded_role_model_manifest_v1")]
 #[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
 #[allow(clippy::too_many_arguments)]
@@ -2888,7 +3088,7 @@ fn encoded_role_model_manifest_v1(
             .map_err(encoded_validation_error)?;
         compile_encoded_role_model_program(&model)
             .map_err(encoded_validation_error)?
-            .role_model
+            .model
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
     })
@@ -2929,7 +3129,7 @@ fn encoded_role_clause_manifest_v1(
             .map_err(encoded_validation_error)?;
         compile_encoded_role_model_program(&model)
             .map_err(encoded_validation_error)?
-            .role_clauses
+            .clauses
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
     })
@@ -3330,6 +3530,14 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(
         encoded_complex_object_role_slices_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_role_characteristic_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_role_characteristic_slices_manifest_v1,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(

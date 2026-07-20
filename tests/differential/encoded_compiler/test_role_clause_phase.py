@@ -104,10 +104,9 @@ def _expected_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
     predicate_remap = {
         predicate.predicate_id: identifier for identifier, predicate in enumerate(predicates)
     }
-    # Supported role-graph inputs retain only the always-last owl:Nothing
-    # predicate after this fragment, so scalar alpha-ordering is already the
-    # exact fragment-local ordering. Unsupported pure-role clauses are tested
-    # separately as deferred roots rather than admitted to this projection.
+    # Supported role-graph and characteristic inputs retain only the always-last
+    # owl:Nothing predicate after this fragment, so scalar alpha-ordering is
+    # already the exact fragment-local ordering.
     assert all(source == target for source, target in predicate_remap.items())
     referenced_provenance = sorted(
         {identifier for clause in clauses for identifier in clause.provenance_ids}
@@ -181,6 +180,10 @@ def test_mixed_role_graph_predicates_clauses_and_provenance_match_scalar() -> No
             "TransitiveObjectProperty(:d)",
             "SubDataPropertyOf(:p :q)",
             "EquivalentDataProperties(:q :r)",
+            "DisjointObjectProperties(:a ObjectInverseOf(:b) :f)",
+            "IrreflexiveObjectProperty(:c)",
+            "AsymmetricObjectProperty(:e)",
+            "DisjointDataProperties(:p :r)",
         ),
         options=OPTIONS,
     )
@@ -220,6 +223,8 @@ def test_composite_clausifies_the_merged_role_graph_once() -> None:
             *declarations,
             "SubObjectPropertyOf(:a :b)",
             "SubDataPropertyOf(:p :q)",
+            "DisjointObjectProperties(:a :c)",
+            "DisjointDataProperties(:p :q)",
         ),
         options=OPTIONS,
     )
@@ -229,6 +234,8 @@ def test_composite_clausifies_the_merged_role_graph_once() -> None:
             "SubObjectPropertyOf(ObjectPropertyChain(:b :c) :d)",
             "TransitiveObjectProperty(:d)",
             "SubDataPropertyOf(:q :p)",
+            "IrreflexiveObjectProperty(:c)",
+            "AsymmetricObjectProperty(:a)",
         ),
         options=OPTIONS,
     )
@@ -262,6 +269,7 @@ def test_source_local_include_and_exclude_clausify_selected_roots(posting_mode: 
             "SubObjectPropertyOf(ObjectPropertyChain(:b :c) :d)",
             "TransitiveObjectProperty(:d)",
             "SubDataPropertyOf(:p :q)",
+            "IrreflexiveObjectProperty(:a)",
         ),
         options=OPTIONS,
     )
@@ -271,6 +279,7 @@ def test_source_local_include_and_exclude_clausify_selected_roots(posting_mode: 
             "SubObjectPropertyOf(:a :b)",
             "TransitiveObjectProperty(:d)",
             "SubDataPropertyOf(:p :q)",
+            "IrreflexiveObjectProperty(:a)",
         ),
         options=OPTIONS,
     )
@@ -317,7 +326,6 @@ def test_unowned_class_and_property_semantics_remain_deferred() -> None:
     enriched = pyowl_core.load_snapshot(
         functional(
             *declarations,
-            "DisjointObjectProperties(:a :b)",
             "ObjectPropertyDomain(:a :A)",
             "ObjectPropertyRange(:b :A)",
             "DataPropertyDomain(:p :A)",
@@ -381,6 +389,38 @@ def test_generated_regular_role_clauses_match_scalar_exactly() -> None:
                 body.append(f"SubDataPropertyOf(:d{left} :d{right})")
             else:
                 body.append(f"EquivalentDataProperties(:d{left} :d{right})")
+        snapshot = pyowl_core.load_snapshot(functional(*body), options=OPTIONS)
+
+        _assert_exact(snapshot)
+
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_generated_role_characteristic_clauses_match_scalar_exactly() -> None:
+    generator = random.Random(72_7992)
+    object_expressions = tuple(
+        [f":o{index}" for index in range(12)]
+        + [f"ObjectInverseOf(:o{index})" for index in range(6)]
+    )
+    for _case in range(14):
+        body = [f"Declaration(ObjectProperty(:o{index}))" for index in range(12)]
+        body.extend(f"Declaration(DataProperty(:d{index}))" for index in range(12))
+        for _axiom in range(generator.randrange(1, 10)):
+            kind = generator.randrange(4)
+            if kind == 0:
+                members = generator.sample(object_expressions, generator.randrange(2, 5))
+                body.append(f"DisjointObjectProperties({' '.join(members)})")
+            elif kind == 1:
+                body.append(f"IrreflexiveObjectProperty({generator.choice(object_expressions)})")
+            elif kind == 2:
+                body.append(f"AsymmetricObjectProperty({generator.choice(object_expressions)})")
+            else:
+                members = generator.sample(range(12), generator.randrange(2, 5))
+                body.append(
+                    "DisjointDataProperties("
+                    + " ".join(f":d{identifier}" for identifier in members)
+                    + ")"
+                )
         snapshot = pyowl_core.load_snapshot(functional(*body), options=OPTIONS)
 
         _assert_exact(snapshot)

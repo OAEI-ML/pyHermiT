@@ -20,6 +20,7 @@ use super::complex_roles::ComplexRolePhase;
 use super::data_inclusions::DataInclusionPhase;
 use super::data_roles::DataRolePhase;
 use super::object_roles::ObjectRolePhase;
+use super::role_characteristics::{RoleCharacteristicPhase, RoleClashKind};
 use super::role_model::RoleModelPhase;
 use super::simple_roles::SimpleRolePhase;
 use super::{EncodedResult, EncodedValidationError};
@@ -310,12 +311,14 @@ impl PhaseBudget {
 }
 
 /// Compile the scalar-compatible positive-role clause fragment.
+#[allow(clippy::too_many_arguments)]
 pub fn compile_role_clause_phase(
     object_roles: &ObjectRolePhase,
     data_roles: &DataRolePhase,
     simple_roles: &SimpleRolePhase,
     data_inclusions: &DataInclusionPhase,
     complex_roles: &ComplexRolePhase,
+    role_characteristics: &RoleCharacteristicPhase,
     role_model: &RoleModelPhase,
     limits: RoleClausePhaseLimits,
 ) -> EncodedResult<RoleClausePhase> {
@@ -325,17 +328,24 @@ pub fn compile_role_clause_phase(
         simple_roles,
         data_inclusions,
         complex_roles,
+        role_characteristics,
         role_model,
     )?;
     let mut budget = PhaseBudget::new(limits);
-    let (predicates, object_predicates, data_predicates) =
-        freeze_predicates(object_roles, data_roles, data_inclusions, &mut budget)?;
+    let (predicates, object_predicates, data_predicates) = freeze_predicates(
+        object_roles,
+        data_roles,
+        data_inclusions,
+        role_characteristics,
+        &mut budget,
+    )?;
     let pending = compile_clauses(
         object_roles,
         data_roles,
         simple_roles,
         data_inclusions,
         complex_roles,
+        role_characteristics,
         &object_predicates,
         &data_predicates,
         &mut budget,
@@ -361,6 +371,7 @@ fn validate_inputs(
     simple_roles: &SimpleRolePhase,
     data_inclusions: &DataInclusionPhase,
     complex_roles: &ComplexRolePhase,
+    role_characteristics: &RoleCharacteristicPhase,
     role_model: &RoleModelPhase,
 ) -> EncodedResult<()> {
     if object_roles.object_role_domain.kind != SymbolKind::ObjectRole
@@ -412,6 +423,27 @@ fn validate_inputs(
     }
     validate_dense_domain(&object_roles.object_role_domain.values, "object-role")?;
     validate_dense_domain(&data_roles.data_property_domain.values, "data-property")?;
+    super::role_characteristics::validate_phase_shape(role_characteristics)?;
+    for clash in &role_characteristics.clashes {
+        let count = if clash.kind.is_object() {
+            object_count
+        } else {
+            data_count
+        };
+        checked_index(clash.first_role_id, count, "role-characteristic first role")?;
+        if let Some(identifier) = clash.second_role_id {
+            checked_index(identifier, count, "role-characteristic second role")?;
+        }
+        let expects_second = matches!(
+            clash.kind,
+            RoleClashKind::DisjointObject | RoleClashKind::DisjointData
+        );
+        if expects_second != clash.second_role_id.is_some() {
+            return Err(EncodedValidationError::invariant(
+                "role-clause characteristic input has the wrong arity",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -433,6 +465,7 @@ fn freeze_predicates(
     object_roles: &ObjectRolePhase,
     data_roles: &DataRolePhase,
     data_inclusions: &DataInclusionPhase,
+    role_characteristics: &RoleCharacteristicPhase,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<FrozenPredicates> {
     let object_count = object_roles.object_role_domain.values.len();
@@ -466,6 +499,28 @@ fn freeze_predicates(
         )?;
         retained_data[sub] = true;
         retained_data[sup] = true;
+    }
+    for clash in &role_characteristics.clashes {
+        if clash.kind != RoleClashKind::DisjointData {
+            continue;
+        }
+        budget.claim_work(1)?;
+        let first = checked_index(
+            clash.first_role_id,
+            data_count,
+            "disjoint data first property",
+        )?;
+        let second = checked_index(
+            clash.second_role_id.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "disjoint data characteristic lost its second property",
+                )
+            })?,
+            data_count,
+            "disjoint data second property",
+        )?;
+        retained_data[first] = true;
+        retained_data[second] = true;
     }
     let data_retained = retained_data.iter().filter(|value| **value).count();
     let total = object_count.checked_add(data_retained).ok_or_else(|| {
@@ -583,6 +638,7 @@ fn compile_clauses(
     simple_roles: &SimpleRolePhase,
     data_inclusions: &DataInclusionPhase,
     complex_roles: &ComplexRolePhase,
+    role_characteristics: &RoleCharacteristicPhase,
     object_predicates: &[u32],
     data_predicates: &[Option<u32>],
     budget: &mut PhaseBudget,
@@ -598,6 +654,7 @@ fn compile_clauses(
         .checked_add(simple_roles.simple_inclusions.len())
         .and_then(|value| value.checked_add(data_inclusions.data_inclusions.len()))
         .and_then(|value| value.checked_add(complex_roles.complex_inclusions.len()))
+        .and_then(|value| value.checked_add(role_characteristics.clashes.len()))
         .and_then(|value| value.checked_add(2))
         .ok_or_else(|| EncodedValidationError::resource("role-clause source count overflowed"))?;
     PhaseBudget::count(maximum, budget.limits.max_clauses, "source clause count")?;
@@ -708,6 +765,73 @@ fn compile_clauses(
             inclusion_provenance(inclusion.provenance_sha256, inclusion.builtin),
             budget,
         )?;
+    }
+    for clash in &role_characteristics.clashes {
+        budget.claim_work(1)?;
+        let provenance = source_provenance(clash.provenance_sha256);
+        match clash.kind {
+            RoleClashKind::DisjointObject => {
+                let second = clash.second_role_id.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "disjoint object characteristic lost its second role",
+                    )
+                })?;
+                push_clause(
+                    &mut clauses,
+                    vec![
+                        object_atom(
+                            object_predicate(object_predicates, clash.first_role_id)?,
+                            0,
+                            1,
+                        ),
+                        object_atom(object_predicate(object_predicates, second)?, 0, 1),
+                    ],
+                    Vec::new(),
+                    provenance,
+                    budget,
+                )?;
+            }
+            RoleClashKind::IrreflexiveObject => {
+                push_clause(
+                    &mut clauses,
+                    vec![object_atom(
+                        object_predicate(object_predicates, clash.first_role_id)?,
+                        0,
+                        0,
+                    )],
+                    Vec::new(),
+                    provenance,
+                    budget,
+                )?;
+            }
+            RoleClashKind::AsymmetricObject => {
+                let predicate = object_predicate(object_predicates, clash.first_role_id)?;
+                push_clause(
+                    &mut clauses,
+                    vec![object_atom(predicate, 0, 1), object_atom(predicate, 1, 0)],
+                    Vec::new(),
+                    provenance,
+                    budget,
+                )?;
+            }
+            RoleClashKind::DisjointData => {
+                let second = clash.second_role_id.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "disjoint data characteristic lost its second role",
+                    )
+                })?;
+                push_clause(
+                    &mut clauses,
+                    vec![
+                        data_atom(data_predicate(data_predicates, clash.first_role_id)?, 0, 1),
+                        data_atom(data_predicate(data_predicates, second)?, 0, 1),
+                    ],
+                    Vec::new(),
+                    provenance,
+                    budget,
+                )?;
+            }
+        }
     }
     push_clause(
         &mut clauses,
@@ -1478,6 +1602,13 @@ fn inclusion_provenance(source: [u8; 32], builtin: bool) -> ProvenanceKey {
             source_sha256: vec![source],
             generated: false,
         }
+    }
+}
+
+fn source_provenance(source: [u8; 32]) -> ProvenanceKey {
+    ProvenanceKey {
+        source_sha256: vec![source],
+        generated: false,
     }
 }
 
