@@ -643,12 +643,21 @@ fn validate_encoded_columns_v1(
             encoded::object_role_hierarchy::ObjectRoleHierarchyLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        encoded::role_semantics::compile_role_semantics_phase(
+        let role_semantics = encoded::role_semantics::compile_role_semantics_phase(
             &object_roles,
             &simple_roles,
             &complex_roles,
             &hierarchy,
             encoded::role_semantics::RoleSemanticsPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::role_automata::compile_role_automata_phase(
+            &object_roles,
+            &simple_roles,
+            &complex_roles,
+            &hierarchy,
+            &role_semantics,
+            encoded::role_automata::RoleAutomataPhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
         encoded::named_classes::compile_named_class_phase(
@@ -738,12 +747,21 @@ fn validate_encoded_selection_v1(
             encoded::object_role_hierarchy::ObjectRoleHierarchyLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        encoded::role_semantics::compile_role_semantics_phase(
+        let role_semantics = encoded::role_semantics::compile_role_semantics_phase(
             &object_roles,
             &simple_roles,
             &complex_roles,
             &hierarchy,
             encoded::role_semantics::RoleSemanticsPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::role_automata::compile_role_automata_phase(
+            &object_roles,
+            &simple_roles,
+            &complex_roles,
+            &hierarchy,
+            &role_semantics,
+            encoded::role_automata::RoleAutomataPhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
         encoded::named_classes::compile_named_class_phase(
@@ -771,6 +789,49 @@ fn tuple_item<'py>(
     value
         .get_item(index)
         .map_err(|_| encoded_slice_invalid(format!("encoded slice {name} is unreadable")))
+}
+
+fn exact_encoded_role_id(value: &Bound<'_, PyAny>, name: &'static str) -> NativeResult<u32> {
+    if !value.is_exact_instance_of::<PyInt>() {
+        return Err(encoded_slice_invalid(format!(
+            "encoded object-role {name} is not an exact integer"
+        )));
+    }
+    value.extract::<u32>().map_err(|_| {
+        encoded_slice_invalid(format!(
+            "encoded object-role {name} is outside the nonnegative u32 domain"
+        ))
+    })
+}
+
+fn exact_encoded_role_word(value: &Bound<'_, PyAny>) -> NativeResult<Vec<u32>> {
+    if !value.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded object-role word is not an exact tuple",
+        ));
+    }
+    let word = value
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("encoded object-role word changed type"))?;
+    let limits = encoded::role_automata::RoleAutomataPhaseLimits::default();
+    if word.len() > limits.max_word_length {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "object-role acceptance word exceeds its length limit",
+            ),
+        ));
+    }
+    let mut result = Vec::new();
+    result.try_reserve_exact(word.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "object-role acceptance word allocation failed",
+        ))
+    })?;
+    for index in 0..word.len() {
+        let role_id = tuple_item(word, index, "object-role word item")?;
+        result.push(exact_encoded_role_id(&role_id, "word item")?);
+    }
+    Ok(result)
 }
 
 fn validate_encoded_slice_context(record: &Bound<'_, PyTuple>) -> NativeResult<usize> {
@@ -869,6 +930,7 @@ struct EncodedSliceProgram {
     complex_roles: encoded::complex_roles::ComplexRolePhase,
     object_role_hierarchy: encoded::object_role_hierarchy::ObjectRoleHierarchyPhase,
     role_semantics: encoded::role_semantics::RoleSemanticsPhase,
+    role_automata: encoded::role_automata::RoleAutomataPhase,
 }
 
 fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<EncodedSliceProgram> {
@@ -1377,6 +1439,48 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         semantics_limits,
     )
     .map_err(encoded_validation_error)?;
+    let merged_semantics_owned = merged_hierarchy_owned
+        .checked_add(role_semantics.owned_bytes)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged role-semantics ownership overflowed",
+            ))
+        })?;
+    let merged_semantics_work = merged_hierarchy_work
+        .checked_add(role_semantics.work)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged role-semantics work overflowed",
+            ))
+        })?;
+    let automata_limits = encoded::role_automata::RoleAutomataPhaseLimits {
+        max_owned_bytes: limits
+            .max_owned_bytes
+            .checked_sub(merged_semantics_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged role semantics exceeded the program ownership limit",
+                ))
+            })?,
+        max_work: limits
+            .max_work
+            .checked_sub(merged_semantics_work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged role semantics exceeded the program work limit",
+                ))
+            })?,
+        ..encoded::role_automata::RoleAutomataPhaseLimits::default()
+    };
+    let role_automata = encoded::role_automata::compile_role_automata_phase(
+        &object_roles,
+        &simple_roles,
+        &complex_roles,
+        &object_role_hierarchy,
+        &role_semantics,
+        automata_limits,
+    )
+    .map_err(encoded_validation_error)?;
     Ok(EncodedSliceProgram {
         named_classes,
         object_roles,
@@ -1384,6 +1488,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         complex_roles,
         object_role_hierarchy,
         role_semantics,
+        role_automata,
     })
 }
 
@@ -1477,6 +1582,43 @@ fn encoded_object_role_semantics_slices_manifest_v1(
     })
 }
 
+#[pyfunction(name = "_encoded_object_role_automata_slices_manifest_v1")]
+#[pyo3(signature = (*, slices))]
+fn encoded_object_role_automata_slices_manifest_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        compile_encoded_slice_program(slices)?
+            .role_automata
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
+#[pyfunction(name = "_encoded_object_role_slices_accepts_v1")]
+#[pyo3(signature = (*, slices, target_role_id, word_role_ids))]
+fn encoded_object_role_slices_accepts_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+    target_role_id: &Bound<'_, PyAny>,
+    word_role_ids: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    contain_encoded_selection(py, || {
+        let target_role_id = exact_encoded_role_id(target_role_id, "target role ID")?;
+        let word_role_ids = exact_encoded_role_word(word_role_ids)?;
+        let program = compile_encoded_slice_program(slices)?;
+        program
+            .role_automata
+            .accepts(
+                &program.object_role_hierarchy,
+                target_role_id,
+                &word_role_ids,
+            )
+            .map_err(encoded_validation_error)
+    })
+}
+
 fn contain_encoded_selection<T>(
     py: Python<'_>,
     operation: impl FnOnce() -> NativeResult<T>,
@@ -1497,6 +1639,60 @@ fn contain_encoded_selection<T>(
 #[allow(clippy::panic)]
 fn debug_encoded_selection_panic_v1(py: Python<'_>) -> PyResult<()> {
     contain_encoded_selection(py, || -> NativeResult<()> { std::panic::panic_any(()) })
+}
+
+struct EncodedRoleAutomataProgram {
+    hierarchy: encoded::object_role_hierarchy::ObjectRoleHierarchyPhase,
+    automata: encoded::role_automata::RoleAutomataPhase,
+}
+
+fn compile_encoded_role_automata_program<B: encoded::ByteSource>(
+    model: &encoded::model::ValidatedModel<B>,
+) -> encoded::EncodedResult<EncodedRoleAutomataProgram> {
+    let symbols = encoded::symbols::compile_symbol_phase(
+        model,
+        encoded::symbols::SymbolPhaseLimits::default(),
+    )?;
+    let roles = encoded::object_roles::compile_object_role_phase(
+        &symbols,
+        encoded::object_roles::ObjectRolePhaseLimits::default(),
+    )?;
+    let simple = encoded::simple_roles::compile_simple_role_phase(
+        model,
+        &symbols,
+        &roles,
+        encoded::simple_roles::SimpleRolePhaseLimits::default(),
+    )?;
+    let complex = encoded::complex_roles::compile_complex_role_phase(
+        model,
+        &symbols,
+        &roles,
+        encoded::complex_roles::ComplexRolePhaseLimits::default(),
+    )?;
+    let hierarchy = encoded::object_role_hierarchy::compile_object_role_hierarchy_phase(
+        &roles,
+        &simple,
+        encoded::object_role_hierarchy::ObjectRoleHierarchyLimits::default(),
+    )?;
+    let semantics = encoded::role_semantics::compile_role_semantics_phase(
+        &roles,
+        &simple,
+        &complex,
+        &hierarchy,
+        encoded::role_semantics::RoleSemanticsPhaseLimits::default(),
+    )?;
+    let automata = encoded::role_automata::compile_role_automata_phase(
+        &roles,
+        &simple,
+        &complex,
+        &hierarchy,
+        &semantics,
+        encoded::role_automata::RoleAutomataPhaseLimits::default(),
+    )?;
+    Ok(EncodedRoleAutomataProgram {
+        hierarchy,
+        automata,
+    })
 }
 
 #[pyfunction(name = "_encoded_symbol_manifest_v1")]
@@ -1897,6 +2093,93 @@ fn encoded_object_role_semantics_manifest_v1(
     }
 }
 
+#[pyfunction(name = "_encoded_object_role_automata_manifest_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_object_role_automata_manifest_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        compile_encoded_role_automata_program(&model)
+            .map_err(encoded_validation_error)?
+            .automata
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
+#[pyfunction(name = "_encoded_object_role_accepts_v1")]
+#[pyo3(signature = (*, target_role_id, word_role_ids, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_object_role_accepts_v1(
+    py: Python<'_>,
+    target_role_id: &Bound<'_, PyAny>,
+    word_role_ids: &Bound<'_, PyAny>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    contain_encoded_selection(py, || {
+        let target_role_id = exact_encoded_role_id(target_role_id, "target role ID")?;
+        let word_role_ids = exact_encoded_role_word(word_role_ids)?;
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let program =
+            compile_encoded_role_automata_program(&model).map_err(encoded_validation_error)?;
+        program
+            .automata
+            .accepts(&program.hierarchy, target_role_id, &word_role_ids)
+            .map_err(encoded_validation_error)
+    })
+}
+
 #[pyfunction(name = "_encoded_named_class_manifest_v1")]
 #[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
 #[allow(clippy::too_many_arguments)]
@@ -2241,6 +2524,19 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(
         encoded_object_role_semantics_slices_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_object_role_automata_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_object_role_automata_slices_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(encoded_object_role_accepts_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_object_role_slices_accepts_v1,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(encoded_named_class_manifest_v1, module)?)?;
