@@ -337,6 +337,32 @@ struct ValidationContext<'a, B: ByteSource> {
     node_count: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DfsFrame {
+    node: usize,
+    field_cursor: usize,
+    field_end: usize,
+    item_cursor: usize,
+    item_end: usize,
+}
+
+impl DfsFrame {
+    fn new<B: ByteSource>(node: usize, columns: &EncodedColumns<B>) -> EncodedResult<Self> {
+        let field_cursor = usize_at(columns.node_field_offsets, node, "node field offset")?;
+        let next = node
+            .checked_add(1)
+            .ok_or_else(|| EncodedValidationError::resource("node field offset index overflow"))?;
+        let field_end = usize_at(columns.node_field_offsets, next, "node field offset")?;
+        Ok(Self {
+            node,
+            field_cursor,
+            field_end,
+            item_cursor: 0,
+            item_end: 0,
+        })
+    }
+}
+
 /// Validate schema-v1 shape, scalar widths, root categories, tags, arity, and
 /// exact field roles without copying an input column.
 pub fn validate_columns<B: ByteSource>(
@@ -424,6 +450,8 @@ pub fn validate_columns<B: ByteSource>(
         columns: &columns,
         node_count,
     };
+    let mut item_cursor = 0_usize;
+    let mut scalar_cursor = 0_usize;
     for node in 0..node_count {
         let tag = u16_at(columns.node_tags, node, "node tag")?;
         let roles = constructor_roles(tag).ok_or_else(|| {
@@ -451,6 +479,11 @@ pub fn validate_columns<B: ByteSource>(
                     if component.kind != expected {
                         return Err(field_role_error(location));
                     }
+                    if component.value != item_cursor {
+                        return Err(EncodedValidationError::protocol(
+                            "encoded collection fields do not exactly cover item rows",
+                        ));
+                    }
                     let end = component
                         .value
                         .checked_add(component.length)
@@ -462,6 +495,7 @@ pub fn validate_columns<B: ByteSource>(
                             "encoded collection field exceeds item rows",
                         ));
                     }
+                    let mut previous_set_item = None;
                     for item in component.value..end {
                         claim_work(&mut work, 1, limits.max_work)?;
                         let item_component = Component {
@@ -475,22 +509,54 @@ pub fn validate_columns<B: ByteSource>(
                             item_component,
                             context,
                         )?;
+                        if expected == COMPONENT_SET {
+                            let identifier = node_id_at(
+                                columns.item_values,
+                                item,
+                                "canonical-set item node ID",
+                            )?;
+                            if previous_set_item.is_some_and(|prior| prior >= identifier) {
+                                return Err(EncodedValidationError::protocol(
+                                    "encoded canonical-set node IDs are not strictly ascending and unique",
+                                ));
+                            }
+                            previous_set_item = Some(identifier);
+                        }
                         validate_leaf_component(
                             item_component,
                             context,
+                            &mut scalar_cursor,
                             &mut work,
                             limits.max_work,
                         )?;
                     }
+                    item_cursor = end;
                 }
                 _ => {
                     validate_field_role(location, role, component, context)?;
-                    validate_leaf_component(component, context, &mut work, limits.max_work)?;
+                    validate_leaf_component(
+                        component,
+                        context,
+                        &mut scalar_cursor,
+                        &mut work,
+                        limits.max_work,
+                    )?;
                 }
             }
         }
     }
+    if item_cursor != item_count {
+        return Err(EncodedValidationError::protocol(
+            "encoded item rows are not exactly covered by collection fields",
+        ));
+    }
+    if scalar_cursor != columns.scalar_bytes.len() {
+        return Err(EncodedValidationError::protocol(
+            "encoded scalar arena is not exactly covered by components",
+        ));
+    }
 
+    let mut previous_root = None;
     for root in 0..root_count {
         claim_work(&mut work, 1, limits.max_work)?;
         let kind = byte_at(columns.root_kinds, root, "root kind")?;
@@ -502,7 +568,15 @@ pub fn validate_columns<B: ByteSource>(
                 "encoded root kind is inconsistent with its constructor tag",
             ));
         }
+        if previous_root.is_some_and(|prior| prior >= (kind, identifier)) {
+            return Err(EncodedValidationError::protocol(
+                "encoded roots are not strictly ordered and unique",
+            ));
+        }
+        previous_root = Some((kind, identifier));
     }
+
+    validate_reachability(&columns, root_count, node_count, &mut work, limits.max_work)?;
 
     Ok(ValidatedEncodedColumns {
         root_count,
@@ -757,6 +831,7 @@ fn field_role_error(location: FieldLocation) -> EncodedValidationError {
 fn validate_leaf_component<B: ByteSource>(
     component: Component,
     context: ValidationContext<'_, B>,
+    scalar_cursor: &mut usize,
     work: &mut u64,
     max_work: u64,
 ) -> EncodedResult<()> {
@@ -784,6 +859,11 @@ fn validate_leaf_component<B: ByteSource>(
             node_index(identifier, context.node_count)?;
         }
         COMPONENT_TEXT | COMPONENT_BYTES | COMPONENT_INTEGER | COMPONENT_ENUM => {
+            if value != *scalar_cursor {
+                return Err(EncodedValidationError::protocol(
+                    "encoded scalar components do not exactly cover the scalar arena",
+                ));
+            }
             let end = value
                 .checked_add(length)
                 .ok_or_else(|| EncodedValidationError::resource("encoded scalar range overflow"))?;
@@ -836,6 +916,7 @@ fn validate_leaf_component<B: ByteSource>(
                     ));
                 }
             }
+            *scalar_cursor = end;
         }
         COMPONENT_SET | COMPONENT_SEQUENCE => {
             return Err(EncodedValidationError::protocol(
@@ -848,6 +929,115 @@ fn validate_leaf_component<B: ByteSource>(
             ));
         }
     }
+    Ok(())
+}
+
+fn validate_reachability<B: ByteSource>(
+    columns: &EncodedColumns<B>,
+    root_count: usize,
+    node_count: usize,
+    work: &mut u64,
+    max_work: u64,
+) -> EncodedResult<()> {
+    claim_work(
+        work,
+        u64::try_from(node_count)
+            .map_err(|_| EncodedValidationError::resource("encoded graph scan exceeds u64"))?,
+        max_work,
+    )?;
+    let mut states = Vec::new();
+    states.try_reserve_exact(node_count).map_err(|_| {
+        EncodedValidationError::resource("encoded reachability state allocation failed")
+    })?;
+    states.resize(node_count, 0_u8);
+    let mut stack = Vec::<DfsFrame>::new();
+    for root in 0..root_count {
+        let identifier = u32_at(columns.root_ids, root, "root ID")?;
+        let node = node_index(identifier, node_count)?;
+        if states[node] == 2 {
+            continue;
+        }
+        if states[node] == 1 {
+            return Err(EncodedValidationError::protocol(
+                "encoded structural graph is cyclic",
+            ));
+        }
+        states[node] = 1;
+        push_dfs_frame(&mut stack, DfsFrame::new(node, columns)?)?;
+        while let Some(frame) = stack.last_mut() {
+            claim_work(work, 1, max_work)?;
+            let child = if frame.item_cursor < frame.item_end {
+                let item = frame.item_cursor;
+                frame.item_cursor += 1;
+                (byte_at(columns.item_kinds, item, "item kind")? == COMPONENT_NODE)
+                    .then(|| node_id_at(columns.item_values, item, "item node ID"))
+                    .transpose()?
+            } else if frame.field_cursor < frame.field_end {
+                let field = frame.field_cursor;
+                frame.field_cursor += 1;
+                match byte_at(columns.field_kinds, field, "field kind")? {
+                    COMPONENT_NODE => {
+                        Some(node_id_at(columns.field_values, field, "field node ID")?)
+                    }
+                    COMPONENT_SET | COMPONENT_SEQUENCE => {
+                        frame.item_cursor =
+                            usize_at(columns.field_values, field, "field item offset")?;
+                        frame.item_end = frame
+                            .item_cursor
+                            .checked_add(usize_at(
+                                columns.field_lengths,
+                                field,
+                                "field item length",
+                            )?)
+                            .ok_or_else(|| {
+                                EncodedValidationError::resource("encoded item range overflow")
+                            })?;
+                        None
+                    }
+                    _ => None,
+                }
+            } else {
+                let completed = frame.node;
+                states[completed] = 2;
+                stack.pop();
+                continue;
+            };
+            let Some(child) = child else {
+                continue;
+            };
+            let child = node_index(child, node_count)?;
+            match states[child] {
+                0 => {
+                    states[child] = 1;
+                    push_dfs_frame(&mut stack, DfsFrame::new(child, columns)?)?;
+                }
+                1 => {
+                    return Err(EncodedValidationError::protocol(
+                        "encoded structural graph is cyclic",
+                    ));
+                }
+                2 => {}
+                _ => {
+                    return Err(EncodedValidationError::invariant(
+                        "invalid encoded DFS state",
+                    ));
+                }
+            }
+        }
+    }
+    if states.iter().any(|state| *state != 2) {
+        return Err(EncodedValidationError::protocol(
+            "encoded structural graph contains unreachable nodes",
+        ));
+    }
+    Ok(())
+}
+
+fn push_dfs_frame(stack: &mut Vec<DfsFrame>, frame: DfsFrame) -> EncodedResult<()> {
+    stack
+        .try_reserve(1)
+        .map_err(|_| EncodedValidationError::resource("encoded graph stack allocation failed"))?;
+    stack.push(frame);
     Ok(())
 }
 
@@ -1006,6 +1196,11 @@ fn u64_at<B: ByteSource>(bytes: B, index: usize, name: &str) -> EncodedResult<u6
         byte_at(bytes, start + 6, name)?,
         byte_at(bytes, start + 7, name)?,
     ]))
+}
+
+fn node_id_at<B: ByteSource>(bytes: B, index: usize, name: &str) -> EncodedResult<u32> {
+    u32::try_from(u64_at(bytes, index, name)?)
+        .map_err(|_| EncodedValidationError::protocol(format!("encoded {name} exceeds u32")))
 }
 
 fn usize_at<B: ByteSource>(bytes: B, index: usize, name: &str) -> EncodedResult<usize> {
@@ -1208,6 +1403,55 @@ mod tests {
         }
     }
 
+    fn equivalent_classes() -> OwnedColumns {
+        OwnedColumns {
+            root_kinds: vec![ROOT_AXIOM],
+            root_ids: le32(&[5]),
+            node_tags: le16(&[1, 1, 2, 2, 62]),
+            node_field_offsets: le64(&[0, 1, 2, 4, 6, 8]),
+            field_kinds: vec![
+                COMPONENT_TEXT,
+                COMPONENT_TEXT,
+                COMPONENT_ENUM,
+                COMPONENT_NODE,
+                COMPONENT_ENUM,
+                COMPONENT_NODE,
+                COMPONENT_SET,
+                COMPONENT_SET,
+            ],
+            field_values: le64(&[0, 5, 10, 1, 15, 2, 0, 2]),
+            field_lengths: le64(&[5, 5, 5, 0, 5, 0, 2, 0]),
+            item_kinds: vec![COMPONENT_NODE, COMPONENT_NODE],
+            item_values: le64(&[3, 4]),
+            item_lengths: le64(&[0, 0]),
+            scalar_bytes: b"urn:Aurn:Bclassclass".to_vec(),
+        }
+    }
+
+    fn data_range_cycle() -> OwnedColumns {
+        OwnedColumns {
+            root_kinds: vec![ROOT_AXIOM],
+            root_ids: le32(&[4]),
+            node_tags: le16(&[1, 2, 23, 94]),
+            node_field_offsets: le64(&[0, 1, 3, 4, 7]),
+            field_kinds: vec![
+                COMPONENT_TEXT,
+                COMPONENT_ENUM,
+                COMPONENT_NODE,
+                COMPONENT_NODE,
+                COMPONENT_NODE,
+                COMPONENT_NODE,
+                COMPONENT_SET,
+            ],
+            field_values: le64(&[0, 5, 1, 3, 2, 3, 0]),
+            field_lengths: le64(&[5, 13, 0, 0, 0, 0, 0]),
+            item_kinds: Vec::new(),
+            item_values: Vec::new(),
+            item_lengths: Vec::new(),
+            scalar_bytes: b"urn:pdata_property".to_vec(),
+        }
+    }
+
     fn assert_protocol_contains(columns: &OwnedColumns, expected: &str) {
         assert!(matches!(
             validate_columns(columns.borrowed(), EncodedLimits::default()),
@@ -1282,7 +1526,7 @@ mod tests {
                 field_count: 5,
                 item_count: 0,
                 scalar_bytes: 10,
-                work: 20,
+                work: 31,
             })
         );
     }
@@ -1382,6 +1626,159 @@ mod tests {
     }
 
     #[test]
+    fn arenas_require_exact_ordered_nonoverlapping_coverage() {
+        assert!(
+            validate_columns(equivalent_classes().borrowed(), EncodedLimits::default()).is_ok()
+        );
+
+        let mut malformed = equivalent_classes();
+        malformed.node_field_offsets = le64(&[1, 1, 2, 4, 6, 8]);
+        assert_protocol_contains(&malformed, "offsets must start at zero");
+
+        let mut malformed = equivalent_classes();
+        malformed.node_field_offsets = le64(&[0, 1, 2, 4, 6, 9]);
+        assert_protocol_contains(&malformed, "offsets are not contiguous and bounded");
+
+        let mut malformed = equivalent_classes();
+        malformed.field_kinds.push(COMPONENT_NONE);
+        malformed.field_values.extend(le64(&[0]));
+        malformed.field_lengths.extend(le64(&[0]));
+        assert_protocol_contains(&malformed, "offsets do not cover every field");
+
+        let mut malformed = equivalent_classes();
+        malformed.field_values = le64(&[0, 5, 10, 1, 15, 2, 1, 2]);
+        assert_protocol_contains(&malformed, "exactly cover item rows");
+
+        let mut malformed = equivalent_classes();
+        malformed.field_values = le64(&[0, 5, 10, 1, 15, 2, 0, 1]);
+        assert_protocol_contains(&malformed, "exactly cover item rows");
+
+        let mut malformed = equivalent_classes();
+        malformed.field_lengths = le64(&[5, 5, 5, 0, 5, 0, 3, 0]);
+        assert_protocol_contains(&malformed, "collection field exceeds item rows");
+
+        let mut malformed = equivalent_classes();
+        malformed.item_kinds.push(COMPONENT_NODE);
+        malformed.item_values.extend(le64(&[4]));
+        malformed.item_lengths.extend(le64(&[0]));
+        assert_protocol_contains(&malformed, "item rows are not exactly covered");
+
+        let mut malformed = equivalent_classes();
+        malformed.field_values = le64(&[1, 5, 10, 1, 15, 2, 0, 2]);
+        assert_protocol_contains(&malformed, "exactly cover the scalar arena");
+
+        let mut malformed = equivalent_classes();
+        malformed.field_values = le64(&[0, 4, 10, 1, 15, 2, 0, 2]);
+        assert_protocol_contains(&malformed, "exactly cover the scalar arena");
+
+        let mut malformed = equivalent_classes();
+        malformed.field_lengths = le64(&[21, 5, 5, 0, 5, 0, 2, 0]);
+        assert_protocol_contains(&malformed, "scalar component is out of bounds");
+
+        let mut malformed = equivalent_classes();
+        malformed.scalar_bytes.push(b'x');
+        assert_protocol_contains(&malformed, "scalar arena is not exactly covered");
+    }
+
+    #[test]
+    fn references_sets_roots_and_reachability_are_integral() {
+        let mut malformed = declaration();
+        malformed.root_ids = le32(&[0]);
+        assert_protocol_contains(&malformed, "one-based and nonzero");
+
+        let mut malformed = declaration();
+        malformed.root_ids = le32(&[4]);
+        assert_protocol_contains(&malformed, "node ID is out of range");
+
+        let mut malformed = declaration();
+        malformed.field_values = le64(&[0, 5, 0, 2, 0]);
+        assert_protocol_contains(&malformed, "one-based and nonzero");
+
+        let mut malformed = declaration();
+        malformed.field_values = le64(&[0, 5, 4, 2, 0]);
+        assert_protocol_contains(&malformed, "node ID is out of range");
+
+        let mut malformed = equivalent_classes();
+        malformed.item_values = le64(&[0, 4]);
+        assert_protocol_contains(&malformed, "one-based and nonzero");
+
+        let mut malformed = equivalent_classes();
+        malformed.item_values = le64(&[3, 6]);
+        assert_protocol_contains(&malformed, "node ID is out of range");
+
+        let mut malformed = equivalent_classes();
+        malformed.item_values = le64(&[4, 3]);
+        assert_protocol_contains(&malformed, "not strictly ascending and unique");
+
+        let mut malformed = equivalent_classes();
+        malformed.item_values = le64(&[3, 3]);
+        assert_protocol_contains(&malformed, "not strictly ascending and unique");
+
+        let mut sequence = property_chain();
+        sequence.field_values = le64(&[0, 5, 1, 0, 3, 2, 2]);
+        sequence.field_lengths = le64(&[5, 15, 0, 2, 0, 0, 0]);
+        sequence.item_kinds = vec![COMPONENT_NODE, COMPONENT_NODE];
+        sequence.item_values = le64(&[2, 2]);
+        sequence.item_lengths = le64(&[0, 0]);
+        assert!(validate_columns(sequence.borrowed(), EncodedLimits::default()).is_ok());
+
+        assert_protocol_contains(&data_range_cycle(), "structural graph is cyclic");
+
+        let mut unreachable = declaration();
+        unreachable.node_tags = le16(&[1, 2, 60, 1]);
+        unreachable.node_field_offsets = le64(&[0, 1, 3, 5, 6]);
+        unreachable.field_kinds.push(COMPONENT_TEXT);
+        unreachable.field_values.extend(le64(&[10]));
+        unreachable.field_lengths.extend(le64(&[1]));
+        unreachable.scalar_bytes.push(b'z');
+        assert_protocol_contains(&unreachable, "contains unreachable nodes");
+
+        let graph_limited = EncodedLimits {
+            max_work: 20,
+            ..EncodedLimits::default()
+        };
+        assert!(matches!(
+            validate_columns(declaration().borrowed(), graph_limited),
+            Err(error) if error.code == "NATIVE_ENCODED_RESOURCE_LIMIT"
+        ));
+    }
+
+    #[test]
+    fn root_kind_tag_and_order_rules_cover_the_frozen_ledger() {
+        const AXIOM_TAGS: [u16; 37] = [
+            60, 61, 62, 63, 64, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 90, 91, 92, 93,
+            94, 95, 100, 101, 110, 111, 112, 113, 114, 115, 116, 120, 121, 122, 123,
+        ];
+        for (tag, _roles) in CONSTRUCTOR_ROLE_LEDGER {
+            assert_eq!(root_accepts(ROOT_ONTOLOGY_ANNOTATION, *tag), *tag == 5);
+            assert_eq!(root_accepts(ROOT_AXIOM, *tag), AXIOM_TAGS.contains(tag));
+            assert_eq!(root_accepts(ROOT_EXTENSION, *tag), *tag == 148);
+            assert!(!root_accepts(0, *tag));
+            assert!(!root_accepts(4, *tag));
+        }
+        for tag in [0, 6, 59, 65, 83, 96, 102, 117, 124, 139, 149] {
+            assert!(!root_accepts(ROOT_ONTOLOGY_ANNOTATION, tag));
+            assert!(!root_accepts(ROOT_AXIOM, tag));
+            assert!(!root_accepts(ROOT_EXTENSION, tag));
+        }
+
+        assert!(validate_columns(annotation().borrowed(), EncodedLimits::default()).is_ok());
+
+        let mut malformed = annotation();
+        malformed.root_kinds[0] = ROOT_AXIOM;
+        assert_protocol_contains(&malformed, "inconsistent with its constructor tag");
+
+        let mut malformed = equivalent_classes();
+        malformed.root_ids = le32(&[2]);
+        assert_protocol_contains(&malformed, "inconsistent with its constructor tag");
+
+        let mut malformed = equivalent_classes();
+        malformed.root_kinds = vec![ROOT_AXIOM, ROOT_AXIOM];
+        malformed.root_ids = le32(&[5, 5]);
+        assert_protocol_contains(&malformed, "strictly ordered and unique");
+    }
+
+    #[test]
     fn leaf_scalars_and_node_identifiers_are_checked_before_handoff() {
         let mut malformed = declaration();
         malformed.scalar_bytes[0] = 0xff;
@@ -1407,6 +1804,7 @@ mod tests {
             columns: &borrowed,
             node_count: 0,
         };
+        let mut scalar_cursor = 0;
         let mut work = 0;
         assert!(matches!(
             validate_leaf_component(
@@ -1416,6 +1814,7 @@ mod tests {
                     length: 2,
                 },
                 context,
+                &mut scalar_cursor,
                 &mut work,
                 16,
             ),
@@ -1429,6 +1828,7 @@ mod tests {
             columns: &borrowed,
             node_count: 0,
         };
+        let mut scalar_cursor = 0;
         let mut work = 0;
         assert!(matches!(
             validate_leaf_component(
@@ -1438,6 +1838,7 @@ mod tests {
                     length: 1,
                 },
                 context,
+                &mut scalar_cursor,
                 &mut work,
                 16,
             ),
