@@ -1,7 +1,8 @@
 //! Transactional named-class, named-individual, and axiom compilation.
 //!
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
-//! a scalar-compatible named `individual` domain. It compiles named-only
+//! a scalar-compatible named `individual` domain and the exact semantic
+//! `source_literal` domain needed by later datatype/ABox phases. It compiles named-only
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
@@ -25,7 +26,7 @@ use super::canonical::{
     self, annotation_stripped_axiom_digest, source_axiom_digest, AnonymousScopeMap, CanonicalBudget,
 };
 use super::data_roles::DataRolePhase;
-use super::model::{ComponentValue, NodeId, NodeRef, ValidatedModel};
+use super::model::{ComponentKind, ComponentValue, NodeId, NodeRef, ScalarRef, ValidatedModel};
 use super::object_roles::ObjectRolePhase;
 use super::symbols::{RootHandler, SymbolPhase};
 use super::{ByteSource, EncodedResult, EncodedValidationError};
@@ -36,6 +37,7 @@ use crate::input_wire::{
 
 const NAMED_CLASS_PHASE_SCHEMA_VERSION: u16 = 1;
 const ENTITY_TAG: u16 = 2;
+const LITERAL_TAG: u16 = 4;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
 const DISJOINT_CLASSES_TAG: u16 = 63;
@@ -71,6 +73,7 @@ pub struct NamedClassPhaseLimits {
     pub max_class_symbols: usize,
     pub max_data_range_symbols: usize,
     pub max_individual_symbols: usize,
+    pub max_source_literal_symbols: usize,
     pub max_compiled_roots: usize,
     pub max_predicates: usize,
     pub max_clauses: usize,
@@ -91,6 +94,7 @@ impl Default for NamedClassPhaseLimits {
             max_class_symbols: 16_000_000,
             max_data_range_symbols: 16_000_000,
             max_individual_symbols: 16_000_000,
+            max_source_literal_symbols: 16_000_000,
             max_compiled_roots: 100_000_000,
             max_predicates: 100_000_000,
             max_clauses: 100_000_000,
@@ -128,6 +132,7 @@ pub struct NamedClassPhase {
     pub class_signature: Vec<ClassSignatureBinding>,
     pub data_range_domain: DecodedSymbolDomain,
     pub individual_domain: DecodedSymbolDomain,
+    pub source_literal_domain: DecodedSymbolDomain,
     pub individual_signature: Vec<IndividualSignatureBinding>,
     pub named_individuals: Vec<u32>,
     pub predicates: Vec<DecodedPredicate>,
@@ -183,6 +188,12 @@ impl NamedClassPhase {
             .collect();
         let individual_symbols = self
             .individual_domain
+            .values
+            .iter()
+            .map(symbol_manifest)
+            .collect();
+        let source_literal_symbols = self
+            .source_literal_domain
             .values
             .iter()
             .map(symbol_manifest)
@@ -259,6 +270,7 @@ impl NamedClassPhase {
             class_signature,
             data_range_symbols,
             individual_symbols,
+            source_literal_symbols,
             individual_signature,
             named_individuals: &self.named_individuals,
             predicates,
@@ -289,6 +301,7 @@ struct NamedClassManifest<'a> {
     class_signature: Vec<ClassSignatureManifest>,
     data_range_symbols: Vec<SymbolManifest<'a>>,
     individual_symbols: Vec<SymbolManifest<'a>>,
+    source_literal_symbols: Vec<SymbolManifest<'a>>,
     individual_signature: Vec<IndividualSignatureManifest>,
     named_individuals: &'a [u32],
     predicates: Vec<PredicateManifest<'a>>,
@@ -785,6 +798,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let declared_individual_ids = declared_individual_ids(symbols, &mut budget)?;
     let (individual_domain, individual_signature) =
         individual_signature(symbols, &declared_individual_ids, &mut budget)?;
+    let source_literal_domain = source_literal_domain(model, symbols, &mut budget)?;
     let mut named_individuals = Vec::new();
     budget.claim_owned(
         individual_domain
@@ -1586,6 +1600,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         class_signature,
         data_range_domain,
         individual_domain,
+        source_literal_domain,
         individual_signature,
         named_individuals,
         predicates,
@@ -1724,6 +1739,269 @@ fn named_data_range_domain(
         kind: SymbolKind::DataRange,
         values,
     })
+}
+
+fn source_literal_domain<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<DecodedSymbolDomain> {
+    let mut candidates = Vec::<(Vec<u8>, String)>::new();
+    for node_index in 0..model.summary().node_count {
+        budget.claim_work(1)?;
+        let node = model.node_at(node_index)?.ok_or_else(|| {
+            EncodedValidationError::invariant("validated literal node disappeared")
+        })?;
+        if node.tag() != LITERAL_TAG || !symbols.semantic_node_is_reachable(node.id()) {
+            continue;
+        }
+        let following = candidates.len().checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("source-literal symbol count overflowed")
+        })?;
+        PhaseBudget::count(
+            following,
+            budget.limits.max_source_literal_symbols,
+            "source-literal symbol count",
+        )?;
+        let key = canonical::canonical_node_key(model, node.id(), &[], budget)?;
+        let display = literal_display(model, symbols, node, budget)?;
+        budget.claim_owned(size_of::<(Vec<u8>, String)>())?;
+        candidates.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("source-literal candidate allocation failed")
+        })?;
+        candidates.push((key, display));
+    }
+    budget.claim_work(sort_work(candidates.len()))?;
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut values = Vec::<DecodedSymbolValue>::new();
+    budget.claim_owned(
+        candidates
+            .len()
+            .checked_mul(size_of::<DecodedSymbolValue>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("source-literal symbol output overflowed")
+            })?,
+    )?;
+    values.try_reserve_exact(candidates.len()).map_err(|_| {
+        EncodedValidationError::resource("source-literal symbol output allocation failed")
+    })?;
+    for (key, display) in candidates {
+        if let Some(previous) = values.last() {
+            if previous.key == key {
+                if previous.display != display {
+                    return Err(EncodedValidationError::invariant(
+                        "source-literal key has conflicting display metadata",
+                    ));
+                }
+                continue;
+            }
+        }
+        let identifier = u32::try_from(values.len()).map_err(|_| {
+            EncodedValidationError::resource("source-literal symbol ID exceeds u32")
+        })?;
+        values.push(DecodedSymbolValue {
+            identifier,
+            key,
+            display,
+            generated: false,
+            query_local: false,
+        });
+    }
+    Ok(DecodedSymbolDomain {
+        kind: SymbolKind::SourceLiteral,
+        values,
+    })
+}
+
+fn literal_display<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    literal: NodeRef,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<String> {
+    if literal.tag() != LITERAL_TAG || literal.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "literal node no longer has schema-1 shape",
+        ));
+    }
+    let fields = literal.fields();
+    let lexical = text_field(model, fields.start, "literal lexical form", budget)?;
+    let datatype_index = fields.start.checked_add(1).ok_or_else(|| {
+        EncodedValidationError::invariant("literal datatype field index overflowed")
+    })?;
+    let datatype_component = required_component(model.field(datatype_index)?, "literal datatype")?;
+    let ComponentValue::Node(datatype_node) = model.resolve(datatype_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "literal datatype field is not a node",
+        ));
+    };
+    let datatype_symbol_id = symbols
+        .entity_symbol_for_node(datatype_node)
+        .ok_or_else(|| EncodedValidationError::invariant("literal datatype is not reachable"))?;
+    let datatype = symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(datatype_symbol_id).map_err(|_| {
+            EncodedValidationError::invariant("literal datatype symbol ID exceeds usize")
+        })?)
+        .ok_or_else(|| EncodedValidationError::invariant("literal datatype symbol is dangling"))?;
+    let datatype_iri = datatype.display.strip_prefix("datatype:").ok_or_else(|| {
+        EncodedValidationError::invariant("literal datatype symbol changed entity kind")
+    })?;
+    let language_index = fields.start.checked_add(2).ok_or_else(|| {
+        EncodedValidationError::invariant("literal language field index overflowed")
+    })?;
+    let language_component = required_component(model.field(language_index)?, "literal language")?;
+    let language = match model.resolve(language_component)? {
+        ComponentValue::None => None,
+        ComponentValue::Scalar(value) => Some(text_scalar(value, "literal language", budget)?),
+        ComponentValue::Node(_) | ComponentValue::Collection(_) => {
+            return Err(EncodedValidationError::invariant(
+                "literal language field is not optional text",
+            ));
+        }
+    };
+    let lexical_repr = python_string_repr(&lexical, budget)?;
+    let language_len = language
+        .as_ref()
+        .map_or(0, |value| value.len().saturating_add(1));
+    let display_len = "literal:"
+        .len()
+        .checked_add(lexical_repr.len())
+        .and_then(|value| value.checked_add("^^".len()))
+        .and_then(|value| value.checked_add(datatype_iri.len()))
+        .and_then(|value| value.checked_add(language_len))
+        .ok_or_else(|| EncodedValidationError::resource("literal display length overflowed"))?;
+    budget.claim_owned(display_len)?;
+    let mut display = String::new();
+    display
+        .try_reserve_exact(display_len)
+        .map_err(|_| EncodedValidationError::resource("literal display allocation failed"))?;
+    display.push_str("literal:");
+    display.push_str(&lexical_repr);
+    display.push_str("^^");
+    display.push_str(datatype_iri);
+    if let Some(language) = language {
+        display.push('@');
+        display.push_str(&language);
+    }
+    Ok(display)
+}
+
+fn text_field<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    index: usize,
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<String> {
+    let component = required_component(model.field(index)?, name)?;
+    let ComponentValue::Scalar(value) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(format!(
+            "{name} is not a scalar"
+        )));
+    };
+    text_scalar(value, name, budget)
+}
+
+fn text_scalar<B: ByteSource>(
+    value: ScalarRef<B>,
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<String> {
+    if value.kind() != ComponentKind::Text {
+        return Err(EncodedValidationError::invariant(format!(
+            "{name} is not text"
+        )));
+    }
+    budget.claim_work(value.len())?;
+    budget.claim_owned(value.len())?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(value.len())
+        .map_err(|_| EncodedValidationError::resource(format!("{name} allocation failed")))?;
+    for index in 0..value.len() {
+        bytes.push(value.byte(index).ok_or_else(|| {
+            EncodedValidationError::invariant(format!("{name} byte disappeared"))
+        })?);
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| EncodedValidationError::invariant(format!("{name} is no longer UTF-8")))
+}
+
+fn python_string_repr(value: &str, budget: &mut PhaseBudget) -> EncodedResult<String> {
+    let quote = if value.contains('\'') && !value.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let encoded_len = value.chars().try_fold(2_usize, |length, character| {
+        length
+            .checked_add(python_repr_character_len(character, quote))
+            .ok_or_else(|| EncodedValidationError::resource("literal repr length overflowed"))
+    })?;
+    budget.claim_owned(encoded_len)?;
+    let mut encoded = String::new();
+    encoded
+        .try_reserve_exact(encoded_len)
+        .map_err(|_| EncodedValidationError::resource("literal repr allocation failed"))?;
+    encoded.push(quote);
+    for character in value.chars() {
+        push_python_repr_character(&mut encoded, character, quote);
+    }
+    encoded.push(quote);
+    Ok(encoded)
+}
+
+fn python_repr_character_len(value: char, quote: char) -> usize {
+    match value {
+        '\\' | '\n' | '\r' | '\t' => 2,
+        character if character == quote => 2,
+        '\'' | '"' => 1,
+        character if debug_keeps_character(character) => character.len_utf8(),
+        character if u32::from(character) <= 0xff => 4,
+        character if u32::from(character) <= 0xffff => 6,
+        _ => 10,
+    }
+}
+
+fn debug_keeps_character(value: char) -> bool {
+    let mut escaped = value.escape_debug();
+    escaped.next() == Some(value) && escaped.next().is_none()
+}
+
+fn push_python_repr_character(target: &mut String, value: char, quote: char) {
+    match value {
+        '\\' => target.push_str("\\\\"),
+        '\n' => target.push_str("\\n"),
+        '\r' => target.push_str("\\r"),
+        '\t' => target.push_str("\\t"),
+        character if character == quote => {
+            target.push('\\');
+            target.push(character);
+        }
+        character @ ('\'' | '"') => target.push(character),
+        character if debug_keeps_character(character) => target.push(character),
+        character => push_python_hex_escape(target, u32::from(character)),
+    }
+}
+
+fn push_python_hex_escape(target: &mut String, value: u32) {
+    let (prefix, digits) = if value <= 0xff {
+        ("\\x", 2)
+    } else if value <= 0xffff {
+        ("\\u", 4)
+    } else {
+        ("\\U", 8)
+    };
+    target.push_str(prefix);
+    for shift in (0..digits).rev() {
+        let nibble = u8::try_from((value >> (shift * 4)) & 0x0f).unwrap_or(0);
+        target.push(char::from(if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + nibble - 10
+        }));
+    }
 }
 
 fn declared_individual_ids(
@@ -6908,6 +7186,10 @@ fn merge_named_class_phases_impl(
         .iter()
         .map(|(_, phase)| &phase.individual_domain)
         .collect::<Vec<_>>();
+    let source_literal_domains = phases
+        .iter()
+        .map(|(_, phase)| &phase.source_literal_domain)
+        .collect::<Vec<_>>();
     let (entity_domain, entity_maps) = merge_symbol_domains(
         &entity_domains,
         SymbolKind::Entity,
@@ -6934,6 +7216,13 @@ fn merge_named_class_phases_impl(
         SymbolKind::Individual,
         limits.max_individual_symbols,
         "individual",
+        &mut budget,
+    )?;
+    let (source_literal_domain, _source_literal_maps) = merge_symbol_domains(
+        &source_literal_domains,
+        SymbolKind::SourceLiteral,
+        limits.max_source_literal_symbols,
+        "source-literal",
         &mut budget,
     )?;
     let class_signature = merge_class_signatures(
@@ -7157,6 +7446,7 @@ fn merge_named_class_phases_impl(
         class_signature,
         data_range_domain,
         individual_domain,
+        source_literal_domain,
         individual_signature,
         named_individuals,
         predicates,

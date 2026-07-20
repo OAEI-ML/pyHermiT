@@ -130,6 +130,18 @@ def _symbol_payload(value: SymbolValue) -> dict[str, object]:
     }
 
 
+def _expected_source_literal_symbols(
+    snapshot: pyowl_core.OntologyView,
+) -> list[dict[str, object]]:
+    _normalized, program, _ontology = compile_captured_bundle(
+        capture_ontology(snapshot).captured,
+        ReasonerConfig(),
+    )
+    return [
+        _symbol_payload(value) for value in program.symbols.domain(SymbolKind.SOURCE_LITERAL).values
+    ]
+
+
 def _projected_atom_payload(
     value: Atom,
     predicate_remap: dict[int, int],
@@ -214,6 +226,7 @@ def _expected_manifest(
     class_domain = program.symbols.domain(SymbolKind.CLASS_EXPRESSION)
     data_range_domain = program.symbols.domain(SymbolKind.DATA_RANGE)
     individual_domain = program.symbols.domain(SymbolKind.INDIVIDUAL)
+    source_literal_domain = program.symbols.domain(SymbolKind.SOURCE_LITERAL)
     entity_domain = program.symbols.domain(SymbolKind.ENTITY)
     named_data_ranges = [
         value for value in data_range_domain.values if value.display.startswith("datatype:")
@@ -531,6 +544,9 @@ def _expected_manifest(
             for identifier, value in enumerate(named_data_ranges)
         ],
         "individual_symbols": [_symbol_payload(value) for value in individual_domain.values],
+        "source_literal_symbols": [
+            _symbol_payload(value) for value in source_literal_domain.values
+        ],
         "individual_signature": [
             {
                 "individual_id": value.identifier,
@@ -571,6 +587,99 @@ def test_named_class_signature_predicates_clauses_and_provenance_match_scalar() 
     )
 
     assert _native_manifest(snapshot) == _expected_manifest(snapshot, compiled_roots=3)
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_semantic_source_literal_symbols_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(AnnotationProperty(:note))",
+            'DataPropertyAssertion(Annotation(:note "annotation-only") :p :i "plain")',
+            'DataPropertyAssertion(:p :i "01"^^xsd:integer)',
+            'DataPropertyAssertion(:p :i "can\'t")',
+            'DataPropertyAssertion(:p :i "café")',
+            'DataPropertyAssertion(:p :i "non\u00a0breaking")',
+            'DataPropertyAssertion(:p :i "zero\u200bwidth")',
+            'NegativeDataPropertyAssertion(:p :i "salut"@FR)',
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual["source_literal_symbols"] == _expected_source_literal_symbols(snapshot)
+    assert all(
+        "annotation-only" not in cast(str, value["display"])
+        for value in cast(list[dict[str, object]], actual["source_literal_symbols"])
+    )
+    assert actual["deferred_roots"] == 7
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_source_literal_symbols_merge_by_canonical_key() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "z")',
+            'DataPropertyAssertion(:p :i "shared")',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "a")',
+            'DataPropertyAssertion(:p :i "shared")',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual["source_literal_symbols"] == _expected_source_literal_symbols(composite)
+    assert len(cast(list[object], actual["source_literal_symbols"])) == 3
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_source_literal_symbols_follow_source_local_root_selection() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "left")',
+            'DataPropertyAssertion(:p :i "right")',
+        ),
+        options=OPTIONS,
+    )
+    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    root_ids = memoryview(buffers["root_ids"]).cast("I")
+    node_tags = memoryview(buffers["node_tags"]).cast("H")
+    assertion_rows = [
+        index + 1 for index, node_id in enumerate(root_ids) if node_tags[node_id - 1] == 115
+    ]
+    assert len(assertion_rows) == 2
+
+    selected_keys: set[str] = set()
+    for root_id in assertion_rows:
+        actual = _native_slices_manifest(
+            _slice_record(
+                snapshot,
+                posting_mode=1,
+                postings=memoryview(struct.pack("<I", root_id)),
+            )
+        )
+        symbols = cast(list[dict[str, object]], actual["source_literal_symbols"])
+        assert len(symbols) == 1
+        selected_keys.add(cast(str, symbols[0]["key_hex"]))
+
+    assert selected_keys == {
+        cast(str, value["key_hex"]) for value in _expected_source_literal_symbols(snapshot)
+    }
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

@@ -273,6 +273,7 @@ pub struct SymbolPhase {
     pub work: u64,
     pub owned_bytes: usize,
     entity_node_symbols: Vec<(NodeId, u32)>,
+    semantic_nodes: Vec<u8>,
     manifest_limit: usize,
 }
 
@@ -287,6 +288,16 @@ impl SymbolPhase {
             .binary_search_by_key(&node, |(candidate, _)| *candidate)
             .ok()
             .map(|index| self.entity_node_symbols[index].1)
+    }
+
+    /// Return whether a node is reachable from the semantic fields of a
+    /// selected logical root. Root annotations and ignored nonlogical roots are
+    /// deliberately absent from this bitmap.
+    pub(super) fn semantic_node_is_reachable(&self, node: NodeId) -> bool {
+        usize::try_from(node.get() - 1)
+            .ok()
+            .and_then(|index| self.semantic_nodes.get(index))
+            .is_some_and(|state| *state != 0)
     }
 
     /// Canonical test-only manifest used for scalar/encoded differential checks.
@@ -786,6 +797,7 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
         work: budget.work,
         owned_bytes: budget.owned_bytes,
         entity_node_symbols,
+        semantic_nodes,
         manifest_limit: limits.max_manifest_bytes,
     })
 }

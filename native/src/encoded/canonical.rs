@@ -70,6 +70,21 @@ pub(crate) fn source_axiom_digest<B: ByteSource>(
     Ok(Sha256::digest(encoded).into())
 }
 
+/// Own the exact canonical key for one validated structural node.
+///
+/// Compiler symbol phases use this for non-entity domains whose scalar keys are
+/// the public core node's canonical bytes. Anonymous scope replacement remains
+/// explicit so a caller cannot accidentally assign a source-local key to a
+/// composite-owned individual.
+pub(crate) fn canonical_node_key<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    node: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut impl CanonicalBudget,
+) -> EncodedResult<Vec<u8>> {
+    canonical_node_bytes(model, node, scope_maps, 0, budget)
+}
+
 pub(crate) fn annotation_stripped_axiom_digest<B: ByteSource>(
     model: &ValidatedModel<B>,
     root: NodeId,
