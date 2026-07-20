@@ -623,6 +623,11 @@ fn validate_encoded_columns_v1(
             encoded::object_roles::ObjectRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
+        encoded::data_roles::compile_data_role_phase(
+            &symbols,
+            encoded::data_roles::DataRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
         let simple_roles = encoded::simple_roles::compile_simple_role_phase(
             &model,
             &symbols,
@@ -725,6 +730,11 @@ fn validate_encoded_selection_v1(
         let object_roles = encoded::object_roles::compile_object_role_phase(
             &symbols,
             encoded::object_roles::ObjectRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::data_roles::compile_data_role_phase(
+            &symbols,
+            encoded::data_roles::DataRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
         let simple_roles = encoded::simple_roles::compile_simple_role_phase(
@@ -926,6 +936,7 @@ fn validate_encoded_scope_map<S: encoded::ByteSource>(scope_map: S) -> NativeRes
 struct EncodedSliceProgram {
     named_classes: encoded::named_classes::NamedClassPhase,
     object_roles: encoded::object_roles::ObjectRolePhase,
+    data_roles: encoded::data_roles::DataRolePhase,
     simple_roles: encoded::simple_roles::SimpleRolePhase,
     complex_roles: encoded::complex_roles::ComplexRolePhase,
     object_role_hierarchy: encoded::object_role_hierarchy::ObjectRoleHierarchyPhase,
@@ -967,6 +978,14 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         .map_err(|_| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "encoded object-role slice transaction allocation failed",
+            ))
+        })?;
+    let mut data_role_phases = Vec::new();
+    data_role_phases
+        .try_reserve_exact(slices.len())
+        .map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded data-property slice transaction allocation failed",
             ))
         })?;
     let mut simple_role_phases = Vec::new();
@@ -1124,7 +1143,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     "encoded slice object-role ownership overflowed",
                 ))
             })?;
-        let simple_role_limits = encoded::simple_roles::SimpleRolePhaseLimits {
+        let data_role_limits = encoded::data_roles::DataRolePhaseLimits {
             max_owned_bytes: limits
                 .max_owned_bytes
                 .checked_sub(after_object_role_owned)
@@ -1141,6 +1160,41 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                         "encoded slice object-role work exceeded its aggregate limit",
                     ))
                 })?,
+            ..encoded::data_roles::DataRolePhaseLimits::default()
+        };
+        let data_roles = encoded::data_roles::compile_data_role_phase(&symbols, data_role_limits)
+            .map_err(encoded_validation_error)?;
+        let after_data_role_work = after_object_role_work
+            .checked_add(data_roles.work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice data-property work overflowed",
+                ))
+            })?;
+        let after_data_role_owned = after_object_role_owned
+            .checked_add(data_roles.owned_bytes)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice data-property ownership overflowed",
+                ))
+            })?;
+        let simple_role_limits = encoded::simple_roles::SimpleRolePhaseLimits {
+            max_owned_bytes: limits
+                .max_owned_bytes
+                .checked_sub(after_data_role_owned)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded slice data-property ownership exceeded its aggregate limit",
+                    ))
+                })?,
+            max_work: limits
+                .max_work
+                .checked_sub(after_data_role_work)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded slice data-property work exceeded its aggregate limit",
+                    ))
+                })?,
             ..encoded::simple_roles::SimpleRolePhaseLimits::default()
         };
         let simple_roles = encoded::simple_roles::compile_simple_role_phase(
@@ -1150,14 +1204,14 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
             simple_role_limits,
         )
         .map_err(encoded_validation_error)?;
-        let after_simple_role_work = after_object_role_work
+        let after_simple_role_work = after_data_role_work
             .checked_add(simple_roles.work)
             .ok_or_else(|| {
                 encoded_validation_error(encoded::EncodedValidationError::resource(
                     "encoded slice simple-role work overflowed",
                 ))
             })?;
-        let after_simple_role_owned = after_object_role_owned
+        let after_simple_role_owned = after_data_role_owned
             .checked_add(simple_roles.owned_bytes)
             .ok_or_else(|| {
                 encoded_validation_error(encoded::EncodedValidationError::resource(
@@ -1249,6 +1303,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         }
         phases.push((symbols, named));
         object_role_phases.push(object_roles);
+        data_role_phases.push(data_roles);
         simple_role_phases.push(simple_roles);
         complex_role_phases.push(complex_roles);
     }
@@ -1276,17 +1331,53 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
     let object_roles =
         encoded::object_roles::merge_object_role_phases(&object_role_phases, object_role_limits)
             .map_err(encoded_validation_error)?;
-    let merged_role_owned = named_classes
+    let merged_object_owned = named_classes
         .owned_bytes
         .checked_add(object_roles.owned_bytes)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged object-role ownership overflowed",
+            ))
+        })?;
+    let merged_object_work = named_classes
+        .work
+        .checked_add(object_roles.work)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged object-role work overflowed",
+            ))
+        })?;
+    let data_role_limits = encoded::data_roles::DataRolePhaseLimits {
+        max_owned_bytes: limits
+            .max_owned_bytes
+            .checked_sub(merged_object_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged object roles exceeded the program ownership limit",
+                ))
+            })?,
+        max_work: limits
+            .max_work
+            .checked_sub(merged_object_work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged object roles exceeded the program work limit",
+                ))
+            })?,
+        ..encoded::data_roles::DataRolePhaseLimits::default()
+    };
+    let data_roles =
+        encoded::data_roles::merge_data_role_phases(&data_role_phases, data_role_limits)
+            .map_err(encoded_validation_error)?;
+    let merged_role_owned = merged_object_owned
+        .checked_add(data_roles.owned_bytes)
         .ok_or_else(|| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "encoded merged role ownership overflowed",
             ))
         })?;
-    let merged_role_work = named_classes
-        .work
-        .checked_add(object_roles.work)
+    let merged_role_work = merged_object_work
+        .checked_add(data_roles.work)
         .ok_or_else(|| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "encoded merged role work overflowed",
@@ -1484,6 +1575,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
     Ok(EncodedSliceProgram {
         named_classes,
         object_roles,
+        data_roles,
         simple_roles,
         complex_roles,
         object_role_hierarchy,
@@ -1521,6 +1613,20 @@ fn encoded_object_role_slices_manifest_v1(
     contain_encoded_selection(py, || {
         compile_encoded_slice_program(slices)?
             .object_roles
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
+#[pyfunction(name = "_encoded_data_property_slices_manifest_v1")]
+#[pyo3(signature = (*, slices))]
+fn encoded_data_property_slices_manifest_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        compile_encoded_slice_program(slices)?
+            .data_roles
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
     })
@@ -1801,6 +1907,64 @@ fn encoded_object_role_manifest_v1(
             ErrorKind::Poisoned,
             "NATIVE_PANIC",
             "native encoded object-role manifest panic was contained",
+        )
+        .into_pyerr(py)),
+    }
+}
+
+#[pyfunction(name = "_encoded_data_property_manifest_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_data_property_manifest_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let symbols = encoded::symbols::compile_symbol_phase(
+            &model,
+            encoded::symbols::SymbolPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let phase = encoded::data_roles::compile_data_role_phase(
+            &symbols,
+            encoded::data_roles::DataRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        phase
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    }));
+    match result {
+        Ok(value) => value.map_err(|error| error.into_pyerr(py)),
+        Err(_) => Err(NativeError::new(
+            ErrorKind::Poisoned,
+            "NATIVE_PANIC",
+            "native encoded data-property manifest panic was contained",
         )
         .into_pyerr(py)),
     }
@@ -2492,6 +2656,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(encoded_object_role_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(
         encoded_object_role_slices_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(encoded_data_property_manifest_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_data_property_slices_manifest_v1,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(
