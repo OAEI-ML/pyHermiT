@@ -59,8 +59,8 @@ pub struct ComplexRoleInclusion {
     pub super_role_id: u32,
     pub provenance_sha256: [u8; 32],
     pub inverse_generated: bool,
-    statement_order_key: Vec<u8>,
-    builtin: bool,
+    pub(super) statement_order_key: Vec<u8>,
+    pub(super) builtin: bool,
 }
 
 /// Owned output of complex object-role inclusion preprocessing.
@@ -70,8 +70,8 @@ pub struct ComplexRolePhase {
     pub compiled_roots: usize,
     pub work: u64,
     pub owned_bytes: usize,
-    compiled_statement_digests: Vec<[u8; 32]>,
-    manifest_limit: usize,
+    pub(super) compiled_statement_digests: Vec<[u8; 32]>,
+    pub(super) manifest_limit: usize,
 }
 
 impl ComplexRolePhase {

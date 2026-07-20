@@ -66,8 +66,8 @@ pub struct SimpleRolePhase {
     pub compiled_roots: usize,
     pub work: u64,
     pub owned_bytes: usize,
-    compiled_statement_digests: Vec<[u8; 32]>,
-    manifest_limit: usize,
+    pub(super) compiled_statement_digests: Vec<[u8; 32]>,
+    pub(super) manifest_limit: usize,
 }
 
 impl SimpleRolePhase {
