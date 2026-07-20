@@ -1506,6 +1506,9 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     | encoded::symbols::RootHandler::NegativeObjectPropertyAssertion
                     | encoded::symbols::RootHandler::ObjectPropertyDomain
                     | encoded::symbols::RootHandler::ObjectPropertyRange
+                    | encoded::symbols::RootHandler::FunctionalObjectProperty
+                    | encoded::symbols::RootHandler::InverseFunctionalObjectProperty
+                    | encoded::symbols::RootHandler::ReflexiveObjectProperty
                     | encoded::symbols::RootHandler::DataPropertyDomain
             )
         });

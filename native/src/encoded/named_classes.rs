@@ -3,11 +3,12 @@
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
 //! a scalar-compatible named `individual` domain. It compiles named-only
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
-//! `SameIndividual`, `DifferentIndividuals`, and named `ObjectPropertyDomain` /
-//! `ObjectPropertyRange` / positive and negative `ObjectPropertyAssertion`
-//! and `DataPropertyDomain` axioms into the existing native predicate, clause,
-//! fact, and provenance records. Exact nested annotations participate in source
-//! provenance, with segmented anonymous scopes remapped before hashing.
+//! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
+//! ranges, assertions, functionality, inverse functionality, and reflexivity,
+//! plus named `DataPropertyDomain` axioms into the existing
+//! native predicate, clause, fact, and provenance records. Exact nested
+//! annotations participate in source provenance, with segmented anonymous
+//! scopes remapped before hashing.
 //! Predicate and clause identifiers are dense within this fragment and must be
 //! remapped when a later phase assembles the complete program; no fragment is
 //! publishable on its own.
@@ -40,6 +41,9 @@ const EQUIVALENT_CLASSES_TAG: u16 = 62;
 const DISJOINT_CLASSES_TAG: u16 = 63;
 const OBJECT_PROPERTY_DOMAIN_TAG: u16 = 74;
 const OBJECT_PROPERTY_RANGE_TAG: u16 = 75;
+const FUNCTIONAL_OBJECT_PROPERTY_TAG: u16 = 76;
+const INVERSE_FUNCTIONAL_OBJECT_PROPERTY_TAG: u16 = 77;
+const REFLEXIVE_OBJECT_PROPERTY_TAG: u16 = 78;
 const DATA_PROPERTY_DOMAIN_TAG: u16 = 93;
 const OBJECT_INVERSE_OF_TAG: u16 = 10;
 const SAME_INDIVIDUAL_TAG: u16 = 110;
@@ -132,6 +136,7 @@ pub struct NamedClassPhase {
     normalized_edges: Vec<NormalizedEdge>,
     normalized_disjoints: Vec<NormalizedDisjoint>,
     normalized_object_constraints: Vec<NormalizedObjectConstraint>,
+    normalized_object_characteristics: Vec<NormalizedObjectCharacteristic>,
     normalized_data_domains: Vec<NormalizedDataDomain>,
     normalized_facts: Vec<NormalizedFact>,
     normalized_object_facts: Vec<NormalizedObjectFact>,
@@ -449,6 +454,27 @@ struct NormalizedObjectConstraint {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ObjectCharacteristicKind {
+    Functional,
+    InverseFunctional,
+    Reflexive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RawObjectCharacteristic {
+    kind: ObjectCharacteristicKind,
+    role_id: u32,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NormalizedObjectCharacteristic {
+    kind: ObjectCharacteristicKind,
+    role_id: u32,
+    provenance: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RawDataDomain {
     role_id: u32,
     class_id: u32,
@@ -723,6 +749,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut raw_edges = Vec::<RawEdge>::new();
     let mut raw_disjoints = Vec::<RawDisjoint>::new();
     let mut raw_object_constraints = Vec::<RawObjectConstraint>::new();
+    let mut raw_object_characteristics = Vec::<RawObjectCharacteristic>::new();
     let mut raw_data_domains = Vec::<RawDataDomain>::new();
     let mut raw_facts = Vec::<RawFact>::new();
     let mut raw_object_facts = Vec::<RawObjectFact>::new();
@@ -885,6 +912,40 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                         })?;
                     }
                 }
+            }
+            RootHandler::FunctionalObjectProperty
+            | RootHandler::InverseFunctionalObjectProperty
+            | RootHandler::ReflexiveObjectProperty => {
+                let Some(object_roles) = object_roles else {
+                    deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "named-class deferred-root count overflowed",
+                        )
+                    })?;
+                    continue;
+                };
+                let characteristic = named_object_characteristic(
+                    model,
+                    symbols,
+                    object_roles,
+                    root.handler,
+                    root.node,
+                    scope_maps,
+                    &mut budget,
+                )?;
+                retain_compiled_root(
+                    &mut compiled_root_digests,
+                    &mut compiled_roots,
+                    characteristic.provenance,
+                    &mut budget,
+                )?;
+                budget.claim_owned(size_of::<RawObjectCharacteristic>())?;
+                raw_object_characteristics.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "named object-property characteristic allocation failed",
+                    )
+                })?;
+                raw_object_characteristics.push(characteristic);
             }
             RootHandler::DataPropertyDomain => {
                 let Some(data_roles) = data_roles else {
@@ -1174,6 +1235,8 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let edges = normalize_edges(raw_edges, &mut budget)?;
     let disjoints = normalize_disjoints(raw_disjoints, &class_domain, &mut budget)?;
     let object_constraints = normalize_object_constraints(raw_object_constraints, &mut budget)?;
+    let object_characteristics =
+        normalize_object_characteristics(raw_object_characteristics, &mut budget)?;
     let data_domains = normalize_data_domains(raw_data_domains, &mut budget)?;
     let facts = normalize_facts(raw_facts, &mut budget)?;
     let object_facts = normalize_object_facts(raw_object_facts, &mut budget)?;
@@ -1184,6 +1247,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &edges,
         &disjoints,
         &object_constraints,
+        &object_characteristics,
         &data_domains,
         &facts,
         &object_facts,
@@ -1206,6 +1270,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &edges,
         &disjoints,
         &object_constraints,
+        &object_characteristics,
         &data_domains,
         &facts,
         &object_facts,
@@ -1228,11 +1293,14 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &edges,
         &disjoints,
         &object_constraints,
+        &object_characteristics,
         &data_domains,
+        thing,
         nothing,
         &predicate_by_class,
         &predicate_by_object_role,
         &predicate_by_data_role,
+        equality_predicate,
         &guard_predicates,
         &provenance_keys,
         &mut budget,
@@ -1248,6 +1316,9 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &predicate_by_object_role,
         named_predicate,
         equality_predicate,
+        object_characteristics
+            .iter()
+            .any(|value| value.kind != ObjectCharacteristicKind::Reflexive),
         inequality_predicate,
         &provenance_keys,
         &scalar_predicate_ids,
@@ -1281,6 +1352,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_edges: edges,
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
+        normalized_object_characteristics: object_characteristics,
         normalized_data_domains: data_domains,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
@@ -1711,6 +1783,54 @@ fn named_object_constraint<B: ByteSource>(
         class_id,
         provenance,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn named_object_characteristic<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    object_roles: &ObjectRolePhase,
+    handler: RootHandler,
+    root: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<RawObjectCharacteristic> {
+    let (tag, kind, name) = match handler {
+        RootHandler::FunctionalObjectProperty => (
+            FUNCTIONAL_OBJECT_PROPERTY_TAG,
+            ObjectCharacteristicKind::Functional,
+            "functional-object-property",
+        ),
+        RootHandler::InverseFunctionalObjectProperty => (
+            INVERSE_FUNCTIONAL_OBJECT_PROPERTY_TAG,
+            ObjectCharacteristicKind::InverseFunctional,
+            "inverse-functional-object-property",
+        ),
+        RootHandler::ReflexiveObjectProperty => (
+            REFLEXIVE_OBJECT_PROPERTY_TAG,
+            ObjectCharacteristicKind::Reflexive,
+            "reflexive-object-property",
+        ),
+        _ => {
+            return Err(EncodedValidationError::invariant(
+                "named object characteristic received a different root handler",
+            ));
+        }
+    };
+    let node = model.node(root)?;
+    if node.tag() != tag || node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(format!(
+            "{name} root no longer has schema-1 shape"
+        )));
+    }
+    let property = node_field(model, node, 0, "object-property characteristic role")?;
+    let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    Ok(RawObjectCharacteristic {
+        kind,
+        role_id,
+        provenance,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2471,6 +2591,51 @@ fn normalize_object_constraints(
     Ok(normalized)
 }
 
+fn normalize_object_characteristics(
+    mut raw: Vec<RawObjectCharacteristic>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedObjectCharacteristic>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_unstable();
+    let mut normalized = Vec::<NormalizedObjectCharacteristic>::new();
+    for characteristic in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.kind == characteristic.kind && previous.role_id == characteristic.role_id {
+                if previous.provenance.last() != Some(&characteristic.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "object-property characteristic provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(characteristic.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedObjectCharacteristic>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "normalized object-property characteristic allocation failed",
+            )
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "object-property characteristic provenance allocation failed",
+            )
+        })?;
+        provenance.push(characteristic.provenance);
+        normalized.push(NormalizedObjectCharacteristic {
+            kind: characteristic.kind,
+            role_id: characteristic.role_id,
+            provenance,
+        });
+    }
+    Ok(normalized)
+}
+
 fn normalize_data_domains(
     mut raw: Vec<RawDataDomain>,
     budget: &mut PhaseBudget,
@@ -2656,6 +2821,7 @@ fn freeze_provenance(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
+    object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
@@ -2699,6 +2865,16 @@ fn freeze_provenance(
             &mut keys,
             ProvenanceKey {
                 source_sha256: constraint.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    for characteristic in object_characteristics {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: characteristic.provenance.clone(),
                 generated: false,
             },
             budget,
@@ -2867,6 +3043,7 @@ fn freeze_predicates(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
+    object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
@@ -2880,7 +3057,11 @@ fn freeze_predicates(
 ) -> EncodedResult<FrozenPredicates> {
     let mut class_ids = Vec::new();
     push_u32(&mut class_ids, nothing, "predicate class", budget)?;
-    if has_individuals {
+    if has_individuals
+        || object_characteristics
+            .iter()
+            .any(|value| value.kind == ObjectCharacteristicKind::Reflexive)
+    {
         push_u32(&mut class_ids, thing, "predicate class", budget)?;
     }
     for edge in edges {
@@ -2911,7 +3092,11 @@ fn freeze_predicates(
     class_ids.dedup();
 
     let mut ordered = Vec::<PendingPredicate>::new();
-    if !equalities.is_empty() {
+    if !equalities.is_empty()
+        || object_characteristics
+            .iter()
+            .any(|value| value.kind != ObjectCharacteristicKind::Reflexive)
+    {
         let key = equality_predicate_key();
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
@@ -2964,6 +3149,14 @@ fn freeze_predicates(
         push_u32(
             &mut object_role_ids,
             constraint.role_id,
+            "predicate object role",
+            budget,
+        )?;
+    }
+    for characteristic in object_characteristics {
+        push_u32(
+            &mut object_role_ids,
+            characteristic.role_id,
             "predicate object role",
             budget,
         )?;
@@ -3278,11 +3471,14 @@ fn freeze_clauses(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
+    object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
+    thing: u32,
     nothing: u32,
     predicate_by_class: &[(u32, u32)],
     predicate_by_object_role: &[(u32, u32)],
     predicate_by_data_role: &[(u32, u32)],
+    equality_predicate: Option<u32>,
     guard_predicates: &[([u8; 32], u32, u32)],
     provenance_keys: &[ProvenanceKey],
     budget: &mut PhaseBudget,
@@ -3291,6 +3487,7 @@ fn freeze_clauses(
         .len()
         .checked_add(1)
         .and_then(|value| value.checked_add(object_constraints.len()))
+        .and_then(|value| value.checked_add(object_characteristics.len()))
         .and_then(|value| value.checked_add(data_domains.len()))
         .ok_or_else(|| EncodedValidationError::resource("named-class clause count overflowed"))?;
     for disjoint in disjoints {
@@ -3333,6 +3530,24 @@ fn freeze_clauses(
             role,
             class,
             constraint.kind,
+            provenance,
+            budget,
+        )?;
+    }
+    for characteristic in object_characteristics {
+        let role = object_predicate_id(predicate_by_object_role, characteristic.role_id)?;
+        let provenance = provenance_id(provenance_keys, &characteristic.provenance, false)?;
+        let thing_predicate = if characteristic.kind == ObjectCharacteristicKind::Reflexive {
+            Some(predicate_id(predicate_by_class, thing)?)
+        } else {
+            None
+        };
+        push_object_characteristic_clause(
+            &mut ordered,
+            role,
+            equality_predicate,
+            thing_predicate,
+            characteristic.kind,
             provenance,
             budget,
         )?;
@@ -3400,6 +3615,7 @@ fn freeze_positive_facts(
     predicate_by_object_role: &[(u32, u32)],
     named_predicate: Option<u32>,
     equality_predicate: Option<u32>,
+    has_object_functionality: bool,
     inequality_predicate: Option<u32>,
     provenance_keys: &[ProvenanceKey],
     scalar_predicate_ids: &[u32],
@@ -3421,7 +3637,10 @@ fn freeze_positive_facts(
             ));
         }
     };
-    let equality_predicate = match (equalities.is_empty(), equality_predicate) {
+    let equality_predicate = match (
+        equalities.is_empty() && !has_object_functionality,
+        equality_predicate,
+    ) {
         (true, None) => None,
         (false, Some(identifier)) => Some(identifier),
         _ => {
@@ -3945,6 +4164,105 @@ fn push_object_constraint_clause(
             head: vec![head],
             provenance_ids: vec![provenance_id],
             join_order: vec![0],
+        },
+    ));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_object_characteristic_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    role_predicate_id: u32,
+    equality_predicate_id: Option<u32>,
+    thing_predicate_id: Option<u32>,
+    kind: ObjectCharacteristicKind,
+    provenance_id: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let (body, head) = match kind {
+        ObjectCharacteristicKind::Functional => {
+            let equality = equality_predicate_id.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "functional object-property clause lost the equality predicate",
+                )
+            })?;
+            (
+                vec![
+                    object_variable_atom(role_predicate_id, 0, 1),
+                    object_variable_atom(role_predicate_id, 0, 2),
+                ],
+                vec![object_variable_atom(equality, 1, 2)],
+            )
+        }
+        ObjectCharacteristicKind::InverseFunctional => {
+            let equality = equality_predicate_id.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "inverse-functional object-property clause lost the equality predicate",
+                )
+            })?;
+            (
+                vec![
+                    object_variable_atom(role_predicate_id, 0, 1),
+                    object_variable_atom(role_predicate_id, 2, 1),
+                ],
+                vec![object_variable_atom(equality, 0, 2)],
+            )
+        }
+        ObjectCharacteristicKind::Reflexive => {
+            let thing = thing_predicate_id.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "reflexive object-property clause lost the top concept predicate",
+                )
+            })?;
+            (
+                vec![variable_atom_at(thing, 0, TermSort::Object)],
+                vec![object_variable_atom(role_predicate_id, 0, 0)],
+            )
+        }
+    };
+    let key = object_characteristic_rule_key(
+        role_predicate_id,
+        equality_predicate_id,
+        thing_predicate_id,
+        kind,
+    )?;
+    let atom_count = body.len().checked_add(head.len()).ok_or_else(|| {
+        EncodedValidationError::resource("object-property characteristic atom count overflowed")
+    })?;
+    let term_count = body.iter().chain(&head).try_fold(0_usize, |count, atom| {
+        count.checked_add(atom.arguments.len()).ok_or_else(|| {
+            EncodedValidationError::resource("object-property characteristic term count overflowed")
+        })
+    })?;
+    let body_count = body.len();
+    budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>() + key.len())?;
+    budget.claim_owned(
+        atom_count
+            .checked_mul(size_of::<DecodedAtom>())
+            .and_then(|value| value.checked_add(term_count.checked_mul(size_of::<DecodedTerm>())?))
+            .and_then(|value| value.checked_add((body_count + 1) * size_of::<u32>()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "object-property characteristic clause payload overflowed",
+                )
+            })?,
+    )?;
+    clauses.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("object-property characteristic clause allocation failed")
+    })?;
+    clauses.push((
+        key,
+        DecodedClause {
+            clause_id: 0,
+            body,
+            head,
+            provenance_ids: vec![provenance_id],
+            join_order: (0..u32::try_from(body_count).map_err(|_| {
+                EncodedValidationError::resource(
+                    "object-property characteristic join order exceeds u32",
+                )
+            })?)
+                .collect(),
         },
     ));
     Ok(())
@@ -4490,6 +4808,68 @@ fn object_constraint_rule_key(
     format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
 }
 
+fn object_characteristic_rule_key(
+    role_predicate_id: u32,
+    equality_predicate_id: Option<u32>,
+    thing_predicate_id: Option<u32>,
+    kind: ObjectCharacteristicKind,
+) -> EncodedResult<Vec<u8>> {
+    let object_atom = |predicate_id: u32, left: u32, right: u32| {
+        format!(
+            "{{\"arguments\":[{},{}],\"predicate_id\":{predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
+            variable_json(left, TermSort::Object),
+            variable_json(right, TermSort::Object),
+        )
+    };
+    let (body, head) = match kind {
+        ObjectCharacteristicKind::Functional => {
+            let equality = equality_predicate_id.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "functional object-property key lost the equality predicate",
+                )
+            })?;
+            (
+                format!(
+                    "{},{}",
+                    object_atom(role_predicate_id, 0, 1),
+                    object_atom(role_predicate_id, 0, 2),
+                ),
+                object_atom(equality, 1, 2),
+            )
+        }
+        ObjectCharacteristicKind::InverseFunctional => {
+            let equality = equality_predicate_id.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "inverse-functional object-property key lost the equality predicate",
+                )
+            })?;
+            (
+                format!(
+                    "{},{}",
+                    object_atom(role_predicate_id, 0, 1),
+                    object_atom(role_predicate_id, 2, 1),
+                ),
+                object_atom(equality, 0, 2),
+            )
+        }
+        ObjectCharacteristicKind::Reflexive => {
+            let thing = thing_predicate_id.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "reflexive object-property key lost the top concept predicate",
+                )
+            })?;
+            (
+                format!(
+                    "{{\"arguments\":[{}],\"predicate_id\":{thing},\"schema_version\":1,\"type\":\"Atom\"}}",
+                    variable_json(0, TermSort::Object),
+                ),
+                object_atom(role_predicate_id, 0, 0),
+            )
+        }
+    };
+    Ok(format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes())
+}
+
 fn data_domain_rule_key(role_predicate_id: u32, class_predicate_id: u32) -> Vec<u8> {
     let body = format!(
         "{{\"arguments\":[{},{}],\"predicate_id\":{role_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
@@ -4738,6 +5118,7 @@ fn merge_named_class_phases_impl(
         edges,
         disjoints,
         object_constraints,
+        object_characteristics,
         data_domains,
         facts,
         object_facts,
@@ -4761,6 +5142,7 @@ fn merge_named_class_phases_impl(
         &edges,
         &disjoints,
         &object_constraints,
+        &object_characteristics,
         &data_domains,
         &facts,
         &object_facts,
@@ -4783,6 +5165,7 @@ fn merge_named_class_phases_impl(
         &edges,
         &disjoints,
         &object_constraints,
+        &object_characteristics,
         &data_domains,
         &facts,
         &object_facts,
@@ -4805,11 +5188,14 @@ fn merge_named_class_phases_impl(
         &edges,
         &disjoints,
         &object_constraints,
+        &object_characteristics,
         &data_domains,
+        thing,
         nothing,
         &predicate_by_class,
         &predicate_by_object_role,
         &predicate_by_data_role,
+        equality_predicate,
         &guard_predicates,
         &provenance_keys,
         &mut budget,
@@ -4825,6 +5211,9 @@ fn merge_named_class_phases_impl(
         &predicate_by_object_role,
         named_predicate,
         equality_predicate,
+        object_characteristics
+            .iter()
+            .any(|value| value.kind != ObjectCharacteristicKind::Reflexive),
         inequality_predicate,
         &provenance_keys,
         &scalar_predicate_ids,
@@ -4903,6 +5292,7 @@ fn merge_named_class_phases_impl(
         normalized_edges: edges,
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
+        normalized_object_characteristics: object_characteristics,
         normalized_data_domains: data_domains,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
@@ -5197,6 +5587,7 @@ type NormalizedSources = (
     Vec<NormalizedEdge>,
     Vec<NormalizedDisjoint>,
     Vec<NormalizedObjectConstraint>,
+    Vec<NormalizedObjectCharacteristic>,
     Vec<NormalizedDataDomain>,
     Vec<NormalizedFact>,
     Vec<NormalizedObjectFact>,
@@ -5220,6 +5611,7 @@ fn merge_normalized_sources(
     let mut raw_edges = Vec::new();
     let mut raw_disjoints = Vec::new();
     let mut raw_object_constraints = Vec::new();
+    let mut raw_object_characteristics = Vec::new();
     let mut raw_data_domains = Vec::new();
     let mut raw_facts = Vec::new();
     let mut raw_object_facts = Vec::new();
@@ -5332,6 +5724,43 @@ fn merge_normalized_sources(
                         kind: constraint.kind,
                         role_id,
                         class_id,
+                        provenance: *provenance,
+                    });
+                }
+            }
+        }
+        if !phase.normalized_object_characteristics.is_empty() {
+            let source_roles = source_object_roles
+                .and_then(|roles| roles.get(phase_index))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged object-property characteristics lost their source role domain",
+                    )
+                })?;
+            let merged_roles = merged_object_roles.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "merged object-property characteristics lost their global role domain",
+                )
+            })?;
+            for characteristic in &phase.normalized_object_characteristics {
+                if characteristic.provenance.is_empty() {
+                    return Err(EncodedValidationError::invariant(
+                        "merged object-property characteristic lost provenance",
+                    ));
+                }
+                let role_id =
+                    remap_object_role(source_roles, merged_roles, characteristic.role_id, budget)?;
+                for provenance in &characteristic.provenance {
+                    budget.claim_work(1)?;
+                    budget.claim_owned(size_of::<RawObjectCharacteristic>())?;
+                    raw_object_characteristics.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "merged object-property characteristic allocation failed",
+                        )
+                    })?;
+                    raw_object_characteristics.push(RawObjectCharacteristic {
+                        kind: characteristic.kind,
+                        role_id,
                         provenance: *provenance,
                     });
                 }
@@ -5564,6 +5993,7 @@ fn merge_normalized_sources(
         normalize_edges(raw_edges, budget)?,
         normalize_disjoints(raw_disjoints, class_domain, budget)?,
         normalize_object_constraints(raw_object_constraints, budget)?,
+        normalize_object_characteristics(raw_object_characteristics, budget)?,
         normalize_data_domains(raw_data_domains, budget)?,
         normalize_facts(raw_facts, budget)?,
         normalize_object_facts(raw_object_facts, budget)?,
