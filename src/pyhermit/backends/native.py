@@ -131,6 +131,7 @@ class NativeBackendFactory:
         "_info",
         "_validate_encoded",
         "_validate_encoded_selection",
+        "_validate_encoded_slices",
     )
 
     def __init__(self, module: ModuleType) -> None:
@@ -145,6 +146,7 @@ class NativeBackendFactory:
         self_test = getattr(module, "self_test", None)
         validate_encoded = getattr(module, "_validate_encoded_columns_v1", None)
         validate_encoded_selection = getattr(module, "_validate_encoded_selection_v1", None)
+        validate_encoded_slices = getattr(module, "_validate_encoded_slices_v1", None)
         if not isinstance(implementation, str) or not implementation:
             _version_error("native implementation version is invalid", "metadata_invalid")
         if implementation != __version__:
@@ -174,6 +176,8 @@ class NativeBackendFactory:
             _version_error("native encoded validator is invalid", "metadata_invalid")
         if validate_encoded_selection is not None and not callable(validate_encoded_selection):
             _version_error("native encoded selection validator is invalid", "metadata_invalid")
+        if validate_encoded_slices is not None and not callable(validate_encoded_slices):
+            _version_error("native encoded slice validator is invalid", "metadata_invalid")
         try:
             self_test()
         except Exception as error:
@@ -186,6 +190,7 @@ class NativeBackendFactory:
         self._create_session = create_session
         self._validate_encoded = validate_encoded
         self._validate_encoded_selection = validate_encoded_selection
+        self._validate_encoded_slices = validate_encoded_slices
         self._info = BackendInfo(
             name="native",
             package_version=__version__,
@@ -217,22 +222,55 @@ class NativeBackendFactory:
         lease = negotiation.lease
         if lease is None:
             return
-        selection_validator = self._validate_encoded_selection
-        if selection_validator is not None:
-            root_slices = lease.overlay_root_slices()
-            if root_slices is not None:
-                for root_slice in root_slices:
-                    result = selection_validator(
-                        posting_mode=root_slice.posting_mode,
-                        postings=root_slice.root_ids,
-                        **{name: root_slice.lease.buffers[name] for name in ENCODED_BUFFER_WIDTHS},
+        planner = getattr(lease, "root_slices", None)
+        root_slices = planner() if callable(planner) else lease.overlay_root_slices()
+        slice_validator = self._validate_encoded_slices
+        if slice_validator is not None and root_slices is not None:
+            column_order = (
+                "root_kinds",
+                "root_ids",
+                "node_tags",
+                "node_field_offsets",
+                "field_kinds",
+                "field_values",
+                "field_lengths",
+                "item_kinds",
+                "item_values",
+                "item_lengths",
+                "scalar_bytes",
+            )
+            result = slice_validator(
+                slices=tuple(
+                    (
+                        root_slice.posting_mode,
+                        root_slice.root_ids,
+                        root_slice.member_tokens,
+                        root_slice.anonymous_scope_maps,
+                        *(root_slice.lease.buffers[name] for name in column_order),
                     )
-                    if result is not None:
-                        raise BackendMismatchError(
-                            "native encoded validator returned an incompatible result",
-                            context={"reason": "encoded_validator_result_invalid"},
-                        )
-                return
+                    for root_slice in root_slices
+                )
+            )
+            if result is not None:
+                raise BackendMismatchError(
+                    "native encoded validator returned an incompatible result",
+                    context={"reason": "encoded_validator_result_invalid"},
+                )
+            return
+        selection_validator = self._validate_encoded_selection
+        if selection_validator is not None and root_slices is not None:
+            for root_slice in root_slices:
+                result = selection_validator(
+                    posting_mode=root_slice.posting_mode,
+                    postings=root_slice.root_ids,
+                    **{name: root_slice.lease.buffers[name] for name in ENCODED_BUFFER_WIDTHS},
+                )
+                if result is not None:
+                    raise BackendMismatchError(
+                        "native encoded validator returned an incompatible result",
+                        context={"reason": "encoded_validator_result_invalid"},
+                    )
+            return
         for local in lease.local_leases():
             result = validator(**{name: local.buffers[name] for name in ENCODED_BUFFER_WIDTHS})
             if result is not None:

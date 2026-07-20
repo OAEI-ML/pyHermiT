@@ -48,7 +48,7 @@ impl EncodedValidationError {
         }
     }
 
-    fn resource(message: impl Into<String>) -> Self {
+    pub(crate) fn resource(message: impl Into<String>) -> Self {
         Self {
             code: "NATIVE_ENCODED_RESOURCE_LIMIT",
             message: message.into(),

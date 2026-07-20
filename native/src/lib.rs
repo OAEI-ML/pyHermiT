@@ -50,7 +50,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyMemoryView, PySequence};
+use pyo3::types::{PyBytes, PyInt, PyMemoryView, PySequence, PyTuple};
 
 pub use cancel::{CancellationHandle, CancellationState};
 use error::{ErrorKind, NativeError, NativeResult};
@@ -690,6 +690,311 @@ fn validate_encoded_selection_v1(
     })
 }
 
+const ENCODED_SLICE_RECORD_LEN: usize = 15;
+const ENCODED_SLICE_CONTEXT_DEPTH: usize = 32;
+
+fn encoded_slice_invalid(message: impl Into<String>) -> NativeError {
+    NativeError::new(ErrorKind::Wire, "NATIVE_ENCODED_VIEW_INVALID", message)
+}
+
+fn tuple_item<'py>(
+    value: &Bound<'py, PyTuple>,
+    index: usize,
+    name: &'static str,
+) -> NativeResult<Bound<'py, PyAny>> {
+    value
+        .get_item(index)
+        .map_err(|_| encoded_slice_invalid(format!("encoded slice {name} is unreadable")))
+}
+
+fn validate_encoded_slice_context(record: &Bound<'_, PyTuple>) -> NativeResult<usize> {
+    let tokens = tuple_item(record, 2, "member tokens")?;
+    if !tokens.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded slice member tokens are not an exact tuple",
+        ));
+    }
+    let tokens = tokens
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("encoded slice member tokens changed type"))?;
+    if tokens.len() > ENCODED_SLICE_CONTEXT_DEPTH {
+        return Err(encoded_slice_invalid(
+            "encoded slice member-token context exceeds its depth limit",
+        ));
+    }
+    for index in 0..tokens.len() {
+        let token = tuple_item(tokens, index, "member token")?;
+        if !token.is_exact_instance_of::<PyBytes>() {
+            return Err(encoded_slice_invalid(
+                "encoded slice member token is not exact bytes",
+            ));
+        }
+        let token = token
+            .cast::<PyBytes>()
+            .map_err(|_| encoded_slice_invalid("encoded slice member token changed type"))?;
+        if token.as_bytes().len() != 32 {
+            return Err(encoded_slice_invalid(
+                "encoded slice member token is not bytes32",
+            ));
+        }
+    }
+
+    let scope_maps = tuple_item(record, 3, "anonymous scope maps")?;
+    if !scope_maps.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded slice anonymous scope maps are not an exact tuple",
+        ));
+    }
+    let scope_maps = scope_maps
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("encoded slice anonymous scope maps changed type"))?;
+    if scope_maps.len() > ENCODED_SLICE_CONTEXT_DEPTH {
+        return Err(encoded_slice_invalid(
+            "encoded slice anonymous-scope context exceeds its depth limit",
+        ));
+    }
+    let mut context_bytes = tokens
+        .len()
+        .checked_mul(32)
+        .ok_or_else(|| encoded_slice_invalid("encoded slice member-token byte count overflowed"))?;
+    for index in 0..scope_maps.len() {
+        let value = tuple_item(scope_maps, index, "anonymous scope map")?;
+        let scope_map = borrowed_py_bytes(&value, "anonymous scope map")?;
+        validate_encoded_scope_map(scope_map)?;
+        context_bytes = context_bytes
+            .checked_add(scope_map.len)
+            .ok_or_else(|| encoded_slice_invalid("encoded slice context byte count overflowed"))?;
+    }
+    Ok(context_bytes)
+}
+
+fn validate_encoded_scope_map<S: encoded::ByteSource>(scope_map: S) -> NativeResult<()> {
+    if scope_map.len() % 64 != 0 {
+        return Err(encoded_slice_invalid(
+            "encoded anonymous scope map contains a partial row",
+        ));
+    }
+    let mut previous: Option<[u8; 32]> = None;
+    for offset in (0..scope_map.len()).step_by(64) {
+        let mut source = [0_u8; 32];
+        let mut target = [0_u8; 32];
+        for index in 0..32 {
+            source[index] = scope_map.byte(offset + index).ok_or_else(|| {
+                encoded_slice_invalid("encoded anonymous scope source disappeared")
+            })?;
+            target[index] = scope_map.byte(offset + 32 + index).ok_or_else(|| {
+                encoded_slice_invalid("encoded anonymous scope target disappeared")
+            })?;
+        }
+        if previous.is_some_and(|value| value >= source) || source == target {
+            return Err(encoded_slice_invalid(
+                "encoded anonymous scope sources are not sorted unique or contain identity rows",
+            ));
+        }
+        previous = Some(source);
+    }
+    Ok(())
+}
+
+fn compile_encoded_slice_program(
+    slices: &Bound<'_, PyAny>,
+) -> NativeResult<encoded::named_classes::NamedClassPhase> {
+    if !slices.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded slice program is not an exact tuple",
+        ));
+    }
+    let slices = slices
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("encoded slice program changed type"))?;
+    let limits = encoded::named_classes::NamedClassPhaseLimits::default();
+    if slices.is_empty() {
+        return Err(encoded_slice_invalid(
+            "encoded slice program requires at least one slice",
+        ));
+    }
+    if slices.len() > limits.max_slices {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "encoded slice program exceeds its slice limit",
+            ),
+        ));
+    }
+    let mut phases = Vec::new();
+    phases.try_reserve_exact(slices.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded slice transaction allocation failed",
+        ))
+    })?;
+    let mut source_work = 0_u64;
+    let mut source_owned = 0_usize;
+    let mut context_bytes = 0_usize;
+    for slice_index in 0..slices.len() {
+        let record = tuple_item(slices, slice_index, "record")?;
+        if !record.is_exact_instance_of::<PyTuple>() {
+            return Err(encoded_slice_invalid(
+                "encoded slice record is not an exact tuple",
+            ));
+        }
+        let record = record
+            .cast::<PyTuple>()
+            .map_err(|_| encoded_slice_invalid("encoded slice record changed type"))?;
+        if record.len() != ENCODED_SLICE_RECORD_LEN {
+            return Err(encoded_slice_invalid(
+                "encoded slice record has the wrong field count",
+            ));
+        }
+        context_bytes = context_bytes
+            .checked_add(validate_encoded_slice_context(record)?)
+            .ok_or_else(|| encoded_slice_invalid("encoded slice context bytes overflowed"))?;
+        if context_bytes > limits.max_owned_bytes {
+            return Err(encoded_validation_error(
+                encoded::EncodedValidationError::resource(
+                    "encoded slice contexts exceed their byte limit",
+                ),
+            ));
+        }
+        let posting_mode = tuple_item(record, 0, "posting mode")?;
+        if !posting_mode.is_exact_instance_of::<PyInt>() {
+            return Err(encoded_slice_invalid(
+                "encoded slice posting mode is not an exact integer",
+            ));
+        }
+        let posting_mode = posting_mode
+            .extract::<u8>()
+            .map_err(|_| encoded_slice_invalid("encoded slice posting mode is outside u8"))?;
+        let postings = tuple_item(record, 1, "postings")?;
+        let postings = borrowed_py_bytes(&postings, "root postings")?;
+        let root_kinds = tuple_item(record, 4, "root_kinds")?;
+        let root_ids = tuple_item(record, 5, "root_ids")?;
+        let node_tags = tuple_item(record, 6, "node_tags")?;
+        let node_field_offsets = tuple_item(record, 7, "node_field_offsets")?;
+        let field_kinds = tuple_item(record, 8, "field_kinds")?;
+        let field_values = tuple_item(record, 9, "field_values")?;
+        let field_lengths = tuple_item(record, 10, "field_lengths")?;
+        let item_kinds = tuple_item(record, 11, "item_kinds")?;
+        let item_values = tuple_item(record, 12, "item_values")?;
+        let item_lengths = tuple_item(record, 13, "item_lengths")?;
+        let scalar_bytes = tuple_item(record, 14, "scalar_bytes")?;
+        let columns = borrowed_encoded_columns(
+            &root_kinds,
+            &root_ids,
+            &node_tags,
+            &node_field_offsets,
+            &field_kinds,
+            &field_values,
+            &field_lengths,
+            &item_kinds,
+            &item_values,
+            &item_lengths,
+            &scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let remaining_owned = limits
+            .max_owned_bytes
+            .checked_sub(source_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice source ownership exceeded its aggregate limit",
+                ))
+            })?;
+        let remaining_work = limits.max_work.checked_sub(source_work).ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded slice source work exceeded its aggregate limit",
+            ))
+        })?;
+        let symbol_limits = encoded::symbols::SymbolPhaseLimits {
+            max_owned_bytes: remaining_owned,
+            max_work: remaining_work,
+            ..encoded::symbols::SymbolPhaseLimits::default()
+        };
+        let symbols = encoded::symbols::compile_symbol_phase_selected(
+            &model,
+            symbol_limits,
+            posting_mode,
+            postings,
+        )
+        .map_err(encoded_validation_error)?;
+        let after_symbol_work = source_work.checked_add(symbols.work).ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded slice source work overflowed",
+            ))
+        })?;
+        let after_symbol_owned =
+            source_owned
+                .checked_add(symbols.owned_bytes)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded slice source ownership overflowed",
+                    ))
+                })?;
+        let named_limits = encoded::named_classes::NamedClassPhaseLimits {
+            max_owned_bytes: limits
+                .max_owned_bytes
+                .checked_sub(after_symbol_owned)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded slice symbol ownership exceeded its aggregate limit",
+                    ))
+                })?,
+            max_work: limits
+                .max_work
+                .checked_sub(after_symbol_work)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded slice symbol work exceeded its aggregate limit",
+                    ))
+                })?,
+            ..limits
+        };
+        let named =
+            encoded::named_classes::compile_named_class_phase(&model, &symbols, named_limits)
+                .map_err(encoded_validation_error)?;
+        source_work = after_symbol_work.checked_add(named.work).ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded slice source work overflowed",
+            ))
+        })?;
+        source_owned = after_symbol_owned
+            .checked_add(named.owned_bytes)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice source ownership overflowed",
+                ))
+            })?;
+        if source_work > limits.max_work || source_owned > limits.max_owned_bytes {
+            return Err(encoded_validation_error(
+                encoded::EncodedValidationError::resource(
+                    "encoded slice sources exceed their aggregate compilation limit",
+                ),
+            ));
+        }
+        phases.push((symbols, named));
+    }
+    encoded::named_classes::merge_named_class_phases(&phases, limits)
+        .map_err(encoded_validation_error)
+}
+
+#[pyfunction(name = "_validate_encoded_slices_v1")]
+#[pyo3(signature = (*, slices))]
+fn validate_encoded_slices_v1(py: Python<'_>, slices: &Bound<'_, PyAny>) -> PyResult<()> {
+    contain_encoded_selection(py, || compile_encoded_slice_program(slices).map(drop))
+}
+
+#[pyfunction(name = "_encoded_named_class_slices_manifest_v1")]
+#[pyo3(signature = (*, slices))]
+fn encoded_named_class_slices_manifest_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        compile_encoded_slice_program(slices)?
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
 fn contain_encoded_selection<T>(
     py: Python<'_>,
     operation: impl FnOnce() -> NativeResult<T>,
@@ -1071,9 +1376,14 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeSession>()?;
     module.add_function(wrap_pyfunction!(validate_encoded_columns_v1, module)?)?;
     module.add_function(wrap_pyfunction!(validate_encoded_selection_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_encoded_slices_v1, module)?)?;
     module.add_function(wrap_pyfunction!(debug_encoded_selection_panic_v1, module)?)?;
     module.add_function(wrap_pyfunction!(encoded_symbol_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(encoded_named_class_manifest_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_named_class_slices_manifest_v1,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(self_test, module)?)?;
     module.add_function(wrap_pyfunction!(create_session, module)?)?;
     Ok(())

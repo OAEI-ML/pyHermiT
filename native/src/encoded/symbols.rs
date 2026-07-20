@@ -23,6 +23,7 @@ const ENTITY_TAG: u16 = 2;
 const IRI_TAG: u16 = 1;
 const DECLARATION_TAG: u16 = 60;
 const POSTINGS_ALL: u8 = 0;
+const POSTINGS_INCLUDE: u8 = 1;
 const POSTINGS_EXCLUDE: u8 = 2;
 
 const BUILTIN_ENTITIES: &[(EntityKind, &str)] = &[
@@ -440,38 +441,36 @@ impl PhaseBudget {
 }
 
 #[derive(Clone, Copy)]
-struct RootExclusions<S: ByteSource> {
+struct RootPostings<S: ByteSource> {
     postings: S,
     count: usize,
     cursor: usize,
-    selected_count: usize,
 }
 
-impl<S: ByteSource> RootExclusions<S> {
-    fn new(postings: S, root_count: usize) -> EncodedResult<Self> {
+impl<S: ByteSource> RootPostings<S> {
+    fn new(postings: S, root_count: usize, name: &'static str) -> EncodedResult<Self> {
         if postings.len() % 4 != 0 {
-            return Err(EncodedValidationError::protocol(
-                "encoded root exclusions contain a partial u32",
-            ));
+            return Err(EncodedValidationError::protocol(format!(
+                "encoded root {name} contain a partial u32"
+            )));
         }
         let count = postings.len() / 4;
         if count == 0 {
-            return Err(EncodedValidationError::protocol(
-                "encoded root exclusions are empty",
-            ));
+            return Err(EncodedValidationError::protocol(format!(
+                "encoded root {name} are empty"
+            )));
         }
         let mut previous = 0_usize;
         for index in 0..count {
-            let current =
-                usize::try_from(u32_at(postings, index, "root exclusion")?).map_err(|_| {
-                    EncodedValidationError::resource(
-                        "encoded root exclusion exceeds the platform index width",
-                    )
-                })?;
+            let current = usize::try_from(u32_at(postings, index, name)?).map_err(|_| {
+                EncodedValidationError::resource(format!(
+                    "encoded root {name} exceeds the platform index width"
+                ))
+            })?;
             if current <= previous || current > root_count {
-                return Err(EncodedValidationError::protocol(
-                    "encoded root exclusions are not sorted unique in-range IDs",
-                ));
+                return Err(EncodedValidationError::protocol(format!(
+                    "encoded root {name} are not sorted unique in-range IDs"
+                )));
             }
             previous = current;
         }
@@ -479,18 +478,17 @@ impl<S: ByteSource> RootExclusions<S> {
             postings,
             count,
             cursor: 0,
-            selected_count: root_count - count,
         })
     }
 
-    fn excludes(&mut self, root_index: usize) -> EncodedResult<bool> {
+    fn contains(&mut self, root_index: usize) -> EncodedResult<bool> {
         if self.cursor >= self.count {
             return Ok(false);
         }
-        let current = usize::try_from(u32_at(self.postings, self.cursor, "root exclusion")?)
+        let current = usize::try_from(u32_at(self.postings, self.cursor, "root posting")?)
             .map_err(|_| {
                 EncodedValidationError::resource(
-                    "encoded root exclusion exceeds the platform index width",
+                    "encoded root posting exceeds the platform index width",
                 )
             })?;
         let local_root_id = root_index
@@ -508,20 +506,23 @@ impl<S: ByteSource> RootExclusions<S> {
 #[derive(Clone, Copy)]
 enum RootSelection<S: ByteSource> {
     All,
-    Exclude(RootExclusions<S>),
+    Include(RootPostings<S>),
+    Exclude(RootPostings<S>),
 }
 
 impl<S: ByteSource> RootSelection<S> {
     const fn selected_count(&self, root_count: usize) -> usize {
         match self {
             Self::All => root_count,
-            Self::Exclude(exclusions) => exclusions.selected_count,
+            Self::Include(inclusions) => inclusions.count,
+            Self::Exclude(exclusions) => root_count - exclusions.count,
         }
     }
 
     const fn validation_work(&self) -> usize {
         match self {
             Self::All => 0,
+            Self::Include(inclusions) => inclusions.count,
             Self::Exclude(exclusions) => exclusions.count,
         }
     }
@@ -529,7 +530,8 @@ impl<S: ByteSource> RootSelection<S> {
     fn excludes(&mut self, root_index: usize) -> EncodedResult<bool> {
         match self {
             Self::All => Ok(false),
-            Self::Exclude(exclusions) => exclusions.excludes(root_index),
+            Self::Include(inclusions) => Ok(!inclusions.contains(root_index)?),
+            Self::Exclude(exclusions) => exclusions.contains(root_index),
         }
     }
 }
@@ -542,7 +544,7 @@ pub fn compile_symbol_phase<B: ByteSource>(
     compile_symbol_phase_with_selection(model, limits, RootSelection::<&[u8]>::All)
 }
 
-/// Compile only roots selected by source-local ALL or EXCLUDE overlay postings.
+/// Compile only roots selected by source-local ALL, INCLUDE, or EXCLUDE postings.
 pub fn compile_symbol_phase_selected<B: ByteSource, S: ByteSource>(
     model: &ValidatedModel<B>,
     limits: SymbolPhaseLimits,
@@ -556,9 +558,16 @@ pub fn compile_symbol_phase_selected<B: ByteSource, S: ByteSource>(
                 "ALL encoded root selection carries exclusions",
             ));
         }
-        POSTINGS_EXCLUDE => {
-            RootSelection::Exclude(RootExclusions::new(postings, model.summary().root_count)?)
-        }
+        POSTINGS_INCLUDE => RootSelection::Include(RootPostings::new(
+            postings,
+            model.summary().root_count,
+            "inclusions",
+        )?),
+        POSTINGS_EXCLUDE => RootSelection::Exclude(RootPostings::new(
+            postings,
+            model.summary().root_count,
+            "exclusions",
+        )?),
         _ => {
             return Err(EncodedValidationError::protocol(
                 "encoded root selection mode is unsupported",
@@ -1351,15 +1360,38 @@ mod tests {
     }
 
     #[test]
+    fn source_local_root_inclusions_filter_dispatch_before_owned_compilation() -> EncodedResult<()>
+    {
+        let owned = declaration("urn:C");
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let inclusions = le32(&[1]);
+
+        let phase = compile_symbol_phase_selected(
+            &model,
+            SymbolPhaseLimits::default(),
+            POSTINGS_INCLUDE,
+            inclusions.as_slice(),
+        )?;
+
+        assert_eq!(phase.roots.len(), 1);
+        assert_eq!(phase.roots[0].handler, RootHandler::Declaration);
+        assert_eq!(phase.declared_entities.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn source_local_root_exclusions_reject_hostile_postings() -> EncodedResult<()> {
         let owned = declaration("urn:C");
         let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
         for (mode, postings, message) in [
             (POSTINGS_ALL, le32(&[1]), "ALL"),
-            (1, le32(&[1]), "unsupported"),
+            (POSTINGS_INCLUDE, Vec::new(), "empty"),
+            (POSTINGS_INCLUDE, vec![1, 0], "partial"),
+            (POSTINGS_INCLUDE, le32(&[2]), "in-range"),
             (POSTINGS_EXCLUDE, Vec::new(), "empty"),
             (POSTINGS_EXCLUDE, vec![1, 0], "partial"),
             (POSTINGS_EXCLUDE, le32(&[2]), "in-range"),
+            (3, le32(&[1]), "unsupported"),
         ] {
             let error = compile_symbol_phase_selected(
                 &model,

@@ -141,6 +141,9 @@ class _EncodedLease:
     def overlay_root_slices(self) -> tuple[object, ...] | None:
         return self._root_slices
 
+    def root_slices(self) -> tuple[object, ...] | None:
+        return self._root_slices
+
 
 def _compiled() -> CompiledOntology:
     fingerprint = _Fingerprint(b"x" * 32)
@@ -482,6 +485,65 @@ def test_encoded_handoff_reuses_overlay_sources_with_exact_root_selections(
         observed[0][2][name] is base_buffers[name] and observed[1][2][name] is delta_buffers[name]
         for name in ENCODED_BUFFER_WIDTHS
     )
+
+
+def test_encoded_handoff_submits_one_contextual_multi_slice_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    base_buffers = {name: memoryview(b"base") for name in ENCODED_BUFFER_WIDTHS}
+    delta_buffers = {name: memoryview(b"delta") for name in ENCODED_BUFFER_WIDTHS}
+    base = _EncodedLease(base_buffers)
+    delta = _EncodedLease(delta_buffers)
+    postings = memoryview(b"\x01\x00\x00\x00")
+    token = b"t" * 32
+    scope_map = memoryview(b"a" * 32 + b"b" * 32)
+    delta._root_slices = (
+        SimpleNamespace(
+            lease=base,
+            posting_mode=1,
+            root_ids=postings,
+            member_tokens=(token,),
+            anonymous_scope_maps=(scope_map,),
+        ),
+        SimpleNamespace(
+            lease=delta,
+            posting_mode=0,
+            root_ids=memoryview(b""),
+            member_tokens=(),
+            anonymous_scope_maps=(),
+        ),
+    )
+    observed: list[tuple[tuple[object, ...], ...]] = []
+
+    def unexpected_columns(**_buffers: memoryview) -> None:
+        raise AssertionError("multi-slice handoff must use one owned transaction")
+
+    def unexpected_selection(**_fields: object) -> None:
+        raise AssertionError("multi-slice handoff must not publish independent fragments")
+
+    def validate_slices(*, slices: tuple[tuple[object, ...], ...]) -> None:
+        observed.append(slices)
+
+    extension._validate_encoded_columns_v1 = unexpected_columns
+    extension._validate_encoded_selection_v1 = unexpected_selection
+    extension._validate_encoded_slices_v1 = validate_slices
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=delta),
+    )
+
+    NativeBackendFactory(extension)._validate_encoded_handoff(object())  # type: ignore[arg-type]
+
+    assert len(observed) == 1
+    records = observed[0]
+    assert len(records) == 2
+    assert records[0][:4] == (1, postings, (token,), (scope_map,))
+    assert records[1][:4] == (0, delta._root_slices[1].root_ids, (), ())
+    assert records[0][4] is base_buffers["root_kinds"]
+    assert records[0][-1] is base_buffers["scalar_bytes"]
+    assert records[1][4] is delta_buffers["root_kinds"]
+    assert records[1][-1] is delta_buffers["scalar_bytes"]
 
 
 def test_encoded_handoff_is_fail_closed_after_advertised_input_is_observed(

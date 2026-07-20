@@ -39,6 +39,8 @@ const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NamedClassPhaseLimits {
+    pub max_slices: usize,
+    pub max_entity_symbols: usize,
     pub max_class_symbols: usize,
     pub max_individual_symbols: usize,
     pub max_compiled_roots: usize,
@@ -54,6 +56,8 @@ pub struct NamedClassPhaseLimits {
 impl Default for NamedClassPhaseLimits {
     fn default() -> Self {
         Self {
+            max_slices: 32_769,
+            max_entity_symbols: 16_000_000,
             max_class_symbols: 16_000_000,
             max_individual_symbols: 16_000_000,
             max_compiled_roots: 100_000_000,
@@ -100,6 +104,7 @@ pub struct NamedClassPhase {
     pub deferred_roots: usize,
     pub work: u64,
     pub owned_bytes: usize,
+    compiled_root_digests: Vec<[u8; 32]>,
     manifest_limit: usize,
 }
 
@@ -419,6 +424,7 @@ enum GroundArguments {
 struct NamedDisjointOutput {
     edges: Vec<RawEdge>,
     disjoint: Option<RawDisjoint>,
+    provenance: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -524,6 +530,7 @@ pub fn compile_named_class_phase<B: ByteSource>(
     let mut raw_facts = Vec::<RawFact>::new();
     let mut raw_equalities = Vec::<RawEqualityFact>::new();
     let mut raw_inequalities = Vec::<RawInequalityFact>::new();
+    let mut compiled_root_digests = Vec::<[u8; 32]>::new();
     let mut compiled_roots = 0_usize;
     let mut deferred_roots = 0_usize;
     for root in &symbols.roots {
@@ -545,11 +552,12 @@ pub fn compile_named_class_phase<B: ByteSource>(
                     &mut budget,
                 )? {
                     Some(edge) => {
-                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
-                            EncodedValidationError::resource(
-                                "named-class compiled-root count overflowed",
-                            )
-                        })?;
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            edge.provenance,
+                            &mut budget,
+                        )?;
                         retain_edge(&mut raw_edges, edge, thing, nothing, &mut budget)?;
                     }
                     None => {
@@ -571,11 +579,18 @@ pub fn compile_named_class_phase<B: ByteSource>(
                     &mut budget,
                 )? {
                     Some(edges) => {
-                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
-                            EncodedValidationError::resource(
-                                "named-class compiled-root count overflowed",
-                            )
-                        })?;
+                        let provenance =
+                            edges.first().map(|edge| edge.provenance).ok_or_else(|| {
+                                EncodedValidationError::invariant(
+                                    "named equivalent-classes root emitted no edges",
+                                )
+                            })?;
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            provenance,
+                            &mut budget,
+                        )?;
                         for edge in edges {
                             retain_edge(&mut raw_edges, edge, thing, nothing, &mut budget)?;
                         }
@@ -601,11 +616,12 @@ pub fn compile_named_class_phase<B: ByteSource>(
                     &mut budget,
                 )? {
                     Some(output) => {
-                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
-                            EncodedValidationError::resource(
-                                "named-class compiled-root count overflowed",
-                            )
-                        })?;
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            output.provenance,
+                            &mut budget,
+                        )?;
                         for edge in output.edges {
                             retain_edge(&mut raw_edges, edge, thing, nothing, &mut budget)?;
                         }
@@ -638,11 +654,20 @@ pub fn compile_named_class_phase<B: ByteSource>(
                     &mut budget,
                 )? {
                     Some(equalities) => {
-                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
-                            EncodedValidationError::resource(
-                                "named-class compiled-root count overflowed",
-                            )
-                        })?;
+                        let provenance = equalities
+                            .first()
+                            .map(|equality| equality.provenance)
+                            .ok_or_else(|| {
+                                EncodedValidationError::invariant(
+                                    "named same-individual root emitted no facts",
+                                )
+                            })?;
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            provenance,
+                            &mut budget,
+                        )?;
                         budget.claim_owned(
                             equalities
                                 .len()
@@ -679,11 +704,20 @@ pub fn compile_named_class_phase<B: ByteSource>(
                     &mut budget,
                 )? {
                     Some(inequalities) => {
-                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
-                            EncodedValidationError::resource(
-                                "named-class compiled-root count overflowed",
-                            )
-                        })?;
+                        let provenance = inequalities
+                            .first()
+                            .map(|inequality| inequality.provenance)
+                            .ok_or_else(|| {
+                                EncodedValidationError::invariant(
+                                    "named different-individuals root emitted no facts",
+                                )
+                            })?;
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            provenance,
+                            &mut budget,
+                        )?;
                         budget.claim_owned(
                             inequalities
                                 .len()
@@ -724,11 +758,12 @@ pub fn compile_named_class_phase<B: ByteSource>(
                     &mut budget,
                 )? {
                     Some(fact) => {
-                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
-                            EncodedValidationError::resource(
-                                "named-class compiled-root count overflowed",
-                            )
-                        })?;
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            fact.provenance,
+                            &mut budget,
+                        )?;
                         budget.claim_owned(size_of::<RawFact>())?;
                         raw_facts.try_reserve(1).map_err(|_| {
                             EncodedValidationError::resource(
@@ -757,6 +792,14 @@ pub fn compile_named_class_phase<B: ByteSource>(
             limits.max_compiled_roots,
             "compiled root count",
         )?;
+    }
+    budget.claim_work(sort_work(compiled_root_digests.len()))?;
+    compiled_root_digests.sort_unstable();
+    compiled_root_digests.dedup();
+    if compiled_root_digests.len() != compiled_roots {
+        return Err(EncodedValidationError::invariant(
+            "named-class source roots have duplicate semantic identities",
+        ));
     }
 
     let edges = normalize_edges(raw_edges, &mut budget)?;
@@ -826,6 +869,7 @@ pub fn compile_named_class_phase<B: ByteSource>(
         deferred_roots,
         work: budget.work,
         owned_bytes: budget.owned_bytes,
+        compiled_root_digests,
         manifest_limit: limits.max_manifest_bytes,
     })
 }
@@ -1205,6 +1249,7 @@ fn named_disjoint_classes<B: ByteSource>(
         return Ok(Some(NamedDisjointOutput {
             edges,
             disjoint: None,
+            provenance,
         }));
     }
 
@@ -1214,6 +1259,7 @@ fn named_disjoint_classes<B: ByteSource>(
             classes: live,
             provenance,
         }),
+        provenance,
     }))
 }
 
@@ -1573,6 +1619,23 @@ fn named_individual_id<B: ByteSource>(
         .binary_search_by_key(&entity_id, |binding| binding.entity_id)
         .ok()
         .map(|index| signature[index].individual_id))
+}
+
+fn retain_compiled_root(
+    digests: &mut Vec<[u8; 32]>,
+    compiled_roots: &mut usize,
+    digest: [u8; 32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    *compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("named-class compiled-root count overflowed")
+    })?;
+    budget.claim_owned(size_of::<[u8; 32]>())?;
+    digests.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("named-class compiled-root identity allocation failed")
+    })?;
+    digests.push(digest);
+    Ok(())
 }
 
 fn retain_edge(
@@ -2999,6 +3062,987 @@ const fn term_sort_name(sort: TermSort) -> &'static str {
     }
 }
 
+/// Canonically merge independently owned source-local compiler transactions.
+///
+/// Every source identifier is remapped through its stable symbol key before
+/// predicates, clauses, facts, and provenance are deduplicated.  The returned
+/// phase therefore has the same dense-ID invariants as a single-source phase;
+/// no borrowed encoded column or Python owner survives this transaction.
+pub fn merge_named_class_phases(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    limits: NamedClassPhaseLimits,
+) -> EncodedResult<NamedClassPhase> {
+    if phases.is_empty() {
+        return Err(EncodedValidationError::protocol(
+            "encoded program merge requires at least one slice",
+        ));
+    }
+    PhaseBudget::count(phases.len(), limits.max_slices, "slice count")?;
+    let mut budget = PhaseBudget::new(limits);
+    for (symbols, phase) in phases {
+        budget.claim_work(
+            usize::try_from(symbols.work)
+                .unwrap_or(usize::MAX)
+                .saturating_add(usize::try_from(phase.work).unwrap_or(usize::MAX)),
+        )?;
+        budget.claim_owned(
+            symbols
+                .owned_bytes
+                .checked_add(phase.owned_bytes)
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "encoded slice source ownership overflowed during merge",
+                    )
+                })?,
+        )?;
+    }
+
+    let entity_domains = phases
+        .iter()
+        .map(|(symbols, _)| &symbols.entity_domain)
+        .collect::<Vec<_>>();
+    let class_domains = phases
+        .iter()
+        .map(|(_, phase)| &phase.class_domain)
+        .collect::<Vec<_>>();
+    let individual_domains = phases
+        .iter()
+        .map(|(_, phase)| &phase.individual_domain)
+        .collect::<Vec<_>>();
+    let (entity_domain, entity_maps) = merge_symbol_domains(
+        &entity_domains,
+        SymbolKind::Entity,
+        limits.max_entity_symbols,
+        "entity",
+        &mut budget,
+    )?;
+    let (class_domain, class_maps) = merge_symbol_domains(
+        &class_domains,
+        SymbolKind::ClassExpression,
+        limits.max_class_symbols,
+        "class-expression",
+        &mut budget,
+    )?;
+    let (individual_domain, individual_maps) = merge_symbol_domains(
+        &individual_domains,
+        SymbolKind::Individual,
+        limits.max_individual_symbols,
+        "individual",
+        &mut budget,
+    )?;
+    let class_signature = merge_class_signatures(
+        phases,
+        &entity_maps,
+        &class_maps,
+        class_domain.values.len(),
+        &mut budget,
+    )?;
+    let individual_signature = merge_individual_signatures(
+        phases,
+        &entity_maps,
+        &individual_maps,
+        individual_domain.values.len(),
+        &mut budget,
+    )?;
+    drop(entity_domain);
+
+    let (provenance, provenance_maps) = merge_phase_provenance(phases, &mut budget)?;
+    let (predicates, predicate_maps) = merge_phase_predicates(phases, &class_maps, &mut budget)?;
+    let clauses = merge_phase_clauses(
+        phases,
+        &predicate_maps,
+        &individual_maps,
+        &provenance_maps,
+        &mut budget,
+    )?;
+    let positive_facts = merge_phase_facts(
+        phases,
+        &predicate_maps,
+        &individual_maps,
+        &provenance_maps,
+        &mut budget,
+    )?;
+    let compiled_source_count = phases.iter().try_fold(0_usize, |total, (_, phase)| {
+        if phase.compiled_root_digests.len() != phase.compiled_roots {
+            return Err(EncodedValidationError::invariant(
+                "merged source compiled-root identities are incomplete",
+            ));
+        }
+        total.checked_add(phase.compiled_roots).ok_or_else(|| {
+            EncodedValidationError::resource("merged compiled-root count overflowed")
+        })
+    })?;
+    let mut compiled_root_digests = Vec::new();
+    budget.claim_owned(
+        compiled_source_count
+            .checked_mul(size_of::<[u8; 32]>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("merged compiled-root identities overflowed")
+            })?,
+    )?;
+    compiled_root_digests
+        .try_reserve_exact(compiled_source_count)
+        .map_err(|_| {
+            EncodedValidationError::resource("merged compiled-root identity allocation failed")
+        })?;
+    for (_, phase) in phases {
+        compiled_root_digests.extend_from_slice(&phase.compiled_root_digests);
+    }
+    budget.claim_work(sort_work(compiled_root_digests.len()))?;
+    compiled_root_digests.sort_unstable();
+    compiled_root_digests.dedup();
+    let compiled_roots = compiled_root_digests.len();
+    let deferred_roots = phases.iter().try_fold(0_usize, |total, (_, phase)| {
+        total.checked_add(phase.deferred_roots).ok_or_else(|| {
+            EncodedValidationError::resource("merged deferred-root count overflowed")
+        })
+    })?;
+    PhaseBudget::count(
+        compiled_roots,
+        limits.max_compiled_roots,
+        "compiled root count",
+    )?;
+    let named_individuals = individual_domain
+        .values
+        .iter()
+        .map(|value| value.identifier)
+        .collect();
+    Ok(NamedClassPhase {
+        class_domain,
+        class_signature,
+        individual_domain,
+        individual_signature,
+        named_individuals,
+        predicates,
+        clauses,
+        positive_facts,
+        provenance,
+        compiled_roots,
+        deferred_roots,
+        work: budget.work,
+        owned_bytes: budget.owned_bytes,
+        compiled_root_digests,
+        manifest_limit: limits.max_manifest_bytes,
+    })
+}
+
+fn merge_symbol_domains(
+    domains: &[&DecodedSymbolDomain],
+    kind: SymbolKind,
+    limit: usize,
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(DecodedSymbolDomain, Vec<Vec<u32>>)> {
+    let total = domains.iter().try_fold(0_usize, |count, domain| {
+        if domain.kind != kind {
+            return Err(EncodedValidationError::invariant(format!(
+                "merged {name} domain changed kind"
+            )));
+        }
+        validate_dense_symbols(domain, name)?;
+        count.checked_add(domain.values.len()).ok_or_else(|| {
+            EncodedValidationError::resource(format!("merged {name} count overflowed"))
+        })
+    })?;
+    PhaseBudget::count(total, limit, name)?;
+    let mut candidates = Vec::new();
+    candidates.try_reserve_exact(total).map_err(|_| {
+        EncodedValidationError::resource(format!("merged {name} symbols allocation failed"))
+    })?;
+    for domain in domains {
+        for value in &domain.values {
+            budget.claim_work(1)?;
+            budget.claim_owned(size_of::<DecodedSymbolValue>())?;
+            budget.claim_owned(value.key.len().saturating_add(value.display.len()))?;
+            candidates.push(value.clone());
+        }
+    }
+    budget.claim_work(sort_work(candidates.len()))?;
+    candidates.sort_by(|left, right| left.key.cmp(&right.key));
+    let mut values: Vec<DecodedSymbolValue> = Vec::new();
+    values.try_reserve_exact(candidates.len()).map_err(|_| {
+        EncodedValidationError::resource(format!("merged {name} result allocation failed"))
+    })?;
+    for mut candidate in candidates {
+        if let Some(previous) = values.last() {
+            if previous.key == candidate.key {
+                if previous.display != candidate.display
+                    || previous.generated != candidate.generated
+                    || previous.query_local != candidate.query_local
+                {
+                    return Err(EncodedValidationError::invariant(format!(
+                        "merged {name} symbol key has conflicting metadata"
+                    )));
+                }
+                continue;
+            }
+        }
+        candidate.identifier = u32::try_from(values.len()).map_err(|_| {
+            EncodedValidationError::resource(format!("merged {name} symbol ID exceeds u32"))
+        })?;
+        values.push(candidate);
+    }
+    let mut mappings = Vec::new();
+    mappings.try_reserve_exact(domains.len()).map_err(|_| {
+        EncodedValidationError::resource(format!("merged {name} mapping allocation failed"))
+    })?;
+    for domain in domains {
+        let mut mapping = Vec::new();
+        budget.claim_owned(
+            domain
+                .values
+                .len()
+                .checked_mul(size_of::<u32>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(format!("merged {name} mapping overflowed"))
+                })?,
+        )?;
+        mapping
+            .try_reserve_exact(domain.values.len())
+            .map_err(|_| {
+                EncodedValidationError::resource(format!("merged {name} mapping allocation failed"))
+            })?;
+        for value in &domain.values {
+            budget.claim_work(binary_search_work(values.len()))?;
+            let index = values
+                .binary_search_by(|candidate| candidate.key.cmp(&value.key))
+                .map_err(|_| {
+                    EncodedValidationError::invariant(format!("merged {name} symbol disappeared"))
+                })?;
+            mapping.push(u32::try_from(index).map_err(|_| {
+                EncodedValidationError::resource(format!("merged {name} mapping exceeds u32"))
+            })?);
+        }
+        mappings.push(mapping);
+    }
+    Ok((DecodedSymbolDomain { kind, values }, mappings))
+}
+
+fn validate_dense_symbols(domain: &DecodedSymbolDomain, name: &'static str) -> EncodedResult<()> {
+    for (index, value) in domain.values.iter().enumerate() {
+        if usize::try_from(value.identifier).ok() != Some(index) {
+            return Err(EncodedValidationError::invariant(format!(
+                "merged {name} source IDs are not dense"
+            )));
+        }
+        if index > 0 && domain.values[index - 1].key >= value.key {
+            return Err(EncodedValidationError::invariant(format!(
+                "merged {name} source keys are not canonical"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn mapped_id(mapping: &[u32], identifier: u32, name: &'static str) -> EncodedResult<u32> {
+    mapping
+        .get(usize::try_from(identifier).map_err(|_| {
+            EncodedValidationError::invariant(format!("merged {name} source ID exceeds usize"))
+        })?)
+        .copied()
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(format!("merged {name} source ID is dangling"))
+        })
+}
+
+fn merge_class_signatures(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    entity_maps: &[Vec<u32>],
+    class_maps: &[Vec<u32>],
+    class_count: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<ClassSignatureBinding>> {
+    let mut merged = vec![None::<(u32, bool)>; class_count];
+    budget.claim_owned(
+        class_count
+            .checked_mul(size_of::<Option<(u32, bool)>>())
+            .ok_or_else(|| EncodedValidationError::resource("merged class signature overflowed"))?,
+    )?;
+    for (phase_index, (_, phase)) in phases.iter().enumerate() {
+        if phase.class_signature.len() != phase.class_domain.values.len() {
+            return Err(EncodedValidationError::invariant(
+                "merged class signature no longer covers its domain",
+            ));
+        }
+        for binding in &phase.class_signature {
+            budget.claim_work(1)?;
+            let class_id = mapped_id(
+                &class_maps[phase_index],
+                binding.class_expression_id,
+                "class",
+            )?;
+            let entity_id = mapped_id(&entity_maps[phase_index], binding.entity_id, "entity")?;
+            let slot = merged
+                .get_mut(usize::try_from(class_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| EncodedValidationError::invariant("merged class ID is dangling"))?;
+            match slot {
+                Some((existing, declared)) if *existing == entity_id => {
+                    *declared |= binding.declared;
+                }
+                Some(_) => {
+                    return Err(EncodedValidationError::invariant(
+                        "merged class symbol maps to conflicting entities",
+                    ));
+                }
+                None => *slot = Some((entity_id, binding.declared)),
+            }
+        }
+    }
+    merged
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let (entity_id, declared) = value.ok_or_else(|| {
+                EncodedValidationError::invariant("merged class signature is incomplete")
+            })?;
+            Ok(ClassSignatureBinding {
+                class_expression_id: u32::try_from(index).map_err(|_| {
+                    EncodedValidationError::resource("merged class signature ID exceeds u32")
+                })?,
+                entity_id,
+                declared,
+            })
+        })
+        .collect()
+}
+
+fn merge_individual_signatures(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    entity_maps: &[Vec<u32>],
+    individual_maps: &[Vec<u32>],
+    individual_count: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<IndividualSignatureBinding>> {
+    let mut merged = vec![None::<(u32, bool)>; individual_count];
+    budget.claim_owned(
+        individual_count
+            .checked_mul(size_of::<Option<(u32, bool)>>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("merged individual signature overflowed")
+            })?,
+    )?;
+    for (phase_index, (_, phase)) in phases.iter().enumerate() {
+        if phase.individual_signature.len() != phase.individual_domain.values.len() {
+            return Err(EncodedValidationError::invariant(
+                "merged individual signature no longer covers its domain",
+            ));
+        }
+        for binding in &phase.individual_signature {
+            budget.claim_work(1)?;
+            let individual_id = mapped_id(
+                &individual_maps[phase_index],
+                binding.individual_id,
+                "individual",
+            )?;
+            let entity_id = mapped_id(&entity_maps[phase_index], binding.entity_id, "entity")?;
+            let slot = merged
+                .get_mut(usize::try_from(individual_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant("merged individual ID is dangling")
+                })?;
+            match slot {
+                Some((existing, declared)) if *existing == entity_id => {
+                    *declared |= binding.declared;
+                }
+                Some(_) => {
+                    return Err(EncodedValidationError::invariant(
+                        "merged individual symbol maps to conflicting entities",
+                    ));
+                }
+                None => *slot = Some((entity_id, binding.declared)),
+            }
+        }
+    }
+    merged
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let (entity_id, declared) = value.ok_or_else(|| {
+                EncodedValidationError::invariant("merged individual signature is incomplete")
+            })?;
+            Ok(IndividualSignatureBinding {
+                individual_id: u32::try_from(index).map_err(|_| {
+                    EncodedValidationError::resource("merged individual signature ID exceeds u32")
+                })?,
+                entity_id,
+                declared,
+            })
+        })
+        .collect()
+}
+
+fn merge_phase_provenance(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(Vec<DecodedProvenanceEntry>, Vec<Vec<u32>>)> {
+    let total = phases.iter().try_fold(0_usize, |count, (_, phase)| {
+        count
+            .checked_add(phase.provenance.len())
+            .ok_or_else(|| EncodedValidationError::resource("merged provenance count overflowed"))
+    })?;
+    PhaseBudget::count(total, budget.limits.max_provenance, "provenance count")?;
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(total)
+        .map_err(|_| EncodedValidationError::resource("merged provenance allocation failed"))?;
+    for (_, phase) in phases {
+        for (index, entry) in phase.provenance.iter().enumerate() {
+            if usize::try_from(entry.provenance_id).ok() != Some(index) {
+                return Err(EncodedValidationError::invariant(
+                    "merged source provenance IDs are not dense",
+                ));
+            }
+            budget.claim_work(1)?;
+            budget.claim_owned(size_of::<DecodedProvenanceEntry>())?;
+            budget.claim_owned(
+                entry
+                    .source_sha256
+                    .len()
+                    .checked_mul(size_of::<[u8; 32]>())
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "merged provenance digest payload overflowed",
+                        )
+                    })?,
+            )?;
+            candidates.push(entry.clone());
+        }
+    }
+    budget.claim_work(sort_work(candidates.len()))?;
+    candidates.sort_by(|left, right| {
+        (left.source_sha256.as_slice(), left.generated)
+            .cmp(&(right.source_sha256.as_slice(), right.generated))
+    });
+    let mut provenance: Vec<DecodedProvenanceEntry> = Vec::new();
+    provenance
+        .try_reserve_exact(candidates.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("merged provenance result allocation failed")
+        })?;
+    for mut candidate in candidates {
+        if provenance.last().is_some_and(|previous| {
+            previous.source_sha256 == candidate.source_sha256
+                && previous.generated == candidate.generated
+        }) {
+            continue;
+        }
+        candidate.provenance_id = u32::try_from(provenance.len())
+            .map_err(|_| EncodedValidationError::resource("merged provenance ID exceeds u32"))?;
+        provenance.push(candidate);
+    }
+    PhaseBudget::count(
+        provenance.len(),
+        budget.limits.max_provenance,
+        "provenance count",
+    )?;
+    let mut mappings = Vec::new();
+    mappings.try_reserve_exact(phases.len()).map_err(|_| {
+        EncodedValidationError::resource("merged provenance mapping allocation failed")
+    })?;
+    for (_, phase) in phases {
+        let mut mapping = Vec::new();
+        budget.claim_owned(
+            phase
+                .provenance
+                .len()
+                .checked_mul(size_of::<u32>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("merged provenance mapping overflowed")
+                })?,
+        )?;
+        mapping
+            .try_reserve_exact(phase.provenance.len())
+            .map_err(|_| {
+                EncodedValidationError::resource("merged provenance mapping allocation failed")
+            })?;
+        for source in &phase.provenance {
+            budget.claim_work(binary_search_work(provenance.len()))?;
+            let index = provenance
+                .binary_search_by(|candidate| {
+                    (candidate.source_sha256.as_slice(), candidate.generated)
+                        .cmp(&(source.source_sha256.as_slice(), source.generated))
+                })
+                .map_err(|_| {
+                    EncodedValidationError::invariant("merged provenance entry disappeared")
+                })?;
+            mapping.push(u32::try_from(index).map_err(|_| {
+                EncodedValidationError::resource("merged provenance mapping exceeds u32")
+            })?);
+        }
+        mappings.push(mapping);
+    }
+    Ok((provenance, mappings))
+}
+
+fn merge_phase_predicates(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    class_maps: &[Vec<u32>],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(Vec<DecodedPredicate>, Vec<Vec<u32>>)> {
+    let total = phases.iter().try_fold(0_usize, |count, (_, phase)| {
+        count
+            .checked_add(phase.predicates.len())
+            .ok_or_else(|| EncodedValidationError::resource("merged predicate count overflowed"))
+    })?;
+    PhaseBudget::count(total, budget.limits.max_predicates, "predicate count")?;
+    let mut candidates = Vec::<(Vec<u8>, DecodedPredicate)>::new();
+    let mut local_keys = Vec::<Vec<Vec<u8>>>::new();
+    candidates
+        .try_reserve_exact(total)
+        .map_err(|_| EncodedValidationError::resource("merged predicate allocation failed"))?;
+    local_keys.try_reserve_exact(phases.len()).map_err(|_| {
+        EncodedValidationError::resource("merged predicate mapping allocation failed")
+    })?;
+    for (phase_index, (_, phase)) in phases.iter().enumerate() {
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(phase.predicates.len())
+            .map_err(|_| {
+                EncodedValidationError::resource("merged predicate key allocation failed")
+            })?;
+        for (index, source) in phase.predicates.iter().enumerate() {
+            if usize::try_from(source.predicate_id).ok() != Some(index) {
+                return Err(EncodedValidationError::invariant(
+                    "merged source predicate IDs are not dense",
+                ));
+            }
+            budget.claim_work(1)?;
+            let mut predicate = source.clone();
+            if let Some(symbol_id) = predicate.symbol_id {
+                predicate.symbol_id = Some(mapped_id(
+                    &class_maps[phase_index],
+                    symbol_id,
+                    "predicate class",
+                )?);
+            }
+            predicate.predicate_id = 0;
+            let key = merged_predicate_key(&predicate)?;
+            budget.claim_owned(
+                size_of::<DecodedPredicate>()
+                    .saturating_add(key.len())
+                    .saturating_add(predicate.argument_sorts.len() * size_of::<TermSort>())
+                    .saturating_add(predicate.annotation.len() * size_of::<u32>())
+                    .saturating_add(predicate.internal_key.as_ref().map_or(0, String::len)),
+            )?;
+            keys.push(key.clone());
+            candidates.push((key, predicate));
+        }
+        local_keys.push(keys);
+    }
+    budget.claim_work(sort_work(candidates.len()))?;
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut keyed = Vec::<(Vec<u8>, DecodedPredicate)>::new();
+    keyed.try_reserve_exact(candidates.len()).map_err(|_| {
+        EncodedValidationError::resource("merged predicate result allocation failed")
+    })?;
+    for (key, candidate) in candidates {
+        if let Some((previous_key, previous)) = keyed.last() {
+            if *previous_key == key {
+                if *previous != candidate {
+                    return Err(EncodedValidationError::invariant(
+                        "merged predicate key has conflicting metadata",
+                    ));
+                }
+                continue;
+            }
+        }
+        keyed.push((key, candidate));
+    }
+    PhaseBudget::count(keyed.len(), budget.limits.max_predicates, "predicate count")?;
+    for (index, (_, predicate)) in keyed.iter_mut().enumerate() {
+        predicate.predicate_id = u32::try_from(index)
+            .map_err(|_| EncodedValidationError::resource("merged predicate ID exceeds u32"))?;
+    }
+    let mut mappings = Vec::new();
+    mappings.try_reserve_exact(local_keys.len()).map_err(|_| {
+        EncodedValidationError::resource("merged predicate mapping allocation failed")
+    })?;
+    for keys in local_keys {
+        let mut mapping = Vec::new();
+        budget.claim_owned(keys.len().checked_mul(size_of::<u32>()).ok_or_else(|| {
+            EncodedValidationError::resource("merged predicate mapping overflowed")
+        })?)?;
+        mapping.try_reserve_exact(keys.len()).map_err(|_| {
+            EncodedValidationError::resource("merged predicate mapping allocation failed")
+        })?;
+        for key in keys {
+            budget.claim_work(binary_search_work(keyed.len()))?;
+            let index = keyed
+                .binary_search_by(|(candidate, _)| candidate.cmp(&key))
+                .map_err(|_| {
+                    EncodedValidationError::invariant("merged predicate entry disappeared")
+                })?;
+            mapping.push(u32::try_from(index).map_err(|_| {
+                EncodedValidationError::resource("merged predicate mapping exceeds u32")
+            })?);
+        }
+        mappings.push(mapping);
+    }
+    Ok((
+        keyed.into_iter().map(|(_, predicate)| predicate).collect(),
+        mappings,
+    ))
+}
+
+fn merged_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
+    let unary_object = predicate.argument_sorts == [TermSort::Object];
+    let binary_object = predicate.argument_sorts == [TermSort::Object, TermSort::Object];
+    if predicate.role_id.is_some()
+        || predicate.cardinality.is_some()
+        || predicate.filler_predicate_id.is_some()
+    {
+        return Err(EncodedValidationError::invariant(
+            "merged named-class predicate has a foreign cross-reference",
+        ));
+    }
+    match predicate.kind {
+        PredicateKind::Concept
+            if unary_object
+                && predicate.annotation.is_empty()
+                && predicate.internal_key.is_none() =>
+        {
+            predicate
+                .symbol_id
+                .map(concept_predicate_key)
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged concept predicate lost its class symbol",
+                    )
+                })
+        }
+        PredicateKind::Equality
+            if binary_object
+                && predicate.symbol_id.is_none()
+                && predicate.annotation.is_empty()
+                && predicate.internal_key.is_none() =>
+        {
+            Ok(equality_predicate_key())
+        }
+        PredicateKind::Inequality
+            if binary_object
+                && predicate.symbol_id.is_none()
+                && predicate.annotation.is_empty()
+                && predicate.internal_key.is_none() =>
+        {
+            Ok(inequality_predicate_key())
+        }
+        PredicateKind::NamedIndividual
+            if unary_object
+                && predicate.symbol_id.is_none()
+                && predicate.annotation.is_empty()
+                && predicate.internal_key.as_deref() == Some("named-individual") =>
+        {
+            Ok(named_individual_predicate_key())
+        }
+        PredicateKind::DisjointGuard
+            if unary_object
+                && predicate.symbol_id.is_none()
+                && predicate.annotation.len() == 1
+                && predicate.internal_key.is_some() =>
+        {
+            Ok(disjoint_guard_predicate_key(
+                predicate.annotation[0],
+                predicate.internal_key.as_deref().unwrap_or_default(),
+            ))
+        }
+        _ => Err(EncodedValidationError::invariant(
+            "merged phase contains a predicate outside the named-class fragment",
+        )),
+    }
+}
+
+fn merge_phase_clauses(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    predicate_maps: &[Vec<u32>],
+    individual_maps: &[Vec<u32>],
+    provenance_maps: &[Vec<u32>],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedClause>> {
+    let total = phases.iter().try_fold(0_usize, |count, (_, phase)| {
+        count
+            .checked_add(phase.clauses.len())
+            .ok_or_else(|| EncodedValidationError::resource("merged clause count overflowed"))
+    })?;
+    PhaseBudget::count(total, budget.limits.max_clauses, "clause count")?;
+    let mut candidates = Vec::<(Vec<u8>, DecodedClause)>::new();
+    candidates
+        .try_reserve_exact(total)
+        .map_err(|_| EncodedValidationError::resource("merged clause allocation failed"))?;
+    for (phase_index, (_, phase)) in phases.iter().enumerate() {
+        for (index, source) in phase.clauses.iter().enumerate() {
+            if usize::try_from(source.clause_id).ok() != Some(index) {
+                return Err(EncodedValidationError::invariant(
+                    "merged source clause IDs are not dense",
+                ));
+            }
+            budget.claim_work(1)?;
+            let mut clause = source.clone();
+            clause.clause_id = 0;
+            clause.body = remap_atoms(
+                &clause.body,
+                &predicate_maps[phase_index],
+                &individual_maps[phase_index],
+            )?;
+            clause.head = remap_atoms(
+                &clause.head,
+                &predicate_maps[phase_index],
+                &individual_maps[phase_index],
+            )?;
+            clause.provenance_ids = remap_ids(
+                &clause.provenance_ids,
+                &provenance_maps[phase_index],
+                "clause provenance",
+            )?;
+            clause.provenance_ids.sort_unstable();
+            clause.provenance_ids.dedup();
+            let body = canonical_variable_predicates(&clause.body, "body")?;
+            let head = canonical_variable_predicates(&clause.head, "head")?;
+            let expected_join: Vec<u32> = (0..u32::try_from(body.len()).map_err(|_| {
+                EncodedValidationError::resource("merged clause body count exceeds u32")
+            })?)
+                .collect();
+            if clause.join_order != expected_join {
+                return Err(EncodedValidationError::invariant(
+                    "merged source clause join order is not canonical",
+                ));
+            }
+            let key = rule_key(&body, &head);
+            budget.claim_owned(
+                size_of::<DecodedClause>()
+                    .saturating_add(key.len())
+                    .saturating_add(
+                        clause.body.len().saturating_add(clause.head.len())
+                            * (size_of::<DecodedAtom>() + size_of::<DecodedTerm>()),
+                    )
+                    .saturating_add(
+                        clause
+                            .provenance_ids
+                            .len()
+                            .saturating_add(clause.join_order.len())
+                            * size_of::<u32>(),
+                    ),
+            )?;
+            candidates.push((key, clause));
+        }
+    }
+    budget.claim_work(sort_work(candidates.len()))?;
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut merged = Vec::<(Vec<u8>, DecodedClause)>::new();
+    merged
+        .try_reserve_exact(candidates.len())
+        .map_err(|_| EncodedValidationError::resource("merged clause result allocation failed"))?;
+    for (key, clause) in candidates {
+        if let Some((previous_key, previous)) = merged.last_mut() {
+            if *previous_key == key {
+                if previous.body != clause.body
+                    || previous.head != clause.head
+                    || previous.join_order != clause.join_order
+                {
+                    return Err(EncodedValidationError::invariant(
+                        "merged clause key has conflicting structure",
+                    ));
+                }
+                union_sorted_ids(&mut previous.provenance_ids, &clause.provenance_ids);
+                continue;
+            }
+        }
+        merged.push((key, clause));
+    }
+    PhaseBudget::count(merged.len(), budget.limits.max_clauses, "clause count")?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(merged.len())
+        .map_err(|_| EncodedValidationError::resource("merged clause output allocation failed"))?;
+    for (index, (_, mut clause)) in merged.into_iter().enumerate() {
+        clause.clause_id = u32::try_from(index)
+            .map_err(|_| EncodedValidationError::resource("merged clause ID exceeds u32"))?;
+        output.push(clause);
+    }
+    Ok(output)
+}
+
+fn merge_phase_facts(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    predicate_maps: &[Vec<u32>],
+    individual_maps: &[Vec<u32>],
+    provenance_maps: &[Vec<u32>],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedGroundAtom>> {
+    let total = phases.iter().try_fold(0_usize, |count, (_, phase)| {
+        count
+            .checked_add(phase.positive_facts.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("merged positive-fact count overflowed")
+            })
+    })?;
+    PhaseBudget::count(total, budget.limits.max_facts, "positive fact count")?;
+    let mut candidates = Vec::<DecodedGroundAtom>::new();
+    candidates
+        .try_reserve_exact(total)
+        .map_err(|_| EncodedValidationError::resource("merged positive-fact allocation failed"))?;
+    for (phase_index, (_, phase)) in phases.iter().enumerate() {
+        for source in &phase.positive_facts {
+            budget.claim_work(1)?;
+            let mut fact = source.clone();
+            fact.predicate_id = mapped_id(
+                &predicate_maps[phase_index],
+                fact.predicate_id,
+                "fact predicate",
+            )?;
+            fact.arguments = fact
+                .arguments
+                .iter()
+                .map(|term| remap_term(term, &individual_maps[phase_index]))
+                .collect::<EncodedResult<Vec<_>>>()?;
+            fact.provenance_ids = remap_ids(
+                &fact.provenance_ids,
+                &provenance_maps[phase_index],
+                "fact provenance",
+            )?;
+            fact.provenance_ids.sort_unstable();
+            fact.provenance_ids.dedup();
+            budget.claim_owned(
+                size_of::<DecodedGroundAtom>()
+                    .saturating_add(fact.arguments.len() * size_of::<DecodedTerm>())
+                    .saturating_add(fact.provenance_ids.len() * size_of::<u32>()),
+            )?;
+            candidates.push(fact);
+        }
+    }
+    budget.claim_work(sort_work(candidates.len()))?;
+    candidates.sort_by(|left, right| {
+        (left.predicate_id, left.arguments.as_slice())
+            .cmp(&(right.predicate_id, right.arguments.as_slice()))
+    });
+    let mut merged: Vec<DecodedGroundAtom> = Vec::new();
+    merged.try_reserve_exact(candidates.len()).map_err(|_| {
+        EncodedValidationError::resource("merged positive-fact result allocation failed")
+    })?;
+    for fact in candidates {
+        if let Some(previous) = merged.last_mut() {
+            if previous.predicate_id == fact.predicate_id && previous.arguments == fact.arguments {
+                union_sorted_ids(&mut previous.provenance_ids, &fact.provenance_ids);
+                continue;
+            }
+        }
+        merged.push(fact);
+    }
+    PhaseBudget::count(merged.len(), budget.limits.max_facts, "positive fact count")?;
+    let mut keyed = Vec::<(Vec<u8>, DecodedGroundAtom)>::new();
+    keyed.try_reserve_exact(merged.len()).map_err(|_| {
+        EncodedValidationError::resource("merged positive-fact ordering allocation failed")
+    })?;
+    for fact in merged {
+        let arguments = merged_ground_arguments(&fact.arguments)?;
+        let key = ground_fact_key(fact.predicate_id, arguments, &fact.provenance_ids);
+        budget.claim_owned(key.len())?;
+        keyed.push((key, fact));
+    }
+    budget.claim_work(sort_work(keyed.len()))?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(keyed.into_iter().map(|(_, fact)| fact).collect())
+}
+
+fn remap_atoms(
+    atoms: &[DecodedAtom],
+    predicate_map: &[u32],
+    individual_map: &[u32],
+) -> EncodedResult<Vec<DecodedAtom>> {
+    atoms
+        .iter()
+        .map(|source| {
+            Ok(DecodedAtom {
+                predicate_id: mapped_id(predicate_map, source.predicate_id, "atom predicate")?,
+                arguments: source
+                    .arguments
+                    .iter()
+                    .map(|term| remap_term(term, individual_map))
+                    .collect::<EncodedResult<Vec<_>>>()?,
+            })
+        })
+        .collect()
+}
+
+fn remap_term(term: &DecodedTerm, individual_map: &[u32]) -> EncodedResult<DecodedTerm> {
+    match term {
+        DecodedTerm::Variable { index, sort } => Ok(DecodedTerm::Variable {
+            index: *index,
+            sort: *sort,
+        }),
+        DecodedTerm::Individual { individual_id } => Ok(DecodedTerm::Individual {
+            individual_id: mapped_id(individual_map, *individual_id, "individual term")?,
+        }),
+        DecodedTerm::Data { .. } => Err(EncodedValidationError::invariant(
+            "merged named-class phase contains a data term",
+        )),
+    }
+}
+
+fn remap_ids(source: &[u32], mapping: &[u32], name: &'static str) -> EncodedResult<Vec<u32>> {
+    source
+        .iter()
+        .map(|identifier| mapped_id(mapping, *identifier, name))
+        .collect()
+}
+
+fn canonical_variable_predicates(
+    atoms: &[DecodedAtom],
+    name: &'static str,
+) -> EncodedResult<Vec<u32>> {
+    let mut predicates = Vec::new();
+    predicates.try_reserve_exact(atoms.len()).map_err(|_| {
+        EncodedValidationError::resource(format!("merged clause {name} allocation failed"))
+    })?;
+    for atom in atoms {
+        if atom.arguments
+            != [DecodedTerm::Variable {
+                index: 0,
+                sort: TermSort::Object,
+            }]
+        {
+            return Err(EncodedValidationError::invariant(format!(
+                "merged clause {name} atom is outside the named-class fragment"
+            )));
+        }
+        predicates.push(atom.predicate_id);
+    }
+    if predicates.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(EncodedValidationError::invariant(format!(
+            "merged clause {name} predicates are not canonical"
+        )));
+    }
+    Ok(predicates)
+}
+
+fn merged_ground_arguments(arguments: &[DecodedTerm]) -> EncodedResult<GroundArguments> {
+    match arguments {
+        [DecodedTerm::Individual { individual_id }] => Ok(GroundArguments::Unary(*individual_id)),
+        [DecodedTerm::Individual {
+            individual_id: left,
+        }, DecodedTerm::Individual {
+            individual_id: right,
+        }] => Ok(GroundArguments::Binary(*left, *right)),
+        _ => Err(EncodedValidationError::invariant(
+            "merged ground fact is outside the named-class fragment",
+        )),
+    }
+}
+
+fn union_sorted_ids(target: &mut Vec<u32>, source: &[u32]) {
+    target.extend_from_slice(source);
+    target.sort_unstable();
+    target.dedup();
+}
+
+fn binary_search_work(count: usize) -> usize {
+    if count < 2 {
+        1
+    } else {
+        usize::try_from(usize::BITS - (count - 1).leading_zeros())
+            .unwrap_or(usize::MAX)
+            .saturating_add(1)
+    }
+}
+
 fn sort_work(count: usize) -> usize {
     if count < 2 {
         return count;
@@ -3177,6 +4221,76 @@ mod tests {
             .map_err(|_| EncodedValidationError::invariant("manifest did not decode"))?;
         assert_eq!(manifest["family"], "named_class_axioms");
         assert_eq!(manifest["compiled_roots"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_source_slices_merge_to_one_canonical_owned_program() -> EncodedResult<()> {
+        let first_owned = class_assertion();
+        let first_model = ValidatedModel::new(first_owned.borrowed(), EncodedLimits::default())?;
+        let first_symbols = compile_symbol_phase(&first_model, SymbolPhaseLimits::default())?;
+        let first_named = compile_named_class_phase(
+            &first_model,
+            &first_symbols,
+            NamedClassPhaseLimits::default(),
+        )?;
+        let second_owned = class_assertion();
+        let second_model = ValidatedModel::new(second_owned.borrowed(), EncodedLimits::default())?;
+        let second_symbols = compile_symbol_phase(&second_model, SymbolPhaseLimits::default())?;
+        let second_named = compile_named_class_phase(
+            &second_model,
+            &second_symbols,
+            NamedClassPhaseLimits::default(),
+        )?;
+        let phases = vec![
+            (first_symbols, first_named.clone()),
+            (second_symbols, second_named),
+        ];
+
+        let merged = merge_named_class_phases(&phases, NamedClassPhaseLimits::default())?;
+
+        let expected: serde_json::Value =
+            serde_json::from_slice(&first_named.canonical_manifest_json()?)
+                .map_err(|_| EncodedValidationError::invariant("manifest did not decode"))?;
+        let actual: serde_json::Value = serde_json::from_slice(&merged.canonical_manifest_json()?)
+            .map_err(|_| EncodedValidationError::invariant("manifest did not decode"))?;
+        assert_eq!(actual, expected);
+        assert_eq!(merged.positive_facts, first_named.positive_facts);
+        assert_eq!(merged.clauses, first_named.clauses);
+        Ok(())
+    }
+
+    #[test]
+    fn multi_slice_merge_is_bounded_and_transactional() -> EncodedResult<()> {
+        let first_owned = equivalent_classes();
+        let first_model = ValidatedModel::new(first_owned.borrowed(), EncodedLimits::default())?;
+        let first_symbols = compile_symbol_phase(&first_model, SymbolPhaseLimits::default())?;
+        let first_named = compile_named_class_phase(
+            &first_model,
+            &first_symbols,
+            NamedClassPhaseLimits::default(),
+        )?;
+        let second_owned = class_assertion();
+        let second_model = ValidatedModel::new(second_owned.borrowed(), EncodedLimits::default())?;
+        let second_symbols = compile_symbol_phase(&second_model, SymbolPhaseLimits::default())?;
+        let second_named = compile_named_class_phase(
+            &second_model,
+            &second_symbols,
+            NamedClassPhaseLimits::default(),
+        )?;
+        let phases = vec![(first_symbols, first_named), (second_symbols, second_named)];
+        let before = phases.clone();
+        let limits = NamedClassPhaseLimits {
+            max_slices: 1,
+            ..NamedClassPhaseLimits::default()
+        };
+
+        let error = merge_named_class_phases(&phases, limits).err();
+
+        assert!(error.is_some_and(|value| {
+            value.code == "NATIVE_ENCODED_RESOURCE_LIMIT" && value.message.contains("slice count")
+        }));
+        assert_eq!(phases, before);
         Ok(())
     }
 

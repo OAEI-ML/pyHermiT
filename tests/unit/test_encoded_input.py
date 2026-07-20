@@ -22,6 +22,7 @@ from pyhermit.encoded_input import (
     EncodedStructuralSegmentLease,
     negotiate_encoded_input,
 )
+from pyhermit.exceptions import ResourceLimitError
 
 V = TypeVar("V")
 _FEATURES = frozenset(
@@ -489,6 +490,152 @@ def test_nested_overlay_exclusions_remain_source_local(
     assert inner_source is not None
     assert root_slices[0].root_ids is inner_source.segments[0].root_ids
     assert root_slices[1].root_ids is lease.segments[0].root_ids
+
+
+def test_composite_include_exclude_tokens_and_scope_maps_compose_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
+    base_owner = _View()
+    _set_local_root_count(base_owner, 2)
+    base_lease = negotiate_encoded_input(_as_view(base_owner), {ENCODED_SCHEMA_NAME: 1}).lease
+    assert base_lease is not None
+
+    inner_owner = _View()
+    _set_local_root_count(inner_owner, 2)
+    inner_scope = memoryview(b"a" * 32 + b"b" * 32)
+    raw_inner_base = _segment(
+        role=2,
+        owner=base_owner,
+        source=base_owner.encoded,
+        posting_mode=2,
+        root_ids=_postings(1),
+        anonymous_scope_map=inner_scope,
+    )
+    raw_inner_delta = _segment(role=3, owner=inner_owner, source=None)
+    inner_segments = (
+        EncodedStructuralSegmentLease(
+            raw_inner_base,
+            2,
+            _as_view(base_owner),
+            base_lease,
+            2,
+            raw_inner_base.root_ids,
+            inner_scope,
+            None,
+        ),
+        EncodedStructuralSegmentLease(
+            raw_inner_delta,
+            3,
+            _as_view(inner_owner),
+            None,
+            0,
+            raw_inner_delta.root_ids,
+            raw_inner_delta.anonymous_scope_map,
+            None,
+        ),
+    )
+    inner_owner.encoded.segments = (raw_inner_base, raw_inner_delta)
+    inner_owner.encoded.structural_fingerprint = encoded_input._encoded_fingerprint(
+        inner_owner.encoded.buffers,
+        inner_segments,
+        inner_owner.encoded.descriptor,
+    )
+    inner_lease = negotiate_encoded_input(_as_view(inner_owner), {ENCODED_SCHEMA_NAME: 1}).lease
+    assert inner_lease is not None
+
+    owner = _View()
+    include_scope = memoryview(b"c" * 32 + b"d" * 32)
+    exclude_scope = memoryview(b"e" * 32 + b"f" * 32)
+    include_token = b"1" * 32
+    exclude_token = b"2" * 32
+    raw_include = _segment(
+        role=4,
+        owner=inner_owner,
+        source=inner_owner.encoded,
+        posting_mode=1,
+        root_ids=_postings(1),
+        anonymous_scope_map=include_scope,
+        member_token=include_token,
+    )
+    raw_exclude = _segment(
+        role=4,
+        owner=inner_owner,
+        source=inner_owner.encoded,
+        posting_mode=2,
+        root_ids=_postings(2),
+        anonymous_scope_map=exclude_scope,
+        member_token=exclude_token,
+    )
+    outer_segments = (
+        EncodedStructuralSegmentLease(
+            raw_include,
+            4,
+            _as_view(inner_owner),
+            inner_lease,
+            1,
+            raw_include.root_ids,
+            include_scope,
+            include_token,
+        ),
+        EncodedStructuralSegmentLease(
+            raw_exclude,
+            4,
+            _as_view(inner_owner),
+            inner_lease,
+            2,
+            raw_exclude.root_ids,
+            exclude_scope,
+            exclude_token,
+        ),
+    )
+    owner.encoded.segments = (raw_include, raw_exclude)
+    owner.encoded.structural_fingerprint = encoded_input._encoded_fingerprint(
+        owner.encoded.buffers,
+        outer_segments,
+        owner.encoded.descriptor,
+    )
+
+    lease = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1}).lease
+
+    assert lease is not None
+    root_slices = lease.root_slices()
+    assert tuple(root_slice.lease.encoded_view for root_slice in root_slices) == (
+        inner_owner.encoded,
+        base_owner.encoded,
+        inner_owner.encoded,
+        owner.encoded,
+    )
+    assert tuple(root_slice.posting_mode for root_slice in root_slices) == (1, 2, 2, 0)
+    assert tuple(bytes(root_slice.root_ids) for root_slice in root_slices) == (
+        _postings(1),
+        _postings(1),
+        _postings(2),
+        b"",
+    )
+    assert tuple(root_slice.member_tokens for root_slice in root_slices) == (
+        (include_token,),
+        (exclude_token,),
+        (exclude_token,),
+        (),
+    )
+    assert tuple(root_slice.anonymous_scope_maps for root_slice in root_slices) == (
+        (lease.segments[0].anonymous_scope_map,),
+        (
+            lease.segments[1].source.segments[0].anonymous_scope_map,
+            lease.segments[1].anonymous_scope_map,
+        ),
+        (lease.segments[1].anonymous_scope_map,),
+        (),
+    )
+    assert root_slices[0].root_ids is lease.segments[0].root_ids
+    assert root_slices[1].root_ids is lease.segments[1].source.segments[0].root_ids
+    assert root_slices[2].root_ids is lease.segments[1].root_ids
+    nested = encoded_input._prefix_member_token((root_slices[0],), b"0" * 32)
+    assert nested[0].member_tokens == (b"0" * 32, include_token)
+    monkeypatch.setattr(encoded_input, "_MAX_ROOT_SLICES", 3)
+    with pytest.raises(ResourceLimitError, match="root-slice plan"):
+        lease.root_slices()
 
 
 @pytest.mark.parametrize("defect", ["role", "posting", "scope_map", "cycle"])

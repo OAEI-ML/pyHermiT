@@ -16,6 +16,8 @@ from typing import Any, cast
 
 import pyowl_core as owl
 
+from .exceptions import ResourceLimitError
+
 ENCODED_SCHEMA_NAME = "pyowl-core/structural-columns"
 ENCODED_SCHEMA_VERSION = 1
 ENCODED_NATIVE_FEATURE = "encoded-structural-compiler-v1"
@@ -48,6 +50,7 @@ _POSTINGS_EXCLUDE = 2
 _MAX_SEGMENT_DEPTH = 32
 _MAX_COMPOSITE_MEMBERS = 1_024
 _MAX_ENCODED_VIEWS = _MAX_COMPOSITE_MEMBERS * (_MAX_SEGMENT_DEPTH + 1) + 1
+_MAX_ROOT_SLICES = _MAX_COMPOSITE_MEMBERS * _MAX_SEGMENT_DEPTH + 1
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -66,11 +69,19 @@ class EncodedStructuralSegmentLease:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class EncodedStructuralRootSlice:
-    """One retained local column set plus its source-local root selection."""
+    """One retained local column set plus its exact segmented-view context.
+
+    Scope maps are ordered from the innermost source transformation to the
+    outermost one.  Member tokens use the resolved locator order, with the
+    outermost composite token first.  Both sidecars remain borrowed from their
+    validated segment leases.
+    """
 
     lease: EncodedStructuralLease
     posting_mode: int
     root_ids: memoryview
+    member_tokens: tuple[bytes, ...] = ()
+    anonymous_scope_maps: tuple[memoryview, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -118,21 +129,15 @@ class EncodedStructuralLease:
             )
         return tuple(ordered)
 
-    def overlay_root_slices(self) -> tuple[EncodedStructuralRootSlice, ...] | None:
-        """Resolve a direct/overlay chain into zero-copy source-local root slices.
+    def root_slices(self) -> tuple[EncodedStructuralRootSlice, ...]:
+        """Resolve the validated segment graph into zero-copy local root slices."""
 
-        ``EXCLUDE`` postings address only the local roots of their immediate
-        source.  Returning ``None`` for non-overlay families keeps composite
-        identity and scope rewriting outside this deliberately bounded lane.
-        """
+        return _resolve_root_slices(self, _RootSliceBudget())
 
-        roles = tuple(segment.role for segment in self.segments)
-        if roles not in {
-            (_SEGMENT_OVERLAY_BASE,),
-            (_SEGMENT_OVERLAY_BASE, _SEGMENT_OVERLAY_DELTA),
-        }:
-            return None
-        return _resolve_direct_overlay_root_slices(self)
+    def overlay_root_slices(self) -> tuple[EncodedStructuralRootSlice, ...]:
+        """Compatibility alias for the now composite-aware root-slice plan."""
+
+        return self.root_slices()
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,50 +616,152 @@ def _validate_segment_family(
         raise _protocol_error("encoded composite without a bridge has local roots")
 
 
-def _resolve_direct_overlay_root_slices(
+@dataclass(slots=True)
+class _RootSliceBudget:
+    count: int = 0
+
+    def claim(self) -> None:
+        following = self.count + 1
+        if following > _MAX_ROOT_SLICES:
+            raise ResourceLimitError(
+                "encoded structural root-slice plan exceeds its limit",
+                limit="encoded_root_slices",
+                observed=following,
+                allowed=_MAX_ROOT_SLICES,
+            )
+        self.count = following
+
+
+def _resolve_root_slices(
     lease: EncodedStructuralLease,
-) -> tuple[EncodedStructuralRootSlice, ...] | None:
+    budget: _RootSliceBudget,
+) -> tuple[EncodedStructuralRootSlice, ...]:
     roles = tuple(segment.role for segment in lease.segments)
     if roles == (_SEGMENT_DIRECT,):
         direct = lease.segments[0]
+        budget.claim()
         return (EncodedStructuralRootSlice(lease, _POSTINGS_ALL, direct.root_ids),)
-    if roles not in {
+    if roles in {
         (_SEGMENT_OVERLAY_BASE,),
         (_SEGMENT_OVERLAY_BASE, _SEGMENT_OVERLAY_DELTA),
     }:
-        return None
+        base = lease.segments[0]
+        source = base.source
+        if source is None:
+            raise _protocol_error("validated overlay base lost its retained source")
+        selected = list(_map_scope(_resolve_root_slices(source, budget), base.anonymous_scope_map))
+        selected = list(_apply_root_postings(selected, source, base))
+        local_postings = lease.segments[1].root_ids if len(lease.segments) == 2 else memoryview(b"")
+        budget.claim()
+        selected.append(EncodedStructuralRootSlice(lease, _POSTINGS_ALL, local_postings))
+        return tuple(selected)
 
-    base = lease.segments[0]
-    source = base.source
-    if source is None:
-        raise _protocol_error("validated overlay base lost its retained source")
-    inherited = _resolve_direct_overlay_root_slices(source)
-    if inherited is None:
-        return None
-    selected = list(inherited)
-    if base.posting_mode == _POSTINGS_EXCLUDE:
-        source_indexes = [
-            index for index, root_slice in enumerate(selected) if root_slice.lease is source
-        ]
-        if len(source_indexes) != 1:
-            raise _protocol_error("validated overlay source has no unique local root slice")
-        source_index = source_indexes[0]
-        selected[source_index] = _exclude_root_slice(selected[source_index], base.root_ids)
-    elif base.posting_mode != _POSTINGS_ALL:
-        raise _protocol_error("validated overlay base has an unsupported posting mode")
+    member_count = roles.count(_SEGMENT_COMPOSITE_MEMBER)
+    expected = (_SEGMENT_COMPOSITE_MEMBER,) * member_count + (
+        (_SEGMENT_COMPOSITE_BRIDGE,) if roles.count(_SEGMENT_COMPOSITE_BRIDGE) else ()
+    )
+    if member_count < 2 or roles != expected:
+        raise _protocol_error("validated encoded segment family became unsupported")
+    composed: list[EncodedStructuralRootSlice] = []
+    for member in lease.segments[:member_count]:
+        source = member.source
+        token = member.member_token
+        if source is None or token is None:
+            raise _protocol_error("validated composite member lost its source or token")
+        inherited: tuple[EncodedStructuralRootSlice, ...]
+        if member.posting_mode == _POSTINGS_INCLUDE:
+            budget.claim()
+            inherited = (_local_root_slice(source),)
+        else:
+            inherited = _resolve_root_slices(source, budget)
+        inherited = _map_scope(inherited, member.anonymous_scope_map)
+        posted = _apply_root_postings(inherited, source, member)
+        composed.extend(_prefix_member_token(posted, token))
+    budget.claim()
+    composed.append(EncodedStructuralRootSlice(lease, _POSTINGS_ALL, memoryview(b"")))
+    return tuple(composed)
 
-    local_postings = lease.segments[1].root_ids if len(lease.segments) == 2 else memoryview(b"")
-    selected.append(EncodedStructuralRootSlice(lease, _POSTINGS_ALL, local_postings))
-    return tuple(selected)
+
+def _local_root_slice(lease: EncodedStructuralLease) -> EncodedStructuralRootSlice:
+    roles = tuple(segment.role for segment in lease.segments)
+    if roles == (_SEGMENT_DIRECT,):
+        postings = lease.segments[0].root_ids
+    elif roles in {
+        (_SEGMENT_OVERLAY_BASE,),
+        (_SEGMENT_OVERLAY_BASE, _SEGMENT_OVERLAY_DELTA),
+    }:
+        postings = lease.segments[1].root_ids if len(lease.segments) == 2 else memoryview(b"")
+    elif roles.count(_SEGMENT_COMPOSITE_MEMBER) >= 2:
+        postings = memoryview(b"")
+    else:
+        raise _protocol_error("validated source has no supported local root slice")
+    return EncodedStructuralRootSlice(lease, _POSTINGS_ALL, postings)
 
 
-def _exclude_root_slice(
-    root_slice: EncodedStructuralRootSlice,
-    exclusions: memoryview,
-) -> EncodedStructuralRootSlice:
-    if root_slice.posting_mode != _POSTINGS_ALL:
-        raise _protocol_error("validated overlay root slice has an unsupported posting mode")
-    return EncodedStructuralRootSlice(root_slice.lease, _POSTINGS_EXCLUDE, exclusions)
+def _apply_root_postings(
+    root_slices: tuple[EncodedStructuralRootSlice, ...] | list[EncodedStructuralRootSlice],
+    source: EncodedStructuralLease,
+    segment: EncodedStructuralSegmentLease,
+) -> tuple[EncodedStructuralRootSlice, ...]:
+    if segment.posting_mode == _POSTINGS_ALL:
+        return tuple(root_slices)
+    source_indexes = [
+        index for index, root_slice in enumerate(root_slices) if root_slice.lease is source
+    ]
+    if len(source_indexes) != 1:
+        raise _protocol_error("validated segment source has no unique local root slice")
+    source_index = source_indexes[0]
+    local = root_slices[source_index]
+    if local.posting_mode != _POSTINGS_ALL:
+        raise _protocol_error("validated source-local root slice is already selected")
+    replacement = EncodedStructuralRootSlice(
+        local.lease,
+        segment.posting_mode,
+        segment.root_ids,
+        local.member_tokens,
+        local.anonymous_scope_maps,
+    )
+    if segment.posting_mode == _POSTINGS_INCLUDE:
+        return (replacement,)
+    if segment.posting_mode == _POSTINGS_EXCLUDE:
+        result = list(root_slices)
+        result[source_index] = replacement
+        return tuple(result)
+    raise _protocol_error("validated root slice has an unsupported posting mode")
+
+
+def _map_scope(
+    root_slices: tuple[EncodedStructuralRootSlice, ...],
+    scope_map: memoryview,
+) -> tuple[EncodedStructuralRootSlice, ...]:
+    if not scope_map.nbytes:
+        return root_slices
+    return tuple(
+        EncodedStructuralRootSlice(
+            root_slice.lease,
+            root_slice.posting_mode,
+            root_slice.root_ids,
+            root_slice.member_tokens,
+            (*root_slice.anonymous_scope_maps, scope_map),
+        )
+        for root_slice in root_slices
+    )
+
+
+def _prefix_member_token(
+    root_slices: tuple[EncodedStructuralRootSlice, ...],
+    token: bytes,
+) -> tuple[EncodedStructuralRootSlice, ...]:
+    return tuple(
+        EncodedStructuralRootSlice(
+            root_slice.lease,
+            root_slice.posting_mode,
+            root_slice.root_ids,
+            (token, *root_slice.member_tokens),
+            root_slice.anonymous_scope_maps,
+        )
+        for root_slice in root_slices
+    )
 
 
 def _encoded_fingerprint(

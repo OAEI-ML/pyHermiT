@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import struct
 from typing import cast
 
 import pyowl_core
@@ -57,6 +58,39 @@ def _native_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
         item_lengths=buffers["item_lengths"],
         scalar_bytes=buffers["scalar_bytes"],
     )
+    return cast(dict[str, object], json.loads(encoded))
+
+
+def _slice_record(
+    snapshot: pyowl_core.OntologyView,
+    *,
+    posting_mode: int = 0,
+    postings: memoryview | None = None,
+    member_tokens: tuple[bytes, ...] = (),
+    anonymous_scope_maps: tuple[memoryview, ...] = (),
+) -> tuple[object, ...]:
+    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    return (
+        posting_mode,
+        memoryview(b"") if postings is None else postings,
+        member_tokens,
+        anonymous_scope_maps,
+        buffers["root_kinds"],
+        buffers["root_ids"],
+        buffers["node_tags"],
+        buffers["node_field_offsets"],
+        buffers["field_kinds"],
+        buffers["field_values"],
+        buffers["field_lengths"],
+        buffers["item_kinds"],
+        buffers["item_values"],
+        buffers["item_lengths"],
+        buffers["scalar_bytes"],
+    )
+
+
+def _native_slices_manifest(*records: tuple[object, ...]) -> dict[str, object]:
+    encoded = native._encoded_named_class_slices_manifest_v1(slices=records)
     return cast(dict[str, object], json.loads(encoded))
 
 
@@ -256,6 +290,98 @@ def test_named_class_signature_predicates_clauses_and_provenance_match_scalar() 
 
     assert _native_manifest(snapshot) == _expected_manifest(snapshot, compiled_roots=3)
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_contextual_multi_slice_program_matches_scalar_composite_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(NamedIndividual(:i))",
+            "SubClassOf(:A :B)",
+            "ClassAssertion(:A :i)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(NamedIndividual(:j))",
+            "EquivalentClasses(:B :C)",
+            "DifferentIndividuals(:i :j)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    left_scope = memoryview(b"a" * 32 + b"b" * 32)
+    right_scope = memoryview(b"c" * 32 + b"d" * 32)
+
+    actual = _native_slices_manifest(
+        _slice_record(
+            left,
+            member_tokens=(b"1" * 32,),
+            anonymous_scope_maps=(left_scope,),
+        ),
+        _slice_record(
+            right,
+            member_tokens=(b"2" * 32,),
+            anonymous_scope_maps=(right_scope,),
+        ),
+    )
+
+    assert actual == _expected_manifest(composite, compiled_roots=4)
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_multi_slice_merge_deduplicates_the_same_semantic_root_across_members() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "SubClassOf(:A :B)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "SubClassOf(:A :B)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(_slice_record(left), _slice_record(right))
+
+    assert actual == _expected_manifest(composite, compiled_roots=1)
+
+
+@pytest.mark.parametrize("posting_mode", [1, 2])
+def test_source_local_include_and_exclude_match_scalar_root_selection(
+    posting_mode: int,
+) -> None:
+    source = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "SubClassOf(:A :B)",
+        ),
+        options=OPTIONS,
+    )
+    root_ids = (3,) if posting_mode == 1 else (1, 2)
+    postings = memoryview(b"".join(struct.pack("<I", value) for value in root_ids))
+
+    actual = _native_slices_manifest(
+        _slice_record(source, posting_mode=posting_mode, postings=postings)
+    )
+
+    expected = _expected_manifest(source, compiled_roots=1)
+    for binding in cast(list[dict[str, object]], expected["class_signature"]):
+        binding["declared"] = False
+    assert actual == expected
 
 
 def test_double_digit_fragment_ids_preserve_scalar_predicate_and_clause_order() -> None:

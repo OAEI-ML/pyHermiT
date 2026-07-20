@@ -24,6 +24,20 @@ _OPTIONS = pyowl_core.LoadOptions(
     backend=pyowl_core.BackendPreference.PYTHON,
 )
 
+_SLICE_COLUMN_ORDER = (
+    "root_kinds",
+    "root_ids",
+    "node_tags",
+    "node_field_offsets",
+    "field_kinds",
+    "field_values",
+    "field_lengths",
+    "item_kinds",
+    "item_values",
+    "item_lengths",
+    "scalar_bytes",
+)
+
 
 def _direct_columns() -> tuple[object, dict[str, memoryview]]:
     snapshot = pyowl_core.load_snapshot(
@@ -49,6 +63,21 @@ def _validate(
             **columns,
         )
         is None
+    )
+
+
+def _slice_record(
+    columns: dict[str, memoryview],
+    *,
+    member_tokens: tuple[bytes, ...] = (),
+    anonymous_scope_maps: tuple[memoryview, ...] = (),
+) -> tuple[object, ...]:
+    return (
+        0,
+        memoryview(b""),
+        member_tokens,
+        anonymous_scope_maps,
+        *(columns[name] for name in _SLICE_COLUMN_ORDER),
     )
 
 
@@ -87,6 +116,34 @@ def test_mmap_columns_are_borrowed_for_one_call_and_release_cleanly(tmp_path: Pa
         if not mapping.closed:
             mapping.close()
         del encoded
+
+
+def test_contextual_multi_slice_call_releases_every_borrow_after_return() -> None:
+    encoded, columns = _direct_columns()
+    context_mapping = mmap.mmap(-1, 64)
+    context_mapping[:] = b"a" * 32 + b"b" * 32
+    writable_scope = memoryview(context_mapping)
+    scope_map = writable_scope.toreadonly()
+    writable_scope.release()
+    record = _slice_record(
+        columns,
+        member_tokens=(b"t" * 32,),
+        anonymous_scope_maps=(scope_map,),
+    )
+    try:
+        assert native._validate_encoded_slices_v1(slices=(record, record)) is None
+        with pytest.raises(BufferError):
+            context_mapping.close()
+        del record
+        scope_map.release()
+        context_mapping.close()
+        assert context_mapping.closed
+        assert encoded.owner is not None
+    finally:
+        with suppress(ValueError):
+            scope_map.release()
+        if not context_mapping.closed:
+            context_mapping.close()
 
 
 def test_shared_immutable_columns_are_safe_across_python_threads() -> None:
