@@ -18,6 +18,7 @@ from pyhermit import ReasonerConfig
 from pyhermit.clauses.compiler import compile_captured_bundle
 from pyhermit.clauses.model import (
     Atom,
+    DataConstant,
     DLClause,
     GroundAtom,
     IndividualTerm,
@@ -208,8 +209,16 @@ def _ground_atom_payload(
 ) -> dict[str, object]:
     arguments = []
     for argument in value.arguments:
-        assert isinstance(argument, IndividualTerm)
-        arguments.append({"individual_id": argument.individual_id})
+        if isinstance(argument, IndividualTerm):
+            arguments.append({"individual_id": argument.individual_id})
+        else:
+            assert isinstance(argument, DataConstant)
+            arguments.append(
+                {
+                    "source_literal_id": argument.source_literal_id,
+                    "data_identity_id": argument.data_identity_id,
+                }
+            )
     return {
         "predicate_id": predicate_remap[value.predicate_id],
         "arguments": arguments,
@@ -230,6 +239,7 @@ def _expected_manifest(
     include_data_functionalities: bool = False,
     include_object_assertions: bool = False,
     include_negative_object_assertions: bool = False,
+    include_data_assertions: bool = False,
 ) -> dict[str, object]:
     normalized, program, ontology = compile_captured_bundle(
         capture_ontology(snapshot).captured,
@@ -272,6 +282,7 @@ def _expected_manifest(
     data_functionality_provenance_ids: set[int] = set()
     assertion_provenance_ids: set[int] = set()
     negative_assertion_provenance_ids: set[int] = set()
+    data_assertion_provenance_ids: set[int] = set()
     if (
         include_object_constraints
         or include_object_characteristics
@@ -282,6 +293,7 @@ def _expected_manifest(
         or include_data_functionalities
         or include_object_assertions
         or include_negative_object_assertions
+        or include_data_assertions
     ):
         provenance_id_by_key = {
             (value.source_sha256, value.generated): value.provenance_id
@@ -350,6 +362,12 @@ def _expected_manifest(
             provenance_id_by_key[(record.provenance_sha256, record.generated)]
             for record in normalized.records
             if isinstance(record.statement, owl.NegativeObjectPropertyAssertion)
+        }
+    if include_data_assertions:
+        data_assertion_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if isinstance(record.statement, owl.DataPropertyAssertion)
         }
     predicates_by_id = {value.predicate_id: value for value in program.predicates.predicates}
     constraint_clauses = {
@@ -457,6 +475,12 @@ def _expected_manifest(
         if negative_assertion_provenance_ids.intersection(fact.provenance_ids)
         and predicates_by_id[fact.predicate_id].kind is PredicateKind.NEGATED_OBJECT_ROLE
     }
+    data_assertion_role_predicates = {
+        fact.predicate_id
+        for fact in program.positive_facts
+        if data_assertion_provenance_ids.intersection(fact.provenance_ids)
+        and predicates_by_id[fact.predicate_id].kind is PredicateKind.DATA_ROLE
+    }
     selected_role_predicates = (
         constraint_role_predicates
         | characteristic_role_predicates
@@ -466,6 +490,7 @@ def _expected_manifest(
         | key_role_predicates
         | assertion_role_predicates
         | negative_assertion_role_predicates
+        | data_assertion_role_predicates
     )
     fragment_predicates = [
         value
@@ -628,7 +653,8 @@ def test_semantic_source_literal_symbols_match_scalar_exactly() -> None:
         "annotation-only" not in cast(str, value["display"])
         for value in cast(list[dict[str, object]], actual["source_literal_symbols"])
     )
-    assert actual["deferred_roots"] == 7
+    assert actual["compiled_roots"] == 5
+    assert actual["deferred_roots"] == 2
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
@@ -1192,6 +1218,93 @@ def test_annotated_functional_data_properties_match_scalar_exactly() -> None:
         include_data_functionalities=True,
     )
     assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_annotated_string_data_property_assertions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(AnnotationProperty(:meta))",
+            "Declaration(NamedIndividual(:i))",
+            (
+                "DataPropertyAssertion("
+                'Annotation(Annotation(:meta "nested") :note "left") :p :i "shared")'
+            ),
+            'DataPropertyAssertion(Annotation(:note "right"@en) :p :i "shared")',
+            (
+                "DataPropertyAssertion(Annotation(:note _:source) "
+                ':q :i "  token   value  "^^xsd:token)'
+            ),
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=3,
+        include_data_assertions=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_string_data_assertions_remap_roles_terms_and_aliases_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:z))",
+            "Declaration(NamedIndividual(:zSource))",
+            'DataPropertyAssertion(:z :zSource "  shared  "^^xsd:token)',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:a))",
+            "Declaration(NamedIndividual(:aSource))",
+            'DataPropertyAssertion(:a :aSource "shared"^^xsd:string)',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_data_assertions=True,
+    )
+    assert len(cast(list[object], actual["source_literal_symbols"])) == 2
+    assert len(cast(list[object], actual["data_value_symbols"])) == 1
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_non_string_data_assertion_defers_without_a_partial_data_fact() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "01"^^xsd:integer)',
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual["compiled_roots"] == 0
+    assert actual["deferred_roots"] == 1
+    assert actual["data_value_symbols"] == []
+    assert all(
+        predicate["kind"] != PredicateKind.DATA_ROLE.value
+        for predicate in cast(list[dict[str, object]], actual["predicates"])
+    )
+    assert len(cast(list[dict[str, object]], actual["positive_facts"])) == 2
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

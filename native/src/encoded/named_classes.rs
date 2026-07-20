@@ -7,9 +7,10 @@
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
-//! plus named data-property domains, ranges, functionality, named datatype
-//! definitions, and named-class keys into the existing native predicate,
-//! clause, fact, and provenance records. Exact nested annotations participate
+//! plus named data-property domains, ranges, functionality, plain/string positive
+//! assertions, named datatype definitions, and named-class keys into the existing
+//! native predicate, clause, fact, and provenance records. Exact nested annotations
+//! participate
 //! in source provenance, with segmented anonymous scopes remapped before hashing.
 //! Predicate and clause identifiers are dense within this fragment and must be
 //! remapped when a later phase assembles the complete program; no fragment is
@@ -58,6 +59,7 @@ const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
 const CLASS_ASSERTION_TAG: u16 = 112;
 const OBJECT_PROPERTY_ASSERTION_TAG: u16 = 113;
 const NEGATIVE_OBJECT_PROPERTY_ASSERTION_TAG: u16 = 114;
+const DATA_PROPERTY_ASSERTION_TAG: u16 = 115;
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
 const DISJOINT_GUARD_DOMAIN: &[u8] = b"pyhermit:linear-disjoint-classes:v1\0";
 const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
@@ -166,6 +168,7 @@ pub struct NamedClassPhase {
     normalized_facts: Vec<NormalizedFact>,
     normalized_object_facts: Vec<NormalizedObjectFact>,
     normalized_negative_object_facts: Vec<NormalizedObjectFact>,
+    normalized_data_facts: Vec<NormalizedDataFact>,
     normalized_equalities: Vec<NormalizedEqualityFact>,
     normalized_inequalities: Vec<NormalizedInequalityFact>,
     source_data_identity_ids: Vec<Option<u32>>,
@@ -625,6 +628,24 @@ struct NormalizedObjectFact {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RawDataFact {
+    role_id: u32,
+    source_individual: u32,
+    source_literal_id: u32,
+    data_identity_id: u32,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NormalizedDataFact {
+    role_id: u32,
+    source_individual: u32,
+    source_literal_id: u32,
+    data_identity_id: u32,
+    provenance: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RawEqualityFact {
     left_individual: u32,
     right_individual: u32,
@@ -660,6 +681,7 @@ struct NormalizedInequalityFact {
 enum GroundArguments {
     Unary(u32),
     Binary(u32, u32),
+    DataBinary(u32, u32, u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -867,6 +889,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut raw_facts = Vec::<RawFact>::new();
     let mut raw_object_facts = Vec::<RawObjectFact>::new();
     let mut raw_negative_object_facts = Vec::<RawObjectFact>::new();
+    let mut raw_data_facts = Vec::<RawDataFact>::new();
     let mut raw_equalities = Vec::<RawEqualityFact>::new();
     let mut raw_inequalities = Vec::<RawInequalityFact>::new();
     let mut compiled_root_digests = Vec::<[u8; 32]>::new();
@@ -1463,6 +1486,50 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     }
                 }
             }
+            RootHandler::DataPropertyAssertion => {
+                let Some(data_roles) = data_roles else {
+                    deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "named-class deferred-root count overflowed",
+                        )
+                    })?;
+                    continue;
+                };
+                match named_data_assertion(
+                    model,
+                    symbols,
+                    data_roles,
+                    &individual_signature,
+                    &source_literal_domain,
+                    &source_data_identity_ids,
+                    root.node,
+                    scope_maps,
+                    &mut budget,
+                )? {
+                    Some(fact) => {
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            fact.provenance,
+                            &mut budget,
+                        )?;
+                        budget.claim_owned(size_of::<RawDataFact>())?;
+                        raw_data_facts.try_reserve(1).map_err(|_| {
+                            EncodedValidationError::resource(
+                                "named data-property assertion allocation failed",
+                            )
+                        })?;
+                        raw_data_facts.push(fact);
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
             _ => {
                 deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
                     EncodedValidationError::resource("named-class deferred-root count overflowed")
@@ -1499,6 +1566,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let facts = normalize_facts(raw_facts, &mut budget)?;
     let object_facts = normalize_object_facts(raw_object_facts, &mut budget)?;
     let negative_object_facts = normalize_object_facts(raw_negative_object_facts, &mut budget)?;
+    let data_facts = normalize_data_facts(raw_data_facts, &mut budget)?;
     let equalities = normalize_equalities(raw_equalities, &mut budget)?;
     let inequalities = normalize_inequalities(raw_inequalities, &mut budget)?;
     let (provenance, provenance_keys) = freeze_provenance(
@@ -1514,6 +1582,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &facts,
         &object_facts,
         &negative_object_facts,
+        &data_facts,
         &equalities,
         &inequalities,
         &mut budget,
@@ -1545,6 +1614,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &facts,
         &object_facts,
         &negative_object_facts,
+        &data_facts,
         &equalities,
         &inequalities,
         thing,
@@ -1588,12 +1658,17 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let positive_facts = freeze_positive_facts(
         &facts,
         &object_facts,
+        &data_facts,
         &equalities,
         &inequalities,
         &individual_domain,
         thing,
         &predicate_by_class,
         &predicate_by_object_role,
+        &predicate_by_data_role,
+        &source_literal_domain,
+        &data_value_domain,
+        &source_data_identity_ids,
         named_predicate,
         equality_predicate,
         object_characteristics
@@ -1645,6 +1720,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_facts: facts,
         normalized_object_facts: object_facts,
         normalized_negative_object_facts: negative_object_facts,
+        normalized_data_facts: data_facts,
         normalized_equalities: equalities,
         normalized_inequalities: inequalities,
         source_data_identity_ids,
@@ -3479,6 +3555,89 @@ fn named_object_assertion<B: ByteSource>(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn named_data_assertion<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    data_roles: &DataRolePhase,
+    individual_signature: &[IndividualSignatureBinding],
+    source_literal_domain: &DecodedSymbolDomain,
+    source_data_identity_ids: &[Option<u32>],
+    root: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<RawDataFact>> {
+    let node = model.node(root)?;
+    if node.tag() != DATA_PROPERTY_ASSERTION_TAG || node.field_count() != 4 {
+        return Err(EncodedValidationError::invariant(
+            "data-property assertion root no longer has schema-1 shape",
+        ));
+    }
+    let property = node_field(model, node, 0, "data-property assertion role")?;
+    let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
+    let Some(source_individual) =
+        named_individual_field(model, symbols, individual_signature, node, 1)?
+    else {
+        return Ok(None);
+    };
+    let literal = node_field(model, node, 2, "data-property assertion literal")?;
+    let Some((source_literal_id, data_identity_id)) = source_data_ids(
+        model,
+        source_literal_domain,
+        source_data_identity_ids,
+        literal,
+        budget,
+    )?
+    else {
+        return Ok(None);
+    };
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    Ok(Some(RawDataFact {
+        role_id,
+        source_individual,
+        source_literal_id,
+        data_identity_id,
+        provenance,
+    }))
+}
+
+fn source_data_ids<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    source_literal_domain: &DecodedSymbolDomain,
+    source_data_identity_ids: &[Option<u32>],
+    literal: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<(u32, u32)>> {
+    if source_literal_domain.kind != SymbolKind::SourceLiteral
+        || source_data_identity_ids.len() != source_literal_domain.values.len()
+    {
+        return Err(EncodedValidationError::invariant(
+            "source literal domain and data-identity mapping disagree",
+        ));
+    }
+    if model.node(literal)?.tag() != LITERAL_TAG {
+        return Err(EncodedValidationError::invariant(
+            "data-property assertion value is not a literal",
+        ));
+    }
+    let key = canonical::canonical_node_key(model, literal, &[], budget)?;
+    budget.claim_work(binary_search_work(source_literal_domain.values.len()))?;
+    let source_index = source_literal_domain
+        .values
+        .binary_search_by(|candidate| candidate.key.cmp(&key))
+        .map_err(|_| {
+            EncodedValidationError::invariant(
+                "data-property assertion literal is absent from its source domain",
+            )
+        })?;
+    let Some(data_identity_id) = source_data_identity_ids[source_index] else {
+        return Ok(None);
+    };
+    let source_literal_id = u32::try_from(source_index)
+        .map_err(|_| EncodedValidationError::resource("source-literal ID exceeds u32"))?;
+    Ok(Some((source_literal_id, data_identity_id)))
+}
+
 fn named_assertion_role<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
@@ -4103,6 +4262,53 @@ fn normalize_object_facts(
     Ok(normalized)
 }
 
+fn normalize_data_facts(
+    mut raw: Vec<RawDataFact>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedDataFact>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_unstable();
+    let mut normalized = Vec::<NormalizedDataFact>::new();
+    for fact in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.role_id == fact.role_id
+                && previous.source_individual == fact.source_individual
+                && previous.source_literal_id == fact.source_literal_id
+                && previous.data_identity_id == fact.data_identity_id
+            {
+                if previous.provenance.last() != Some(&fact.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "data-property assertion provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(fact.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedDataFact>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("normalized data-property assertion allocation failed")
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("data-property assertion provenance allocation failed")
+        })?;
+        provenance.push(fact.provenance);
+        normalized.push(NormalizedDataFact {
+            role_id: fact.role_id,
+            source_individual: fact.source_individual,
+            source_literal_id: fact.source_literal_id,
+            data_identity_id: fact.data_identity_id,
+            provenance,
+        });
+    }
+    Ok(normalized)
+}
+
 fn normalize_equalities(
     mut raw: Vec<RawEqualityFact>,
     budget: &mut PhaseBudget,
@@ -4207,6 +4413,7 @@ fn freeze_provenance(
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
     negative_object_facts: &[NormalizedObjectFact],
+    data_facts: &[NormalizedDataFact],
     equalities: &[NormalizedEqualityFact],
     inequalities: &[NormalizedInequalityFact],
     budget: &mut PhaseBudget,
@@ -4332,6 +4539,16 @@ fn freeze_provenance(
         )?;
     }
     for fact in negative_object_facts {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: fact.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    for fact in data_facts {
         push_provenance_key(
             &mut keys,
             ProvenanceKey {
@@ -4479,6 +4696,7 @@ fn freeze_predicates(
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
     negative_object_facts: &[NormalizedObjectFact],
+    data_facts: &[NormalizedDataFact],
     equalities: &[NormalizedEqualityFact],
     inequalities: &[NormalizedInequalityFact],
     thing: u32,
@@ -4723,6 +4941,14 @@ fn freeze_predicates(
                 budget,
             )?;
         }
+    }
+    for fact in data_facts {
+        push_u32(
+            &mut data_role_ids,
+            fact.role_id,
+            "predicate data role",
+            budget,
+        )?;
     }
     budget.claim_work(sort_work(data_role_ids.len()))?;
     data_role_ids.sort_unstable();
@@ -5301,12 +5527,17 @@ fn freeze_clauses(
 fn freeze_positive_facts(
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
+    data_facts: &[NormalizedDataFact],
     equalities: &[NormalizedEqualityFact],
     inequalities: &[NormalizedInequalityFact],
     individual_domain: &DecodedSymbolDomain,
     thing: u32,
     predicate_by_class: &[(u32, u32)],
     predicate_by_object_role: &[(u32, u32)],
+    predicate_by_data_role: &[(u32, u32)],
+    source_literal_domain: &DecodedSymbolDomain,
+    data_value_domain: &DecodedSymbolDomain,
+    source_data_identity_ids: &[Option<u32>],
     named_predicate: Option<u32>,
     equality_predicate: Option<u32>,
     has_object_functionality: bool,
@@ -5316,6 +5547,14 @@ fn freeze_positive_facts(
     scalar_predicate_ids: &[u32],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<DecodedGroundAtom>> {
+    if source_literal_domain.kind != SymbolKind::SourceLiteral
+        || data_value_domain.kind != SymbolKind::DataValue
+        || source_data_identity_ids.len() != source_literal_domain.values.len()
+    {
+        return Err(EncodedValidationError::invariant(
+            "positive data-fact symbol domains are inconsistent",
+        ));
+    }
     let builtin: [u8; 32] = Sha256::digest(BUILTIN_PROVENANCE_INPUT).into();
     let builtin_provenance = provenance_id(provenance_keys, &[builtin], true)?;
     let thing_predicate = if individual_domain.values.is_empty() {
@@ -5363,6 +5602,7 @@ fn freeze_positive_facts(
         .checked_mul(2)
         .and_then(|value| value.checked_add(facts.len()))
         .and_then(|value| value.checked_add(object_facts.len()))
+        .and_then(|value| value.checked_add(data_facts.len()))
         .and_then(|value| value.checked_add(equalities.len()))
         .and_then(|value| value.checked_add(inequalities.len()))
         .ok_or_else(|| EncodedValidationError::resource("positive-fact count overflowed"))?;
@@ -5370,6 +5610,7 @@ fn freeze_positive_facts(
         facts
             .len()
             .checked_add(object_facts.len())
+            .and_then(|value| value.checked_add(data_facts.len()))
             .and_then(|value| value.checked_add(equalities.len()))
             .and_then(|value| value.checked_add(inequalities.len()))
             .ok_or_else(|| EncodedValidationError::resource("positive-fact work overflowed"))?,
@@ -5402,6 +5643,7 @@ fn freeze_positive_facts(
         .checked_mul(2)
         .and_then(|value| value.checked_add(class_fact_count))
         .and_then(|value| value.checked_add(object_facts.len()))
+        .and_then(|value| value.checked_add(data_facts.len()))
         .and_then(|value| value.checked_add(equality_fact_count))
         .and_then(|value| value.checked_add(inequality_fact_count))
         .ok_or_else(|| EncodedValidationError::resource("positive-fact merge count overflowed"))?;
@@ -5467,6 +5709,49 @@ fn freeze_positive_facts(
         pending.push((
             object_predicate_id(predicate_by_object_role, fact.role_id)?,
             GroundArguments::Binary(fact.source_individual, fact.target_individual),
+            provenance_id(provenance_keys, &fact.provenance, false)?,
+        ));
+    }
+    for fact in data_facts {
+        budget.claim_work(1)?;
+        if usize::try_from(fact.source_individual)
+            .ok()
+            .is_none_or(|identifier| identifier >= individual_domain.values.len())
+        {
+            return Err(EncodedValidationError::invariant(
+                "named data-property assertion has a dangling individual ID",
+            ));
+        }
+        let source_index = usize::try_from(fact.source_literal_id).map_err(|_| {
+            EncodedValidationError::invariant(
+                "named data-property assertion source-literal ID exceeds usize",
+            )
+        })?;
+        if source_index >= source_literal_domain.values.len() {
+            return Err(EncodedValidationError::invariant(
+                "named data-property assertion has a dangling source-literal ID",
+            ));
+        }
+        if usize::try_from(fact.data_identity_id)
+            .ok()
+            .is_none_or(|identifier| identifier >= data_value_domain.values.len())
+        {
+            return Err(EncodedValidationError::invariant(
+                "named data-property assertion has a dangling data-identity ID",
+            ));
+        }
+        if source_data_identity_ids[source_index] != Some(fact.data_identity_id) {
+            return Err(EncodedValidationError::invariant(
+                "named data-property assertion source and data identity disagree",
+            ));
+        }
+        pending.push((
+            data_predicate_id(predicate_by_data_role, fact.role_id)?,
+            GroundArguments::DataBinary(
+                fact.source_individual,
+                fact.source_literal_id,
+                fact.data_identity_id,
+            ),
             provenance_id(provenance_keys, &fact.provenance, false)?,
         ));
     }
@@ -5567,11 +5852,17 @@ fn freeze_positive_facts(
     let mut ordered = Vec::<(Vec<u8>, DecodedGroundAtom)>::new();
     let binary_fact_count = merged
         .iter()
-        .filter(|(_, arguments, _)| matches!(arguments, GroundArguments::Binary(_, _)))
+        .filter(|(_, arguments, _)| {
+            matches!(
+                arguments,
+                GroundArguments::Binary(_, _) | GroundArguments::DataBinary(_, _, _)
+            )
+        })
         .count();
     let expected_binary_fact_count = equality_fact_count
         .checked_add(inequality_fact_count)
         .and_then(|value| value.checked_add(object_facts.len()))
+        .and_then(|value| value.checked_add(data_facts.len()))
         .ok_or_else(|| EncodedValidationError::resource("binary-fact count overflowed"))?;
     if binary_fact_count != expected_binary_fact_count {
         return Err(EncodedValidationError::invariant(
@@ -5627,6 +5918,17 @@ fn freeze_positive_facts(
                     individual_id: right_individual,
                 },
             ],
+            GroundArguments::DataBinary(source_individual, source_literal_id, data_identity_id) => {
+                vec![
+                    DecodedTerm::Individual {
+                        individual_id: source_individual,
+                    },
+                    DecodedTerm::Data {
+                        source_literal_id,
+                        data_identity_id,
+                    },
+                ]
+            }
         };
         ordered.push((
             key,
@@ -7415,6 +7717,11 @@ fn ground_fact_key(
         GroundArguments::Binary(left_individual, right_individual) => format!(
             "{{\"individual_id\":{left_individual},\"schema_version\":1,\"type\":\"IndividualTerm\"}},{{\"individual_id\":{right_individual},\"schema_version\":1,\"type\":\"IndividualTerm\"}}"
         ),
+        GroundArguments::DataBinary(source_individual, source_literal_id, data_identity_id) => {
+            format!(
+                "{{\"individual_id\":{source_individual},\"schema_version\":1,\"type\":\"IndividualTerm\"}},{{\"data_identity_id\":{data_identity_id},\"schema_version\":1,\"source_literal_id\":{source_literal_id},\"type\":\"DataConstant\"}}"
+            )
+        }
     };
     format!(
         "{{\"arguments\":[{arguments}],\"predicate_id\":{predicate_id},\"provenance_ids\":[{provenance}],\"schema_version\":1,\"type\":\"GroundAtom\"}}"
@@ -7668,6 +7975,7 @@ fn merge_named_class_phases_impl(
         facts,
         object_facts,
         negative_object_facts,
+        data_facts,
         equalities,
         inequalities,
     ) = merge_normalized_sources(
@@ -7675,6 +7983,8 @@ fn merge_named_class_phases_impl(
         &class_maps,
         &data_range_maps,
         &individual_maps,
+        &source_literal_maps,
+        &data_value_maps,
         &class_domain,
         source_object_roles,
         merged_object_roles,
@@ -7697,6 +8007,7 @@ fn merge_named_class_phases_impl(
         &facts,
         &object_facts,
         &negative_object_facts,
+        &data_facts,
         &equalities,
         &inequalities,
         &mut budget,
@@ -7728,6 +8039,7 @@ fn merge_named_class_phases_impl(
         &facts,
         &object_facts,
         &negative_object_facts,
+        &data_facts,
         &equalities,
         &inequalities,
         thing,
@@ -7771,12 +8083,17 @@ fn merge_named_class_phases_impl(
     let positive_facts = freeze_positive_facts(
         &facts,
         &object_facts,
+        &data_facts,
         &equalities,
         &inequalities,
         &individual_domain,
         thing,
         &predicate_by_class,
         &predicate_by_object_role,
+        &predicate_by_data_role,
+        &source_literal_domain,
+        &data_value_domain,
+        &source_data_identity_ids,
         named_predicate,
         equality_predicate,
         object_characteristics
@@ -7873,6 +8190,7 @@ fn merge_named_class_phases_impl(
         normalized_facts: facts,
         normalized_object_facts: object_facts,
         normalized_negative_object_facts: negative_object_facts,
+        normalized_data_facts: data_facts,
         normalized_equalities: equalities,
         normalized_inequalities: inequalities,
         source_data_identity_ids,
@@ -8247,6 +8565,7 @@ type NormalizedSources = (
     Vec<NormalizedFact>,
     Vec<NormalizedObjectFact>,
     Vec<NormalizedObjectFact>,
+    Vec<NormalizedDataFact>,
     Vec<NormalizedEqualityFact>,
     Vec<NormalizedInequalityFact>,
 );
@@ -8257,6 +8576,8 @@ fn merge_normalized_sources(
     class_maps: &[Vec<u32>],
     data_range_maps: &[Vec<u32>],
     individual_maps: &[Vec<u32>],
+    source_literal_maps: &[Vec<u32>],
+    data_value_maps: &[Vec<u32>],
     class_domain: &DecodedSymbolDomain,
     source_object_roles: Option<&[ObjectRolePhase]>,
     merged_object_roles: Option<&ObjectRolePhase>,
@@ -8276,6 +8597,7 @@ fn merge_normalized_sources(
     let mut raw_facts = Vec::new();
     let mut raw_object_facts = Vec::new();
     let mut raw_negative_object_facts = Vec::new();
+    let mut raw_data_facts = Vec::new();
     let mut raw_equalities = Vec::new();
     let mut raw_inequalities = Vec::new();
     for (phase_index, (_, phase)) in phases.iter().enumerate() {
@@ -8287,6 +8609,12 @@ fn merge_normalized_sources(
         })?;
         let individual_map = individual_maps.get(phase_index).ok_or_else(|| {
             EncodedValidationError::invariant("merged individual mapping disappeared")
+        })?;
+        let source_literal_map = source_literal_maps.get(phase_index).ok_or_else(|| {
+            EncodedValidationError::invariant("merged source-literal mapping disappeared")
+        })?;
+        let data_value_map = data_value_maps.get(phase_index).ok_or_else(|| {
+            EncodedValidationError::invariant("merged data-value mapping disappeared")
         })?;
         for edge in &phase.normalized_edges {
             if edge.provenance.is_empty() {
@@ -8752,6 +9080,59 @@ fn merge_normalized_sources(
                 }
             }
         }
+        if !phase.normalized_data_facts.is_empty() {
+            let source_roles = source_data_roles
+                .and_then(|roles| roles.get(phase_index))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged data-property assertions lost their source role domain",
+                    )
+                })?;
+            let merged_roles = merged_data_roles.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "merged data-property assertions lost their global role domain",
+                )
+            })?;
+            for fact in &phase.normalized_data_facts {
+                if fact.provenance.is_empty() {
+                    return Err(EncodedValidationError::invariant(
+                        "merged data-property assertion lost provenance",
+                    ));
+                }
+                let role_id = remap_data_role(source_roles, merged_roles, fact.role_id, budget)?;
+                let source_individual = mapped_id(
+                    individual_map,
+                    fact.source_individual,
+                    "data-property assertion source individual",
+                )?;
+                let source_literal_id = mapped_id(
+                    source_literal_map,
+                    fact.source_literal_id,
+                    "data-property assertion source literal",
+                )?;
+                let data_identity_id = mapped_id(
+                    data_value_map,
+                    fact.data_identity_id,
+                    "data-property assertion data identity",
+                )?;
+                for provenance in &fact.provenance {
+                    budget.claim_work(1)?;
+                    budget.claim_owned(size_of::<RawDataFact>())?;
+                    raw_data_facts.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "merged data-property assertion allocation failed",
+                        )
+                    })?;
+                    raw_data_facts.push(RawDataFact {
+                        role_id,
+                        source_individual,
+                        source_literal_id,
+                        data_identity_id,
+                        provenance: *provenance,
+                    });
+                }
+            }
+        }
         if !phase.normalized_negative_object_facts.is_empty() {
             let source_roles = source_object_roles
                 .and_then(|roles| roles.get(phase_index))
@@ -8877,6 +9258,7 @@ fn merge_normalized_sources(
         normalize_facts(raw_facts, budget)?,
         normalize_object_facts(raw_object_facts, budget)?,
         normalize_object_facts(raw_negative_object_facts, budget)?,
+        normalize_data_facts(raw_data_facts, budget)?,
         normalize_equalities(raw_equalities, budget)?,
         normalize_inequalities(raw_inequalities, budget)?,
     ))
