@@ -623,11 +623,17 @@ fn validate_encoded_columns_v1(
             encoded::object_roles::ObjectRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        encoded::simple_roles::compile_simple_role_phase(
+        let simple_roles = encoded::simple_roles::compile_simple_role_phase(
             &model,
             &symbols,
             &object_roles,
             encoded::simple_roles::SimpleRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::object_role_hierarchy::compile_object_role_hierarchy_phase(
+            &object_roles,
+            &simple_roles,
+            encoded::object_role_hierarchy::ObjectRoleHierarchyLimits::default(),
         )
         .map_err(encoded_validation_error)?;
         encoded::named_classes::compile_named_class_phase(
@@ -697,11 +703,17 @@ fn validate_encoded_selection_v1(
             encoded::object_roles::ObjectRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        encoded::simple_roles::compile_simple_role_phase(
+        let simple_roles = encoded::simple_roles::compile_simple_role_phase(
             &model,
             &symbols,
             &object_roles,
             encoded::simple_roles::SimpleRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::object_role_hierarchy::compile_object_role_hierarchy_phase(
+            &object_roles,
+            &simple_roles,
+            encoded::object_role_hierarchy::ObjectRoleHierarchyLimits::default(),
         )
         .map_err(encoded_validation_error)?;
         encoded::named_classes::compile_named_class_phase(
@@ -824,6 +836,7 @@ struct EncodedSliceProgram {
     named_classes: encoded::named_classes::NamedClassPhase,
     object_roles: encoded::object_roles::ObjectRolePhase,
     simple_roles: encoded::simple_roles::SimpleRolePhase,
+    object_role_hierarchy: encoded::object_role_hierarchy::ObjectRoleHierarchyPhase,
 }
 
 fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<EncodedSliceProgram> {
@@ -1162,10 +1175,51 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         simple_role_limits,
     )
     .map_err(encoded_validation_error)?;
+    let merged_simple_owned = merged_role_owned
+        .checked_add(simple_roles.owned_bytes)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged simple-role ownership overflowed",
+            ))
+        })?;
+    let merged_simple_work = merged_role_work
+        .checked_add(simple_roles.work)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged simple-role work overflowed",
+            ))
+        })?;
+    let hierarchy_limits = encoded::object_role_hierarchy::ObjectRoleHierarchyLimits {
+        max_owned_bytes: limits
+            .max_owned_bytes
+            .checked_sub(merged_simple_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged simple roles exceeded the program ownership limit",
+                ))
+            })?,
+        max_work: limits
+            .max_work
+            .checked_sub(merged_simple_work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged simple roles exceeded the program work limit",
+                ))
+            })?,
+        ..encoded::object_role_hierarchy::ObjectRoleHierarchyLimits::default()
+    };
+    let object_role_hierarchy =
+        encoded::object_role_hierarchy::compile_object_role_hierarchy_phase(
+            &object_roles,
+            &simple_roles,
+            hierarchy_limits,
+        )
+        .map_err(encoded_validation_error)?;
     Ok(EncodedSliceProgram {
         named_classes,
         object_roles,
         simple_roles,
+        object_role_hierarchy,
     })
 }
 
@@ -1212,6 +1266,20 @@ fn encoded_simple_object_role_slices_manifest_v1(
     contain_encoded_selection(py, || {
         compile_encoded_slice_program(slices)?
             .simple_roles
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
+#[pyfunction(name = "_encoded_object_role_hierarchy_slices_manifest_v1")]
+#[pyo3(signature = (*, slices))]
+fn encoded_object_role_hierarchy_slices_manifest_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        compile_encoded_slice_program(slices)?
+            .object_role_hierarchy
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
     })
@@ -1410,6 +1478,77 @@ fn encoded_simple_object_role_manifest_v1(
             ErrorKind::Poisoned,
             "NATIVE_PANIC",
             "native encoded simple-role manifest panic was contained",
+        )
+        .into_pyerr(py)),
+    }
+}
+
+#[pyfunction(name = "_encoded_object_role_hierarchy_manifest_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_object_role_hierarchy_manifest_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let symbols = encoded::symbols::compile_symbol_phase(
+            &model,
+            encoded::symbols::SymbolPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let roles = encoded::object_roles::compile_object_role_phase(
+            &symbols,
+            encoded::object_roles::ObjectRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let simple = encoded::simple_roles::compile_simple_role_phase(
+            &model,
+            &symbols,
+            &roles,
+            encoded::simple_roles::SimpleRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let phase = encoded::object_role_hierarchy::compile_object_role_hierarchy_phase(
+            &roles,
+            &simple,
+            encoded::object_role_hierarchy::ObjectRoleHierarchyLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        phase
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    }));
+    match result {
+        Ok(value) => value.map_err(|error| error.into_pyerr(py)),
+        Err(_) => Err(NativeError::new(
+            ErrorKind::Poisoned,
+            "NATIVE_PANIC",
+            "native encoded object-role hierarchy manifest panic was contained",
         )
         .into_pyerr(py)),
     }
@@ -1735,6 +1874,14 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(
         encoded_simple_object_role_slices_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_object_role_hierarchy_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_object_role_hierarchy_slices_manifest_v1,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(encoded_named_class_manifest_v1, module)?)?;

@@ -10,6 +10,7 @@
 
 pub mod model;
 pub mod named_classes;
+pub mod object_role_hierarchy;
 pub mod object_roles;
 pub mod simple_roles;
 pub mod symbols;
