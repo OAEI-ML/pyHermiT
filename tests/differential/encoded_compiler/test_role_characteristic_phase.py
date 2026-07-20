@@ -9,7 +9,7 @@ import itertools
 import json
 import random
 import struct
-from typing import cast
+from typing import Any, cast
 
 import pyowl_core
 import pyowl_core.model as owl
@@ -57,13 +57,14 @@ def _slice_record(
     posting_mode: int = 0,
     postings: memoryview | None = None,
     member_tokens: tuple[bytes, ...] = (),
+    anonymous_scope_maps: tuple[memoryview, ...] = (),
 ) -> tuple[object, ...]:
     buffers = produce_encoded_structural_view_v1(snapshot).buffers
     return (
         posting_mode,
         memoryview(b"") if postings is None else postings,
         member_tokens,
-        (),
+        anonymous_scope_maps,
         buffers["root_kinds"],
         buffers["root_ids"],
         buffers["node_tags"],
@@ -95,13 +96,9 @@ def _expected_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
     )
     roles = _role_graph(normalized)
     compiled: set[str] = set()
-    deferred = 0
     clashes: set[tuple[str, int, int | None, str]] = set()
     for source in snapshot.iter_axioms():
         if not isinstance(source, _CHARACTERISTIC_TYPES):
-            continue
-        if source.annotations:
-            deferred += 1
             continue
         provenance = hashlib.sha256(source.canonical_bytes()).hexdigest()
         compiled.add(provenance)
@@ -152,7 +149,7 @@ def _expected_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
         "schema_version": 1,
         "family": "role_characteristic_clashes",
         "compiled_roots": len(compiled),
-        "deferred_roots": deferred,
+        "deferred_roots": 0,
         "clashes": [
             {
                 "kind": kind,
@@ -180,6 +177,30 @@ def _native_slices_manifest(*records: tuple[object, ...]) -> dict[str, object]:
     )
 
 
+def _scope_map(replacements: dict[bytes, bytes]) -> memoryview:
+    return memoryview(b"".join(source + target for source, target in sorted(replacements.items())))
+
+
+def _composite_records(
+    composite: pyowl_core.OntologyView,
+    sources: tuple[pyowl_core.OntologyView, ...],
+) -> tuple[tuple[object, ...], ...]:
+    tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
+    mappings = cast(
+        tuple[dict[bytes, bytes], ...],
+        cast(Any, composite)._scope_replacements(),
+    )
+    rows = sorted(zip(tokens, sources, mappings, strict=True), key=lambda row: row[0])
+    return tuple(
+        _slice_record(
+            source,
+            member_tokens=(token,),
+            anonymous_scope_maps=(() if not mapping else (_scope_map(mapping),)),
+        )
+        for token, source, mapping in rows
+    )
+
+
 def test_role_characteristic_clashes_and_provenance_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -197,7 +218,7 @@ def test_role_characteristic_clashes_and_provenance_match_scalar_exactly() -> No
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_annotated_characteristics_are_explicitly_deferred() -> None:
+def test_annotated_characteristics_preserve_exact_nested_provenance() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(ObjectProperty(:p))",
@@ -205,10 +226,11 @@ def test_annotated_characteristics_are_explicitly_deferred() -> None:
             "Declaration(DataProperty(:a))",
             "Declaration(DataProperty(:b))",
             "Declaration(AnnotationProperty(:note))",
-            'DisjointObjectProperties(Annotation(:note "source") :p :q)',
-            'IrreflexiveObjectProperty(Annotation(:note "source") :p)',
-            'AsymmetricObjectProperty(Annotation(:note "source") :q)',
-            'DisjointDataProperties(Annotation(:note "source") :a :b)',
+            "Declaration(AnnotationProperty(:meta))",
+            'DisjointObjectProperties(Annotation(Annotation(:meta "nested") :note "source") :p :q)',
+            "IrreflexiveObjectProperty(Annotation(:note <urn:annotation:value>) :p)",
+            'AsymmetricObjectProperty(Annotation(:note "bonjour"@fr) :q)',
+            "DisjointDataProperties(Annotation(:note _:source) :a :b)",
         ),
         options=OPTIONS,
     )
@@ -216,9 +238,31 @@ def test_annotated_characteristics_are_explicitly_deferred() -> None:
     actual = _native_manifest(snapshot)
 
     assert actual == _expected_manifest(snapshot)
-    assert actual["compiled_roots"] == 0
-    assert actual["deferred_roots"] == 4
-    assert actual["clashes"] == []
+    assert actual["compiled_roots"] == 4
+    assert actual["deferred_roots"] == 0
+    assert len(cast(list[object], actual["clashes"])) == 4
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_scope_maps_annotated_anonymous_provenance_exactly() -> None:
+    source = functional(
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+        "Declaration(AnnotationProperty(:note))",
+        "DisjointObjectProperties(Annotation(:note _:same) :p :q)",
+        "IrreflexiveObjectProperty(Annotation(:note _:same) :p)",
+    )
+    left = pyowl_core.load_snapshot(source, options=OPTIONS)
+    right = pyowl_core.load_snapshot(source, options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    records = _composite_records(composite, (left, right))
+    assert any(cast(tuple[object, ...], record[3]) for record in records)
+
+    actual = _native_slices_manifest(*records)
+
+    assert actual == _expected_manifest(composite)
+    assert actual["compiled_roots"] == 4
+    assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

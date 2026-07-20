@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import random
 import struct
-from typing import cast
+from typing import Any, cast
 
 import pyowl_core
 import pyowl_core.model as owl
@@ -43,13 +43,14 @@ def _slice_record(
     posting_mode: int = 0,
     postings: memoryview | None = None,
     member_tokens: tuple[bytes, ...] = (),
+    anonymous_scope_maps: tuple[memoryview, ...] = (),
 ) -> tuple[object, ...]:
     buffers = produce_encoded_structural_view_v1(snapshot).buffers
     return (
         posting_mode,
         memoryview(b"") if postings is None else postings,
         member_tokens,
-        (),
+        anonymous_scope_maps,
         buffers["root_kinds"],
         buffers["root_ids"],
         buffers["node_tags"],
@@ -71,6 +72,30 @@ def _native_manifest_bytes(snapshot: pyowl_core.OntologyView) -> bytes:
 
 def _native_slices_manifest_bytes(*records: tuple[object, ...]) -> bytes:
     return native._encoded_role_clause_slices_manifest_v1(slices=records)
+
+
+def _scope_map(replacements: dict[bytes, bytes]) -> memoryview:
+    return memoryview(b"".join(source + target for source, target in sorted(replacements.items())))
+
+
+def _composite_records(
+    composite: pyowl_core.OntologyView,
+    sources: tuple[pyowl_core.OntologyView, ...],
+) -> tuple[tuple[object, ...], ...]:
+    tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
+    mappings = cast(
+        tuple[dict[bytes, bytes], ...],
+        cast(Any, composite)._scope_replacements(),
+    )
+    rows = sorted(zip(tokens, sources, mappings, strict=True), key=lambda row: row[0])
+    return tuple(
+        _slice_record(
+            source,
+            member_tokens=(token,),
+            anonymous_scope_maps=(() if not mapping else (_scope_map(mapping),)),
+        )
+        for token, source, mapping in rows
+    )
 
 
 def _term_payload(term: object) -> dict[str, object]:
@@ -172,6 +197,7 @@ def test_mixed_role_graph_predicates_clauses_and_provenance_match_scalar() -> No
         functional(
             *(f"Declaration(ObjectProperty(:{name}))" for name in "abcdef"),
             *(f"Declaration(DataProperty(:{name}))" for name in "pqr"),
+            "Declaration(AnnotationProperty(:note))",
             "SubObjectPropertyOf(:a :b)",
             "EquivalentObjectProperties(:b :c)",
             "InverseObjectProperties(:a :f)",
@@ -180,10 +206,10 @@ def test_mixed_role_graph_predicates_clauses_and_provenance_match_scalar() -> No
             "TransitiveObjectProperty(:d)",
             "SubDataPropertyOf(:p :q)",
             "EquivalentDataProperties(:q :r)",
-            "DisjointObjectProperties(:a ObjectInverseOf(:b) :f)",
-            "IrreflexiveObjectProperty(:c)",
-            "AsymmetricObjectProperty(:e)",
-            "DisjointDataProperties(:p :r)",
+            'DisjointObjectProperties(Annotation(:note "disjoint") :a ObjectInverseOf(:b) :f)',
+            'IrreflexiveObjectProperty(Annotation(:note "irreflexive") :c)',
+            'AsymmetricObjectProperty(Annotation(:note "asymmetric") :e)',
+            'DisjointDataProperties(Annotation(:note "data") :p :r)',
         ),
         options=OPTIONS,
     )
@@ -249,6 +275,29 @@ def test_composite_clausifies_the_merged_role_graph_once() -> None:
                 _slice_record(right, member_tokens=(b"2" * 32,)),
             )
         ),
+    )
+
+    assert actual == _expected_manifest(composite)
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_anonymous_annotation_scope_maps_clause_provenance_exactly() -> None:
+    source = functional(
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+        "Declaration(AnnotationProperty(:note))",
+        "DisjointObjectProperties(Annotation(:note _:same) :p :q)",
+        "IrreflexiveObjectProperty(Annotation(:note _:same) :p)",
+    )
+    left = pyowl_core.load_snapshot(source, options=OPTIONS)
+    right = pyowl_core.load_snapshot(source, options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    records = _composite_records(composite, (left, right))
+    assert any(cast(tuple[object, ...], record[3]) for record in records)
+
+    actual = cast(
+        dict[str, object],
+        json.loads(_native_slices_manifest_bytes(*records)),
     )
 
     assert actual == _expected_manifest(composite)

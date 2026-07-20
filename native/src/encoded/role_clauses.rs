@@ -244,6 +244,15 @@ struct PendingClause {
     provenance: ProvenanceKey,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CharacteristicSource {
+    kind: RoleClashKind,
+    first_role_id: u32,
+    second_role_id: Option<u32>,
+    statement_sha256: [u8; 32],
+    provenance_sha256: [u8; 32],
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct MergedClause {
     key: Vec<u8>,
@@ -766,73 +775,13 @@ fn compile_clauses(
             budget,
         )?;
     }
-    for clash in &role_characteristics.clashes {
-        budget.claim_work(1)?;
-        let provenance = source_provenance(clash.provenance_sha256);
-        match clash.kind {
-            RoleClashKind::DisjointObject => {
-                let second = clash.second_role_id.ok_or_else(|| {
-                    EncodedValidationError::invariant(
-                        "disjoint object characteristic lost its second role",
-                    )
-                })?;
-                push_clause(
-                    &mut clauses,
-                    vec![
-                        object_atom(
-                            object_predicate(object_predicates, clash.first_role_id)?,
-                            0,
-                            1,
-                        ),
-                        object_atom(object_predicate(object_predicates, second)?, 0, 1),
-                    ],
-                    Vec::new(),
-                    provenance,
-                    budget,
-                )?;
-            }
-            RoleClashKind::IrreflexiveObject => {
-                push_clause(
-                    &mut clauses,
-                    vec![object_atom(
-                        object_predicate(object_predicates, clash.first_role_id)?,
-                        0,
-                        0,
-                    )],
-                    Vec::new(),
-                    provenance,
-                    budget,
-                )?;
-            }
-            RoleClashKind::AsymmetricObject => {
-                let predicate = object_predicate(object_predicates, clash.first_role_id)?;
-                push_clause(
-                    &mut clauses,
-                    vec![object_atom(predicate, 0, 1), object_atom(predicate, 1, 0)],
-                    Vec::new(),
-                    provenance,
-                    budget,
-                )?;
-            }
-            RoleClashKind::DisjointData => {
-                let second = clash.second_role_id.ok_or_else(|| {
-                    EncodedValidationError::invariant(
-                        "disjoint data characteristic lost its second role",
-                    )
-                })?;
-                push_clause(
-                    &mut clauses,
-                    vec![
-                        data_atom(data_predicate(data_predicates, clash.first_role_id)?, 0, 1),
-                        data_atom(data_predicate(data_predicates, second)?, 0, 1),
-                    ],
-                    Vec::new(),
-                    provenance,
-                    budget,
-                )?;
-            }
-        }
-    }
+    compile_characteristic_clauses(
+        &mut clauses,
+        role_characteristics,
+        object_predicates,
+        data_predicates,
+        budget,
+    )?;
     push_clause(
         &mut clauses,
         vec![object_atom(
@@ -856,6 +805,176 @@ fn compile_clauses(
         budget,
     )?;
     Ok(clauses)
+}
+
+fn compile_characteristic_clauses(
+    target: &mut Vec<PendingClause>,
+    role_characteristics: &RoleCharacteristicPhase,
+    object_predicates: &[u32],
+    data_predicates: &[Option<u32>],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    budget.claim_owned(
+        role_characteristics
+            .clashes
+            .len()
+            .checked_mul(size_of::<CharacteristicSource>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "role-characteristic clause source allocation overflowed",
+                )
+            })?,
+    )?;
+    let mut sources = Vec::new();
+    sources
+        .try_reserve_exact(role_characteristics.clashes.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("role-characteristic clause source allocation failed")
+        })?;
+    sources.extend(
+        role_characteristics
+            .clashes
+            .iter()
+            .map(|clash| CharacteristicSource {
+                kind: clash.kind,
+                first_role_id: clash.first_role_id,
+                second_role_id: clash.second_role_id,
+                statement_sha256: clash.statement_sha256,
+                provenance_sha256: clash.provenance_sha256,
+            }),
+    );
+    budget.claim_work(sort_work(sources.len()))?;
+    sources.sort_unstable();
+    sources.dedup();
+    let mut cursor = 0_usize;
+    while cursor < sources.len() {
+        budget.claim_work(1)?;
+        let source = sources[cursor];
+        let mut following = cursor + 1;
+        while following < sources.len()
+            && characteristic_statement_key(sources[following])
+                == characteristic_statement_key(source)
+        {
+            budget.claim_work(1)?;
+            following += 1;
+        }
+        let provenance_count = following - cursor;
+        budget.claim_owned(
+            provenance_count
+                .checked_mul(size_of::<[u8; 32]>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "role-characteristic provenance allocation overflowed",
+                    )
+                })?,
+        )?;
+        let mut provenance = Vec::new();
+        provenance
+            .try_reserve_exact(provenance_count)
+            .map_err(|_| {
+                EncodedValidationError::resource("role-characteristic provenance allocation failed")
+            })?;
+        provenance.extend(
+            sources[cursor..following]
+                .iter()
+                .map(|value| value.provenance_sha256),
+        );
+        push_characteristic_clause(
+            target,
+            source,
+            ProvenanceKey {
+                source_sha256: provenance,
+                generated: false,
+            },
+            object_predicates,
+            data_predicates,
+            budget,
+        )?;
+        cursor = following;
+    }
+    Ok(())
+}
+
+const fn characteristic_statement_key(
+    source: CharacteristicSource,
+) -> (RoleClashKind, u32, Option<u32>, [u8; 32]) {
+    (
+        source.kind,
+        source.first_role_id,
+        source.second_role_id,
+        source.statement_sha256,
+    )
+}
+
+fn push_characteristic_clause(
+    target: &mut Vec<PendingClause>,
+    source: CharacteristicSource,
+    provenance: ProvenanceKey,
+    object_predicates: &[u32],
+    data_predicates: &[Option<u32>],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    match source.kind {
+        RoleClashKind::DisjointObject => {
+            let second = source.second_role_id.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "disjoint object characteristic lost its second role",
+                )
+            })?;
+            push_clause(
+                target,
+                vec![
+                    object_atom(
+                        object_predicate(object_predicates, source.first_role_id)?,
+                        0,
+                        1,
+                    ),
+                    object_atom(object_predicate(object_predicates, second)?, 0, 1),
+                ],
+                Vec::new(),
+                provenance,
+                budget,
+            )
+        }
+        RoleClashKind::IrreflexiveObject => push_clause(
+            target,
+            vec![object_atom(
+                object_predicate(object_predicates, source.first_role_id)?,
+                0,
+                0,
+            )],
+            Vec::new(),
+            provenance,
+            budget,
+        ),
+        RoleClashKind::AsymmetricObject => {
+            let predicate = object_predicate(object_predicates, source.first_role_id)?;
+            push_clause(
+                target,
+                vec![object_atom(predicate, 0, 1), object_atom(predicate, 1, 0)],
+                Vec::new(),
+                provenance,
+                budget,
+            )
+        }
+        RoleClashKind::DisjointData => {
+            let second = source.second_role_id.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "disjoint data characteristic lost its second role",
+                )
+            })?;
+            push_clause(
+                target,
+                vec![
+                    data_atom(data_predicate(data_predicates, source.first_role_id)?, 0, 1),
+                    data_atom(data_predicate(data_predicates, second)?, 0, 1),
+                ],
+                Vec::new(),
+                provenance,
+                budget,
+            )
+        }
+    }
 }
 
 fn push_clause(
@@ -1130,31 +1249,69 @@ fn freeze_provenance(
     for clause in clauses {
         for key in &clause.provenance {
             budget.claim_work(1)?;
-            budget.claim_owned(size_of::<ProvenanceKey>() + key.source_sha256.len() * 32)?;
+            let digest_bytes = key.source_sha256.len().checked_mul(32).ok_or_else(|| {
+                EncodedValidationError::resource("role provenance digest bytes overflowed")
+            })?;
+            budget.claim_owned(
+                size_of::<ProvenanceKey>()
+                    .checked_add(digest_bytes)
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource("role provenance bytes overflowed")
+                    })?,
+            )?;
             keys.try_reserve(1).map_err(|_| {
                 EncodedValidationError::resource("role-clause provenance allocation failed")
             })?;
-            keys.push(key.clone());
+            let mut source_sha256 = Vec::new();
+            source_sha256
+                .try_reserve_exact(key.source_sha256.len())
+                .map_err(|_| {
+                    EncodedValidationError::resource(
+                        "role-clause provenance digest allocation failed",
+                    )
+                })?;
+            source_sha256.extend_from_slice(&key.source_sha256);
+            keys.push(ProvenanceKey {
+                source_sha256,
+                generated: key.generated,
+            });
         }
     }
     budget.claim_work(sort_work(keys.len()))?;
     keys.sort();
     keys.dedup();
     PhaseBudget::count(keys.len(), budget.limits.max_provenance, "provenance count")?;
-    budget.claim_owned(
-        keys.len()
-            .checked_mul(size_of::<DecodedProvenanceEntry>() + size_of::<[u8; 32]>())
-            .ok_or_else(|| EncodedValidationError::resource("role provenance output overflowed"))?,
-    )?;
+    let output_digest_count = keys.iter().try_fold(0_usize, |count, key| {
+        count
+            .checked_add(key.source_sha256.len())
+            .ok_or_else(|| EncodedValidationError::resource("role provenance output overflowed"))
+    })?;
+    let output_bytes = keys
+        .len()
+        .checked_mul(size_of::<DecodedProvenanceEntry>())
+        .and_then(|value| {
+            output_digest_count
+                .checked_mul(size_of::<[u8; 32]>())
+                .and_then(|digests| value.checked_add(digests))
+        })
+        .ok_or_else(|| EncodedValidationError::resource("role provenance output overflowed"))?;
+    budget.claim_owned(output_bytes)?;
     let mut entries = Vec::new();
     entries.try_reserve_exact(keys.len()).map_err(|_| {
         EncodedValidationError::resource("role provenance output allocation failed")
     })?;
     for (identifier, key) in keys.iter().enumerate() {
+        let mut source_sha256 = Vec::new();
+        source_sha256
+            .try_reserve_exact(key.source_sha256.len())
+            .map_err(|_| {
+                EncodedValidationError::resource("role provenance output digest allocation failed")
+            })?;
+        source_sha256.extend_from_slice(&key.source_sha256);
         entries.push(DecodedProvenanceEntry {
             provenance_id: u32::try_from(identifier)
                 .map_err(|_| EncodedValidationError::resource("role provenance ID exceeds u32"))?,
-            source_sha256: key.source_sha256.clone(),
+            source_sha256,
             generated: key.generated,
         });
     }
@@ -1602,13 +1759,6 @@ fn inclusion_provenance(source: [u8; 32], builtin: bool) -> ProvenanceKey {
             source_sha256: vec![source],
             generated: false,
         }
-    }
-}
-
-fn source_provenance(source: [u8; 32]) -> ProvenanceKey {
-    ProvenanceKey {
-        source_sha256: vec![source],
-        generated: false,
     }
 }
 

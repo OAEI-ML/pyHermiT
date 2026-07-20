@@ -1023,6 +1023,67 @@ fn validate_encoded_scope_map<S: encoded::ByteSource>(scope_map: S) -> NativeRes
     Ok(())
 }
 
+fn decode_encoded_scope_maps(
+    record: &Bound<'_, PyTuple>,
+    max_owned_bytes: usize,
+) -> NativeResult<(Vec<encoded::role_characteristics::AnonymousScopeMap>, usize)> {
+    let scope_maps = tuple_item(record, 3, "anonymous scope maps")?;
+    let scope_maps = scope_maps
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("encoded slice anonymous scope maps changed type"))?;
+    let outer_bytes = scope_maps
+        .len()
+        .checked_mul(std::mem::size_of::<
+            encoded::role_characteristics::AnonymousScopeMap,
+        >())
+        .ok_or_else(|| encoded_slice_invalid("anonymous-scope map allocation overflowed"))?;
+    let mut owned_bytes = outer_bytes;
+    for index in 0..scope_maps.len() {
+        let value = tuple_item(scope_maps, index, "anonymous scope map")?;
+        let scope_map = borrowed_py_bytes(&value, "anonymous scope map")?;
+        owned_bytes = owned_bytes
+            .checked_add(scope_map.len)
+            .ok_or_else(|| encoded_slice_invalid("anonymous-scope map bytes overflowed"))?;
+    }
+    if owned_bytes > max_owned_bytes {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "anonymous-scope map decoding exceeds the remaining owned-byte limit",
+            ),
+        ));
+    }
+    let mut decoded = Vec::new();
+    decoded.try_reserve_exact(scope_maps.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "anonymous-scope map collection allocation failed",
+        ))
+    })?;
+    for index in 0..scope_maps.len() {
+        let value = tuple_item(scope_maps, index, "anonymous scope map")?;
+        let scope_map = borrowed_py_bytes(&value, "anonymous scope map")?;
+        let row_count = scope_map.len / 64;
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(row_count).map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "anonymous-scope replacement allocation failed",
+            ))
+        })?;
+        for offset in (0..scope_map.len).step_by(64) {
+            let mut source = [0_u8; 32];
+            let mut target = [0_u8; 32];
+            for byte_index in 0..32 {
+                source[byte_index] = encoded::ByteSource::byte(scope_map, offset + byte_index)
+                    .ok_or_else(|| encoded_slice_invalid("anonymous scope source disappeared"))?;
+                target[byte_index] = encoded::ByteSource::byte(scope_map, offset + 32 + byte_index)
+                    .ok_or_else(|| encoded_slice_invalid("anonymous scope target disappeared"))?;
+            }
+            rows.push(encoded::role_characteristics::AnonymousScopeReplacement { source, target });
+        }
+        decoded.push(rows);
+    }
+    Ok((decoded, owned_bytes))
+}
+
 struct EncodedSliceProgram {
     named_classes: encoded::named_classes::NamedClassPhase,
     object_roles: encoded::object_roles::ObjectRolePhase,
@@ -1409,14 +1470,35 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     "encoded slice complex-role ownership overflowed",
                 ))
             })?;
+        let remaining_after_complex_owned = limits
+            .max_owned_bytes
+            .checked_sub(after_complex_role_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice complex-role ownership exceeded its aggregate limit",
+                ))
+            })?;
+        let has_role_characteristics = symbols.roots.iter().any(|root| {
+            matches!(
+                root.handler,
+                encoded::symbols::RootHandler::DisjointObjectProperties
+                    | encoded::symbols::RootHandler::IrreflexiveObjectProperty
+                    | encoded::symbols::RootHandler::AsymmetricObjectProperty
+                    | encoded::symbols::RootHandler::DisjointDataProperties
+            )
+        });
+        let (scope_maps, scope_map_owned) = if has_role_characteristics {
+            decode_encoded_scope_maps(record, remaining_after_complex_owned)?
+        } else {
+            (Vec::new(), 0)
+        };
         let role_characteristic_limits =
             encoded::role_characteristics::RoleCharacteristicPhaseLimits {
-                max_owned_bytes: limits
-                    .max_owned_bytes
-                    .checked_sub(after_complex_role_owned)
+                max_owned_bytes: remaining_after_complex_owned
+                    .checked_sub(scope_map_owned)
                     .ok_or_else(|| {
                         encoded_validation_error(encoded::EncodedValidationError::resource(
-                            "encoded slice complex-role ownership exceeded its aggregate limit",
+                            "anonymous-scope maps exceeded the role-characteristic ownership limit",
                         ))
                     })?,
                 max_work: limits
@@ -1430,14 +1512,16 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                 ..encoded::role_characteristics::RoleCharacteristicPhaseLimits::default()
             };
         let role_characteristics =
-            encoded::role_characteristics::compile_role_characteristic_phase(
+            encoded::role_characteristics::compile_role_characteristic_phase_scoped(
                 &model,
                 &symbols,
                 &object_roles,
                 &data_roles,
+                &scope_maps,
                 role_characteristic_limits,
             )
             .map_err(encoded_validation_error)?;
+        drop(scope_maps);
         let after_role_characteristic_work = after_complex_role_work
             .checked_add(role_characteristics.work)
             .ok_or_else(|| {
