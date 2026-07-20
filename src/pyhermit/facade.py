@@ -10,13 +10,18 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import TypeVar, cast
 
 import pyowl_core
 import pyowl_core.model as owl
 from pyowl_core import IRI, ImportResolver, LoadOptions, OntologyInput, OntologyView
 
-from pyhermit.backends.dispatch import backend_info, select_backend_factory
+from pyhermit.backends.dispatch import (
+    NATIVE_ABI_VERSION,
+    backend_info,
+    select_backend_factory,
+)
 from pyhermit.backends.native_mapping import CompiledResultMapper, MappedRealization
 from pyhermit.backends.protocol import (
     BackendInfo,
@@ -35,7 +40,7 @@ from pyhermit.clauses import (
     compile_delta_plan,
 )
 from pyhermit.config import ReasonerConfig
-from pyhermit.core import capture_compatible_view
+from pyhermit.core import COMPILER_CACHE_SCHEMA_VERSION, capture_compatible_view
 from pyhermit.events import CancellationSource
 from pyhermit.exceptions import (
     ConcurrentMutationError,
@@ -127,6 +132,40 @@ class Reasoner:
     @property
     def backend(self) -> BackendInfo:
         return self._factory.info
+
+    def diagnostics(self) -> Mapping[str, bool | int | float | str]:
+        """Return immutable, path-safe compiler and ingestion diagnostics.
+
+        The ``encoded_*`` values account only for structural-view compilation into
+        the permanent session.  Scalar compatibility paths therefore report exact
+        zero values even when the native adapter performs a validation-only encoded
+        preflight before its private wire handoff.
+        """
+
+        with self._state_lock:
+            compiled = self._runtime.compiled
+            backend = self._factory.info
+        values: dict[str, bool | int | float | str] = {
+            "compiler_cache_schema_version": COMPILER_CACHE_SCHEMA_VERSION,
+            "compiler_digest": compiled.ontology_fingerprint,
+            "encoded_buffer_bytes": 0,
+            "encoded_buffer_count": 0,
+            "encoded_compiler_gil_released": False,
+            "encoded_detached_buffer_count": 0,
+            "encoded_indexed_buffer_count": 0,
+            "encoded_posting_bytes": 0,
+            "encoded_private_ir_bytes": 0,
+            "encoded_referenced_view_count": 0,
+            "encoded_segment_count": 0,
+            "encoded_staging_copy_bytes": 0,
+            "encoded_zero_copy_buffers": 0,
+            "implementation_version": backend.implementation_version,
+            "ingestion_path": ("scalar-python" if backend.name == "python" else "scalar-wire"),
+            "ir_schema_version": backend.ir_schema_version,
+        }
+        if backend.name in {"native", "verify"}:
+            values["native_abi_version"] = NATIVE_ABI_VERSION
+        return MappingProxyType(dict(sorted(values.items())))
 
     def interrupt(self) -> None:
         with self._state_lock:

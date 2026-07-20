@@ -18,7 +18,13 @@ from pyowl_core import (
 )
 
 from ._version import __version__
-from .backends.protocol import BackendInfo, BackendStatus, Hierarchy
+from .backends.dispatch import NATIVE_ABI_VERSION
+from .backends.protocol import (
+    COMPILED_IR_SCHEMA_VERSION,
+    BackendInfo,
+    BackendStatus,
+    Hierarchy,
+)
 from .config import (
     BackendName,
     BlockingMode,
@@ -28,6 +34,7 @@ from .config import (
     ReasonerConfig,
     UnsupportedDatatypePolicy,
 )
+from .core import COMPILER_CACHE_SCHEMA_VERSION
 from .exceptions import (
     BackendError,
     BackendMismatchError,
@@ -55,7 +62,10 @@ from .exceptions import (
 from .facade import InferenceType, Reasoner, backend_info
 
 __all__ = [
+    "COMPILED_IR_SCHEMA_VERSION",
+    "COMPILER_CACHE_SCHEMA_VERSION",
     "IRI",
+    "NATIVE_ABI_VERSION",
     "BackendError",
     "BackendInfo",
     "BackendMismatchError",

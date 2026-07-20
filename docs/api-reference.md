@@ -12,6 +12,7 @@ selects the transitive answer; `direct=True` selects immediate quotient-graph ne
 | `Reasoner.ontology` | Retained immutable `OntologyView`; a compatible supplied view is returned by identity. |
 | `Reasoner.config` | Frozen `ReasonerConfig` used to create the session. |
 | `Reasoner.backend` | Selected immutable `BackendInfo`, including name, version, capabilities, and acceleration state. |
+| `Reasoner.diagnostics` | Immutable sorted scalar mapping describing the compiler identity, ingestion path, and bounded encoded-ingestion counters. |
 | `Reasoner.interrupt` | Requests cooperative cancellation of the active operation; it is a no-op when idle. |
 | `Reasoner.dispose` | Idempotently closes private state; later semantic or update operations fail. |
 
@@ -94,7 +95,9 @@ same-as groups according to `ReasonerConfig.individual_grouping`.
 | `Reasoner.flush` | Publishes one new overlay-backed ontology state and rebuilds affected private state. |
 
 `Hierarchy`, `ReasonerConfig`, `BackendName`, `BackendInfo`, `InferenceType`, and the
-exception hierarchy are also public. A `Hierarchy` stores equivalence groups directly as
+exception hierarchy are also public. `COMPILER_CACHE_SCHEMA_VERSION`,
+`COMPILED_IR_SCHEMA_VERSION`, and `NATIVE_ABI_VERSION` are import-light cache/compatibility
+constants. A `Hierarchy` stores equivalence groups directly as
 `nodes: tuple[frozenset[T], ...]`; `edges`, `top_node`, and `bottom_node` reference those
 groups by integer index. See the
 [user guide](user-guide.md) for backend selection, grouping, errors, cancellation,

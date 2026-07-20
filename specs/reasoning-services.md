@@ -51,6 +51,7 @@ class Reasoner:
     def config(self) -> ReasonerConfig: ...
     @property
     def backend(self) -> BackendInfo: ...
+    def diagnostics(self) -> Mapping[str, bool | int | float | str]: ...
     def interrupt(self) -> None: ...
     def dispose(self) -> None: ...
     def __enter__(self) -> Reasoner: ...
@@ -66,6 +67,11 @@ reparsed. Construction MAY defer tableau allocation and classification. `dispose
 releases native memory/caches, and makes subsequent semantic/update calls raise
 `DisposedReasonerError`; immutable `config`, `backend`, and diagnostic metadata remain
 readable. It never closes/invalidates the shared core view.
+
+`diagnostics()` returns a sorted immutable scalar mapping. Its stable cross-consumer fields are
+the ingestion path, lowercase SHA-256 compiler digest, compiler/native schema versions, and the
+bounded encoded-ingestion counters defined by `native-structural-ingestion.md`. It remains
+readable after disposal.
 
 `interrupt` may be called safely from another thread. It targets the currently active
 operation(s), is not a permanent disposed state, and does not carry over to a later

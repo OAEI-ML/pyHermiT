@@ -13,7 +13,7 @@
   "operation_groups": [
     {
       "id": "lifecycle-and-diagnostics",
-      "members": ["ontology", "config", "backend", "interrupt", "dispose"],
+      "members": ["ontology", "config", "backend", "diagnostics", "interrupt", "dispose"],
       "positive": ["tests/integration/facade/test_reasoner.py"],
       "negative": ["tests/unit/contracts/test_config_events_exceptions.py"],
       "interaction": ["tests/unit/backends/test_native_events.py"],

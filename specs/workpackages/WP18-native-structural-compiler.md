@@ -40,7 +40,7 @@ reasoning semantics, overwrite frozen oracle fixtures, or place reasoner records
    lifetime.
 2. Implement transactional Rust OWL 2 DL validation, normalization, role preprocessing,
    clausification, symbol/provenance construction, and direct permanent-session publication.
-3. Preserve `scalar-python` and `scalar-wire-native` paths and add explicit, versioned compilation
+3. Preserve `scalar-python` and `scalar-wire` paths and add explicit, versioned compilation
    diagnostics without semantic backend leakage.
 4. Add canonical compiler manifests and exact scalar/encoded comparisons for every constructor,
    validation rule, normalized/role/clause section, failure type, limit, and cancellation point.

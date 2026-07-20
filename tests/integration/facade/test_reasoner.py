@@ -80,6 +80,88 @@ def test_public_surface_reexports_exact_core_views_and_runs_complete_services() 
     assert reasoner.data_property_hierarchy().nodes
 
 
+def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
+    reasoner = Reasoner(
+        functional("Declaration(Class(:A))"),
+        config=config(),
+        load_options=OPTIONS,
+    )
+
+    diagnostics = reasoner.diagnostics()
+    expected_keys = {
+        "compiler_cache_schema_version",
+        "compiler_digest",
+        "encoded_buffer_bytes",
+        "encoded_buffer_count",
+        "encoded_compiler_gil_released",
+        "encoded_detached_buffer_count",
+        "encoded_indexed_buffer_count",
+        "encoded_posting_bytes",
+        "encoded_private_ir_bytes",
+        "encoded_referenced_view_count",
+        "encoded_segment_count",
+        "encoded_staging_copy_bytes",
+        "encoded_zero_copy_buffers",
+        "implementation_version",
+        "ingestion_path",
+        "ir_schema_version",
+    }
+    expected_path = "scalar-python" if reasoner.backend.name == "python" else "scalar-wire"
+    if reasoner.backend.name in {"native", "verify"}:
+        expected_keys.add("native_abi_version")
+
+    assert tuple(diagnostics) == tuple(sorted(expected_keys))
+    assert diagnostics["ingestion_path"] == expected_path
+    digest = diagnostics["compiler_digest"]
+    assert isinstance(digest, str)
+    assert len(digest) == 64
+    assert set(digest) <= set("0123456789abcdef")
+    assert diagnostics["compiler_cache_schema_version"] == pyhermit.COMPILER_CACHE_SCHEMA_VERSION
+    assert diagnostics["ir_schema_version"] == pyhermit.COMPILED_IR_SCHEMA_VERSION
+    assert diagnostics["implementation_version"] == reasoner.backend.implementation_version
+    if reasoner.backend.name in {"native", "verify"}:
+        assert diagnostics["native_abi_version"] == pyhermit.NATIVE_ABI_VERSION
+    encoded = {key: value for key, value in diagnostics.items() if key.startswith("encoded_")}
+    assert encoded == {
+        "encoded_buffer_bytes": 0,
+        "encoded_buffer_count": 0,
+        "encoded_compiler_gil_released": False,
+        "encoded_detached_buffer_count": 0,
+        "encoded_indexed_buffer_count": 0,
+        "encoded_posting_bytes": 0,
+        "encoded_private_ir_bytes": 0,
+        "encoded_referenced_view_count": 0,
+        "encoded_segment_count": 0,
+        "encoded_staging_copy_bytes": 0,
+        "encoded_zero_copy_buffers": 0,
+    }
+    with pytest.raises(TypeError):
+        diagnostics["ingestion_path"] = "encoded-native"  # type: ignore[index]
+
+    reasoner.dispose()
+    assert reasoner.diagnostics() == diagnostics
+
+
+def test_public_compiler_diagnostics_change_only_with_compilation_identity() -> None:
+    source = functional("Declaration(Class(:A))", "Declaration(Class(:B))")
+    left = Reasoner(source, config=config(), load_options=OPTIONS)
+    right = Reasoner(source, config=config(), load_options=OPTIONS)
+    original = left.diagnostics()["compiler_digest"]
+
+    assert right.diagnostics()["compiler_digest"] == original
+    left.add_axioms(
+        (
+            owl.SubClassOf(
+                owl.Class(owl.IRI("urn:test#A")),
+                owl.Class(owl.IRI("urn:test#B")),
+            ),
+        )
+    )
+    assert left.diagnostics()["compiler_digest"] == original
+    left.flush()
+    assert left.diagnostics()["compiler_digest"] != original
+
+
 def test_buffered_updates_are_transactional_zero_copy_and_clear_precompute() -> None:
     reasoner = Reasoner(
         functional(

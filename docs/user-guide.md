@@ -152,8 +152,18 @@ Messages are diagnostic and are not a compatibility key.
 
 ## Version and performance diagnostics
 
-Record `pyhermit.__version__`, `backend_info()`, `reasoner.backend`, the core structural,
-logical, and signature fingerprints, and `ReasonerConfig.as_dict()` with a result. Do
+Record `pyhermit.__version__`, `backend_info()`, `reasoner.backend`,
+`reasoner.diagnostics()`, the core structural, logical, and signature fingerprints, and
+`ReasonerConfig.as_dict()` with a result. The immutable diagnostics mapping uses the shared
+`scalar-python`, `scalar-wire`, and `encoded-native` ingestion-path vocabulary. Its lowercase
+SHA-256 `compiler_digest` is the current compiled-session cache identity. The public
+`COMPILER_CACHE_SCHEMA_VERSION`, `COMPILED_IR_SCHEMA_VERSION`, and `NATIVE_ABI_VERSION`
+constants support import-light cache partitioning.
+
+Until the encoded-native session path is enabled, the eleven `encoded_*` fields are exact
+zero/false accounting for the permanent-session compiler boundary. They are not estimates or
+unimplemented placeholders: a native validation-only encoded preflight is deliberately excluded,
+and the selected session still consumes the scalar private wire. Do
 not compare a warm shared view to a cold file load as if they were the same workload.
 The required methodology separates load, validation, compilation, first/repeated
 reasoning, classification, realization, updates, and peak RSS; see

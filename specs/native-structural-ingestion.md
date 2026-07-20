@@ -35,7 +35,7 @@ Three paths remain explicit:
 
 - `scalar-python`: existing scalar profile validation, normalization, clausification, and Python
   reasoning;
-- `scalar-wire-native`: existing Python compilation and validated native input wire, retained as
+- `scalar-wire`: existing Python compilation and validated native input wire, retained as
   a compatibility path; and
 - `encoded-native`: public core columns/segments directly into the Rust compiler and permanent
   Rust session.
@@ -45,6 +45,14 @@ A scalar-only compatible provider continues to support every public service and 
 report the compilation path, core encoded schema, pyHermiT compiler schema, and whether any bulk
 column was copied. A malformed advertised encoded view fails before session publication and never
 falls back after partial consumption.
+
+The stable public `Reasoner.diagnostics()` path vocabulary is `scalar-python`, `scalar-wire`, and
+`encoded-native`; `scalar-native` is reserved for a future semantically distinct path. The mapping
+also exposes `compiler_digest`, `compiler_cache_schema_version`, `ir_schema_version`,
+`implementation_version`, optional `native_abi_version`, and the shared pyELK/Exact/OAEI
+`encoded_*` counter ledger. Those counters account only for structural-view compilation into the
+permanent session. On current scalar paths they are contractual zero/false measurements even when
+the native adapter performs a validation-only encoded preflight; they are not placeholders.
 
 No path imports `pyowl_core._native`, relies on core arena layout, persists encoded dense IDs, or
 performs per-axiom Python/Rust calls. Native compilation retains the encoded owner for the complete
@@ -130,7 +138,7 @@ In addition to `performance.md`, encoded-native acceptance requires:
   ontology wire on the encoded-native production path;
 - encoded-view validation and Python/Rust boundary time below 5% of native
   compile-plus-classification time on each designated medium/large workload;
-- encoded-native view-to-session time at least 2x faster than scalar-wire-native by geometric
+- encoded-native view-to-session time at least 2x faster than scalar-wire by geometric
   mean, with no nontrivial workload more than 10% slower outside the noise floor;
 - no more than 10% peak/incremental-RSS regression without an accepted measured time/scale
   tradeoff; and
