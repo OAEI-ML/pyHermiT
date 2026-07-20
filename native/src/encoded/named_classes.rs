@@ -5,11 +5,12 @@
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, and named `ObjectPropertyDomain` /
 //! `ObjectPropertyRange` / positive and negative `ObjectPropertyAssertion`
-//! axioms into the existing native predicate, clause, fact, and provenance
-//! records. Exact nested annotations participate in source provenance, with
-//! segmented anonymous scopes remapped before hashing. Predicate and clause
-//! identifiers are dense within this fragment and must be remapped when a later
-//! phase assembles the complete program; no fragment is publishable on its own.
+//! and `DataPropertyDomain` axioms into the existing native predicate, clause,
+//! fact, and provenance records. Exact nested annotations participate in source
+//! provenance, with segmented anonymous scopes remapped before hashing.
+//! Predicate and clause identifiers are dense within this fragment and must be
+//! remapped when a later phase assembles the complete program; no fragment is
+//! publishable on its own.
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #![forbid(unsafe_code)]
@@ -22,6 +23,7 @@ use sha2::{Digest, Sha256};
 use super::canonical::{
     self, annotation_stripped_axiom_digest, source_axiom_digest, AnonymousScopeMap, CanonicalBudget,
 };
+use super::data_roles::DataRolePhase;
 use super::model::{ComponentValue, NodeId, NodeRef, ValidatedModel};
 use super::object_roles::ObjectRolePhase;
 use super::symbols::{RootHandler, SymbolPhase};
@@ -38,6 +40,7 @@ const EQUIVALENT_CLASSES_TAG: u16 = 62;
 const DISJOINT_CLASSES_TAG: u16 = 63;
 const OBJECT_PROPERTY_DOMAIN_TAG: u16 = 74;
 const OBJECT_PROPERTY_RANGE_TAG: u16 = 75;
+const DATA_PROPERTY_DOMAIN_TAG: u16 = 93;
 const OBJECT_INVERSE_OF_TAG: u16 = 10;
 const SAME_INDIVIDUAL_TAG: u16 = 110;
 const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
@@ -49,6 +52,7 @@ const DISJOINT_GUARD_DOMAIN: &[u8] = b"pyhermit:linear-disjoint-classes:v1\0";
 const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
 const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
 const OBJECT_PROPERTY_PREFIX: &str = "object_property:";
+const DATA_PROPERTY_PREFIX: &str = "data_property:";
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 
@@ -128,6 +132,7 @@ pub struct NamedClassPhase {
     normalized_edges: Vec<NormalizedEdge>,
     normalized_disjoints: Vec<NormalizedDisjoint>,
     normalized_object_constraints: Vec<NormalizedObjectConstraint>,
+    normalized_data_domains: Vec<NormalizedDataDomain>,
     normalized_facts: Vec<NormalizedFact>,
     normalized_object_facts: Vec<NormalizedObjectFact>,
     normalized_negative_object_facts: Vec<NormalizedObjectFact>,
@@ -443,6 +448,20 @@ struct NormalizedObjectConstraint {
     provenance: Vec<[u8; 32]>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RawDataDomain {
+    role_id: u32,
+    class_id: u32,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NormalizedDataDomain {
+    role_id: u32,
+    class_id: u32,
+    provenance: Vec<[u8; 32]>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RawFact {
     class_id: u32,
@@ -603,7 +622,7 @@ pub fn compile_named_class_phase<B: ByteSource>(
     symbols: &SymbolPhase,
     limits: NamedClassPhaseLimits,
 ) -> EncodedResult<NamedClassPhase> {
-    compile_named_class_phase_impl(model, symbols, None, &[], limits)
+    compile_named_class_phase_impl(model, symbols, None, None, &[], limits)
 }
 
 /// Compile the named fragment with an inner-to-outer anonymous-scope map
@@ -614,7 +633,7 @@ pub fn compile_named_class_phase_scoped<B: ByteSource>(
     scope_maps: &[AnonymousScopeMap],
     limits: NamedClassPhaseLimits,
 ) -> EncodedResult<NamedClassPhase> {
-    compile_named_class_phase_impl(model, symbols, None, scope_maps, limits)
+    compile_named_class_phase_impl(model, symbols, None, None, scope_maps, limits)
 }
 
 /// Compile the named fragment with the source-local object-role domain needed
@@ -626,13 +645,33 @@ pub fn compile_named_class_phase_with_object_roles_scoped<B: ByteSource>(
     scope_maps: &[AnonymousScopeMap],
     limits: NamedClassPhaseLimits,
 ) -> EncodedResult<NamedClassPhase> {
-    compile_named_class_phase_impl(model, symbols, Some(object_roles), scope_maps, limits)
+    compile_named_class_phase_impl(model, symbols, Some(object_roles), None, scope_maps, limits)
+}
+
+/// Compile the named fragment with source-local object- and data-role domains.
+pub fn compile_named_class_phase_with_role_domains_scoped<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    object_roles: &ObjectRolePhase,
+    data_roles: &DataRolePhase,
+    scope_maps: &[AnonymousScopeMap],
+    limits: NamedClassPhaseLimits,
+) -> EncodedResult<NamedClassPhase> {
+    compile_named_class_phase_impl(
+        model,
+        symbols,
+        Some(object_roles),
+        Some(data_roles),
+        scope_maps,
+        limits,
+    )
 }
 
 fn compile_named_class_phase_impl<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
     scope_maps: &[AnonymousScopeMap],
     limits: NamedClassPhaseLimits,
 ) -> EncodedResult<NamedClassPhase> {
@@ -671,10 +710,20 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         || scalar_object_role_count(&symbols.entity_domain),
         |roles| Ok(roles.object_role_domain.values.len()),
     )?;
+    let (scalar_data_role_count, scalar_bottom_data_role_id) = data_roles.map_or_else(
+        || scalar_data_role_summary(&symbols.entity_domain),
+        |roles| {
+            Ok((
+                roles.data_property_domain.values.len(),
+                roles.bottom_data_property_id,
+            ))
+        },
+    )?;
 
     let mut raw_edges = Vec::<RawEdge>::new();
     let mut raw_disjoints = Vec::<RawDisjoint>::new();
     let mut raw_object_constraints = Vec::<RawObjectConstraint>::new();
+    let mut raw_data_domains = Vec::<RawDataDomain>::new();
     let mut raw_facts = Vec::<RawFact>::new();
     let mut raw_object_facts = Vec::<RawObjectFact>::new();
     let mut raw_negative_object_facts = Vec::<RawObjectFact>::new();
@@ -827,6 +876,48 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                             )
                         })?;
                         raw_object_constraints.push(constraint);
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
+            RootHandler::DataPropertyDomain => {
+                let Some(data_roles) = data_roles else {
+                    deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "named-class deferred-root count overflowed",
+                        )
+                    })?;
+                    continue;
+                };
+                match named_data_domain(
+                    model,
+                    symbols,
+                    data_roles,
+                    &class_signature,
+                    root.node,
+                    scope_maps,
+                    &mut budget,
+                )? {
+                    Some(domain) => {
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            domain.provenance,
+                            &mut budget,
+                        )?;
+                        budget.claim_owned(size_of::<RawDataDomain>())?;
+                        raw_data_domains.try_reserve(1).map_err(|_| {
+                            EncodedValidationError::resource(
+                                "named data-property domain allocation failed",
+                            )
+                        })?;
+                        raw_data_domains.push(domain);
                     }
                     None => {
                         deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
@@ -1083,6 +1174,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let edges = normalize_edges(raw_edges, &mut budget)?;
     let disjoints = normalize_disjoints(raw_disjoints, &class_domain, &mut budget)?;
     let object_constraints = normalize_object_constraints(raw_object_constraints, &mut budget)?;
+    let data_domains = normalize_data_domains(raw_data_domains, &mut budget)?;
     let facts = normalize_facts(raw_facts, &mut budget)?;
     let object_facts = normalize_object_facts(raw_object_facts, &mut budget)?;
     let negative_object_facts = normalize_object_facts(raw_negative_object_facts, &mut budget)?;
@@ -1092,6 +1184,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &edges,
         &disjoints,
         &object_constraints,
+        &data_domains,
         &facts,
         &object_facts,
         &negative_object_facts,
@@ -1104,6 +1197,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         predicate_by_class,
         predicate_by_object_role,
         predicate_by_negative_object_role,
+        predicate_by_data_role,
         guard_predicates,
         named_predicate,
         equality_predicate,
@@ -1112,6 +1206,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &edges,
         &disjoints,
         &object_constraints,
+        &data_domains,
         &facts,
         &object_facts,
         &negative_object_facts,
@@ -1122,15 +1217,22 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         !individual_domain.values.is_empty(),
         &mut budget,
     )?;
-    let scalar_predicate_ids =
-        scalar_predicate_ids(&predicates, scalar_object_role_count, &mut budget)?;
+    let scalar_predicate_ids = scalar_predicate_ids(
+        &predicates,
+        scalar_object_role_count,
+        scalar_data_role_count,
+        scalar_bottom_data_role_id,
+        &mut budget,
+    )?;
     let clauses = freeze_clauses(
         &edges,
         &disjoints,
         &object_constraints,
+        &data_domains,
         nothing,
         &predicate_by_class,
         &predicate_by_object_role,
+        &predicate_by_data_role,
         &guard_predicates,
         &provenance_keys,
         &mut budget,
@@ -1179,6 +1281,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_edges: edges,
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
+        normalized_data_domains: data_domains,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
         normalized_negative_object_facts: negative_object_facts,
@@ -1610,6 +1713,68 @@ fn named_object_constraint<B: ByteSource>(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn named_data_domain<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    data_roles: &DataRolePhase,
+    class_signature: &[ClassSignatureBinding],
+    root: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<RawDataDomain>> {
+    let node = model.node(root)?;
+    if node.tag() != DATA_PROPERTY_DOMAIN_TAG || node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "data-property domain root no longer has schema-1 shape",
+        ));
+    }
+    let property = node_field(model, node, 0, "data-property domain role")?;
+    let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
+    let Some(class_id) = named_class_field(model, symbols, class_signature, node, 1)? else {
+        return Ok(None);
+    };
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    Ok(Some(RawDataDomain {
+        role_id,
+        class_id,
+        provenance,
+    }))
+}
+
+fn named_data_role_id<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    data_roles: &DataRolePhase,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<u32> {
+    let node = model.node(identifier)?;
+    if node.tag() != ENTITY_TAG {
+        return Err(EncodedValidationError::invariant(
+            "data-property domain has an unsupported role expression",
+        ));
+    }
+    let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
+        EncodedValidationError::invariant(
+            "data-property domain role is absent from the entity seed",
+        )
+    })?;
+    let entity = symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(entity_id).map_err(|_| {
+            EncodedValidationError::invariant("data-property entity ID exceeds usize")
+        })?)
+        .ok_or_else(|| EncodedValidationError::invariant("data-property entity ID is dangling"))?;
+    if !entity.display.starts_with(DATA_PROPERTY_PREFIX) {
+        return Err(EncodedValidationError::invariant(
+            "data-property domain resolved to a different entity kind",
+        ));
+    }
+    data_role_id_by_key(&data_roles.data_property_domain, &entity.key, budget)
+}
+
 fn named_object_role_id<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
@@ -1693,6 +1858,25 @@ fn role_id_by_key(
         .map_err(|_| EncodedValidationError::invariant("object-property role key is absent"))?;
     u32::try_from(index)
         .map_err(|_| EncodedValidationError::resource("object-property role ID exceeds u32"))
+}
+
+fn data_role_id_by_key(
+    domain: &DecodedSymbolDomain,
+    key: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<u32> {
+    if domain.kind != SymbolKind::DataProperty {
+        return Err(EncodedValidationError::invariant(
+            "data-property domain received a non-data-property domain",
+        ));
+    }
+    budget.claim_work(binary_search_work(domain.values.len()))?;
+    let index = domain
+        .values
+        .binary_search_by(|candidate| candidate.key.as_slice().cmp(key))
+        .map_err(|_| EncodedValidationError::invariant("data-property role key is absent"))?;
+    u32::try_from(index)
+        .map_err(|_| EncodedValidationError::resource("data-property role ID exceeds u32"))
 }
 
 fn named_same_individuals<B: ByteSource>(
@@ -2287,6 +2471,47 @@ fn normalize_object_constraints(
     Ok(normalized)
 }
 
+fn normalize_data_domains(
+    mut raw: Vec<RawDataDomain>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedDataDomain>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_unstable();
+    let mut normalized = Vec::<NormalizedDataDomain>::new();
+    for domain in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.role_id == domain.role_id && previous.class_id == domain.class_id {
+                if previous.provenance.last() != Some(&domain.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "data-property domain provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(domain.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedDataDomain>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("normalized data-property domain allocation failed")
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("data-property domain provenance allocation failed")
+        })?;
+        provenance.push(domain.provenance);
+        normalized.push(NormalizedDataDomain {
+            role_id: domain.role_id,
+            class_id: domain.class_id,
+            provenance,
+        });
+    }
+    Ok(normalized)
+}
+
 fn normalize_object_facts(
     mut raw: Vec<RawObjectFact>,
     budget: &mut PhaseBudget,
@@ -2431,6 +2656,7 @@ fn freeze_provenance(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
+    data_domains: &[NormalizedDataDomain],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
     negative_object_facts: &[NormalizedObjectFact],
@@ -2473,6 +2699,16 @@ fn freeze_provenance(
             &mut keys,
             ProvenanceKey {
                 source_sha256: constraint.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    for domain in data_domains {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: domain.provenance.clone(),
                 generated: false,
             },
             budget,
@@ -2594,6 +2830,7 @@ enum PredicateOwner {
     Concept(u32),
     ObjectRole(u32),
     NegatedObjectRole(u32),
+    DataRole(u32),
     Equality,
     Inequality,
     NamedIndividual,
@@ -2618,6 +2855,7 @@ type FrozenPredicates = (
     PredicateIndex,
     ObjectPredicateIndex,
     ObjectPredicateIndex,
+    ObjectPredicateIndex,
     GuardPredicateIndex,
     Option<u32>,
     Option<u32>,
@@ -2629,6 +2867,7 @@ fn freeze_predicates(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
+    data_domains: &[NormalizedDataDomain],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
     negative_object_facts: &[NormalizedObjectFact],
@@ -2660,6 +2899,9 @@ fn freeze_predicates(
             "predicate class",
             budget,
         )?;
+    }
+    for domain in data_domains {
+        push_u32(&mut class_ids, domain.class_id, "predicate class", budget)?;
     }
     for fact in facts {
         push_u32(&mut class_ids, fact.class_id, "predicate class", budget)?;
@@ -2773,6 +3015,30 @@ fn freeze_predicates(
             owner: PredicateOwner::NegatedObjectRole(role_id),
         });
     }
+    let mut data_role_ids = Vec::new();
+    for domain in data_domains {
+        push_u32(
+            &mut data_role_ids,
+            domain.role_id,
+            "predicate data role",
+            budget,
+        )?;
+    }
+    budget.claim_work(sort_work(data_role_ids.len()))?;
+    data_role_ids.sort_unstable();
+    data_role_ids.dedup();
+    for role_id in data_role_ids {
+        let key = role_predicate_key(PredicateKind::DataRole, role_id);
+        budget.claim_owned(size_of::<PendingPredicate>())?;
+        budget.claim_owned(key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("data-role predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::DataRole(role_id),
+        });
+    }
     for disjoint in disjoints {
         let internal_key = crate::model::hex(&disjoint.guard_digest);
         budget.claim_owned(internal_key.len())?;
@@ -2811,6 +3077,7 @@ fn freeze_predicates(
     let mut predicate_by_class = Vec::new();
     let mut predicate_by_object_role = Vec::new();
     let mut predicate_by_negative_object_role = Vec::new();
+    let mut predicate_by_data_role = Vec::new();
     let mut guard_predicates = Vec::new();
     let mut named_predicate = None;
     let mut equality_predicate = None;
@@ -2820,7 +3087,7 @@ fn freeze_predicates(
             .len()
             .checked_mul(
                 size_of::<DecodedPredicate>()
-                    + 3 * size_of::<(u32, u32)>()
+                    + 4 * size_of::<(u32, u32)>()
                     + size_of::<([u8; 32], u32, u32)>()
                     + size_of::<TermSort>(),
             )
@@ -2847,6 +3114,11 @@ fn freeze_predicates(
             EncodedValidationError::resource(
                 "negated object-role predicate index allocation failed",
             )
+        })?;
+    predicate_by_data_role
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("data-role predicate index allocation failed")
         })?;
     guard_predicates
         .try_reserve_exact(ordered.len())
@@ -2901,6 +3173,21 @@ fn freeze_predicates(
                     internal_key: None,
                 });
                 predicate_by_negative_object_role.push((role_id, predicate_id));
+            }
+            PredicateOwner::DataRole(role_id) => {
+                budget.claim_owned(size_of::<TermSort>())?;
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::DataRole,
+                    argument_sorts: vec![TermSort::Object, TermSort::Data],
+                    symbol_id: None,
+                    role_id: Some(role_id),
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: Vec::new(),
+                    internal_key: None,
+                });
+                predicate_by_data_role.push((role_id, predicate_id));
             }
             PredicateOwner::Equality => {
                 budget.claim_owned(size_of::<TermSort>())?;
@@ -2971,12 +3258,14 @@ fn freeze_predicates(
     predicate_by_class.sort_unstable_by_key(|(class_id, _)| *class_id);
     predicate_by_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_negative_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
+    predicate_by_data_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     guard_predicates.sort_unstable_by_key(|(digest, sequence, _)| (*digest, *sequence));
     Ok((
         predicates,
         predicate_by_class,
         predicate_by_object_role,
         predicate_by_negative_object_role,
+        predicate_by_data_role,
         guard_predicates,
         named_predicate,
         equality_predicate,
@@ -2989,9 +3278,11 @@ fn freeze_clauses(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
+    data_domains: &[NormalizedDataDomain],
     nothing: u32,
     predicate_by_class: &[(u32, u32)],
     predicate_by_object_role: &[(u32, u32)],
+    predicate_by_data_role: &[(u32, u32)],
     guard_predicates: &[([u8; 32], u32, u32)],
     provenance_keys: &[ProvenanceKey],
     budget: &mut PhaseBudget,
@@ -3000,6 +3291,7 @@ fn freeze_clauses(
         .len()
         .checked_add(1)
         .and_then(|value| value.checked_add(object_constraints.len()))
+        .and_then(|value| value.checked_add(data_domains.len()))
         .ok_or_else(|| EncodedValidationError::resource("named-class clause count overflowed"))?;
     for disjoint in disjoints {
         let count = disjoint
@@ -3044,6 +3336,12 @@ fn freeze_clauses(
             provenance,
             budget,
         )?;
+    }
+    for domain in data_domains {
+        let role = data_predicate_id(predicate_by_data_role, domain.role_id)?;
+        let class = predicate_id(predicate_by_class, domain.class_id)?;
+        let provenance = provenance_id(provenance_keys, &domain.provenance, false)?;
+        push_data_domain_clause(&mut ordered, role, class, provenance, budget)?;
     }
     for disjoint in disjoints {
         let provenance = provenance_id(provenance_keys, &disjoint.provenance, false)?;
@@ -3652,6 +3950,42 @@ fn push_object_constraint_clause(
     Ok(())
 }
 
+fn push_data_domain_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    role_predicate_id: u32,
+    class_predicate_id: u32,
+    provenance_id: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let body = data_variable_atom(role_predicate_id, 0, 1);
+    let head = variable_atom_at(class_predicate_id, 0, TermSort::Object);
+    let key = data_domain_rule_key(role_predicate_id, class_predicate_id);
+    budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>() + key.len())?;
+    budget.claim_owned(
+        2_usize
+            .checked_mul(size_of::<DecodedAtom>())
+            .and_then(|value| value.checked_add(3 * size_of::<DecodedTerm>()))
+            .and_then(|value| value.checked_add(2 * size_of::<u32>()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("data-property domain clause payload overflowed")
+            })?,
+    )?;
+    clauses.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("data-property domain clause allocation failed")
+    })?;
+    clauses.push((
+        key,
+        DecodedClause {
+            clause_id: 0,
+            body: vec![body],
+            head: vec![head],
+            provenance_ids: vec![provenance_id],
+            join_order: vec![0],
+        },
+    ));
+    Ok(())
+}
+
 fn variable_atom(predicate_id: u32) -> DecodedAtom {
     variable_atom_at(predicate_id, 0, TermSort::Object)
 }
@@ -3679,6 +4013,22 @@ fn object_variable_atom(predicate_id: u32, left: u32, right: u32) -> DecodedAtom
     }
 }
 
+fn data_variable_atom(predicate_id: u32, left: u32, right: u32) -> DecodedAtom {
+    DecodedAtom {
+        predicate_id,
+        arguments: vec![
+            DecodedTerm::Variable {
+                index: left,
+                sort: TermSort::Object,
+            },
+            DecodedTerm::Variable {
+                index: right,
+                sort: TermSort::Data,
+            },
+        ],
+    }
+}
+
 fn predicate_id(index: &[(u32, u32)], class_id: u32) -> EncodedResult<u32> {
     index
         .binary_search_by_key(&class_id, |(candidate, _)| *candidate)
@@ -3697,6 +4047,14 @@ fn object_predicate_id(index: &[(u32, u32)], role_id: u32) -> EncodedResult<u32>
         .ok_or_else(|| {
             EncodedValidationError::invariant("object-role predicate index is incomplete")
         })
+}
+
+fn data_predicate_id(index: &[(u32, u32)], role_id: u32) -> EncodedResult<u32> {
+    index
+        .binary_search_by_key(&role_id, |(candidate, _)| *candidate)
+        .ok()
+        .map(|position| index[position].1)
+        .ok_or_else(|| EncodedValidationError::invariant("data-role predicate index is incomplete"))
 }
 
 fn guard_predicate_id(
@@ -3792,27 +4150,46 @@ fn scalar_object_role_count(entity_domain: &DecodedSymbolDomain) -> EncodedResul
         .ok_or_else(|| EncodedValidationError::resource("scalar object-role count overflowed"))
 }
 
+fn scalar_data_role_summary(entity_domain: &DecodedSymbolDomain) -> EncodedResult<(usize, u32)> {
+    if entity_domain.kind != SymbolKind::Entity {
+        return Err(EncodedValidationError::invariant(
+            "scalar data-role summary received a non-entity domain",
+        ));
+    }
+    let named = entity_domain
+        .values
+        .iter()
+        .filter(|value| value.display.starts_with(DATA_PROPERTY_PREFIX))
+        .count();
+    let count = named
+        .checked_add(2)
+        .ok_or_else(|| EncodedValidationError::resource("scalar data-role count overflowed"))?;
+    let bottom = named
+        .checked_add(1)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            EncodedValidationError::resource("scalar bottom data-role ID exceeds u32")
+        })?;
+    Ok((count, bottom))
+}
+
 fn scalar_predicate_ids(
     predicates: &[DecodedPredicate],
     object_role_count: usize,
+    data_role_count: usize,
+    bottom_data_role_id: u32,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<u32>> {
-    let object_predicate_count = predicates
-        .iter()
-        .filter(|predicate| predicate.kind == PredicateKind::ObjectRole)
-        .count();
-    let global_count = predicates
+    let candidate_capacity = predicates
         .len()
-        .checked_sub(object_predicate_count)
-        .and_then(|value| value.checked_add(object_role_count))
+        .checked_add(object_role_count)
         .and_then(|value| value.checked_add(1))
         .ok_or_else(|| EncodedValidationError::resource("scalar predicate count overflowed"))?;
     budget.claim_owned(
         object_role_count
-            .checked_mul(size_of::<Option<u32>>())
-            .ok_or_else(|| {
-                EncodedValidationError::resource("scalar object-role mapping overflowed")
-            })?,
+            .checked_add(data_role_count)
+            .and_then(|value| value.checked_mul(size_of::<Option<u32>>()))
+            .ok_or_else(|| EncodedValidationError::resource("scalar role mapping overflowed"))?,
     )?;
     let mut local_object_predicates = Vec::new();
     local_object_predicates
@@ -3821,44 +4198,85 @@ fn scalar_predicate_ids(
             EncodedValidationError::resource("scalar object-role mapping allocation failed")
         })?;
     local_object_predicates.resize(object_role_count, None);
+    let mut local_data_predicates = Vec::new();
+    local_data_predicates
+        .try_reserve_exact(data_role_count)
+        .map_err(|_| {
+            EncodedValidationError::resource("scalar data-role mapping allocation failed")
+        })?;
+    local_data_predicates.resize(data_role_count, None);
     for predicate in predicates {
-        if predicate.kind != PredicateKind::ObjectRole {
-            continue;
-        }
-        if predicate.argument_sorts != [TermSort::Object, TermSort::Object]
+        let (expected_sorts, slots, name) = match predicate.kind {
+            PredicateKind::ObjectRole => (
+                [TermSort::Object, TermSort::Object],
+                &mut local_object_predicates,
+                "object-role",
+            ),
+            PredicateKind::DataRole => (
+                [TermSort::Object, TermSort::Data],
+                &mut local_data_predicates,
+                "data-role",
+            ),
+            _ => continue,
+        };
+        if predicate.argument_sorts != expected_sorts
             || predicate.symbol_id.is_some()
             || predicate.cardinality.is_some()
             || predicate.filler_predicate_id.is_some()
             || !predicate.annotation.is_empty()
             || predicate.internal_key.is_some()
         {
-            return Err(EncodedValidationError::invariant(
-                "named object-role predicate has invalid metadata",
-            ));
+            return Err(EncodedValidationError::invariant(format!(
+                "named {name} predicate has invalid metadata"
+            )));
         }
         let role_id = predicate.role_id.ok_or_else(|| {
-            EncodedValidationError::invariant("named object-role predicate lost its role ID")
+            EncodedValidationError::invariant(format!("named {name} predicate lost its role ID"))
         })?;
-        let slot = local_object_predicates
+        let slot = slots
             .get_mut(usize::try_from(role_id).map_err(|_| {
-                EncodedValidationError::invariant("named object-role ID exceeds usize")
+                EncodedValidationError::invariant(format!("named {name} ID exceeds usize"))
             })?)
             .ok_or_else(|| {
-                EncodedValidationError::invariant("named object-role ID is outside its domain")
+                EncodedValidationError::invariant(format!("named {name} ID is outside its domain"))
             })?;
         if slot.replace(predicate.predicate_id).is_some() {
-            return Err(EncodedValidationError::invariant(
-                "named object-role predicate ID is duplicated",
-            ));
+            return Err(EncodedValidationError::invariant(format!(
+                "named {name} predicate ID is duplicated"
+            )));
         }
     }
     let mut candidates = Vec::<(Vec<u8>, Option<u32>)>::new();
-    candidates.try_reserve_exact(global_count).map_err(|_| {
-        EncodedValidationError::resource("scalar predicate ordering allocation failed")
+    candidates
+        .try_reserve_exact(candidate_capacity)
+        .map_err(|_| {
+            EncodedValidationError::resource("scalar predicate ordering allocation failed")
+        })?;
+    let bottom_data_index = usize::try_from(bottom_data_role_id).map_err(|_| {
+        EncodedValidationError::invariant("scalar bottom data-role ID exceeds usize")
     })?;
-    let data_key = role_predicate_key(PredicateKind::DataRole, 1);
+    let bottom_data_predicate = local_data_predicates
+        .get(bottom_data_index)
+        .copied()
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("scalar bottom data-role ID is outside its domain")
+        })?;
+    let data_key = role_predicate_key(PredicateKind::DataRole, bottom_data_role_id);
     budget.claim_owned(size_of::<(Vec<u8>, Option<u32>)>().saturating_add(data_key.len()))?;
-    candidates.push((data_key, None));
+    candidates.push((data_key, bottom_data_predicate));
+    for (role_index, local_predicate_id) in local_data_predicates.iter().copied().enumerate() {
+        let role_id = u32::try_from(role_index)
+            .map_err(|_| EncodedValidationError::resource("scalar data-role ID exceeds u32"))?;
+        if role_id == bottom_data_role_id {
+            continue;
+        }
+        let Some(local_predicate_id) = local_predicate_id else {
+            continue;
+        };
+        let key = role_predicate_key(PredicateKind::DataRole, role_id);
+        budget.claim_owned(size_of::<(Vec<u8>, Option<u32>)>().saturating_add(key.len()))?;
+        candidates.push((key, Some(local_predicate_id)));
+    }
     for (role_index, local_predicate_id) in local_object_predicates.iter().copied().enumerate() {
         let role_id = u32::try_from(role_index)
             .map_err(|_| EncodedValidationError::resource("scalar object-role ID exceeds u32"))?;
@@ -3867,7 +4285,10 @@ fn scalar_predicate_ids(
         candidates.push((key, local_predicate_id));
     }
     for predicate in predicates {
-        if predicate.kind == PredicateKind::ObjectRole {
+        if matches!(
+            predicate.kind,
+            PredicateKind::ObjectRole | PredicateKind::DataRole
+        ) {
             continue;
         }
         let key = named_predicate_key(predicate)?;
@@ -4069,6 +4490,19 @@ fn object_constraint_rule_key(
     format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
 }
 
+fn data_domain_rule_key(role_predicate_id: u32, class_predicate_id: u32) -> Vec<u8> {
+    let body = format!(
+        "{{\"arguments\":[{},{}],\"predicate_id\":{role_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
+        variable_json(0, TermSort::Object),
+        variable_json(1, TermSort::Data),
+    );
+    let head = format!(
+        "{{\"arguments\":[{}],\"predicate_id\":{class_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
+        variable_json(0, TermSort::Object),
+    );
+    format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
+}
+
 fn variable_json(index: u32, sort: TermSort) -> String {
     let sort = match sort {
         TermSort::Object => "object",
@@ -4154,7 +4588,7 @@ pub fn merge_named_class_phases(
     phases: &[(SymbolPhase, NamedClassPhase)],
     limits: NamedClassPhaseLimits,
 ) -> EncodedResult<NamedClassPhase> {
-    merge_named_class_phases_impl(phases, None, None, limits)
+    merge_named_class_phases_impl(phases, None, None, None, None, limits)
 }
 
 /// Merge named fragments while remapping source-local object roles into the
@@ -4174,6 +4608,33 @@ pub fn merge_named_class_phases_with_object_roles(
         phases,
         Some(source_object_roles),
         Some(merged_object_roles),
+        None,
+        None,
+        limits,
+    )
+}
+
+/// Merge named fragments while remapping source-local object and data roles
+/// into the globally frozen role domains used by property-domain clauses.
+pub fn merge_named_class_phases_with_role_domains(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    source_object_roles: &[ObjectRolePhase],
+    merged_object_roles: &ObjectRolePhase,
+    source_data_roles: &[DataRolePhase],
+    merged_data_roles: &DataRolePhase,
+    limits: NamedClassPhaseLimits,
+) -> EncodedResult<NamedClassPhase> {
+    if source_object_roles.len() != phases.len() || source_data_roles.len() != phases.len() {
+        return Err(EncodedValidationError::invariant(
+            "named-class source role phases do not align with their slices",
+        ));
+    }
+    merge_named_class_phases_impl(
+        phases,
+        Some(source_object_roles),
+        Some(merged_object_roles),
+        Some(source_data_roles),
+        Some(merged_data_roles),
         limits,
     )
 }
@@ -4182,6 +4643,8 @@ fn merge_named_class_phases_impl(
     phases: &[(SymbolPhase, NamedClassPhase)],
     source_object_roles: Option<&[ObjectRolePhase]>,
     merged_object_roles: Option<&ObjectRolePhase>,
+    source_data_roles: Option<&[DataRolePhase]>,
+    merged_data_roles: Option<&DataRolePhase>,
     limits: NamedClassPhaseLimits,
 ) -> EncodedResult<NamedClassPhase> {
     if phases.is_empty() {
@@ -4260,12 +4723,22 @@ fn merge_named_class_phases_impl(
         || scalar_object_role_count(&entity_domain),
         |roles| Ok(roles.object_role_domain.values.len()),
     )?;
+    let (scalar_data_role_count, scalar_bottom_data_role_id) = merged_data_roles.map_or_else(
+        || scalar_data_role_summary(&entity_domain),
+        |roles| {
+            Ok((
+                roles.data_property_domain.values.len(),
+                roles.bottom_data_property_id,
+            ))
+        },
+    )?;
     drop(entity_domain);
 
     let (
         edges,
         disjoints,
         object_constraints,
+        data_domains,
         facts,
         object_facts,
         negative_object_facts,
@@ -4278,6 +4751,8 @@ fn merge_named_class_phases_impl(
         &class_domain,
         source_object_roles,
         merged_object_roles,
+        source_data_roles,
+        merged_data_roles,
         &mut budget,
     )?;
     let thing = class_id_by_display(&class_domain, THING_DISPLAY)?;
@@ -4286,6 +4761,7 @@ fn merge_named_class_phases_impl(
         &edges,
         &disjoints,
         &object_constraints,
+        &data_domains,
         &facts,
         &object_facts,
         &negative_object_facts,
@@ -4298,6 +4774,7 @@ fn merge_named_class_phases_impl(
         predicate_by_class,
         predicate_by_object_role,
         predicate_by_negative_object_role,
+        predicate_by_data_role,
         guard_predicates,
         named_predicate,
         equality_predicate,
@@ -4306,6 +4783,7 @@ fn merge_named_class_phases_impl(
         &edges,
         &disjoints,
         &object_constraints,
+        &data_domains,
         &facts,
         &object_facts,
         &negative_object_facts,
@@ -4316,15 +4794,22 @@ fn merge_named_class_phases_impl(
         !individual_domain.values.is_empty(),
         &mut budget,
     )?;
-    let scalar_predicate_ids =
-        scalar_predicate_ids(&predicates, scalar_object_role_count, &mut budget)?;
+    let scalar_predicate_ids = scalar_predicate_ids(
+        &predicates,
+        scalar_object_role_count,
+        scalar_data_role_count,
+        scalar_bottom_data_role_id,
+        &mut budget,
+    )?;
     let clauses = freeze_clauses(
         &edges,
         &disjoints,
         &object_constraints,
+        &data_domains,
         nothing,
         &predicate_by_class,
         &predicate_by_object_role,
+        &predicate_by_data_role,
         &guard_predicates,
         &provenance_keys,
         &mut budget,
@@ -4418,6 +4903,7 @@ fn merge_named_class_phases_impl(
         normalized_edges: edges,
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
+        normalized_data_domains: data_domains,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
         normalized_negative_object_facts: negative_object_facts,
@@ -4563,6 +5049,24 @@ fn remap_object_role(
     role_id_by_key(&merged.object_role_domain, key, budget)
 }
 
+fn remap_data_role(
+    source: &DataRolePhase,
+    merged: &DataRolePhase,
+    identifier: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<u32> {
+    let key =
+        source
+            .data_property_domain
+            .values
+            .get(usize::try_from(identifier).map_err(|_| {
+                EncodedValidationError::invariant("source data-role ID exceeds usize")
+            })?)
+            .map(|value| value.key.as_slice())
+            .ok_or_else(|| EncodedValidationError::invariant("source data-role ID is dangling"))?;
+    data_role_id_by_key(&merged.data_property_domain, key, budget)
+}
+
 fn merge_class_signatures(
     phases: &[(SymbolPhase, NamedClassPhase)],
     entity_maps: &[Vec<u32>],
@@ -4693,6 +5197,7 @@ type NormalizedSources = (
     Vec<NormalizedEdge>,
     Vec<NormalizedDisjoint>,
     Vec<NormalizedObjectConstraint>,
+    Vec<NormalizedDataDomain>,
     Vec<NormalizedFact>,
     Vec<NormalizedObjectFact>,
     Vec<NormalizedObjectFact>,
@@ -4700,6 +5205,7 @@ type NormalizedSources = (
     Vec<NormalizedInequalityFact>,
 );
 
+#[allow(clippy::too_many_arguments)]
 fn merge_normalized_sources(
     phases: &[(SymbolPhase, NamedClassPhase)],
     class_maps: &[Vec<u32>],
@@ -4707,11 +5213,14 @@ fn merge_normalized_sources(
     class_domain: &DecodedSymbolDomain,
     source_object_roles: Option<&[ObjectRolePhase]>,
     merged_object_roles: Option<&ObjectRolePhase>,
+    source_data_roles: Option<&[DataRolePhase]>,
+    merged_data_roles: Option<&DataRolePhase>,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<NormalizedSources> {
     let mut raw_edges = Vec::new();
     let mut raw_disjoints = Vec::new();
     let mut raw_object_constraints = Vec::new();
+    let mut raw_data_domains = Vec::new();
     let mut raw_facts = Vec::new();
     let mut raw_object_facts = Vec::new();
     let mut raw_negative_object_facts = Vec::new();
@@ -4821,6 +5330,43 @@ fn merge_normalized_sources(
                     })?;
                     raw_object_constraints.push(RawObjectConstraint {
                         kind: constraint.kind,
+                        role_id,
+                        class_id,
+                        provenance: *provenance,
+                    });
+                }
+            }
+        }
+        if !phase.normalized_data_domains.is_empty() {
+            let source_roles = source_data_roles
+                .and_then(|roles| roles.get(phase_index))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged data-property domains lost their source role domain",
+                    )
+                })?;
+            let merged_roles = merged_data_roles.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "merged data-property domains lost their global role domain",
+                )
+            })?;
+            for domain in &phase.normalized_data_domains {
+                if domain.provenance.is_empty() {
+                    return Err(EncodedValidationError::invariant(
+                        "merged data-property domain lost provenance",
+                    ));
+                }
+                let role_id = remap_data_role(source_roles, merged_roles, domain.role_id, budget)?;
+                let class_id = mapped_id(class_map, domain.class_id, "data-property domain class")?;
+                for provenance in &domain.provenance {
+                    budget.claim_work(1)?;
+                    budget.claim_owned(size_of::<RawDataDomain>())?;
+                    raw_data_domains.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "merged data-property domain allocation failed",
+                        )
+                    })?;
+                    raw_data_domains.push(RawDataDomain {
                         role_id,
                         class_id,
                         provenance: *provenance,
@@ -5018,6 +5564,7 @@ fn merge_normalized_sources(
         normalize_edges(raw_edges, budget)?,
         normalize_disjoints(raw_disjoints, class_domain, budget)?,
         normalize_object_constraints(raw_object_constraints, budget)?,
+        normalize_data_domains(raw_data_domains, budget)?,
         normalize_facts(raw_facts, budget)?,
         normalize_object_facts(raw_object_facts, budget)?,
         normalize_object_facts(raw_negative_object_facts, budget)?,

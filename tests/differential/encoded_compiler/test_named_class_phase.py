@@ -198,6 +198,7 @@ def _expected_manifest(
     *,
     compiled_roots: int,
     include_object_constraints: bool = False,
+    include_data_domains: bool = False,
     include_object_assertions: bool = False,
     include_negative_object_assertions: bool = False,
 ) -> dict[str, object]:
@@ -224,10 +225,12 @@ def _expected_manifest(
         PredicateKind.NAMED_INDIVIDUAL,
     }
     constraint_provenance_ids: set[int] = set()
+    data_domain_provenance_ids: set[int] = set()
     assertion_provenance_ids: set[int] = set()
     negative_assertion_provenance_ids: set[int] = set()
     if (
         include_object_constraints
+        or include_data_domains
         or include_object_assertions
         or include_negative_object_assertions
     ):
@@ -243,6 +246,12 @@ def _expected_manifest(
                 record.statement,
                 (owl.ObjectPropertyDomain, owl.ObjectPropertyRange),
             )
+        }
+    if include_data_domains:
+        data_domain_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if isinstance(record.statement, owl.DataPropertyDomain)
         }
     if include_object_assertions:
         assertion_provenance_ids = {
@@ -262,12 +271,24 @@ def _expected_manifest(
         for clause in program.clauses
         if constraint_provenance_ids.intersection(clause.provenance_ids)
     }
+    data_domain_clauses = {
+        clause.clause_id
+        for clause in program.clauses
+        if data_domain_provenance_ids.intersection(clause.provenance_ids)
+    }
     constraint_role_predicates = {
         atom.predicate_id
         for clause in program.clauses
         if clause.clause_id in constraint_clauses
         for atom in clause.body + clause.head
         if predicates_by_id[atom.predicate_id].kind is PredicateKind.OBJECT_ROLE
+    }
+    data_domain_role_predicates = {
+        atom.predicate_id
+        for clause in program.clauses
+        if clause.clause_id in data_domain_clauses
+        for atom in clause.body + clause.head
+        if predicates_by_id[atom.predicate_id].kind is PredicateKind.DATA_ROLE
     }
     assertion_role_predicates = {
         fact.predicate_id
@@ -282,7 +303,10 @@ def _expected_manifest(
         and predicates_by_id[fact.predicate_id].kind is PredicateKind.NEGATED_OBJECT_ROLE
     }
     selected_role_predicates = (
-        constraint_role_predicates | assertion_role_predicates | negative_assertion_role_predicates
+        constraint_role_predicates
+        | data_domain_role_predicates
+        | assertion_role_predicates
+        | negative_assertion_role_predicates
     )
     fragment_predicates = [
         value
@@ -313,7 +337,11 @@ def _expected_manifest(
         unary_named_clause = bool(clause.body) and not any(
             atom.arguments != (expected_variable,) for atom in clause.body + clause.head
         )
-        if not unary_named_clause and clause.clause_id not in constraint_clauses:
+        if (
+            not unary_named_clause
+            and clause.clause_id not in constraint_clauses
+            and clause.clause_id not in data_domain_clauses
+        ):
             continue
         if any(atom.predicate_id not in predicate_remap for atom in clause.body + clause.head):
             continue
@@ -654,6 +682,39 @@ def test_annotated_named_object_domain_and_range_clauses_match_scalar_exactly() 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_annotated_named_data_property_domains_match_scalar_exactly() -> None:
+    long_data_property = (
+        "<https://example.test/data-property/this-name-is-deliberately-longer-than-owl-builtins>"
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:p))",
+            f"Declaration(DataProperty({long_data_property}))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(AnnotationProperty(:meta))",
+            'DataPropertyDomain(Annotation(Annotation(:meta "nested") :note "left") :p :A)',
+            'DataPropertyDomain(Annotation(:note "right"@en) :p :A)',
+            (
+                "DataPropertyDomain(Annotation(:note <urn:annotation:value>) "
+                f"{long_data_property} :B)"
+            ),
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=3,
+        include_data_domains=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_annotated_named_object_assertions_and_inverse_roles_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -919,6 +980,61 @@ def test_composite_object_constraints_remap_distinct_local_role_domains() -> Non
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_composite_anonymous_data_domains_group_sources_exactly() -> None:
+    source = functional(
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(DataProperty(:p))",
+        "Declaration(DataProperty(:q))",
+        "Declaration(AnnotationProperty(:note))",
+        "DataPropertyDomain(Annotation(:note _:same) :p :A)",
+        "DataPropertyDomain(Annotation(:note _:same) :q :B)",
+    )
+    left = pyowl_core.load_snapshot(source, options=OPTIONS)
+    right = pyowl_core.load_snapshot(source, options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_data_domains=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_data_domains_remap_distinct_local_role_and_class_domains() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:Z))",
+            "Declaration(DataProperty(:z))",
+            "DataPropertyDomain(:z :Z)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(DataProperty(:a))",
+            "DataPropertyDomain(:a :A)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_data_domains=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_complex_object_domain_and_range_still_defer_whole_roots() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -939,6 +1055,28 @@ def test_complex_object_domain_and_range_still_defer_whole_roots() -> None:
     assert manifest["deferred_roots"] == 2
     assert all(
         predicate["kind"] != "object_role"
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_complex_data_property_domain_still_defers_the_whole_root() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:p))",
+            "DataPropertyDomain(:p ObjectSomeValuesFrom(:q :A))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
+    assert all(
+        predicate["kind"] != PredicateKind.DATA_ROLE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES

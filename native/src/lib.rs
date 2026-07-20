@@ -710,10 +710,11 @@ fn validate_encoded_columns_v1(
             encoded::role_clauses::RoleClausePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        encoded::named_classes::compile_named_class_phase_with_object_roles_scoped(
+        encoded::named_classes::compile_named_class_phase_with_role_domains_scoped(
             &model,
             &symbols,
             &object_roles,
+            &data_roles,
             &[],
             encoded::named_classes::NamedClassPhaseLimits::default(),
         )
@@ -866,10 +867,11 @@ fn validate_encoded_selection_v1(
             encoded::role_clauses::RoleClausePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        encoded::named_classes::compile_named_class_phase_with_object_roles_scoped(
+        encoded::named_classes::compile_named_class_phase_with_role_domains_scoped(
             &model,
             &symbols,
             &object_roles,
+            &data_roles,
             &[],
             encoded::named_classes::NamedClassPhaseLimits::default(),
         )
@@ -1504,6 +1506,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     | encoded::symbols::RootHandler::NegativeObjectPropertyAssertion
                     | encoded::symbols::RootHandler::ObjectPropertyDomain
                     | encoded::symbols::RootHandler::ObjectPropertyRange
+                    | encoded::symbols::RootHandler::DataPropertyDomain
             )
         });
         let (scope_maps, scope_map_owned) =
@@ -1579,10 +1582,11 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                 })?,
             ..limits
         };
-        let named = encoded::named_classes::compile_named_class_phase_with_object_roles_scoped(
+        let named = encoded::named_classes::compile_named_class_phase_with_role_domains_scoped(
             &model,
             &symbols,
             &object_roles,
+            &data_roles,
             if has_named_axiom_provenance {
                 &scope_maps
             } else {
@@ -1629,7 +1633,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
     let object_roles =
         encoded::object_roles::merge_object_role_phases(&object_role_phases, object_role_limits)
             .map_err(encoded_validation_error)?;
-    let named_limits = encoded::named_classes::NamedClassPhaseLimits {
+    let data_role_limits = encoded::data_roles::DataRolePhaseLimits {
         max_owned_bytes: limits
             .max_owned_bytes
             .checked_sub(object_roles.owned_bytes)
@@ -1646,62 +1650,65 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     "encoded object-role merge work exceeded the program limit",
                 ))
             })?,
-        ..limits
-    };
-    let named_classes = encoded::named_classes::merge_named_class_phases_with_object_roles(
-        &phases,
-        &object_role_phases,
-        &object_roles,
-        named_limits,
-    )
-    .map_err(encoded_validation_error)?;
-    let merged_object_owned = object_roles
-        .owned_bytes
-        .checked_add(named_classes.owned_bytes)
-        .ok_or_else(|| {
-            encoded_validation_error(encoded::EncodedValidationError::resource(
-                "encoded merged object-role ownership overflowed",
-            ))
-        })?;
-    let merged_object_work = object_roles
-        .work
-        .checked_add(named_classes.work)
-        .ok_or_else(|| {
-            encoded_validation_error(encoded::EncodedValidationError::resource(
-                "encoded merged object-role work overflowed",
-            ))
-        })?;
-    let data_role_limits = encoded::data_roles::DataRolePhaseLimits {
-        max_owned_bytes: limits
-            .max_owned_bytes
-            .checked_sub(merged_object_owned)
-            .ok_or_else(|| {
-                encoded_validation_error(encoded::EncodedValidationError::resource(
-                    "encoded merged object roles exceeded the program ownership limit",
-                ))
-            })?,
-        max_work: limits
-            .max_work
-            .checked_sub(merged_object_work)
-            .ok_or_else(|| {
-                encoded_validation_error(encoded::EncodedValidationError::resource(
-                    "encoded merged object roles exceeded the program work limit",
-                ))
-            })?,
         ..encoded::data_roles::DataRolePhaseLimits::default()
     };
     let data_roles =
         encoded::data_roles::merge_data_role_phases(&data_role_phases, data_role_limits)
             .map_err(encoded_validation_error)?;
-    let merged_role_owned = merged_object_owned
+    let merged_role_domain_owned = object_roles
+        .owned_bytes
         .checked_add(data_roles.owned_bytes)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged role-domain ownership overflowed",
+            ))
+        })?;
+    let merged_role_domain_work =
+        object_roles
+            .work
+            .checked_add(data_roles.work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged role-domain work overflowed",
+                ))
+            })?;
+    let named_limits = encoded::named_classes::NamedClassPhaseLimits {
+        max_owned_bytes: limits
+            .max_owned_bytes
+            .checked_sub(merged_role_domain_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged role domains exceeded the program ownership limit",
+                ))
+            })?,
+        max_work: limits
+            .max_work
+            .checked_sub(merged_role_domain_work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged role domains exceeded the program work limit",
+                ))
+            })?,
+        ..limits
+    };
+    let named_classes = encoded::named_classes::merge_named_class_phases_with_role_domains(
+        &phases,
+        &object_role_phases,
+        &object_roles,
+        &data_role_phases,
+        &data_roles,
+        named_limits,
+    )
+    .map_err(encoded_validation_error)?;
+    let merged_role_owned = merged_role_domain_owned
+        .checked_add(named_classes.owned_bytes)
         .ok_or_else(|| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "encoded merged role ownership overflowed",
             ))
         })?;
-    let merged_role_work = merged_object_work
-        .checked_add(data_roles.work)
+    let merged_role_work = merged_role_domain_work
+        .checked_add(named_classes.work)
         .ok_or_else(|| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "encoded merged role work overflowed",
@@ -3352,10 +3359,16 @@ fn encoded_named_class_manifest_v1(
             encoded::object_roles::ObjectRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        let phase = encoded::named_classes::compile_named_class_phase_with_object_roles_scoped(
+        let data_roles = encoded::data_roles::compile_data_role_phase(
+            &symbols,
+            encoded::data_roles::DataRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let phase = encoded::named_classes::compile_named_class_phase_with_role_domains_scoped(
             &model,
             &symbols,
             &object_roles,
+            &data_roles,
             &[],
             encoded::named_classes::NamedClassPhaseLimits::default(),
         )
