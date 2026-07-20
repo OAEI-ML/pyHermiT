@@ -53,6 +53,9 @@ also exposes `compiler_digest`, `compiler_cache_schema_version`, `ir_schema_vers
 `encoded_*` counter ledger. Those counters account only for structural-view compilation into the
 permanent session. On current scalar paths they are contractual zero/false measurements even when
 the native adapter performs a validation-only encoded preflight; they are not placeholders.
+`compiler_digest` is the lowercase SHA-256 of the canonical complete compiler manifest with the
+backend/configuration-specific private session-cache fingerprint excluded, so scalar and encoded
+paths over the same compilation identity must report the same value.
 
 No path imports `pyowl_core._native`, relies on core arena layout, persists encoded dense IDs, or
 performs per-axiom Python/Rust calls. Native compilation retains the encoded owner for the complete

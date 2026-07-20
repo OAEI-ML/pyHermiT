@@ -156,7 +156,9 @@ Record `pyhermit.__version__`, `backend_info()`, `reasoner.backend`,
 `reasoner.diagnostics()`, the core structural, logical, and signature fingerprints, and
 `ReasonerConfig.as_dict()` with a result. The immutable diagnostics mapping uses the shared
 `scalar-python`, `scalar-wire`, and `encoded-native` ingestion-path vocabulary. Its lowercase
-SHA-256 `compiler_digest` is the current compiled-session cache identity. The public
+SHA-256 `compiler_digest` covers the canonical compiler manifest and is independent of the
+selected backend/ingestion path. The path-specific private session-cache key is deliberately not
+exposed as that digest. The public
 `COMPILER_CACHE_SCHEMA_VERSION`, `COMPILED_IR_SCHEMA_VERSION`, and `NATIVE_ABI_VERSION`
 constants support import-light cache partitioning.
 

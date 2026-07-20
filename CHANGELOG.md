@@ -13,7 +13,8 @@ release; dates describe repository evidence, not package-index publication.
 - Added explicit `python`, `native`, `auto`, and exact `verify` modes. Explicit native
   selection is fail-closed; semantic failures never fall back silently.
 - Added immutable public compiler/ingestion diagnostics and import-light compiler-cache,
-  compiled-IR, and native-ABI schema constants for cache and provenance consumers.
+  compiled-IR, and native-ABI schema constants for cache and provenance consumers; the public
+  compiler digest is canonical across backend and ingestion-path selection.
 - Added deterministic normalization/private IR, hyperresolution, branching and
   backjumping, equality/nominal/cardinality handling, existential blocking, role
   automata, and datatype semantics with Python/native parity evidence.

@@ -5,6 +5,8 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
@@ -72,12 +74,32 @@ class _Runtime:
     normalized: NormalizedOntology
     program: ClauseProgram
     compiled: CompiledOntology
+    compiler_digest: str
     session: BackendSession
     executor: CompiledQueryExecutor
     entailment: EntailmentService
     classification: ClassificationService
     realization: RealizationService
     result_mapper: CompiledResultMapper | None
+
+
+def _canonical_compiler_digest(compiled: CompiledOntology) -> str:
+    """Hash the complete compiler manifest without the path-specific session key."""
+
+    manifest = compiled.canonical_manifest()
+    fingerprints = manifest.get("fingerprints")
+    if not isinstance(fingerprints, dict) or "ontology" not in fingerprints:
+        raise RuntimeError("compiled ontology manifest lost its fingerprint contract")
+    canonical_fingerprints = dict(fingerprints)
+    del canonical_fingerprints["ontology"]
+    manifest["fingerprints"] = canonical_fingerprints
+    encoded = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(b"pyhermit/compiler-digest/v1\0" + encoded).hexdigest()
 
 
 class Reasoner:
@@ -143,11 +165,11 @@ class Reasoner:
         """
 
         with self._state_lock:
-            compiled = self._runtime.compiled
+            compiler_digest = self._runtime.compiler_digest
             backend = self._factory.info
         values: dict[str, bool | int | float | str] = {
             "compiler_cache_schema_version": COMPILER_CACHE_SCHEMA_VERSION,
-            "compiler_digest": compiled.ontology_fingerprint,
+            "compiler_digest": compiler_digest,
             "encoded_buffer_bytes": 0,
             "encoded_buffer_count": 0,
             "encoded_compiler_gil_released": False,
@@ -600,6 +622,7 @@ class Reasoner:
             normalized,
             program,
             compiled,
+            _canonical_compiler_digest(compiled),
             session,
             executor,
             entailment,

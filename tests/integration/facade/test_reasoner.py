@@ -162,6 +162,32 @@ def test_public_compiler_diagnostics_change_only_with_compilation_identity() -> 
     assert left.diagnostics()["compiler_digest"] != original
 
 
+def test_public_compiler_digest_is_backend_and_ingestion_path_independent() -> None:
+    if not pyhermit.backend_info().native.available:
+        pytest.skip("native extension is unavailable")
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "SubClassOf(:A :B)",
+        ),
+        options=OPTIONS,
+    )
+    reasoners = tuple(
+        Reasoner(snapshot, config=ReasonerConfig(backend=backend))
+        for backend in ("python", "native", "verify")
+    )
+
+    diagnostics = tuple(reasoner.diagnostics() for reasoner in reasoners)
+
+    assert {value["ingestion_path"] for value in diagnostics} == {
+        "scalar-python",
+        "scalar-wire",
+    }
+    assert len({value["compiler_digest"] for value in diagnostics}) == 1
+    assert len({reasoner._runtime.compiled.ontology_fingerprint for reasoner in reasoners}) == 3
+
+
 def test_buffered_updates_are_transactional_zero_copy_and_clear_precompute() -> None:
     reasoner = Reasoner(
         functional(
