@@ -628,11 +628,17 @@ fn validate_encoded_columns_v1(
             encoded::data_roles::DataRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        encoded::data_inclusions::compile_data_inclusion_phase(
+        let data_inclusions = encoded::data_inclusions::compile_data_inclusion_phase(
             &model,
             &symbols,
             &data_roles,
             encoded::data_inclusions::DataInclusionPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::data_role_hierarchy::compile_data_role_hierarchy_phase(
+            &data_roles,
+            &data_inclusions,
+            encoded::data_role_hierarchy::DataRoleHierarchyLimits::default(),
         )
         .map_err(encoded_validation_error)?;
         let simple_roles = encoded::simple_roles::compile_simple_role_phase(
@@ -744,11 +750,17 @@ fn validate_encoded_selection_v1(
             encoded::data_roles::DataRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        encoded::data_inclusions::compile_data_inclusion_phase(
+        let data_inclusions = encoded::data_inclusions::compile_data_inclusion_phase(
             &model,
             &symbols,
             &data_roles,
             encoded::data_inclusions::DataInclusionPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::data_role_hierarchy::compile_data_role_hierarchy_phase(
+            &data_roles,
+            &data_inclusions,
+            encoded::data_role_hierarchy::DataRoleHierarchyLimits::default(),
         )
         .map_err(encoded_validation_error)?;
         let simple_roles = encoded::simple_roles::compile_simple_role_phase(
@@ -952,6 +964,7 @@ struct EncodedSliceProgram {
     object_roles: encoded::object_roles::ObjectRolePhase,
     data_roles: encoded::data_roles::DataRolePhase,
     data_inclusions: encoded::data_inclusions::DataInclusionPhase,
+    data_role_hierarchy: encoded::data_role_hierarchy::DataRoleHierarchyPhase,
     simple_roles: encoded::simple_roles::SimpleRolePhase,
     complex_roles: encoded::complex_roles::ComplexRolePhase,
     object_role_hierarchy: encoded::object_role_hierarchy::ObjectRoleHierarchyPhase,
@@ -1487,6 +1500,45 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                 "encoded merged data-property inclusion work overflowed",
             ))
         })?;
+    let data_hierarchy_limits = encoded::data_role_hierarchy::DataRoleHierarchyLimits {
+        max_owned_bytes: limits
+            .max_owned_bytes
+            .checked_sub(merged_role_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged data inclusions exceeded the program ownership limit",
+                ))
+            })?,
+        max_work: limits
+            .max_work
+            .checked_sub(merged_role_work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged data inclusions exceeded the program work limit",
+                ))
+            })?,
+        ..encoded::data_role_hierarchy::DataRoleHierarchyLimits::default()
+    };
+    let data_role_hierarchy = encoded::data_role_hierarchy::compile_data_role_hierarchy_phase(
+        &data_roles,
+        &data_inclusions,
+        data_hierarchy_limits,
+    )
+    .map_err(encoded_validation_error)?;
+    let merged_role_owned = merged_role_owned
+        .checked_add(data_role_hierarchy.owned_bytes)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged data hierarchy ownership overflowed",
+            ))
+        })?;
+    let merged_role_work = merged_role_work
+        .checked_add(data_role_hierarchy.work)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged data hierarchy work overflowed",
+            ))
+        })?;
     let simple_role_limits = encoded::simple_roles::SimpleRolePhaseLimits {
         max_owned_bytes: limits
             .max_owned_bytes
@@ -1681,6 +1733,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         object_roles,
         data_roles,
         data_inclusions,
+        data_role_hierarchy,
         simple_roles,
         complex_roles,
         object_role_hierarchy,
@@ -1746,6 +1799,20 @@ fn encoded_data_property_inclusions_slices_manifest_v1(
     contain_encoded_selection(py, || {
         compile_encoded_slice_program(slices)?
             .data_inclusions
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
+#[pyfunction(name = "_encoded_data_property_hierarchy_slices_manifest_v1")]
+#[pyo3(signature = (*, slices))]
+fn encoded_data_property_hierarchy_slices_manifest_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        compile_encoded_slice_program(slices)?
+            .data_role_hierarchy
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
     })
@@ -2137,6 +2204,67 @@ fn encoded_data_property_inclusions_manifest_v1(
             &symbols,
             &roles,
             encoded::data_inclusions::DataInclusionPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?
+        .canonical_manifest_json()
+        .map_err(encoded_validation_error)
+    })
+}
+
+#[pyfunction(name = "_encoded_data_property_hierarchy_manifest_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_data_property_hierarchy_manifest_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let symbols = encoded::symbols::compile_symbol_phase(
+            &model,
+            encoded::symbols::SymbolPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let roles = encoded::data_roles::compile_data_role_phase(
+            &symbols,
+            encoded::data_roles::DataRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let inclusions = encoded::data_inclusions::compile_data_inclusion_phase(
+            &model,
+            &symbols,
+            &roles,
+            encoded::data_inclusions::DataInclusionPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::data_role_hierarchy::compile_data_role_hierarchy_phase(
+            &roles,
+            &inclusions,
+            encoded::data_role_hierarchy::DataRoleHierarchyLimits::default(),
         )
         .map_err(encoded_validation_error)?
         .canonical_manifest_json()
@@ -2843,6 +2971,14 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(
         encoded_data_property_inclusions_slices_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_data_property_hierarchy_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_data_property_hierarchy_slices_manifest_v1,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(
