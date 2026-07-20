@@ -2,16 +2,16 @@
 //!
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
 //! a scalar-compatible named `individual` domain and the exact semantic
-//! `source_literal` domain plus scalar-compatible plain-string `data_value`
+//! `source_literal` domain plus scalar-compatible string and Boolean `data_value`
 //! identities needed by later datatype/ABox phases. It compiles named-only
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
-//! plus named data-property domains, ranges, functionality, plain/string positive
-//! assertions, named datatype definitions, and named-class keys into the existing
-//! native predicate, clause, fact, and provenance records. Exact nested annotations
-//! participate
-//! in source provenance, with segmented anonymous scopes remapped before hashing.
+//! plus named data-property domains, ranges, functionality, string/Boolean positive
+//! and negative assertions, named datatype definitions, and named-class keys into the
+//! existing native predicate, clause, fact, and provenance records. Exact nested
+//! annotations participate in source provenance, with segmented anonymous scopes
+//! remapped before hashing.
 //! Predicate and clause identifiers are dense within this fragment and must be
 //! remapped when a later phase assembles the complete program; no fragment is
 //! publishable on its own.
@@ -70,6 +70,7 @@ const DATA_PROPERTY_PREFIX: &str = "data_property:";
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
 const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema#";
+const XSD_BOOLEAN_IRI: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 
@@ -2159,11 +2160,43 @@ fn extract_literal<B: ByteSource>(
         display.push_str(language.as_str());
     }
     let data_identity_key =
-        string_data_identity_key(&lexical, datatype_iri, language.as_deref(), budget)?;
+        literal_data_identity_key(&lexical, datatype_iri, language.as_deref(), budget)?;
     Ok(ExtractedLiteral {
         display,
         data_identity_key,
     })
+}
+
+fn literal_data_identity_key(
+    lexical: &str,
+    datatype_iri: &str,
+    language: Option<&str>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<Vec<u8>>> {
+    if datatype_iri == XSD_BOOLEAN_IRI {
+        return boolean_data_identity_key(lexical, budget).map(Some);
+    }
+    string_data_identity_key(lexical, datatype_iri, language, budget)
+}
+
+fn boolean_data_identity_key(lexical: &str, budget: &mut PhaseBudget) -> EncodedResult<Vec<u8>> {
+    let character_count = lexical.chars().count();
+    PhaseBudget::count(
+        character_count,
+        budget.limits.max_literal_characters,
+        "literal character count",
+    )?;
+    budget.claim_work(character_count)?;
+    let payload = match lexical {
+        "true" | "1" => b"[\"boolean\",true]".as_slice(),
+        "false" | "0" => b"[\"boolean\",false]".as_slice(),
+        _ => {
+            return Err(EncodedValidationError::invariant(
+                "Boolean literal is outside its datatype lexical space",
+            ));
+        }
+    };
+    prefixed_data_identity_key(payload, budget)
 }
 
 fn string_data_identity_key(
@@ -2215,6 +2248,10 @@ fn string_data_identity_key(
             "string data identity length disagrees with canonical JSON",
         ));
     }
+    prefixed_data_identity_key(&payload, budget).map(Some)
+}
+
+fn prefixed_data_identity_key(payload: &[u8], budget: &mut PhaseBudget) -> EncodedResult<Vec<u8>> {
     let key_len = DATA_IDENTITY_PREFIX
         .len()
         .checked_add(payload.len())
@@ -2225,8 +2262,8 @@ fn string_data_identity_key(
     key.try_reserve_exact(key_len)
         .map_err(|_| EncodedValidationError::resource("data identity key allocation failed"))?;
     key.extend_from_slice(DATA_IDENTITY_PREFIX);
-    key.extend_from_slice(&payload);
-    Ok(Some(key))
+    key.extend_from_slice(payload);
+    Ok(key)
 }
 
 fn string_identity_payload_len(text: &str, language: Option<&str>) -> EncodedResult<usize> {

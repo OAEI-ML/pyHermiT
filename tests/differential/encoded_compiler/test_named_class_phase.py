@@ -1367,6 +1367,68 @@ def test_composite_negative_string_data_assertions_remap_aliases_exactly() -> No
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_boolean_data_assertions_collapse_aliases_and_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "true"^^xsd:boolean)',
+            'DataPropertyAssertion(:p :i "1"^^xsd:boolean)',
+            'NegativeDataPropertyAssertion(:q :i "false"^^xsd:boolean)',
+            'NegativeDataPropertyAssertion(:q :i "0"^^xsd:boolean)',
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_data_assertions=True,
+        include_negative_data_assertions=True,
+    )
+    assert actual["data_value_symbols"] == _expected_data_value_symbols(snapshot)
+    assert len(cast(list[object], actual["source_literal_symbols"])) == 4
+    assert len(cast(list[object], actual["data_value_symbols"])) == 2
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_boolean_data_assertions_remap_one_shared_identity_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:z))",
+            "Declaration(NamedIndividual(:zSource))",
+            'DataPropertyAssertion(:z :zSource "true"^^xsd:boolean)',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:a))",
+            "Declaration(NamedIndividual(:aSource))",
+            'NegativeDataPropertyAssertion(:a :aSource "1"^^xsd:boolean)',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_data_assertions=True,
+        include_negative_data_assertions=True,
+    )
+    assert len(cast(list[object], actual["source_literal_symbols"])) == 2
+    assert len(cast(list[object], actual["data_value_symbols"])) == 1
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 @pytest.mark.parametrize(
     ("constructor", "predicate_kind"),
     [
@@ -1374,7 +1436,7 @@ def test_composite_negative_string_data_assertions_remap_aliases_exactly() -> No
         ("NegativeDataPropertyAssertion", PredicateKind.NEGATED_DATA_ROLE),
     ],
 )
-def test_non_string_data_assertion_defers_without_a_partial_data_fact(
+def test_numeric_data_assertion_defers_without_a_partial_data_fact(
     constructor: str,
     predicate_kind: PredicateKind,
 ) -> None:
