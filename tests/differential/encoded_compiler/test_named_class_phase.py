@@ -9,6 +9,7 @@ import struct
 from typing import Any, cast
 
 import pyowl_core
+import pyowl_core.model as owl
 import pytest
 from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
 
@@ -16,6 +17,7 @@ import pyhermit._native as native
 from pyhermit import ReasonerConfig
 from pyhermit.clauses.compiler import compile_captured_bundle
 from pyhermit.clauses.model import (
+    Atom,
     DLClause,
     GroundAtom,
     IndividualTerm,
@@ -128,11 +130,52 @@ def _symbol_payload(value: SymbolValue) -> dict[str, object]:
     }
 
 
-def _atom_payload(predicate_id: int) -> dict[str, object]:
+def _projected_atom_payload(
+    value: Atom,
+    predicate_remap: dict[int, int],
+) -> dict[str, object]:
+    arguments: list[dict[str, object]] = []
+    for argument in value.arguments:
+        assert isinstance(argument, Variable)
+        arguments.append({"index": argument.index, "sort": argument.sort.value})
     return {
-        "predicate_id": predicate_id,
-        "arguments": [{"index": 0, "sort": "object"}],
+        "predicate_id": predicate_remap[value.predicate_id],
+        "arguments": arguments,
     }
+
+
+def _projected_atom_key(
+    value: Atom,
+    predicate_remap: dict[int, int],
+) -> dict[str, object]:
+    arguments: list[dict[str, object]] = []
+    for argument in value.arguments:
+        assert isinstance(argument, Variable)
+        arguments.append(
+            {
+                "type": "Variable",
+                "index": argument.index,
+                "sort": argument.sort.value,
+                "schema_version": 1,
+            }
+        )
+    return {
+        "type": "Atom",
+        "predicate_id": predicate_remap[value.predicate_id],
+        "arguments": arguments,
+        "schema_version": 1,
+    }
+
+
+def _projected_rule_key(
+    clause: DLClause,
+    predicate_remap: dict[int, int],
+) -> bytes:
+    payload = {
+        "body": [_projected_atom_key(value, predicate_remap) for value in clause.body],
+        "head": [_projected_atom_key(value, predicate_remap) for value in clause.head],
+    }
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
 
 
 def _ground_atom_payload(
@@ -150,36 +193,13 @@ def _ground_atom_payload(
     }
 
 
-def _scalar_atom_key(predicate_id: int) -> dict[str, object]:
-    return {
-        "type": "Atom",
-        "predicate_id": predicate_id,
-        "arguments": [
-            {
-                "type": "Variable",
-                "index": 0,
-                "sort": "object",
-                "schema_version": 1,
-            }
-        ],
-        "schema_version": 1,
-    }
-
-
-def _rule_key(body: tuple[int, ...], head: tuple[int, ...]) -> bytes:
-    payload = {
-        "body": [_scalar_atom_key(value) for value in body],
-        "head": [_scalar_atom_key(value) for value in head],
-    }
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-
-
 def _expected_manifest(
     snapshot: pyowl_core.OntologyView,
     *,
     compiled_roots: int,
+    include_object_constraints: bool = False,
 ) -> dict[str, object]:
-    _normalized, program, ontology = compile_captured_bundle(
+    normalized, program, ontology = compile_captured_bundle(
         capture_ontology(snapshot).captured,
         ReasonerConfig(),
     )
@@ -201,8 +221,37 @@ def _expected_manifest(
         PredicateKind.INEQUALITY,
         PredicateKind.NAMED_INDIVIDUAL,
     }
+    constraint_provenance_ids: set[int] = set()
+    if include_object_constraints:
+        provenance_id_by_key = {
+            (value.source_sha256, value.generated): value.provenance_id
+            for value in program.provenance.entries
+        }
+        constraint_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if isinstance(
+                record.statement,
+                (owl.ObjectPropertyDomain, owl.ObjectPropertyRange),
+            )
+        }
+    predicates_by_id = {value.predicate_id: value for value in program.predicates.predicates}
+    constraint_clauses = {
+        clause.clause_id
+        for clause in program.clauses
+        if constraint_provenance_ids.intersection(clause.provenance_ids)
+    }
+    constraint_role_predicates = {
+        atom.predicate_id
+        for clause in program.clauses
+        if clause.clause_id in constraint_clauses
+        for atom in clause.body + clause.head
+        if predicates_by_id[atom.predicate_id].kind is PredicateKind.OBJECT_ROLE
+    }
     fragment_predicates = [
-        value for value in program.predicates.predicates if value.kind in fragment_kinds
+        value
+        for value in program.predicates.predicates
+        if value.kind in fragment_kinds or value.predicate_id in constraint_role_predicates
     ]
     predicate_remap = {
         value.predicate_id: identifier for identifier, value in enumerate(fragment_predicates)
@@ -223,35 +272,26 @@ def _expected_manifest(
     ]
 
     expected_variable = Variable(0, TermSort.OBJECT)
-    projected: list[tuple[bytes, DLClause, tuple[int, ...], tuple[int, ...]]] = []
+    projected: list[tuple[bytes, DLClause]] = []
     for clause in program.clauses:
-        if not clause.body or any(
+        unary_named_clause = bool(clause.body) and not any(
             atom.arguments != (expected_variable,) for atom in clause.body + clause.head
-        ):
-            continue
-        body = tuple(
-            predicate_remap[atom.predicate_id]
-            for atom in clause.body
-            if atom.predicate_id in predicate_remap
         )
-        head = tuple(
-            predicate_remap[atom.predicate_id]
-            for atom in clause.head
-            if atom.predicate_id in predicate_remap
-        )
-        if len(body) != len(clause.body) or len(head) != len(clause.head):
+        if not unary_named_clause and clause.clause_id not in constraint_clauses:
             continue
-        projected.append((_rule_key(body, head), clause, body, head))
+        if any(atom.predicate_id not in predicate_remap for atom in clause.body + clause.head):
+            continue
+        projected.append((_projected_rule_key(clause, predicate_remap), clause))
     projected.sort(key=lambda value: value[0])
     clauses = [
         {
             "clause_id": identifier,
-            "body": [_atom_payload(value) for value in body],
-            "head": [_atom_payload(value) for value in head],
+            "body": [_projected_atom_payload(value, predicate_remap) for value in clause.body],
+            "head": [_projected_atom_payload(value, predicate_remap) for value in clause.head],
             "provenance_ids": list(clause.provenance_ids),
             "join_order": list(clause.join_order),
         }
-        for identifier, (_key, clause, body, head) in enumerate(projected)
+        for identifier, (_key, clause) in enumerate(projected)
     ]
     positive_facts = [
         _ground_atom_payload(value, predicate_remap)
@@ -542,6 +582,115 @@ def test_annotated_named_axiom_family_preserves_exact_nested_provenance() -> Non
     assert manifest["compiled_roots"] == 6
     assert manifest["deferred_roots"] == 0
     assert manifest["named_individuals"] == [0, 1]
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_annotated_named_object_domain_and_range_clauses_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(AnnotationProperty(:meta))",
+            'ObjectPropertyDomain(Annotation(Annotation(:meta "nested") :note "left") :p :A)',
+            'ObjectPropertyDomain(Annotation(:note "right"@en) :p :A)',
+            "ObjectPropertyRange(Annotation(:note _:source) ObjectInverseOf(:q) :B)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=3,
+        include_object_constraints=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_anonymous_object_constraints_remap_and_group_sources_exactly() -> None:
+    source = functional(
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+        "Declaration(AnnotationProperty(:note))",
+        "ObjectPropertyDomain(Annotation(:note _:same) :p :A)",
+        "ObjectPropertyRange(Annotation(:note _:same) ObjectInverseOf(:q) :B)",
+    )
+    left = pyowl_core.load_snapshot(source, options=OPTIONS)
+    right = pyowl_core.load_snapshot(source, options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_object_constraints_remap_distinct_local_role_domains() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:z))",
+            "Declaration(AnnotationProperty(:note))",
+            "ObjectPropertyDomain(Annotation(:note _:left) :z :A)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:a))",
+            "Declaration(AnnotationProperty(:note))",
+            "ObjectPropertyRange(Annotation(:note _:right) ObjectInverseOf(:a) :B)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_object_constraints=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_complex_object_domain_and_range_still_defer_whole_roots() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            'ObjectPropertyDomain(Annotation(:note "source") :p ObjectSomeValuesFrom(:q :A))',
+            "ObjectPropertyRange(:p ObjectUnionOf(:A :B))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 2
+    assert all(
+        predicate["kind"] != "object_role"
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
