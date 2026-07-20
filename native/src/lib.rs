@@ -678,7 +678,7 @@ fn validate_encoded_columns_v1(
             encoded::role_automata::RoleAutomataPhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        encoded::role_model::compile_role_model_phase(
+        let role_model = encoded::role_model::compile_role_model_phase(
             &object_roles,
             &data_roles,
             &simple_roles,
@@ -688,6 +688,16 @@ fn validate_encoded_columns_v1(
             &role_semantics,
             &role_automata,
             encoded::role_model::RoleModelPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::role_clauses::compile_role_clause_phase(
+            &object_roles,
+            &data_roles,
+            &simple_roles,
+            &data_inclusions,
+            &complex_roles,
+            &role_model,
+            encoded::role_clauses::RoleClausePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
         encoded::named_classes::compile_named_class_phase(
@@ -812,7 +822,7 @@ fn validate_encoded_selection_v1(
             encoded::role_automata::RoleAutomataPhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        encoded::role_model::compile_role_model_phase(
+        let role_model = encoded::role_model::compile_role_model_phase(
             &object_roles,
             &data_roles,
             &simple_roles,
@@ -822,6 +832,16 @@ fn validate_encoded_selection_v1(
             &role_semantics,
             &role_automata,
             encoded::role_model::RoleModelPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::role_clauses::compile_role_clause_phase(
+            &object_roles,
+            &data_roles,
+            &simple_roles,
+            &data_inclusions,
+            &complex_roles,
+            &role_model,
+            encoded::role_clauses::RoleClausePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
         encoded::named_classes::compile_named_class_phase(
@@ -995,6 +1015,7 @@ struct EncodedSliceProgram {
     role_semantics: encoded::role_semantics::RoleSemanticsPhase,
     role_automata: encoded::role_automata::RoleAutomataPhase,
     role_model: encoded::role_model::RoleModelPhase,
+    role_clauses: encoded::role_clauses::RoleClausePhase,
 }
 
 fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<EncodedSliceProgram> {
@@ -1798,6 +1819,49 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         role_model_limits,
     )
     .map_err(encoded_validation_error)?;
+    let merged_role_model_owned = merged_automata_owned
+        .checked_add(role_model.owned_bytes)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged role-model ownership overflowed",
+            ))
+        })?;
+    let merged_role_model_work = merged_automata_work
+        .checked_add(role_model.work)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged role-model work overflowed",
+            ))
+        })?;
+    let role_clause_limits = encoded::role_clauses::RoleClausePhaseLimits {
+        max_owned_bytes: limits
+            .max_owned_bytes
+            .checked_sub(merged_role_model_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged role model exceeded the program ownership limit",
+                ))
+            })?,
+        max_work: limits
+            .max_work
+            .checked_sub(merged_role_model_work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged role model exceeded the program work limit",
+                ))
+            })?,
+        ..encoded::role_clauses::RoleClausePhaseLimits::default()
+    };
+    let role_clauses = encoded::role_clauses::compile_role_clause_phase(
+        &object_roles,
+        &data_roles,
+        &simple_roles,
+        &data_inclusions,
+        &complex_roles,
+        &role_model,
+        role_clause_limits,
+    )
+    .map_err(encoded_validation_error)?;
     Ok(EncodedSliceProgram {
         named_classes,
         object_roles,
@@ -1810,6 +1874,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         role_semantics,
         role_automata,
         role_model,
+        role_clauses,
     })
 }
 
@@ -1973,6 +2038,20 @@ fn encoded_role_model_slices_manifest_v1(
     })
 }
 
+#[pyfunction(name = "_encoded_role_clause_slices_manifest_v1")]
+#[pyo3(signature = (*, slices))]
+fn encoded_role_clause_slices_manifest_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        compile_encoded_slice_program(slices)?
+            .role_clauses
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
 #[pyfunction(name = "_encoded_object_role_slices_accepts_v1")]
 #[pyo3(signature = (*, slices, target_role_id, word_role_ids))]
 fn encoded_object_role_slices_accepts_v1(
@@ -2072,9 +2151,14 @@ fn compile_encoded_role_automata_program<B: encoded::ByteSource>(
     })
 }
 
+struct EncodedRoleProgram {
+    role_model: encoded::role_model::RoleModelPhase,
+    role_clauses: encoded::role_clauses::RoleClausePhase,
+}
+
 fn compile_encoded_role_model_program<B: encoded::ByteSource>(
     model: &encoded::model::ValidatedModel<B>,
-) -> encoded::EncodedResult<encoded::role_model::RoleModelPhase> {
+) -> encoded::EncodedResult<EncodedRoleProgram> {
     let symbols = encoded::symbols::compile_symbol_phase(
         model,
         encoded::symbols::SymbolPhaseLimits::default(),
@@ -2130,7 +2214,7 @@ fn compile_encoded_role_model_program<B: encoded::ByteSource>(
         &semantics,
         encoded::role_automata::RoleAutomataPhaseLimits::default(),
     )?;
-    encoded::role_model::compile_role_model_phase(
+    let role_model = encoded::role_model::compile_role_model_phase(
         &object_roles,
         &data_roles,
         &simple_roles,
@@ -2140,7 +2224,20 @@ fn compile_encoded_role_model_program<B: encoded::ByteSource>(
         &semantics,
         &automata,
         encoded::role_model::RoleModelPhaseLimits::default(),
-    )
+    )?;
+    let role_clauses = encoded::role_clauses::compile_role_clause_phase(
+        &object_roles,
+        &data_roles,
+        &simple_roles,
+        &data_inclusions,
+        &complex_roles,
+        &role_model,
+        encoded::role_clauses::RoleClausePhaseLimits::default(),
+    )?;
+    Ok(EncodedRoleProgram {
+        role_model,
+        role_clauses,
+    })
 }
 
 #[pyfunction(name = "_encoded_symbol_manifest_v1")]
@@ -2791,6 +2888,48 @@ fn encoded_role_model_manifest_v1(
             .map_err(encoded_validation_error)?;
         compile_encoded_role_model_program(&model)
             .map_err(encoded_validation_error)?
+            .role_model
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
+#[pyfunction(name = "_encoded_role_clause_manifest_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_role_clause_manifest_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        compile_encoded_role_model_program(&model)
+            .map_err(encoded_validation_error)?
+            .role_clauses
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
     })
@@ -3220,6 +3359,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(encoded_role_model_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(
         encoded_role_model_slices_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(encoded_role_clause_manifest_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_role_clause_slices_manifest_v1,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(encoded_object_role_accepts_v1, module)?)?;
