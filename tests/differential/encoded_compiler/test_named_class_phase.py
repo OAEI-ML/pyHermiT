@@ -133,24 +133,20 @@ def _expected_manifest(
         value.entity_id for value in ontology.declared_entities if value.kind == "class"
     }
     declared_individual_ids = {
-        value.entity_id
-        for value in ontology.declared_entities
-        if value.kind == "named_individual"
+        value.entity_id for value in ontology.declared_entities if value.kind == "named_individual"
     }
 
     fragment_kinds = {
         PredicateKind.CONCEPT,
         PredicateKind.DISJOINT_GUARD,
+        PredicateKind.EQUALITY,
         PredicateKind.NAMED_INDIVIDUAL,
     }
     fragment_predicates = [
-        value
-        for value in program.predicates.predicates
-        if value.kind in fragment_kinds
+        value for value in program.predicates.predicates if value.kind in fragment_kinds
     ]
     predicate_remap = {
-        value.predicate_id: identifier
-        for identifier, value in enumerate(fragment_predicates)
+        value.predicate_id: identifier for identifier, value in enumerate(fragment_predicates)
     }
     predicates = [
         {
@@ -209,9 +205,7 @@ def _expected_manifest(
         "family": "named_class_axioms",
         "compiled_roots": compiled_roots,
         "deferred_roots": 0,
-        "class_expression_symbols": [
-            _symbol_payload(value) for value in class_domain.values
-        ],
+        "class_expression_symbols": [_symbol_payload(value) for value in class_domain.values],
         "class_signature": [
             {
                 "class_expression_id": value.identifier,
@@ -318,37 +312,76 @@ def test_named_class_assertions_and_individual_signature_match_scalar() -> None:
     assert _native_manifest(snapshot) == _expected_manifest(snapshot, compiled_roots=3)
 
 
+def test_named_same_individual_facts_and_overlapping_provenance_match_scalar() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(NamedIndividual(:a))",
+            "Declaration(NamedIndividual(:b))",
+            "Declaration(NamedIndividual(:c))",
+            "SameIndividual(:a :b :c)",
+            # The (a, b) equality is shared by two source axioms, but each
+            # source retains its own provenance entry on the merged fact.
+            "SameIndividual(:a :b)",
+        ),
+        options=OPTIONS,
+    )
+
+    assert _native_manifest(snapshot) == _expected_manifest(snapshot, compiled_roots=2)
+
+
 def test_double_digit_individual_and_fact_ids_preserve_scalar_order() -> None:
     declarations = [f"Declaration(NamedIndividual(:i{index}))" for index in range(12)]
     assertions = [f"ClassAssertion(owl:Thing :i{index})" for index in range(12)]
     snapshot = pyowl_core.load_snapshot(
-        functional(*declarations, *assertions),
+        functional(*declarations, *assertions, "SameIndividual(:i8 :i9)"),
         options=OPTIONS,
     )
 
     assert _native_manifest(snapshot) == _expected_manifest(
         snapshot,
-        compiled_roots=len(assertions),
+        compiled_roots=len(assertions) + 1,
     )
 
 
-def test_complex_or_annotated_class_assertion_is_deferred_to_scalar() -> None:
+def test_complex_or_annotated_named_abox_root_is_deferred_to_scalar() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(AnnotationProperty(:note))",
             "Declaration(NamedIndividual(:i))",
+            "Declaration(NamedIndividual(:j))",
             "ClassAssertion(ObjectSomeValuesFrom(:p :A) :i)",
             'ClassAssertion(Annotation(:note "source") :A :i)',
+            'SameIndividual(Annotation(:note "source") :i :j)',
         ),
         options=OPTIONS,
     )
 
     manifest = _native_manifest(snapshot)
     assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 2
+    assert manifest["deferred_roots"] == 3
+    assert manifest["named_individuals"] == [0, 1]
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_anonymous_same_individual_defers_the_whole_root_without_partial_fact() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(NamedIndividual(:i))",
+            "SameIndividual(:i _:anonymous)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
     assert manifest["named_individuals"] == [0]
+    predicates = cast(list[dict[str, object]], manifest["predicates"])
+    assert all(value["kind"] != PredicateKind.EQUALITY.value for value in predicates)
+    positive_facts = cast(list[dict[str, object]], manifest["positive_facts"])
+    assert len(positive_facts) == 2
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

@@ -2,11 +2,11 @@
 //!
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
 //! a scalar-compatible named `individual` domain. It compiles named-only
-//! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, and `ClassAssertion`
-//! axioms into the existing native predicate, clause, fact, and provenance
-//! records. Predicate and clause identifiers are dense within this fragment
-//! and must be remapped when a later phase assembles the complete program; no
-//! fragment is publishable on its own.
+//! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`, and
+//! `SameIndividual` axioms into the existing native predicate, clause, fact,
+//! and provenance records. Predicate and clause identifiers are dense within
+//! this fragment and must be remapped when a later phase assembles the complete
+//! program; no fragment is publishable on its own.
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #![forbid(unsafe_code)]
@@ -29,6 +29,7 @@ const ENTITY_TAG: u16 = 2;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
 const DISJOINT_CLASSES_TAG: u16 = 63;
+const SAME_INDIVIDUAL_TAG: u16 = 110;
 const CLASS_ASSERTION_TAG: u16 = 112;
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
 const DISJOINT_GUARD_DOMAIN: &[u8] = b"pyhermit:linear-disjoint-classes:v1\0";
@@ -393,6 +394,19 @@ struct NormalizedFact {
     provenance: Vec<[u8; 32]>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RawEqualityFact {
+    left_individual: u32,
+    right_individual: u32,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum GroundArguments {
+    Unary(u32),
+    Binary(u32, u32),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NamedDisjointOutput {
     edges: Vec<RawEdge>,
@@ -500,6 +514,7 @@ pub fn compile_named_class_phase<B: ByteSource>(
     let mut raw_edges = Vec::<RawEdge>::new();
     let mut raw_disjoints = Vec::<RawDisjoint>::new();
     let mut raw_facts = Vec::<RawFact>::new();
+    let mut raw_equalities = Vec::<RawEqualityFact>::new();
     let mut compiled_roots = 0_usize;
     let mut deferred_roots = 0_usize;
     for root in &symbols.roots {
@@ -604,6 +619,47 @@ pub fn compile_named_class_phase<B: ByteSource>(
                     }
                 }
             }
+            RootHandler::SameIndividual => {
+                match named_same_individuals(
+                    model,
+                    symbols,
+                    &individual_signature,
+                    &individual_domain,
+                    root.node,
+                    &mut budget,
+                )? {
+                    Some(equalities) => {
+                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class compiled-root count overflowed",
+                            )
+                        })?;
+                        budget.claim_owned(
+                            equalities
+                                .len()
+                                .checked_mul(size_of::<RawEqualityFact>())
+                                .ok_or_else(|| {
+                                    EncodedValidationError::resource(
+                                        "named same-individual allocation overflowed",
+                                    )
+                                })?,
+                        )?;
+                        raw_equalities.try_reserve(equalities.len()).map_err(|_| {
+                            EncodedValidationError::resource(
+                                "named same-individual allocation failed",
+                            )
+                        })?;
+                        raw_equalities.extend(equalities);
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
             RootHandler::ClassAssertion => {
                 match named_class_assertion(
                     model,
@@ -654,16 +710,20 @@ pub fn compile_named_class_phase<B: ByteSource>(
     let edges = normalize_edges(raw_edges, &mut budget)?;
     let disjoints = normalize_disjoints(raw_disjoints, &class_domain, &mut budget)?;
     let facts = normalize_facts(raw_facts, &mut budget)?;
-    let (provenance, provenance_keys) = freeze_provenance(&edges, &disjoints, &facts, &mut budget)?;
-    let (predicates, predicate_by_class, guard_predicates, named_predicate) = freeze_predicates(
-        &edges,
-        &disjoints,
-        &facts,
-        thing,
-        nothing,
-        !individual_domain.values.is_empty(),
-        &mut budget,
-    )?;
+    let equalities = normalize_equalities(raw_equalities, &mut budget)?;
+    let (provenance, provenance_keys) =
+        freeze_provenance(&edges, &disjoints, &facts, &equalities, &mut budget)?;
+    let (predicates, predicate_by_class, guard_predicates, named_predicate, equality_predicate) =
+        freeze_predicates(
+            &edges,
+            &disjoints,
+            &facts,
+            &equalities,
+            thing,
+            nothing,
+            !individual_domain.values.is_empty(),
+            &mut budget,
+        )?;
     let clauses = freeze_clauses(
         &edges,
         &disjoints,
@@ -675,10 +735,12 @@ pub fn compile_named_class_phase<B: ByteSource>(
     )?;
     let positive_facts = freeze_positive_facts(
         &facts,
+        &equalities,
         &individual_domain,
         thing,
         &predicate_by_class,
         named_predicate,
+        equality_predicate,
         &provenance_keys,
         &mut budget,
     )?;
@@ -1087,6 +1149,102 @@ fn named_disjoint_classes<B: ByteSource>(
     }))
 }
 
+fn named_same_individuals<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    signature: &[IndividualSignatureBinding],
+    domain: &DecodedSymbolDomain,
+    root: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<Vec<RawEqualityFact>>> {
+    let node = model.node(root)?;
+    if node.tag() != SAME_INDIVIDUAL_TAG || node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "same-individual root no longer has schema-1 shape",
+        ));
+    }
+    if !annotations_are_empty(model, node, 1)? {
+        return Ok(None);
+    }
+    let individuals_component = required_component(
+        model.field(node.fields().start)?,
+        "same-individual individuals",
+    )?;
+    let ComponentValue::Collection(individuals_view) = model.resolve(individuals_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "same-individual members did not resolve to a collection",
+        ));
+    };
+    let mut individuals = Vec::new();
+    budget.claim_owned(
+        individuals_view
+            .len()
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("same-individual member allocation overflowed")
+            })?,
+    )?;
+    individuals
+        .try_reserve_exact(individuals_view.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("same-individual member allocation failed")
+        })?;
+    for item_index in individuals_view.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "same-individual member")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "same-individual member did not resolve to a node",
+            ));
+        };
+        let Some(individual_id) = named_individual_id(model, symbols, signature, identifier)?
+        else {
+            return Ok(None);
+        };
+        individuals.push(individual_id);
+    }
+    if individuals.len() < 2 {
+        return Err(EncodedValidationError::invariant(
+            "same-individual root has fewer than two members",
+        ));
+    }
+    if !individuals.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(EncodedValidationError::invariant(
+            "same-individual members are not in canonical set order",
+        ));
+    }
+    let provenance = individual_set_axiom_digest(
+        domain,
+        SAME_INDIVIDUAL_TAG,
+        &individuals,
+        "same-individual",
+        budget,
+    )?;
+    let equality_count = individuals.len().checked_sub(1).ok_or_else(|| {
+        EncodedValidationError::invariant("same-individual equality count underflowed")
+    })?;
+    let mut equalities = Vec::new();
+    budget.claim_owned(
+        equality_count
+            .checked_mul(size_of::<RawEqualityFact>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("same-individual fact allocation overflowed")
+            })?,
+    )?;
+    equalities
+        .try_reserve_exact(equality_count)
+        .map_err(|_| EncodedValidationError::resource("same-individual fact allocation failed"))?;
+    let first = individuals[0];
+    for individual in individuals.into_iter().skip(1) {
+        equalities.push(RawEqualityFact {
+            left_individual: first,
+            right_individual: individual,
+            provenance,
+        });
+    }
+    Ok(Some(equalities))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn named_class_assertion<B: ByteSource>(
     model: &ValidatedModel<B>,
@@ -1378,10 +1536,22 @@ fn normalize_facts(
     Ok(normalized)
 }
 
+fn normalize_equalities(
+    mut raw: Vec<RawEqualityFact>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<RawEqualityFact>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_unstable();
+    budget.claim_work(raw.len())?;
+    raw.dedup();
+    Ok(raw)
+}
+
 fn freeze_provenance(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     facts: &[NormalizedFact],
+    equalities: &[RawEqualityFact],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(Vec<DecodedProvenanceEntry>, Vec<ProvenanceKey>)> {
     let builtin: [u8; 32] = Sha256::digest(BUILTIN_PROVENANCE_INPUT).into();
@@ -1419,6 +1589,17 @@ fn freeze_provenance(
             &mut keys,
             ProvenanceKey {
                 source_sha256: fact.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    budget.claim_work(equalities.len())?;
+    for equality in equalities {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: vec![equality.provenance],
                 generated: false,
             },
             budget,
@@ -1486,6 +1667,7 @@ fn push_provenance_key(
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PredicateOwner {
     Concept(u32),
+    Equality,
     NamedIndividual,
     DisjointGuard {
         digest: [u8; 32],
@@ -1507,12 +1689,15 @@ type FrozenPredicates = (
     PredicateIndex,
     GuardPredicateIndex,
     Option<u32>,
+    Option<u32>,
 );
 
+#[allow(clippy::too_many_arguments)]
 fn freeze_predicates(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     facts: &[NormalizedFact],
+    equalities: &[RawEqualityFact],
     thing: u32,
     nothing: u32,
     has_individuals: bool,
@@ -1540,6 +1725,18 @@ fn freeze_predicates(
     class_ids.dedup();
 
     let mut ordered = Vec::<PendingPredicate>::new();
+    if !equalities.is_empty() {
+        let key = equality_predicate_key();
+        budget.claim_owned(size_of::<PendingPredicate>())?;
+        budget.claim_owned(key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("equality predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::Equality,
+        });
+    }
     if has_individuals {
         let key = named_individual_predicate_key();
         budget.claim_owned(size_of::<PendingPredicate>())?;
@@ -1602,6 +1799,7 @@ fn freeze_predicates(
     let mut predicate_by_class = Vec::new();
     let mut guard_predicates = Vec::new();
     let mut named_predicate = None;
+    let mut equality_predicate = None;
     budget.claim_owned(
         ordered
             .len()
@@ -1647,6 +1845,21 @@ fn freeze_predicates(
                 });
                 predicate_by_class.push((class_id, predicate_id));
             }
+            PredicateOwner::Equality => {
+                budget.claim_owned(size_of::<TermSort>())?;
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::Equality,
+                    argument_sorts: vec![TermSort::Object, TermSort::Object],
+                    symbol_id: None,
+                    role_id: None,
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: Vec::new(),
+                    internal_key: None,
+                });
+                equality_predicate = Some(predicate_id);
+            }
             PredicateOwner::NamedIndividual => {
                 budget.claim_owned("named-individual".len())?;
                 predicates.push(DecodedPredicate {
@@ -1690,6 +1903,7 @@ fn freeze_predicates(
         predicate_by_class,
         guard_predicates,
         named_predicate,
+        equality_predicate,
     ))
 }
 
@@ -1782,12 +1996,15 @@ fn freeze_clauses(
     Ok(clauses)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn freeze_positive_facts(
     facts: &[NormalizedFact],
+    equalities: &[RawEqualityFact],
     individual_domain: &DecodedSymbolDomain,
     thing: u32,
     predicate_by_class: &[(u32, u32)],
     named_predicate: Option<u32>,
+    equality_predicate: Option<u32>,
     provenance_keys: &[ProvenanceKey],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<DecodedGroundAtom>> {
@@ -1807,23 +2024,53 @@ fn freeze_positive_facts(
             ));
         }
     };
+    let equality_predicate = match (equalities.is_empty(), equality_predicate) {
+        (true, None) => None,
+        (false, Some(identifier)) => Some(identifier),
+        _ => {
+            return Err(EncodedValidationError::invariant(
+                "equality predicate presence disagrees with equality facts",
+            ));
+        }
+    };
     let expected = individual_domain
         .values
         .len()
         .checked_mul(2)
         .and_then(|value| value.checked_add(facts.len()))
+        .and_then(|value| value.checked_add(equalities.len()))
         .ok_or_else(|| EncodedValidationError::resource("positive-fact count overflowed"))?;
-    budget.claim_work(facts.len())?;
-    let merged_count = expected
-        .checked_sub(facts.iter().filter(|fact| fact.class_id == thing).count())
-        .ok_or_else(|| {
-            EncodedValidationError::invariant("positive-fact merge count underflowed")
-        })?;
+    budget.claim_work(
+        facts
+            .len()
+            .checked_add(equalities.len())
+            .ok_or_else(|| EncodedValidationError::resource("positive-fact work overflowed"))?,
+    )?;
+    let top_fact_count = facts.iter().filter(|fact| fact.class_id == thing).count();
+    let class_fact_count = facts.len().checked_sub(top_fact_count).ok_or_else(|| {
+        EncodedValidationError::invariant("positive class-fact merge count underflowed")
+    })?;
+    let equality_fact_count = equalities
+        .iter()
+        .enumerate()
+        .filter(|(index, equality)| {
+            *index == 0
+                || equalities[*index - 1].left_individual != equality.left_individual
+                || equalities[*index - 1].right_individual != equality.right_individual
+        })
+        .count();
+    let merged_count = individual_domain
+        .values
+        .len()
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(class_fact_count))
+        .and_then(|value| value.checked_add(equality_fact_count))
+        .ok_or_else(|| EncodedValidationError::resource("positive-fact merge count overflowed"))?;
     PhaseBudget::count(merged_count, budget.limits.max_facts, "positive fact count")?;
-    let mut pending = Vec::<(u32, u32, u32)>::new();
+    let mut pending = Vec::<(u32, GroundArguments, u32)>::new();
     budget.claim_owned(
         expected
-            .checked_mul(size_of::<(u32, u32, u32)>())
+            .checked_mul(size_of::<(u32, GroundArguments, u32)>())
             .ok_or_else(|| EncodedValidationError::resource("positive-fact input overflowed"))?,
     )?;
     pending
@@ -1837,8 +2084,16 @@ fn freeze_positive_facts(
         let top = thing_predicate.ok_or_else(|| {
             EncodedValidationError::invariant("top concept predicate index is incomplete")
         })?;
-        pending.push((named, individual.identifier, builtin_provenance));
-        pending.push((top, individual.identifier, builtin_provenance));
+        pending.push((
+            named,
+            GroundArguments::Unary(individual.identifier),
+            builtin_provenance,
+        ));
+        pending.push((
+            top,
+            GroundArguments::Unary(individual.identifier),
+            builtin_provenance,
+        ));
     }
     for fact in facts {
         budget.claim_work(1)?;
@@ -1852,18 +2107,50 @@ fn freeze_positive_facts(
         }
         pending.push((
             predicate_id(predicate_by_class, fact.class_id)?,
-            fact.individual_id,
+            GroundArguments::Unary(fact.individual_id),
             provenance_id(provenance_keys, &fact.provenance, false)?,
+        ));
+    }
+    for equality in equalities {
+        budget.claim_work(1)?;
+        if equality.left_individual >= equality.right_individual {
+            return Err(EncodedValidationError::invariant(
+                "named same-individual fact is not canonically oriented",
+            ));
+        }
+        if [equality.left_individual, equality.right_individual]
+            .into_iter()
+            .any(|individual_id| {
+                usize::try_from(individual_id)
+                    .ok()
+                    .is_none_or(|identifier| identifier >= individual_domain.values.len())
+            })
+        {
+            return Err(EncodedValidationError::invariant(
+                "named same-individual fact has a dangling individual ID",
+            ));
+        }
+        let predicate = equality_predicate.ok_or_else(|| {
+            EncodedValidationError::invariant("equality predicate index is incomplete")
+        })?;
+        pending.push((
+            predicate,
+            GroundArguments::Binary(equality.left_individual, equality.right_individual),
+            provenance_id(
+                provenance_keys,
+                std::slice::from_ref(&equality.provenance),
+                false,
+            )?,
         ));
     }
     budget.claim_work(sort_work(pending.len()))?;
     pending.sort_unstable();
 
-    let mut merged = Vec::<(u32, u32, Vec<u32>)>::new();
-    for (predicate, individual, provenance) in pending {
+    let mut merged = Vec::<(u32, GroundArguments, Vec<u32>)>::new();
+    for (predicate, arguments, provenance) in pending {
         budget.claim_work(1)?;
         if let Some(previous) = merged.last_mut() {
-            if previous.0 == predicate && previous.1 == individual {
+            if previous.0 == predicate && previous.1 == arguments {
                 if previous.2.last() != Some(&provenance) {
                     budget.claim_owned(size_of::<u32>())?;
                     previous.2.try_reserve(1).map_err(|_| {
@@ -1876,7 +2163,7 @@ fn freeze_positive_facts(
                 continue;
             }
         }
-        budget.claim_owned(size_of::<(u32, u32, Vec<u32>)>() + size_of::<u32>())?;
+        budget.claim_owned(size_of::<(u32, GroundArguments, Vec<u32>)>() + size_of::<u32>())?;
         merged.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("positive-fact merge allocation failed")
         })?;
@@ -1885,7 +2172,7 @@ fn freeze_positive_facts(
             EncodedValidationError::resource("positive-fact provenance allocation failed")
         })?;
         provenance_ids.push(provenance);
-        merged.push((predicate, individual, provenance_ids));
+        merged.push((predicate, arguments, provenance_ids));
     }
     PhaseBudget::count(merged.len(), budget.limits.max_facts, "positive fact count")?;
     if merged.len() != merged_count {
@@ -1895,16 +2182,34 @@ fn freeze_positive_facts(
     }
 
     let mut ordered = Vec::<(Vec<u8>, DecodedGroundAtom)>::new();
+    let binary_fact_count = merged
+        .iter()
+        .filter(|(_, arguments, _)| matches!(arguments, GroundArguments::Binary(_, _)))
+        .count();
+    if binary_fact_count != equality_fact_count {
+        return Err(EncodedValidationError::invariant(
+            "equality-fact merge count disagrees with its exact bound",
+        ));
+    }
+    let term_count = merged
+        .len()
+        .checked_add(binary_fact_count)
+        .ok_or_else(|| EncodedValidationError::resource("positive-fact term count overflowed"))?;
     budget.claim_owned(
         merged
             .len()
-            .checked_mul(size_of::<(Vec<u8>, DecodedGroundAtom)>() + size_of::<DecodedTerm>())
+            .checked_mul(size_of::<(Vec<u8>, DecodedGroundAtom)>())
+            .and_then(|value| {
+                term_count
+                    .checked_mul(size_of::<DecodedTerm>())
+                    .and_then(|term_bytes| value.checked_add(term_bytes))
+            })
             .ok_or_else(|| EncodedValidationError::resource("positive-fact output overflowed"))?,
     )?;
     ordered
         .try_reserve_exact(merged.len())
         .map_err(|_| EncodedValidationError::resource("positive-fact output allocation failed"))?;
-    for (predicate_id, individual_id, provenance_ids) in merged {
+    for (predicate_id, arguments, provenance_ids) in merged {
         budget.claim_owned(
             provenance_ids
                 .len()
@@ -1913,13 +2218,26 @@ fn freeze_positive_facts(
                     EncodedValidationError::resource("positive-fact provenance output overflowed")
                 })?,
         )?;
-        let key = ground_fact_key(predicate_id, individual_id, &provenance_ids);
+        let key = ground_fact_key(predicate_id, arguments, &provenance_ids);
         budget.claim_owned(key.len())?;
+        let arguments = match arguments {
+            GroundArguments::Unary(individual_id) => {
+                vec![DecodedTerm::Individual { individual_id }]
+            }
+            GroundArguments::Binary(left_individual, right_individual) => vec![
+                DecodedTerm::Individual {
+                    individual_id: left_individual,
+                },
+                DecodedTerm::Individual {
+                    individual_id: right_individual,
+                },
+            ],
+        };
         ordered.push((
             key,
             DecodedGroundAtom {
                 predicate_id,
-                arguments: vec![DecodedTerm::Individual { individual_id }],
+                arguments,
                 provenance_ids,
             },
         ));
@@ -2109,6 +2427,34 @@ fn class_assertion_digest(
     Ok(Sha256::digest(encoded).into())
 }
 
+fn individual_set_axiom_digest(
+    domain: &DecodedSymbolDomain,
+    tag: u16,
+    individuals: &[u32],
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<[u8; 32]> {
+    let mut encoded = Vec::new();
+    push_varint(&mut encoded, u64::from(tag), budget)?;
+    push_byte(&mut encoded, 6, budget)?;
+    push_varint(
+        &mut encoded,
+        u64::try_from(individuals.len())
+            .map_err(|_| EncodedValidationError::resource(format!("{name} arity exceeds u64")))?,
+        budget,
+    )?;
+    for individual_id in individuals {
+        push_frame(
+            &mut encoded,
+            individual_key(domain, *individual_id)?,
+            budget,
+        )?;
+    }
+    push_empty_set(&mut encoded, budget)?;
+    budget.claim_work(encoded.len())?;
+    Ok(Sha256::digest(encoded).into())
+}
+
 fn equivalent_digest(
     domain: &DecodedSymbolDomain,
     classes: &[u32],
@@ -2253,6 +2599,11 @@ fn named_individual_predicate_key() -> Vec<u8> {
         .to_vec()
 }
 
+fn equality_predicate_key() -> Vec<u8> {
+    b"{\"annotation\":[],\"argument_sorts\":[\"object\",\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"equality\",\"role_id\":null,\"symbol_id\":null}"
+        .to_vec()
+}
+
 fn disjoint_guard_predicate_key(sequence: u32, internal_key: &str) -> Vec<u8> {
     format!(
         "{{\"annotation\":[{sequence}],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":\"{internal_key}\",\"kind\":\"disjoint_guard\",\"role_id\":null,\"symbol_id\":null}}"
@@ -2282,14 +2633,26 @@ fn atom_json(predicate_id: u32) -> String {
     )
 }
 
-fn ground_fact_key(predicate_id: u32, individual_id: u32, provenance_ids: &[u32]) -> Vec<u8> {
+fn ground_fact_key(
+    predicate_id: u32,
+    arguments: GroundArguments,
+    provenance_ids: &[u32],
+) -> Vec<u8> {
     let provenance = provenance_ids
         .iter()
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",");
+    let arguments = match arguments {
+        GroundArguments::Unary(individual_id) => format!(
+            "{{\"individual_id\":{individual_id},\"schema_version\":1,\"type\":\"IndividualTerm\"}}"
+        ),
+        GroundArguments::Binary(left_individual, right_individual) => format!(
+            "{{\"individual_id\":{left_individual},\"schema_version\":1,\"type\":\"IndividualTerm\"}},{{\"individual_id\":{right_individual},\"schema_version\":1,\"type\":\"IndividualTerm\"}}"
+        ),
+    };
     format!(
-        "{{\"arguments\":[{{\"individual_id\":{individual_id},\"schema_version\":1,\"type\":\"IndividualTerm\"}}],\"predicate_id\":{predicate_id},\"provenance_ids\":[{provenance}],\"schema_version\":1,\"type\":\"GroundAtom\"}}"
+        "{{\"arguments\":[{arguments}],\"predicate_id\":{predicate_id},\"provenance_ids\":[{provenance}],\"schema_version\":1,\"type\":\"GroundAtom\"}}"
     )
     .into_bytes()
 }
@@ -2448,6 +2811,31 @@ mod tests {
         }
     }
 
+    fn same_individual() -> OwnedColumns {
+        OwnedColumns {
+            root_kinds: vec![super::super::ROOT_AXIOM],
+            root_ids: le32(&[5]),
+            node_tags: le16(&[1, 1, 2, 2, SAME_INDIVIDUAL_TAG]),
+            node_field_offsets: le64(&[0, 1, 2, 4, 6, 8]),
+            field_kinds: vec![
+                super::super::COMPONENT_TEXT,
+                super::super::COMPONENT_TEXT,
+                super::super::COMPONENT_ENUM,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_ENUM,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_SET,
+                super::super::COMPONENT_SET,
+            ],
+            field_values: le64(&[0, 5, 10, 1, 26, 2, 0, 2]),
+            field_lengths: le64(&[5, 5, 16, 0, 16, 0, 2, 0]),
+            item_kinds: vec![super::super::COMPONENT_NODE, super::super::COMPONENT_NODE],
+            item_values: le64(&[3, 4]),
+            item_lengths: le64(&[0, 0]),
+            scalar_bytes: b"urn:aurn:bnamed_individualnamed_individual".to_vec(),
+        }
+    }
+
     #[test]
     fn equivalent_named_classes_freeze_existing_native_records() -> EncodedResult<()> {
         let owned = equivalent_classes();
@@ -2546,6 +2934,42 @@ mod tests {
         assert!(phase.positive_facts.iter().all(|fact| {
             fact.arguments == [DecodedTerm::Individual { individual_id: 0 }]
                 && !fact.provenance_ids.is_empty()
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn named_same_individual_freezes_binary_equality_fact() -> EncodedResult<()> {
+        let owned = same_individual();
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let symbols = compile_symbol_phase(&model, SymbolPhaseLimits::default())?;
+        let phase = compile_named_class_phase(&model, &symbols, NamedClassPhaseLimits::default())?;
+
+        assert_eq!(phase.compiled_roots, 1);
+        assert_eq!(phase.deferred_roots, 0);
+        assert_eq!(phase.individual_domain.values.len(), 2);
+        assert_eq!(phase.named_individuals, [0, 1]);
+        assert_eq!(phase.predicates.len(), 4);
+        assert_eq!(phase.clauses.len(), 1);
+        assert_eq!(phase.positive_facts.len(), 5);
+        assert_eq!(phase.provenance.len(), 2);
+        let equality = phase
+            .predicates
+            .iter()
+            .find(|predicate| predicate.kind == PredicateKind::Equality)
+            .ok_or_else(|| EncodedValidationError::invariant("equality predicate is missing"))?;
+        assert_eq!(
+            equality.argument_sorts,
+            [TermSort::Object, TermSort::Object]
+        );
+        assert!(phase.positive_facts.iter().any(|fact| {
+            fact.predicate_id == equality.predicate_id
+                && fact.arguments
+                    == [
+                        DecodedTerm::Individual { individual_id: 0 },
+                        DecodedTerm::Individual { individual_id: 1 },
+                    ]
+                && fact.provenance_ids.len() == 1
         }));
         Ok(())
     }
