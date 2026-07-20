@@ -630,6 +630,13 @@ fn validate_encoded_columns_v1(
             encoded::simple_roles::SimpleRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
+        encoded::complex_roles::compile_complex_role_phase(
+            &model,
+            &symbols,
+            &object_roles,
+            encoded::complex_roles::ComplexRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
         encoded::object_role_hierarchy::compile_object_role_hierarchy_phase(
             &object_roles,
             &simple_roles,
@@ -708,6 +715,13 @@ fn validate_encoded_selection_v1(
             &symbols,
             &object_roles,
             encoded::simple_roles::SimpleRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::complex_roles::compile_complex_role_phase(
+            &model,
+            &symbols,
+            &object_roles,
+            encoded::complex_roles::ComplexRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
         encoded::object_role_hierarchy::compile_object_role_hierarchy_phase(
@@ -836,6 +850,7 @@ struct EncodedSliceProgram {
     named_classes: encoded::named_classes::NamedClassPhase,
     object_roles: encoded::object_roles::ObjectRolePhase,
     simple_roles: encoded::simple_roles::SimpleRolePhase,
+    complex_roles: encoded::complex_roles::ComplexRolePhase,
     object_role_hierarchy: encoded::object_role_hierarchy::ObjectRoleHierarchyPhase,
 }
 
@@ -881,6 +896,14 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         .map_err(|_| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "encoded simple-role slice transaction allocation failed",
+            ))
+        })?;
+    let mut complex_role_phases = Vec::new();
+    complex_role_phases
+        .try_reserve_exact(slices.len())
+        .map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded complex-role slice transaction allocation failed",
             ))
         })?;
     let mut source_work = 0_u64;
@@ -1062,7 +1085,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     "encoded slice simple-role ownership overflowed",
                 ))
             })?;
-        let named_limits = encoded::named_classes::NamedClassPhaseLimits {
+        let complex_role_limits = encoded::complex_roles::ComplexRolePhaseLimits {
             max_owned_bytes: limits
                 .max_owned_bytes
                 .checked_sub(after_simple_role_owned)
@@ -1079,19 +1102,59 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                         "encoded slice simple-role work exceeded its aggregate limit",
                     ))
                 })?,
+            ..encoded::complex_roles::ComplexRolePhaseLimits::default()
+        };
+        let complex_roles = encoded::complex_roles::compile_complex_role_phase(
+            &model,
+            &symbols,
+            &object_roles,
+            complex_role_limits,
+        )
+        .map_err(encoded_validation_error)?;
+        let after_complex_role_work = after_simple_role_work
+            .checked_add(complex_roles.work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice complex-role work overflowed",
+                ))
+            })?;
+        let after_complex_role_owned = after_simple_role_owned
+            .checked_add(complex_roles.owned_bytes)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice complex-role ownership overflowed",
+                ))
+            })?;
+        let named_limits = encoded::named_classes::NamedClassPhaseLimits {
+            max_owned_bytes: limits
+                .max_owned_bytes
+                .checked_sub(after_complex_role_owned)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded slice complex-role ownership exceeded its aggregate limit",
+                    ))
+                })?,
+            max_work: limits
+                .max_work
+                .checked_sub(after_complex_role_work)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded slice complex-role work exceeded its aggregate limit",
+                    ))
+                })?,
             ..limits
         };
         let named =
             encoded::named_classes::compile_named_class_phase(&model, &symbols, named_limits)
                 .map_err(encoded_validation_error)?;
-        source_work = after_simple_role_work
+        source_work = after_complex_role_work
             .checked_add(named.work)
             .ok_or_else(|| {
                 encoded_validation_error(encoded::EncodedValidationError::resource(
                     "encoded slice source work overflowed",
                 ))
             })?;
-        source_owned = after_simple_role_owned
+        source_owned = after_complex_role_owned
             .checked_add(named.owned_bytes)
             .ok_or_else(|| {
                 encoded_validation_error(encoded::EncodedValidationError::resource(
@@ -1108,6 +1171,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         phases.push((symbols, named));
         object_role_phases.push(object_roles);
         simple_role_phases.push(simple_roles);
+        complex_role_phases.push(complex_roles);
     }
     let named_classes = encoded::named_classes::merge_named_class_phases(&phases, limits)
         .map_err(encoded_validation_error)?;
@@ -1189,7 +1253,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                 "encoded merged simple-role work overflowed",
             ))
         })?;
-    let hierarchy_limits = encoded::object_role_hierarchy::ObjectRoleHierarchyLimits {
+    let complex_role_limits = encoded::complex_roles::ComplexRolePhaseLimits {
         max_owned_bytes: limits
             .max_owned_bytes
             .checked_sub(merged_simple_owned)
@@ -1206,6 +1270,46 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     "encoded merged simple roles exceeded the program work limit",
                 ))
             })?,
+        ..encoded::complex_roles::ComplexRolePhaseLimits::default()
+    };
+    let complex_roles = encoded::complex_roles::merge_complex_role_phases(
+        &object_role_phases,
+        &complex_role_phases,
+        &object_roles,
+        complex_role_limits,
+    )
+    .map_err(encoded_validation_error)?;
+    let merged_complex_owned = merged_simple_owned
+        .checked_add(complex_roles.owned_bytes)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged complex-role ownership overflowed",
+            ))
+        })?;
+    let merged_complex_work = merged_simple_work
+        .checked_add(complex_roles.work)
+        .ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded merged complex-role work overflowed",
+            ))
+        })?;
+    let hierarchy_limits = encoded::object_role_hierarchy::ObjectRoleHierarchyLimits {
+        max_owned_bytes: limits
+            .max_owned_bytes
+            .checked_sub(merged_complex_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged complex roles exceeded the program ownership limit",
+                ))
+            })?,
+        max_work: limits
+            .max_work
+            .checked_sub(merged_complex_work)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded merged complex roles exceeded the program work limit",
+                ))
+            })?,
         ..encoded::object_role_hierarchy::ObjectRoleHierarchyLimits::default()
     };
     let object_role_hierarchy =
@@ -1219,6 +1323,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
         named_classes,
         object_roles,
         simple_roles,
+        complex_roles,
         object_role_hierarchy,
     })
 }
@@ -1266,6 +1371,20 @@ fn encoded_simple_object_role_slices_manifest_v1(
     contain_encoded_selection(py, || {
         compile_encoded_slice_program(slices)?
             .simple_roles
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
+#[pyfunction(name = "_encoded_complex_object_role_slices_manifest_v1")]
+#[pyo3(signature = (*, slices))]
+fn encoded_complex_object_role_slices_manifest_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        compile_encoded_slice_program(slices)?
+            .complex_roles
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
     })
@@ -1478,6 +1597,71 @@ fn encoded_simple_object_role_manifest_v1(
             ErrorKind::Poisoned,
             "NATIVE_PANIC",
             "native encoded simple-role manifest panic was contained",
+        )
+        .into_pyerr(py)),
+    }
+}
+
+#[pyfunction(name = "_encoded_complex_object_role_manifest_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_complex_object_role_manifest_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let symbols = encoded::symbols::compile_symbol_phase(
+            &model,
+            encoded::symbols::SymbolPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let roles = encoded::object_roles::compile_object_role_phase(
+            &symbols,
+            encoded::object_roles::ObjectRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let phase = encoded::complex_roles::compile_complex_role_phase(
+            &model,
+            &symbols,
+            &roles,
+            encoded::complex_roles::ComplexRolePhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        phase
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    }));
+    match result {
+        Ok(value) => value.map_err(|error| error.into_pyerr(py)),
+        Err(_) => Err(NativeError::new(
+            ErrorKind::Poisoned,
+            "NATIVE_PANIC",
+            "native encoded complex-role manifest panic was contained",
         )
         .into_pyerr(py)),
     }
@@ -1874,6 +2058,14 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(
         encoded_simple_object_role_slices_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_complex_object_role_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_complex_object_role_slices_manifest_v1,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(

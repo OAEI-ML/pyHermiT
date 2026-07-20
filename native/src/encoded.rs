@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod complex_roles;
 pub mod model;
 pub mod named_classes;
 pub mod object_role_hierarchy;

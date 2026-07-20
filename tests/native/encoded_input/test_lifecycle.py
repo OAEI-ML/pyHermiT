@@ -44,7 +44,7 @@ def _direct_columns() -> tuple[object, dict[str, memoryview]]:
         b"Prefix(:=<urn:lifecycle#>) Ontology(<urn:lifecycle> "
         b"Declaration(Class(:A)) Declaration(Class(:B)) "
         b"Declaration(ObjectProperty(:p)) Declaration(ObjectProperty(:q)) "
-        b"SubObjectPropertyOf(:p :q))",
+        b"SubObjectPropertyOf(:p :q) TransitiveObjectProperty(:q))",
         options=_OPTIONS,
     )
     encoded = produce_encoded_structural_view_v1(snapshot)
