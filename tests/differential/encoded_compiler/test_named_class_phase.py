@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import struct
-from typing import cast
+from typing import Any, cast
 
 import pyowl_core
 import pytest
@@ -92,6 +92,30 @@ def _slice_record(
 def _native_slices_manifest(*records: tuple[object, ...]) -> dict[str, object]:
     encoded = native._encoded_named_class_slices_manifest_v1(slices=records)
     return cast(dict[str, object], json.loads(encoded))
+
+
+def _scope_map(replacements: dict[bytes, bytes]) -> memoryview:
+    return memoryview(b"".join(source + target for source, target in sorted(replacements.items())))
+
+
+def _composite_records(
+    composite: pyowl_core.OntologyView,
+    sources: tuple[pyowl_core.OntologyView, ...],
+) -> tuple[tuple[object, ...], ...]:
+    tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
+    mappings = cast(
+        tuple[dict[bytes, bytes], ...],
+        cast(Any, composite)._scope_replacements(),
+    )
+    rows = sorted(zip(tokens, sources, mappings, strict=True), key=lambda row: row[0])
+    return tuple(
+        _slice_record(
+            source,
+            member_tokens=(token,),
+            anonymous_scope_maps=(() if not mapping else (_scope_map(mapping),)),
+        )
+        for token, source, mapping in rows
+    )
 
 
 def _symbol_payload(value: SymbolValue) -> dict[str, object]:
@@ -492,26 +516,100 @@ def test_double_digit_individual_and_fact_ids_preserve_scalar_order() -> None:
     )
 
 
-def test_complex_or_annotated_named_abox_root_is_deferred_to_scalar() -> None:
+def test_annotated_named_axiom_family_preserves_exact_nested_provenance() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(AnnotationProperty(:meta))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(NamedIndividual(:j))",
+            'SubClassOf(Annotation(Annotation(:meta "nested") :note "source") :A :B)',
+            "EquivalentClasses(Annotation(:note <urn:annotation:value>) :A :C)",
+            'DisjointClasses(Annotation(:note "bonjour"@fr) :B :C)',
+            "ClassAssertion(Annotation(:note _:source) :A :i)",
+            'SameIndividual(Annotation(:note "same") :i :j)',
+            'DifferentIndividuals(Annotation(:note "different") :i :j)',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+    assert manifest == _expected_manifest(snapshot, compiled_roots=6)
+    assert manifest["compiled_roots"] == 6
+    assert manifest["deferred_roots"] == 0
+    assert manifest["named_individuals"] == [0, 1]
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_anonymous_annotations_group_normalized_sources_exactly() -> None:
+    source = functional(
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(AnnotationProperty(:note))",
+        "Declaration(NamedIndividual(:i))",
+        "Declaration(NamedIndividual(:j))",
+        "SubClassOf(Annotation(:note _:same) :A :B)",
+        "EquivalentClasses(Annotation(:note _:same) :B :C)",
+        "DisjointClasses(Annotation(:note _:same) :A :C)",
+        "ClassAssertion(Annotation(:note _:same) :A :i)",
+        'SameIndividual(Annotation(:note "identity") :i :j)',
+        'DifferentIndividuals(Annotation(:note "identity") :i :j)',
+    )
+    left = pyowl_core.load_snapshot(source, options=OPTIONS)
+    right = pyowl_core.load_snapshot(source, options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    records = _composite_records(composite, (left, right))
+    assert any(cast(tuple[object, ...], record[3]) for record in records)
+
+    actual = _native_slices_manifest(*records)
+
+    assert actual == _expected_manifest(composite, compiled_roots=10)
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_identity_annotation_variants_group_sources_exactly() -> None:
+    def source(annotation: str) -> bytes:
+        return functional(
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(NamedIndividual(:j))",
+            f'SameIndividual(Annotation(:note "{annotation}") :i :j)',
+            f'DifferentIndividuals(Annotation(:note "{annotation}") :i :j)',
+        )
+
+    left = pyowl_core.load_snapshot(source("left"), options=OPTIONS)
+    right = pyowl_core.load_snapshot(source("right"), options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(composite, compiled_roots=4)
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_complex_named_class_assertion_still_defers_the_whole_root() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(AnnotationProperty(:note))",
             "Declaration(NamedIndividual(:i))",
-            "Declaration(NamedIndividual(:j))",
-            "ClassAssertion(ObjectSomeValuesFrom(:p :A) :i)",
-            'ClassAssertion(Annotation(:note "source") :A :i)',
-            'SameIndividual(Annotation(:note "source") :i :j)',
-            'DifferentIndividuals(Annotation(:note "source") :i :j)',
+            'ClassAssertion(Annotation(:note "source") ObjectSomeValuesFrom(:p :A) :i)',
         ),
         options=OPTIONS,
     )
 
     manifest = _native_manifest(snapshot)
     assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 4
-    assert manifest["named_individuals"] == [0, 1]
+    assert manifest["deferred_roots"] == 1
+    assert manifest["named_individuals"] == [0]
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

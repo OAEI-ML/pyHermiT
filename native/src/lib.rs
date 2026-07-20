@@ -1487,11 +1487,23 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     | encoded::symbols::RootHandler::DisjointDataProperties
             )
         });
-        let (scope_maps, scope_map_owned) = if has_role_characteristics {
-            decode_encoded_scope_maps(record, remaining_after_complex_owned)?
-        } else {
-            (Vec::new(), 0)
-        };
+        let has_named_axiom_provenance = symbols.roots.iter().any(|root| {
+            matches!(
+                root.handler,
+                encoded::symbols::RootHandler::SubClassOf
+                    | encoded::symbols::RootHandler::EquivalentClasses
+                    | encoded::symbols::RootHandler::DisjointClasses
+                    | encoded::symbols::RootHandler::SameIndividual
+                    | encoded::symbols::RootHandler::DifferentIndividuals
+                    | encoded::symbols::RootHandler::ClassAssertion
+            )
+        });
+        let (scope_maps, scope_map_owned) =
+            if has_role_characteristics || has_named_axiom_provenance {
+                decode_encoded_scope_maps(record, remaining_after_complex_owned)?
+            } else {
+                (Vec::new(), 0)
+            };
         let role_characteristic_limits =
             encoded::role_characteristics::RoleCharacteristicPhaseLimits {
                 max_owned_bytes: remaining_after_complex_owned
@@ -1517,11 +1529,14 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                 &symbols,
                 &object_roles,
                 &data_roles,
-                &scope_maps,
+                if has_role_characteristics {
+                    &scope_maps
+                } else {
+                    &[]
+                },
                 role_characteristic_limits,
             )
             .map_err(encoded_validation_error)?;
-        drop(scope_maps);
         let after_role_characteristic_work = after_complex_role_work
             .checked_add(role_characteristics.work)
             .ok_or_else(|| {
@@ -1540,9 +1555,10 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
             max_owned_bytes: limits
                 .max_owned_bytes
                 .checked_sub(after_role_characteristic_owned)
+                .and_then(|remaining| remaining.checked_sub(scope_map_owned))
                 .ok_or_else(|| {
                     encoded_validation_error(encoded::EncodedValidationError::resource(
-                        "encoded slice role-characteristic ownership exceeded its aggregate limit",
+                        "anonymous-scope maps exceeded the named-class ownership limit",
                     ))
                 })?,
             max_work: limits
@@ -1555,9 +1571,18 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                 })?,
             ..limits
         };
-        let named =
-            encoded::named_classes::compile_named_class_phase(&model, &symbols, named_limits)
-                .map_err(encoded_validation_error)?;
+        let named = encoded::named_classes::compile_named_class_phase_scoped(
+            &model,
+            &symbols,
+            if has_named_axiom_provenance {
+                &scope_maps
+            } else {
+                &[]
+            },
+            named_limits,
+        )
+        .map_err(encoded_validation_error)?;
+        drop(scope_maps);
         source_work = after_role_characteristic_work
             .checked_add(named.work)
             .ok_or_else(|| {

@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub(crate) mod canonical;
 pub mod complex_roles;
 pub mod data_inclusions;
 pub mod data_role_hierarchy;

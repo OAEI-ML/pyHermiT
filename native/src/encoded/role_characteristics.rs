@@ -12,10 +12,13 @@
 use std::mem::size_of;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
+use super::canonical::{
+    self, annotation_stripped_axiom_digest, source_axiom_digest, CanonicalBudget,
+};
+pub use super::canonical::{AnonymousScopeMap, AnonymousScopeReplacement};
 use super::data_roles::DataRolePhase;
-use super::model::{ComponentKind, ComponentValue, NodeId, NodeRef, ScalarRef, ValidatedModel};
+use super::model::{ComponentValue, NodeId, NodeRef, ValidatedModel};
 use super::object_roles::ObjectRolePhase;
 use super::symbols::{RootHandler, SymbolPhase};
 use super::{ByteSource, EncodedResult, EncodedValidationError};
@@ -29,17 +32,6 @@ const IRREFLEXIVE_OBJECT_PROPERTY_TAG: u16 = 79;
 const ASYMMETRIC_OBJECT_PROPERTY_TAG: u16 = 81;
 const DISJOINT_DATA_PROPERTIES_TAG: u16 = 92;
 const DATA_PROPERTY_PREFIX: &str = "data_property:";
-const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
-const ANONYMOUS_SCOPE_BYTES: usize = 32;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AnonymousScopeReplacement {
-    pub source: [u8; ANONYMOUS_SCOPE_BYTES],
-    pub target: [u8; ANONYMOUS_SCOPE_BYTES],
-}
-
-pub type AnonymousScopeMap = Vec<AnonymousScopeReplacement>;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoleCharacteristicPhaseLimits {
     pub max_slices: usize,
@@ -241,6 +233,24 @@ impl PhaseBudget {
     }
 }
 
+impl CanonicalBudget for PhaseBudget {
+    fn canonical_max_depth(&self) -> usize {
+        self.limits.max_canonical_depth
+    }
+
+    fn canonical_max_scope_maps(&self) -> usize {
+        self.limits.max_scope_maps
+    }
+
+    fn claim_canonical_work(&mut self, amount: usize) -> EncodedResult<()> {
+        self.claim_work(amount)
+    }
+
+    fn claim_canonical_owned(&mut self, amount: usize) -> EncodedResult<()> {
+        self.claim_owned(amount)
+    }
+}
+
 /// Compile the supported role-characteristic roots in one validated slice.
 pub fn compile_role_characteristic_phase<B: ByteSource>(
     model: &ValidatedModel<B>,
@@ -264,7 +274,7 @@ pub fn compile_role_characteristic_phase_scoped<B: ByteSource>(
 ) -> EncodedResult<RoleCharacteristicPhase> {
     validate_domains(object_roles, data_roles)?;
     let mut budget = PhaseBudget::new(limits);
-    validate_scope_maps(scope_maps, &mut budget)?;
+    canonical::validate_scope_maps(scope_maps, &mut budget)?;
     let mut raw = Vec::new();
     let mut compiled_statement_digests = Vec::new();
     let mut deferred_roots = 0_usize;
@@ -503,7 +513,7 @@ fn compile_disjoint_object_properties<B: ByteSource>(
             .map(|value| value.structural_key.as_slice()),
         "disjoint-object-properties",
     )?;
-    let statement_sha256 = normalized_statement_digest(model, root, budget)?;
+    let statement_sha256 = annotation_stripped_axiom_digest(model, root, budget)?;
     let digest = source_axiom_digest(model, root, scope_maps, budget)?;
     append_object_pairs(target, &expressions, statement_sha256, digest, budget)?;
     Ok(Some(digest))
@@ -530,7 +540,7 @@ fn compile_single_object_characteristic<B: ByteSource>(
         node_field(model, node, 0, name)?,
         budget,
     )?;
-    let statement_sha256 = normalized_statement_digest(model, root, budget)?;
+    let statement_sha256 = annotation_stripped_axiom_digest(model, root, budget)?;
     let digest = source_axiom_digest(model, root, scope_maps, budget)?;
     push_raw(
         target,
@@ -602,7 +612,7 @@ fn compile_disjoint_data_properties<B: ByteSource>(
             .map(|value| value.structural_key.as_slice()),
         "disjoint-data-properties",
     )?;
-    let statement_sha256 = normalized_statement_digest(model, root, budget)?;
+    let statement_sha256 = annotation_stripped_axiom_digest(model, root, budget)?;
     let digest = source_axiom_digest(model, root, scope_maps, budget)?;
     append_data_pairs(target, &expressions, statement_sha256, digest, budget)?;
     Ok(Some(digest))
@@ -965,281 +975,6 @@ fn remap_role(
     role_id_by_key(merged, key, name, budget)
 }
 
-fn source_axiom_digest<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    root: NodeId,
-    scope_maps: &[AnonymousScopeMap],
-    budget: &mut PhaseBudget,
-) -> EncodedResult<[u8; 32]> {
-    let encoded = canonical_node_bytes(model, root, scope_maps, 0, budget)?;
-    budget.claim_work(encoded.len())?;
-    Ok(Sha256::digest(encoded).into())
-}
-
-fn normalized_statement_digest<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    root: NodeId,
-    budget: &mut PhaseBudget,
-) -> EncodedResult<[u8; 32]> {
-    let node = model.node(root)?;
-    let annotation_index = node.fields().end.checked_sub(1).ok_or_else(|| {
-        EncodedValidationError::invariant("role-characteristic root has no annotation field")
-    })?;
-    let annotation = required_component(
-        model.field(annotation_index)?,
-        "role-characteristic annotation field",
-    )?;
-    let ComponentValue::Collection(annotation) = model.resolve(annotation)? else {
-        return Err(EncodedValidationError::invariant(
-            "role-characteristic annotation field is not a collection",
-        ));
-    };
-    if annotation.kind() != ComponentKind::Set {
-        return Err(EncodedValidationError::invariant(
-            "role-characteristic annotation field is not a canonical set",
-        ));
-    }
-    let mut encoded = Vec::new();
-    push_varint(&mut encoded, u64::from(node.tag()), budget)?;
-    for field_index in node.fields().start..annotation_index {
-        budget.claim_work(1)?;
-        let component = required_component(model.field(field_index)?, "normalized axiom field")?;
-        append_canonical_component(
-            &mut encoded,
-            model,
-            model.resolve(component)?,
-            &[],
-            1,
-            false,
-            budget,
-        )?;
-    }
-    push_byte(&mut encoded, 6, budget)?;
-    push_varint(&mut encoded, 0, budget)?;
-    budget.claim_work(encoded.len())?;
-    Ok(Sha256::digest(encoded).into())
-}
-
-fn canonical_node_bytes<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    identifier: NodeId,
-    scope_maps: &[AnonymousScopeMap],
-    depth: usize,
-    budget: &mut PhaseBudget,
-) -> EncodedResult<Vec<u8>> {
-    if depth > budget.limits.max_canonical_depth {
-        return Err(EncodedValidationError::resource(
-            "role-characteristic canonicalization exceeds its depth limit",
-        ));
-    }
-    budget.claim_work(1)?;
-    let node = model.node(identifier)?;
-    let mut encoded = Vec::new();
-    push_varint(&mut encoded, u64::from(node.tag()), budget)?;
-    let child_depth = depth.checked_add(1).ok_or_else(|| {
-        EncodedValidationError::resource("role-characteristic canonical depth overflowed")
-    })?;
-    for (position, field_index) in node.fields().enumerate() {
-        budget.claim_work(1)?;
-        let component = required_component(model.field(field_index)?, "canonical node field")?;
-        append_canonical_component(
-            &mut encoded,
-            model,
-            model.resolve(component)?,
-            scope_maps,
-            child_depth,
-            node.tag() == ANONYMOUS_INDIVIDUAL_TAG && position == 0,
-            budget,
-        )?;
-    }
-    Ok(encoded)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn append_canonical_component<B: ByteSource>(
-    target: &mut Vec<u8>,
-    model: &ValidatedModel<B>,
-    component: ComponentValue<B>,
-    scope_maps: &[AnonymousScopeMap],
-    depth: usize,
-    anonymous_scope: bool,
-    budget: &mut PhaseBudget,
-) -> EncodedResult<()> {
-    match component {
-        ComponentValue::None => push_byte(target, 0, budget),
-        ComponentValue::Node(identifier) => {
-            push_byte(target, 1, budget)?;
-            let encoded = canonical_node_bytes(model, identifier, scope_maps, depth, budget)?;
-            push_frame(target, &encoded, budget)
-        }
-        ComponentValue::Scalar(scalar) => {
-            append_canonical_scalar(target, scalar, scope_maps, anonymous_scope, budget)
-        }
-        ComponentValue::Collection(collection) => {
-            let marker = match collection.kind() {
-                ComponentKind::Set => 6,
-                ComponentKind::Sequence => 7,
-                _ => {
-                    return Err(EncodedValidationError::invariant(
-                        "canonical collection has a scalar component kind",
-                    ));
-                }
-            };
-            push_byte(target, marker, budget)?;
-            push_varint(
-                target,
-                u64::try_from(collection.len()).map_err(|_| {
-                    EncodedValidationError::resource(
-                        "role-characteristic collection arity exceeds u64",
-                    )
-                })?,
-                budget,
-            )?;
-            for item_index in collection.items() {
-                budget.claim_work(1)?;
-                let item =
-                    required_component(model.item(item_index)?, "canonical collection item")?;
-                let item = model.resolve(item)?;
-                if collection.kind() == ComponentKind::Set {
-                    let ComponentValue::Node(identifier) = item else {
-                        return Err(EncodedValidationError::invariant(
-                            "canonical set item is not a node",
-                        ));
-                    };
-                    let encoded =
-                        canonical_node_bytes(model, identifier, scope_maps, depth, budget)?;
-                    push_frame(target, &encoded, budget)?;
-                } else {
-                    append_canonical_component(
-                        target, model, item, scope_maps, depth, false, budget,
-                    )?;
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-fn append_canonical_scalar<B: ByteSource>(
-    target: &mut Vec<u8>,
-    scalar: ScalarRef<B>,
-    scope_maps: &[AnonymousScopeMap],
-    anonymous_scope: bool,
-    budget: &mut PhaseBudget,
-) -> EncodedResult<()> {
-    if anonymous_scope {
-        if scalar.kind() != ComponentKind::Bytes || scalar.len() != ANONYMOUS_SCOPE_BYTES {
-            return Err(EncodedValidationError::invariant(
-                "anonymous-individual scope no longer has bytes32 shape",
-            ));
-        }
-        let mut source = [0_u8; ANONYMOUS_SCOPE_BYTES];
-        for (index, byte) in source.iter_mut().enumerate() {
-            *byte = scalar.byte(index).ok_or_else(|| {
-                EncodedValidationError::invariant("anonymous-individual scope disappeared")
-            })?;
-        }
-        let mapped = remap_anonymous_scope(source, scope_maps, budget)?;
-        push_byte(target, 3, budget)?;
-        return push_frame(target, &mapped, budget);
-    }
-    let marker = match scalar.kind() {
-        ComponentKind::Text => 2,
-        ComponentKind::Bytes => 3,
-        ComponentKind::Integer => 4,
-        ComponentKind::Enum => 5,
-        _ => {
-            return Err(EncodedValidationError::invariant(
-                "canonical scalar has a nonscalar component kind",
-            ));
-        }
-    };
-    push_byte(target, marker, budget)?;
-    if scalar.kind() == ComponentKind::Integer {
-        return push_integer_varint(target, scalar, budget);
-    }
-    push_varint(
-        target,
-        u64::try_from(scalar.len()).map_err(|_| {
-            EncodedValidationError::resource("role-characteristic scalar length exceeds u64")
-        })?,
-        budget,
-    )?;
-    for index in 0..scalar.len() {
-        push_byte(
-            target,
-            scalar.byte(index).ok_or_else(|| {
-                EncodedValidationError::invariant("canonical scalar byte disappeared")
-            })?,
-            budget,
-        )?;
-    }
-    Ok(())
-}
-
-fn push_integer_varint<B: ByteSource>(
-    target: &mut Vec<u8>,
-    scalar: ScalarRef<B>,
-    budget: &mut PhaseBudget,
-) -> EncodedResult<()> {
-    let last = scalar.len().checked_sub(1).ok_or_else(|| {
-        EncodedValidationError::invariant("canonical integer has an empty payload")
-    })?;
-    let high = scalar.byte(last).ok_or_else(|| {
-        EncodedValidationError::invariant("canonical integer high byte disappeared")
-    })?;
-    let lower_bits = last.checked_mul(8).ok_or_else(|| {
-        EncodedValidationError::resource("canonical integer bit length overflowed")
-    })?;
-    let high_bits = usize::try_from(u8::BITS - high.leading_zeros()).map_err(|_| {
-        EncodedValidationError::resource("canonical integer bit length exceeds usize")
-    })?;
-    let width = lower_bits
-        .checked_add(high_bits)
-        .ok_or_else(|| EncodedValidationError::resource("canonical integer bit length overflowed"))?
-        .div_ceil(7)
-        .max(1);
-    budget.claim_work(width)?;
-    for index in 0..width {
-        let bit_offset = index.checked_mul(7).ok_or_else(|| {
-            EncodedValidationError::resource("canonical integer bit offset overflowed")
-        })?;
-        let source_index = bit_offset / 8;
-        let shift = u32::try_from(bit_offset % 8).map_err(|_| {
-            EncodedValidationError::resource("canonical integer bit shift exceeds u32")
-        })?;
-        let mut window = u16::from(scalar.byte(source_index).ok_or_else(|| {
-            EncodedValidationError::invariant("canonical integer byte disappeared")
-        })?) >> shift;
-        if shift != 0 && source_index + 1 < scalar.len() {
-            window |= u16::from(scalar.byte(source_index + 1).ok_or_else(|| {
-                EncodedValidationError::invariant("canonical integer byte disappeared")
-            })?) << (8 - shift);
-        }
-        let mut output = u8::try_from(window & 0x7f)
-            .map_err(|_| EncodedValidationError::invariant("canonical integer chunk exceeds u8"))?;
-        if index + 1 < width {
-            output |= 0x80;
-        }
-        push_byte(target, output, budget)?;
-    }
-    Ok(())
-}
-
-fn remap_anonymous_scope(
-    mut scope: [u8; ANONYMOUS_SCOPE_BYTES],
-    scope_maps: &[AnonymousScopeMap],
-    budget: &mut PhaseBudget,
-) -> EncodedResult<[u8; ANONYMOUS_SCOPE_BYTES]> {
-    for scope_map in scope_maps {
-        budget.claim_work(binary_search_work(scope_map.len()))?;
-        if let Ok(index) = scope_map.binary_search_by_key(&scope, |row| row.source) {
-            scope = scope_map[index].target;
-        }
-    }
-    Ok(scope)
-}
-
 fn inverse_structural_key(property: &[u8], budget: &mut PhaseBudget) -> EncodedResult<Vec<u8>> {
     let mut key = Vec::new();
     push_varint(&mut key, u64::from(OBJECT_INVERSE_OF_TAG), budget)?;
@@ -1312,30 +1047,6 @@ fn push_digest(
         EncodedValidationError::resource("role-characteristic root allocation failed")
     })?;
     target.push(value);
-    Ok(())
-}
-
-fn validate_scope_maps(
-    scope_maps: &[AnonymousScopeMap],
-    budget: &mut PhaseBudget,
-) -> EncodedResult<()> {
-    PhaseBudget::count(
-        scope_maps.len(),
-        budget.limits.max_scope_maps,
-        "anonymous-scope map count",
-    )?;
-    budget.claim_work(scope_maps.len())?;
-    for scope_map in scope_maps {
-        budget.claim_work(scope_map.len())?;
-        for (index, row) in scope_map.iter().enumerate() {
-            if row.source == row.target || (index > 0 && scope_map[index - 1].source >= row.source)
-            {
-                return Err(EncodedValidationError::invariant(
-                    "anonymous-scope replacements are not sorted unique or contain identity rows",
-                ));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -1565,15 +1276,18 @@ mod tests {
             }],
         ];
         let mut budget = PhaseBudget::new(RoleCharacteristicPhaseLimits::default());
-        validate_scope_maps(&maps, &mut budget)?;
-        assert_eq!(remap_anonymous_scope([1; 32], &maps, &mut budget)?, [3; 32]);
+        canonical::validate_scope_maps(&maps, &mut budget)?;
+        assert_eq!(
+            canonical::remap_anonymous_scope([1; 32], &maps, &mut budget)?,
+            [3; 32]
+        );
 
         let hostile = vec![vec![AnonymousScopeReplacement {
             source: [4; 32],
             target: [4; 32],
         }]];
         let mut hostile_budget = PhaseBudget::new(RoleCharacteristicPhaseLimits::default());
-        let error = validate_scope_maps(&hostile, &mut hostile_budget)
+        let error = canonical::validate_scope_maps(&hostile, &mut hostile_budget)
             .err()
             .ok_or_else(|| {
                 EncodedValidationError::invariant(
