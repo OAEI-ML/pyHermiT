@@ -20,6 +20,7 @@ mod cancel;
 mod classification_bridge;
 mod datatype_tableau;
 pub mod datatypes;
+pub mod encoded;
 pub mod error;
 pub mod event_wire;
 pub mod existentials;
