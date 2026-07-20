@@ -43,7 +43,8 @@ def _direct_columns() -> tuple[object, dict[str, memoryview]]:
     snapshot = pyowl_core.load_snapshot(
         b"Prefix(:=<urn:lifecycle#>) Ontology(<urn:lifecycle> "
         b"Declaration(Class(:A)) Declaration(Class(:B)) "
-        b"Declaration(ObjectProperty(:p)))",
+        b"Declaration(ObjectProperty(:p)) Declaration(ObjectProperty(:q)) "
+        b"SubObjectPropertyOf(:p :q))",
         options=_OPTIONS,
     )
     encoded = produce_encoded_structural_view_v1(snapshot)

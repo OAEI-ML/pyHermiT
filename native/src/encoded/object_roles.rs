@@ -54,7 +54,7 @@ pub struct ObjectRolePhase {
     pub bottom_object_role_id: u32,
     pub work: u64,
     pub owned_bytes: usize,
-    manifest_limit: usize,
+    pub(super) manifest_limit: usize,
 }
 
 impl ObjectRolePhase {
