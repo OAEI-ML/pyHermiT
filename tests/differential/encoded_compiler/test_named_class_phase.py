@@ -198,6 +198,7 @@ def _expected_manifest(
     *,
     compiled_roots: int,
     include_object_constraints: bool = False,
+    include_object_assertions: bool = False,
 ) -> dict[str, object]:
     normalized, program, ontology = compile_captured_bundle(
         capture_ontology(snapshot).captured,
@@ -222,11 +223,13 @@ def _expected_manifest(
         PredicateKind.NAMED_INDIVIDUAL,
     }
     constraint_provenance_ids: set[int] = set()
-    if include_object_constraints:
+    assertion_provenance_ids: set[int] = set()
+    if include_object_constraints or include_object_assertions:
         provenance_id_by_key = {
             (value.source_sha256, value.generated): value.provenance_id
             for value in program.provenance.entries
         }
+    if include_object_constraints:
         constraint_provenance_ids = {
             provenance_id_by_key[(record.provenance_sha256, record.generated)]
             for record in normalized.records
@@ -234,6 +237,12 @@ def _expected_manifest(
                 record.statement,
                 (owl.ObjectPropertyDomain, owl.ObjectPropertyRange),
             )
+        }
+    if include_object_assertions:
+        assertion_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if isinstance(record.statement, owl.ObjectPropertyAssertion)
         }
     predicates_by_id = {value.predicate_id: value for value in program.predicates.predicates}
     constraint_clauses = {
@@ -248,10 +257,17 @@ def _expected_manifest(
         for atom in clause.body + clause.head
         if predicates_by_id[atom.predicate_id].kind is PredicateKind.OBJECT_ROLE
     }
+    assertion_role_predicates = {
+        fact.predicate_id
+        for fact in program.positive_facts
+        if assertion_provenance_ids.intersection(fact.provenance_ids)
+        and predicates_by_id[fact.predicate_id].kind is PredicateKind.OBJECT_ROLE
+    }
+    selected_role_predicates = constraint_role_predicates | assertion_role_predicates
     fragment_predicates = [
         value
         for value in program.predicates.predicates
-        if value.kind in fragment_kinds or value.predicate_id in constraint_role_predicates
+        if value.kind in fragment_kinds or value.predicate_id in selected_role_predicates
     ]
     predicate_remap = {
         value.predicate_id: identifier for identifier, value in enumerate(fragment_predicates)
@@ -609,6 +625,113 @@ def test_annotated_named_object_domain_and_range_clauses_match_scalar_exactly() 
         include_object_constraints=True,
     )
     assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_annotated_named_object_assertions_and_inverse_roles_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(AnnotationProperty(:meta))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(NamedIndividual(:j))",
+            'ObjectPropertyAssertion(Annotation(Annotation(:meta "nested") :note "left") :p :i :j)',
+            'ObjectPropertyAssertion(Annotation(:note "right"@en) :p :i :j)',
+            "ObjectPropertyAssertion(Annotation(:note _:source) ObjectInverseOf(:q) :i :j)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=3,
+        include_object_assertions=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_anonymous_object_assertions_group_sources_exactly() -> None:
+    source = functional(
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+        "Declaration(AnnotationProperty(:note))",
+        "Declaration(NamedIndividual(:i))",
+        "Declaration(NamedIndividual(:j))",
+        "ObjectPropertyAssertion(Annotation(:note _:same) :p :i :j)",
+        "ObjectPropertyAssertion(Annotation(:note _:same) ObjectInverseOf(:q) :i :j)",
+    )
+    left = pyowl_core.load_snapshot(source, options=OPTIONS)
+    right = pyowl_core.load_snapshot(source, options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_assertions=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_object_assertions_remap_local_roles_and_individuals_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:z))",
+            "Declaration(NamedIndividual(:zSource))",
+            "Declaration(NamedIndividual(:zTarget))",
+            "ObjectPropertyAssertion(:z :zSource :zTarget)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:a))",
+            "Declaration(NamedIndividual(:aSource))",
+            "Declaration(NamedIndividual(:aTarget))",
+            "ObjectPropertyAssertion(ObjectInverseOf(:a) :aSource :aTarget)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_object_assertions=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_anonymous_object_assertion_operand_defers_the_whole_root() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            "ObjectPropertyAssertion(:p :i _:anonymous)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
+    assert manifest["named_individuals"] == [0]
+    assert all(
+        predicate["kind"] != PredicateKind.OBJECT_ROLE.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert len(cast(list[dict[str, object]], manifest["positive_facts"])) == 2
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

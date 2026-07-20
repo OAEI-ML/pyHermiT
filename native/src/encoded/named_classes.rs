@@ -4,12 +4,12 @@
 //! a scalar-compatible named `individual` domain. It compiles named-only
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, and named `ObjectPropertyDomain` /
-//! `ObjectPropertyRange` axioms into the existing native predicate, clause,
-//! fact, and provenance records. Exact nested annotations
-//! participate in source provenance, with segmented anonymous scopes remapped
-//! before hashing. Predicate and clause identifiers are dense within this
-//! fragment and must be remapped when a later phase assembles the complete
-//! program; no fragment is publishable on its own.
+//! `ObjectPropertyRange` / positive `ObjectPropertyAssertion` axioms into the
+//! existing native predicate, clause, fact, and provenance records. Exact
+//! nested annotations participate in source provenance, with segmented
+//! anonymous scopes remapped before hashing. Predicate and clause identifiers
+//! are dense within this fragment and must be remapped when a later phase
+//! assembles the complete program; no fragment is publishable on its own.
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #![forbid(unsafe_code)]
@@ -42,6 +42,7 @@ const OBJECT_INVERSE_OF_TAG: u16 = 10;
 const SAME_INDIVIDUAL_TAG: u16 = 110;
 const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
 const CLASS_ASSERTION_TAG: u16 = 112;
+const OBJECT_PROPERTY_ASSERTION_TAG: u16 = 113;
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
 const DISJOINT_GUARD_DOMAIN: &[u8] = b"pyhermit:linear-disjoint-classes:v1\0";
 const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
@@ -126,6 +127,7 @@ pub struct NamedClassPhase {
     normalized_disjoints: Vec<NormalizedDisjoint>,
     normalized_object_constraints: Vec<NormalizedObjectConstraint>,
     normalized_facts: Vec<NormalizedFact>,
+    normalized_object_facts: Vec<NormalizedObjectFact>,
     normalized_equalities: Vec<NormalizedEqualityFact>,
     normalized_inequalities: Vec<NormalizedInequalityFact>,
     manifest_limit: usize,
@@ -446,6 +448,22 @@ struct NormalizedFact {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RawObjectFact {
+    role_id: u32,
+    source_individual: u32,
+    target_individual: u32,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NormalizedObjectFact {
+    role_id: u32,
+    source_individual: u32,
+    target_individual: u32,
+    provenance: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RawEqualityFact {
     left_individual: u32,
     right_individual: u32,
@@ -648,6 +666,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut raw_disjoints = Vec::<RawDisjoint>::new();
     let mut raw_object_constraints = Vec::<RawObjectConstraint>::new();
     let mut raw_facts = Vec::<RawFact>::new();
+    let mut raw_object_facts = Vec::<RawObjectFact>::new();
     let mut raw_equalities = Vec::<RawEqualityFact>::new();
     let mut raw_inequalities = Vec::<RawInequalityFact>::new();
     let mut compiled_root_digests = Vec::<[u8; 32]>::new();
@@ -943,6 +962,48 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     }
                 }
             }
+            RootHandler::ObjectPropertyAssertion => {
+                let Some(object_roles) = object_roles else {
+                    deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "named-class deferred-root count overflowed",
+                        )
+                    })?;
+                    continue;
+                };
+                match named_object_assertion(
+                    model,
+                    symbols,
+                    object_roles,
+                    &individual_signature,
+                    root.node,
+                    scope_maps,
+                    &mut budget,
+                )? {
+                    Some(fact) => {
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            fact.provenance,
+                            &mut budget,
+                        )?;
+                        budget.claim_owned(size_of::<RawObjectFact>())?;
+                        raw_object_facts.try_reserve(1).map_err(|_| {
+                            EncodedValidationError::resource(
+                                "named object-property assertion allocation failed",
+                            )
+                        })?;
+                        raw_object_facts.push(fact);
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
             _ => {
                 deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
                     EncodedValidationError::resource("named-class deferred-root count overflowed")
@@ -968,6 +1029,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let disjoints = normalize_disjoints(raw_disjoints, &class_domain, &mut budget)?;
     let object_constraints = normalize_object_constraints(raw_object_constraints, &mut budget)?;
     let facts = normalize_facts(raw_facts, &mut budget)?;
+    let object_facts = normalize_object_facts(raw_object_facts, &mut budget)?;
     let equalities = normalize_equalities(raw_equalities, &mut budget)?;
     let inequalities = normalize_inequalities(raw_inequalities, &mut budget)?;
     let (provenance, provenance_keys) = freeze_provenance(
@@ -975,6 +1037,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &disjoints,
         &object_constraints,
         &facts,
+        &object_facts,
         &equalities,
         &inequalities,
         &mut budget,
@@ -992,6 +1055,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &disjoints,
         &object_constraints,
         &facts,
+        &object_facts,
         &equalities,
         &inequalities,
         thing,
@@ -1014,11 +1078,13 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     )?;
     let positive_facts = freeze_positive_facts(
         &facts,
+        &object_facts,
         &equalities,
         &inequalities,
         &individual_domain,
         thing,
         &predicate_by_class,
+        &predicate_by_object_role,
         named_predicate,
         equality_predicate,
         inequality_predicate,
@@ -1045,6 +1111,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
         normalized_facts: facts,
+        normalized_object_facts: object_facts,
         normalized_equalities: equalities,
         normalized_inequalities: inequalities,
         manifest_limit: limits.max_manifest_bytes,
@@ -1791,6 +1858,68 @@ fn named_class_assertion<B: ByteSource>(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn named_object_assertion<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    object_roles: &ObjectRolePhase,
+    individual_signature: &[IndividualSignatureBinding],
+    root: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<RawObjectFact>> {
+    let node = model.node(root)?;
+    if node.tag() != OBJECT_PROPERTY_ASSERTION_TAG || node.field_count() != 4 {
+        return Err(EncodedValidationError::invariant(
+            "object-property assertion root no longer has schema-1 shape",
+        ));
+    }
+    let property = node_field(model, node, 0, "object-property assertion role")?;
+    let (role_id, inverted) = named_assertion_role(model, symbols, object_roles, property, budget)?;
+    let Some(mut source_individual) =
+        named_individual_field(model, symbols, individual_signature, node, 1)?
+    else {
+        return Ok(None);
+    };
+    let Some(mut target_individual) =
+        named_individual_field(model, symbols, individual_signature, node, 2)?
+    else {
+        return Ok(None);
+    };
+    if inverted {
+        std::mem::swap(&mut source_individual, &mut target_individual);
+    }
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    Ok(Some(RawObjectFact {
+        role_id,
+        source_individual,
+        target_individual,
+        provenance,
+    }))
+}
+
+fn named_assertion_role<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    object_roles: &ObjectRolePhase,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(u32, bool)> {
+    let node = model.node(identifier)?;
+    if node.tag() == ENTITY_TAG {
+        return named_object_role_id(model, symbols, object_roles, identifier, budget)
+            .map(|role_id| (role_id, false));
+    }
+    if node.tag() != OBJECT_INVERSE_OF_TAG || node.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "object-property assertion has an unsupported role expression",
+        ));
+    }
+    let property = node_field(model, node, 0, "inverse object-property assertion role")?;
+    let (role_id, inverted) = named_assertion_role(model, symbols, object_roles, property, budget)?;
+    Ok((role_id, !inverted))
+}
+
 fn named_class_field<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
@@ -2087,6 +2216,55 @@ fn normalize_object_constraints(
     Ok(normalized)
 }
 
+fn normalize_object_facts(
+    mut raw: Vec<RawObjectFact>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedObjectFact>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_unstable();
+    let mut normalized = Vec::<NormalizedObjectFact>::new();
+    for fact in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.role_id == fact.role_id
+                && previous.source_individual == fact.source_individual
+                && previous.target_individual == fact.target_individual
+            {
+                if previous.provenance.last() != Some(&fact.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "object-property assertion provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(fact.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedObjectFact>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "normalized object-property assertion allocation failed",
+            )
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "object-property assertion provenance allocation failed",
+            )
+        })?;
+        provenance.push(fact.provenance);
+        normalized.push(NormalizedObjectFact {
+            role_id: fact.role_id,
+            source_individual: fact.source_individual,
+            target_individual: fact.target_individual,
+            provenance,
+        });
+    }
+    Ok(normalized)
+}
+
 fn normalize_equalities(
     mut raw: Vec<RawEqualityFact>,
     budget: &mut PhaseBudget,
@@ -2177,11 +2355,13 @@ fn normalize_inequalities(
     Ok(normalized)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn freeze_provenance(
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
     facts: &[NormalizedFact],
+    object_facts: &[NormalizedObjectFact],
     equalities: &[NormalizedEqualityFact],
     inequalities: &[NormalizedInequalityFact],
     budget: &mut PhaseBudget,
@@ -2227,6 +2407,16 @@ fn freeze_provenance(
         )?;
     }
     for fact in facts {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: fact.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    for fact in object_facts {
         push_provenance_key(
             &mut keys,
             ProvenanceKey {
@@ -2356,6 +2546,7 @@ fn freeze_predicates(
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
     facts: &[NormalizedFact],
+    object_facts: &[NormalizedObjectFact],
     equalities: &[NormalizedEqualityFact],
     inequalities: &[NormalizedInequalityFact],
     thing: u32,
@@ -2446,6 +2637,14 @@ fn freeze_predicates(
         push_u32(
             &mut object_role_ids,
             constraint.role_id,
+            "predicate object role",
+            budget,
+        )?;
+    }
+    for fact in object_facts {
+        push_u32(
+            &mut object_role_ids,
+            fact.role_id,
             "predicate object role",
             budget,
         )?;
@@ -2760,11 +2959,13 @@ fn freeze_clauses(
 #[allow(clippy::too_many_arguments)]
 fn freeze_positive_facts(
     facts: &[NormalizedFact],
+    object_facts: &[NormalizedObjectFact],
     equalities: &[NormalizedEqualityFact],
     inequalities: &[NormalizedInequalityFact],
     individual_domain: &DecodedSymbolDomain,
     thing: u32,
     predicate_by_class: &[(u32, u32)],
+    predicate_by_object_role: &[(u32, u32)],
     named_predicate: Option<u32>,
     equality_predicate: Option<u32>,
     inequality_predicate: Option<u32>,
@@ -2811,13 +3012,15 @@ fn freeze_positive_facts(
         .len()
         .checked_mul(2)
         .and_then(|value| value.checked_add(facts.len()))
+        .and_then(|value| value.checked_add(object_facts.len()))
         .and_then(|value| value.checked_add(equalities.len()))
         .and_then(|value| value.checked_add(inequalities.len()))
         .ok_or_else(|| EncodedValidationError::resource("positive-fact count overflowed"))?;
     budget.claim_work(
         facts
             .len()
-            .checked_add(equalities.len())
+            .checked_add(object_facts.len())
+            .and_then(|value| value.checked_add(equalities.len()))
             .and_then(|value| value.checked_add(inequalities.len()))
             .ok_or_else(|| EncodedValidationError::resource("positive-fact work overflowed"))?,
     )?;
@@ -2848,6 +3051,7 @@ fn freeze_positive_facts(
         .len()
         .checked_mul(2)
         .and_then(|value| value.checked_add(class_fact_count))
+        .and_then(|value| value.checked_add(object_facts.len()))
         .and_then(|value| value.checked_add(equality_fact_count))
         .and_then(|value| value.checked_add(inequality_fact_count))
         .ok_or_else(|| EncodedValidationError::resource("positive-fact merge count overflowed"))?;
@@ -2893,6 +3097,26 @@ fn freeze_positive_facts(
         pending.push((
             predicate_id(predicate_by_class, fact.class_id)?,
             GroundArguments::Unary(fact.individual_id),
+            provenance_id(provenance_keys, &fact.provenance, false)?,
+        ));
+    }
+    for fact in object_facts {
+        budget.claim_work(1)?;
+        if [fact.source_individual, fact.target_individual]
+            .into_iter()
+            .any(|individual_id| {
+                usize::try_from(individual_id)
+                    .ok()
+                    .is_none_or(|identifier| identifier >= individual_domain.values.len())
+            })
+        {
+            return Err(EncodedValidationError::invariant(
+                "named object-property assertion has a dangling individual ID",
+            ));
+        }
+        pending.push((
+            object_predicate_id(predicate_by_object_role, fact.role_id)?,
+            GroundArguments::Binary(fact.source_individual, fact.target_individual),
             provenance_id(provenance_keys, &fact.provenance, false)?,
         ));
     }
@@ -2997,10 +3221,11 @@ fn freeze_positive_facts(
         .count();
     let expected_binary_fact_count = equality_fact_count
         .checked_add(inequality_fact_count)
+        .and_then(|value| value.checked_add(object_facts.len()))
         .ok_or_else(|| EncodedValidationError::resource("binary-fact count overflowed"))?;
     if binary_fact_count != expected_binary_fact_count {
         return Err(EncodedValidationError::invariant(
-            "binary identity-fact merge count disagrees with its exact bound",
+            "binary-fact merge count disagrees with its exact bound",
         ));
     }
     let term_count = merged
@@ -3782,7 +4007,7 @@ fn merge_named_class_phases_impl(
     )?;
     drop(entity_domain);
 
-    let (edges, disjoints, object_constraints, facts, equalities, inequalities) =
+    let (edges, disjoints, object_constraints, facts, object_facts, equalities, inequalities) =
         merge_normalized_sources(
             phases,
             &class_maps,
@@ -3799,6 +4024,7 @@ fn merge_named_class_phases_impl(
         &disjoints,
         &object_constraints,
         &facts,
+        &object_facts,
         &equalities,
         &inequalities,
         &mut budget,
@@ -3816,6 +4042,7 @@ fn merge_named_class_phases_impl(
         &disjoints,
         &object_constraints,
         &facts,
+        &object_facts,
         &equalities,
         &inequalities,
         thing,
@@ -3838,11 +4065,13 @@ fn merge_named_class_phases_impl(
     )?;
     let positive_facts = freeze_positive_facts(
         &facts,
+        &object_facts,
         &equalities,
         &inequalities,
         &individual_domain,
         thing,
         &predicate_by_class,
+        &predicate_by_object_role,
         named_predicate,
         equality_predicate,
         inequality_predicate,
@@ -3914,6 +4143,7 @@ fn merge_named_class_phases_impl(
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
         normalized_facts: facts,
+        normalized_object_facts: object_facts,
         normalized_equalities: equalities,
         normalized_inequalities: inequalities,
         manifest_limit: limits.max_manifest_bytes,
@@ -4187,6 +4417,7 @@ type NormalizedSources = (
     Vec<NormalizedDisjoint>,
     Vec<NormalizedObjectConstraint>,
     Vec<NormalizedFact>,
+    Vec<NormalizedObjectFact>,
     Vec<NormalizedEqualityFact>,
     Vec<NormalizedInequalityFact>,
 );
@@ -4204,6 +4435,7 @@ fn merge_normalized_sources(
     let mut raw_disjoints = Vec::new();
     let mut raw_object_constraints = Vec::new();
     let mut raw_facts = Vec::new();
+    let mut raw_object_facts = Vec::new();
     let mut raw_equalities = Vec::new();
     let mut raw_inequalities = Vec::new();
     for (phase_index, (_, phase)) in phases.iter().enumerate() {
@@ -4344,6 +4576,53 @@ fn merge_normalized_sources(
                 });
             }
         }
+        if !phase.normalized_object_facts.is_empty() {
+            let source_roles = source_object_roles
+                .and_then(|roles| roles.get(phase_index))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged object-property assertions lost their source role domain",
+                    )
+                })?;
+            let merged_roles = merged_object_roles.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "merged object-property assertions lost their global role domain",
+                )
+            })?;
+            for fact in &phase.normalized_object_facts {
+                if fact.provenance.is_empty() {
+                    return Err(EncodedValidationError::invariant(
+                        "merged object-property assertion lost provenance",
+                    ));
+                }
+                let role_id = remap_object_role(source_roles, merged_roles, fact.role_id, budget)?;
+                let source_individual = mapped_id(
+                    individual_map,
+                    fact.source_individual,
+                    "object-property assertion source individual",
+                )?;
+                let target_individual = mapped_id(
+                    individual_map,
+                    fact.target_individual,
+                    "object-property assertion target individual",
+                )?;
+                for provenance in &fact.provenance {
+                    budget.claim_work(1)?;
+                    budget.claim_owned(size_of::<RawObjectFact>())?;
+                    raw_object_facts.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "merged object-property assertion allocation failed",
+                        )
+                    })?;
+                    raw_object_facts.push(RawObjectFact {
+                        role_id,
+                        source_individual,
+                        target_individual,
+                        provenance: *provenance,
+                    });
+                }
+            }
+        }
         for equality in &phase.normalized_equalities {
             if equality.provenance.is_empty() {
                 return Err(EncodedValidationError::invariant(
@@ -4414,6 +4693,7 @@ fn merge_normalized_sources(
         normalize_disjoints(raw_disjoints, class_domain, budget)?,
         normalize_object_constraints(raw_object_constraints, budget)?,
         normalize_facts(raw_facts, budget)?,
+        normalize_object_facts(raw_object_facts, budget)?,
         normalize_equalities(raw_equalities, budget)?,
         normalize_inequalities(raw_inequalities, budget)?,
     ))
