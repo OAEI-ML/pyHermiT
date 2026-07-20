@@ -269,10 +269,23 @@ pub struct SymbolPhase {
     pub declared_entities: Vec<DecodedEntity>,
     pub work: u64,
     pub owned_bytes: usize,
+    entity_node_symbols: Vec<(NodeId, u32)>,
     manifest_limit: usize,
 }
 
 impl SymbolPhase {
+    /// Resolve a reachable encoded entity node into the owned entity domain.
+    ///
+    /// The mapping is deliberately private to encoded compiler phases.  It
+    /// prevents later transactions from retaining or re-reading Python-owned
+    /// buffers after symbol extraction has completed.
+    pub(super) fn entity_symbol_for_node(&self, node: NodeId) -> Option<u32> {
+        self.entity_node_symbols
+            .binary_search_by_key(&node, |(candidate, _)| *candidate)
+            .ok()
+            .map(|index| self.entity_node_symbols[index].1)
+    }
+
     /// Canonical test-only manifest used for scalar/encoded differential checks.
     pub fn canonical_manifest_json(&self) -> EncodedResult<Vec<u8>> {
         let roots = self
@@ -469,6 +482,7 @@ pub fn compile_symbol_phase<B: ByteSource>(
 
     let semantic_nodes = semantic_reachability(model, &roots, &mut budget)?;
     let mut entities = Vec::<ExtractedEntity>::new();
+    let mut source_entity_nodes = Vec::<(NodeId, Vec<u8>)>::new();
     for (node_index, reachable) in semantic_nodes.iter().copied().enumerate() {
         budget.claim_work(1)?;
         let node = model
@@ -495,9 +509,15 @@ pub fn compile_symbol_phase<B: ByteSource>(
             ));
         }
         budget.claim_owned(size_of::<ExtractedEntity>())?;
+        budget.claim_owned(size_of::<(NodeId, Vec<u8>)>())?;
+        budget.claim_owned(entity.key.len())?;
         entities.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("encoded source entity allocation failed")
         })?;
+        source_entity_nodes.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("encoded entity-node mapping allocation failed")
+        })?;
+        source_entity_nodes.push((node.id(), entity.key.clone()));
         entities.push(entity);
     }
     for (kind, iri) in BUILTIN_ENTITIES {
@@ -558,6 +578,37 @@ pub fn compile_symbol_phase<B: ByteSource>(
         });
     }
 
+    let mut entity_node_symbols = Vec::new();
+    budget.claim_owned(
+        source_entity_nodes
+            .len()
+            .checked_mul(size_of::<(NodeId, u32)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("encoded entity-node output size overflowed")
+            })?,
+    )?;
+    entity_node_symbols
+        .try_reserve_exact(source_entity_nodes.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("encoded entity-node output allocation failed")
+        })?;
+    for (node, key) in source_entity_nodes {
+        budget.claim_work(binary_search_work(entities.len()))?;
+        let identifier = entities
+            .binary_search_by(|entity| entity.key.cmp(&key))
+            .map_err(|_| {
+                EncodedValidationError::invariant(
+                    "reachable entity node is absent from the extracted entity domain",
+                )
+            })?;
+        entity_node_symbols.push((
+            node,
+            u32::try_from(identifier).map_err(|_| {
+                EncodedValidationError::resource("encoded entity symbol ID exceeds u32")
+            })?,
+        ));
+    }
+
     let mut values = Vec::new();
     values.try_reserve_exact(entities.len()).map_err(|_| {
         EncodedValidationError::resource("encoded entity symbol output allocation failed")
@@ -590,6 +641,7 @@ pub fn compile_symbol_phase<B: ByteSource>(
         declared_entities,
         work: budget.work,
         owned_bytes: budget.owned_bytes,
+        entity_node_symbols,
         manifest_limit: limits.max_manifest_bytes,
     })
 }

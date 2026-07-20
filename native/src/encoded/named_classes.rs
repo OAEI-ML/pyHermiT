@@ -1,0 +1,1359 @@
+//! Transactional named-class signature and axiom compilation.
+//!
+//! This phase owns a scalar-compatible `class_expression` symbol domain and
+//! compiles the named-only `SubClassOf`/`EquivalentClasses` family into the
+//! existing native predicate, clause, and provenance records.  Predicate and
+//! clause identifiers are dense within this fragment and must be remapped when
+//! a later phase assembles the complete program; no fragment is publishable on
+//! its own.
+// SPDX-License-Identifier: LGPL-3.0-or-later
+
+#![forbid(unsafe_code)]
+
+use std::mem::size_of;
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use super::model::{ComponentValue, NodeId, NodeRef, ValidatedModel};
+use super::symbols::{RootHandler, SymbolPhase};
+use super::{ByteSource, EncodedResult, EncodedValidationError};
+use crate::input_wire::{
+    DecodedAtom, DecodedClause, DecodedPredicate, DecodedProvenanceEntry, DecodedSymbolDomain,
+    DecodedSymbolValue, DecodedTerm, PredicateKind, SymbolKind, TermSort,
+};
+
+const NAMED_CLASS_PHASE_SCHEMA_VERSION: u16 = 1;
+const ENTITY_TAG: u16 = 2;
+const SUBCLASS_TAG: u16 = 61;
+const EQUIVALENT_CLASSES_TAG: u16 = 62;
+const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
+const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
+const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamedClassPhaseLimits {
+    pub max_class_symbols: usize,
+    pub max_compiled_roots: usize,
+    pub max_clauses: usize,
+    pub max_provenance: usize,
+    pub max_owned_bytes: usize,
+    pub max_work: u64,
+    pub max_manifest_bytes: usize,
+}
+
+impl Default for NamedClassPhaseLimits {
+    fn default() -> Self {
+        Self {
+            max_class_symbols: 16_000_000,
+            max_compiled_roots: 100_000_000,
+            max_clauses: 100_000_000,
+            max_provenance: 100_000_000,
+            max_owned_bytes: 512 * 1024 * 1024,
+            max_work: 2_000_000_000,
+            max_manifest_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
+/// Stable declaration/signature bridge between entity and class domains.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClassSignatureBinding {
+    pub class_expression_id: u32,
+    pub entity_id: u32,
+    pub declared: bool,
+}
+
+/// Owned output of the named-class compiler transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedClassPhase {
+    pub class_domain: DecodedSymbolDomain,
+    pub class_signature: Vec<ClassSignatureBinding>,
+    pub predicates: Vec<DecodedPredicate>,
+    pub clauses: Vec<DecodedClause>,
+    pub provenance: Vec<DecodedProvenanceEntry>,
+    pub compiled_roots: usize,
+    pub deferred_roots: usize,
+    pub work: u64,
+    pub owned_bytes: usize,
+    manifest_limit: usize,
+}
+
+impl NamedClassPhase {
+    /// Canonical private manifest used for exact scalar differential checks.
+    pub fn canonical_manifest_json(&self) -> EncodedResult<Vec<u8>> {
+        let class_expression_symbols = self
+            .class_domain
+            .values
+            .iter()
+            .map(symbol_manifest)
+            .collect();
+        let class_signature = self
+            .class_signature
+            .iter()
+            .map(|binding| ClassSignatureManifest {
+                class_expression_id: binding.class_expression_id,
+                entity_id: binding.entity_id,
+                declared: binding.declared,
+            })
+            .collect();
+        let predicates = self
+            .predicates
+            .iter()
+            .map(|predicate| PredicateManifest {
+                predicate_id: predicate.predicate_id,
+                kind: predicate_kind_name(predicate.kind),
+                argument_sorts: predicate
+                    .argument_sorts
+                    .iter()
+                    .copied()
+                    .map(term_sort_name)
+                    .collect(),
+                symbol_id: predicate.symbol_id,
+                role_id: predicate.role_id,
+                cardinality: predicate.cardinality,
+                filler_predicate_id: predicate.filler_predicate_id,
+                annotation: &predicate.annotation,
+                internal_key: predicate.internal_key.as_deref(),
+            })
+            .collect();
+        let clauses = self
+            .clauses
+            .iter()
+            .map(|clause| ClauseManifest {
+                clause_id: clause.clause_id,
+                body: clause.body.iter().map(atom_manifest).collect(),
+                head: clause.head.iter().map(atom_manifest).collect(),
+                provenance_ids: &clause.provenance_ids,
+                join_order: &clause.join_order,
+            })
+            .collect();
+        let provenance = self
+            .provenance
+            .iter()
+            .map(|entry| ProvenanceManifest {
+                provenance_id: entry.provenance_id,
+                source_sha256: entry
+                    .source_sha256
+                    .iter()
+                    .map(|digest| crate::model::hex(digest))
+                    .collect(),
+                generated: entry.generated,
+            })
+            .collect();
+        let encoded = serde_json::to_vec(&NamedClassManifest {
+            schema_version: NAMED_CLASS_PHASE_SCHEMA_VERSION,
+            family: "named_class_axioms",
+            compiled_roots: self.compiled_roots,
+            deferred_roots: self.deferred_roots,
+            class_expression_symbols,
+            class_signature,
+            predicates,
+            clauses,
+            provenance,
+        })
+        .map_err(|_| {
+            EncodedValidationError::invariant("named-class manifest serialization failed")
+        })?;
+        if encoded.len() > self.manifest_limit {
+            return Err(EncodedValidationError::resource(
+                "named-class manifest exceeds its byte limit",
+            ));
+        }
+        Ok(encoded)
+    }
+}
+
+#[derive(Serialize)]
+struct NamedClassManifest<'a> {
+    schema_version: u16,
+    family: &'static str,
+    compiled_roots: usize,
+    deferred_roots: usize,
+    class_expression_symbols: Vec<SymbolManifest<'a>>,
+    class_signature: Vec<ClassSignatureManifest>,
+    predicates: Vec<PredicateManifest<'a>>,
+    clauses: Vec<ClauseManifest<'a>>,
+    provenance: Vec<ProvenanceManifest>,
+}
+
+#[derive(Serialize)]
+struct SymbolManifest<'a> {
+    identifier: u32,
+    key_hex: String,
+    display: &'a str,
+    generated: bool,
+    query_local: bool,
+}
+
+fn symbol_manifest(value: &DecodedSymbolValue) -> SymbolManifest<'_> {
+    SymbolManifest {
+        identifier: value.identifier,
+        key_hex: crate::model::hex(&value.key),
+        display: &value.display,
+        generated: value.generated,
+        query_local: value.query_local,
+    }
+}
+
+#[derive(Serialize)]
+struct ClassSignatureManifest {
+    class_expression_id: u32,
+    entity_id: u32,
+    declared: bool,
+}
+
+#[derive(Serialize)]
+struct PredicateManifest<'a> {
+    predicate_id: u32,
+    kind: &'static str,
+    argument_sorts: Vec<&'static str>,
+    symbol_id: Option<u32>,
+    role_id: Option<u32>,
+    cardinality: Option<u32>,
+    filler_predicate_id: Option<u32>,
+    annotation: &'a [u32],
+    internal_key: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ClauseManifest<'a> {
+    clause_id: u32,
+    body: Vec<AtomManifest>,
+    head: Vec<AtomManifest>,
+    provenance_ids: &'a [u32],
+    join_order: &'a [u32],
+}
+
+#[derive(Serialize)]
+struct AtomManifest {
+    predicate_id: u32,
+    arguments: Vec<TermManifest>,
+}
+
+#[derive(Serialize)]
+struct TermManifest {
+    index: u32,
+    sort: &'static str,
+}
+
+fn atom_manifest(atom: &DecodedAtom) -> AtomManifest {
+    AtomManifest {
+        predicate_id: atom.predicate_id,
+        arguments: atom.arguments.iter().filter_map(term_manifest).collect(),
+    }
+}
+
+const fn term_manifest(term: &DecodedTerm) -> Option<TermManifest> {
+    match term {
+        DecodedTerm::Variable { index, sort } => Some(TermManifest {
+            index: *index,
+            sort: term_sort_name(*sort),
+        }),
+        DecodedTerm::Individual { .. } | DecodedTerm::Data { .. } => None,
+    }
+}
+
+#[derive(Serialize)]
+struct ProvenanceManifest {
+    provenance_id: u32,
+    source_sha256: Vec<String>,
+    generated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RawEdge {
+    sub_class: u32,
+    super_class: u32,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedEdge {
+    sub_class: u32,
+    super_class: u32,
+    provenance: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProvenanceKey {
+    source_sha256: Vec<[u8; 32]>,
+    generated: bool,
+}
+
+struct PhaseBudget {
+    limits: NamedClassPhaseLimits,
+    work: u64,
+    owned_bytes: usize,
+}
+
+impl PhaseBudget {
+    const fn new(limits: NamedClassPhaseLimits) -> Self {
+        Self {
+            limits,
+            work: 0,
+            owned_bytes: 0,
+        }
+    }
+
+    fn claim_work(&mut self, amount: usize) -> EncodedResult<()> {
+        let amount = u64::try_from(amount)
+            .map_err(|_| EncodedValidationError::resource("named-class work exceeds u64"))?;
+        let following = self
+            .work
+            .checked_add(amount)
+            .ok_or_else(|| EncodedValidationError::resource("named-class work overflowed"))?;
+        if following > self.limits.max_work {
+            return Err(EncodedValidationError::resource(
+                "named-class compilation exceeds its work limit",
+            ));
+        }
+        self.work = following;
+        Ok(())
+    }
+
+    fn claim_owned(&mut self, amount: usize) -> EncodedResult<()> {
+        let following = self.owned_bytes.checked_add(amount).ok_or_else(|| {
+            EncodedValidationError::resource("named-class owned-byte count overflowed")
+        })?;
+        if following > self.limits.max_owned_bytes {
+            return Err(EncodedValidationError::resource(
+                "named-class compilation exceeds its owned-byte limit",
+            ));
+        }
+        self.owned_bytes = following;
+        Ok(())
+    }
+
+    fn count(observed: usize, allowed: usize, name: &'static str) -> EncodedResult<()> {
+        if observed > allowed {
+            Err(EncodedValidationError::resource(format!(
+                "named-class {name} exceeds its limit"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Compile the bounded named-class fragment without publishing a session.
+pub fn compile_named_class_phase<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    limits: NamedClassPhaseLimits,
+) -> EncodedResult<NamedClassPhase> {
+    let mut budget = PhaseBudget::new(limits);
+    let declared_class_ids = declared_class_ids(symbols, &mut budget)?;
+    let (class_domain, class_signature) =
+        class_signature(symbols, &declared_class_ids, &mut budget)?;
+    let thing = class_id_by_display(&class_domain, THING_DISPLAY)?;
+    let nothing = class_id_by_display(&class_domain, NOTHING_DISPLAY)?;
+
+    let mut raw_edges = Vec::<RawEdge>::new();
+    let mut compiled_roots = 0_usize;
+    let mut deferred_roots = 0_usize;
+    for root in &symbols.roots {
+        budget.claim_work(1)?;
+        match root.handler {
+            RootHandler::Declaration
+            | RootHandler::OntologyAnnotation
+            | RootHandler::AnnotationAssertion
+            | RootHandler::SubAnnotationPropertyOf
+            | RootHandler::AnnotationPropertyDomain
+            | RootHandler::AnnotationPropertyRange => {}
+            RootHandler::SubClassOf => {
+                match named_subclass(
+                    model,
+                    symbols,
+                    &class_signature,
+                    &class_domain,
+                    root.node,
+                    &mut budget,
+                )? {
+                    Some(edge) => {
+                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class compiled-root count overflowed",
+                            )
+                        })?;
+                        retain_edge(&mut raw_edges, edge, thing, nothing, &mut budget)?;
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
+            RootHandler::EquivalentClasses => {
+                match named_equivalent_classes(
+                    model,
+                    symbols,
+                    &class_signature,
+                    &class_domain,
+                    root.node,
+                    &mut budget,
+                )? {
+                    Some(edges) => {
+                        compiled_roots = compiled_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class compiled-root count overflowed",
+                            )
+                        })?;
+                        for edge in edges {
+                            retain_edge(&mut raw_edges, edge, thing, nothing, &mut budget)?;
+                        }
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
+            _ => {
+                deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                    EncodedValidationError::resource("named-class deferred-root count overflowed")
+                })?;
+            }
+        }
+        PhaseBudget::count(
+            compiled_roots,
+            limits.max_compiled_roots,
+            "compiled root count",
+        )?;
+    }
+
+    let edges = normalize_edges(raw_edges, &mut budget)?;
+    let (provenance, provenance_keys) = freeze_provenance(&edges, &mut budget)?;
+    let (predicates, predicate_by_class) = freeze_predicates(&edges, nothing, &mut budget)?;
+    let clauses = freeze_clauses(
+        &edges,
+        nothing,
+        &predicate_by_class,
+        &provenance_keys,
+        &mut budget,
+    )?;
+    Ok(NamedClassPhase {
+        class_domain,
+        class_signature,
+        predicates,
+        clauses,
+        provenance,
+        compiled_roots,
+        deferred_roots,
+        work: budget.work,
+        owned_bytes: budget.owned_bytes,
+        manifest_limit: limits.max_manifest_bytes,
+    })
+}
+
+fn declared_class_ids(symbols: &SymbolPhase, budget: &mut PhaseBudget) -> EncodedResult<Vec<u32>> {
+    let mut identifiers = Vec::new();
+    for entity in &symbols.declared_entities {
+        budget.claim_work(1)?;
+        if entity.kind != "class" {
+            continue;
+        }
+        budget.claim_owned(size_of::<u32>())?;
+        identifiers.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("declared-class signature allocation failed")
+        })?;
+        identifiers.push(entity.entity_id);
+    }
+    budget.claim_work(sort_work(identifiers.len()))?;
+    identifiers.sort_unstable();
+    identifiers.dedup();
+    Ok(identifiers)
+}
+
+fn class_signature(
+    symbols: &SymbolPhase,
+    declared_class_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(DecodedSymbolDomain, Vec<ClassSignatureBinding>)> {
+    let mut values = Vec::new();
+    let mut bindings = Vec::new();
+    for entity in &symbols.entity_domain.values {
+        budget.claim_work(1)?;
+        if !entity.display.starts_with("class:") {
+            continue;
+        }
+        let following = values.len().checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("named-class symbol count overflowed")
+        })?;
+        PhaseBudget::count(following, budget.limits.max_class_symbols, "symbol count")?;
+        budget.claim_owned(size_of::<DecodedSymbolValue>())?;
+        budget.claim_owned(size_of::<ClassSignatureBinding>())?;
+        budget.claim_owned(entity.key.len())?;
+        budget.claim_owned(entity.display.len())?;
+        values.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("named-class symbol allocation failed")
+        })?;
+        bindings.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("named-class signature allocation failed")
+        })?;
+        let class_expression_id = u32::try_from(values.len())
+            .map_err(|_| EncodedValidationError::resource("named-class symbol ID exceeds u32"))?;
+        values.push(DecodedSymbolValue {
+            identifier: class_expression_id,
+            key: entity.key.clone(),
+            display: entity.display.clone(),
+            generated: entity.generated,
+            query_local: entity.query_local,
+        });
+        bindings.push(ClassSignatureBinding {
+            class_expression_id,
+            entity_id: entity.identifier,
+            declared: declared_class_ids.binary_search(&entity.identifier).is_ok(),
+        });
+    }
+    Ok((
+        DecodedSymbolDomain {
+            kind: SymbolKind::ClassExpression,
+            values,
+        },
+        bindings,
+    ))
+}
+
+fn class_id_by_display(domain: &DecodedSymbolDomain, display: &str) -> EncodedResult<u32> {
+    domain
+        .values
+        .iter()
+        .find(|value| value.display == display)
+        .map(|value| value.identifier)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "named-class signature is missing a required built-in class",
+            )
+        })
+}
+
+fn named_subclass<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    signature: &[ClassSignatureBinding],
+    domain: &DecodedSymbolDomain,
+    root: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<RawEdge>> {
+    let node = model.node(root)?;
+    if node.tag() != SUBCLASS_TAG || node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "subclass root no longer has schema-1 shape",
+        ));
+    }
+    if !annotations_are_empty(model, node, 2)? {
+        return Ok(None);
+    }
+    let Some(sub_class) = named_class_field(model, symbols, signature, node, 0)? else {
+        return Ok(None);
+    };
+    let Some(super_class) = named_class_field(model, symbols, signature, node, 1)? else {
+        return Ok(None);
+    };
+    let provenance = subclass_digest(domain, sub_class, super_class, budget)?;
+    Ok(Some(RawEdge {
+        sub_class,
+        super_class,
+        provenance,
+    }))
+}
+
+fn named_equivalent_classes<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    signature: &[ClassSignatureBinding],
+    domain: &DecodedSymbolDomain,
+    root: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<Vec<RawEdge>>> {
+    let node = model.node(root)?;
+    if node.tag() != EQUIVALENT_CLASSES_TAG || node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "equivalent-classes root no longer has schema-1 shape",
+        ));
+    }
+    if !annotations_are_empty(model, node, 1)? {
+        return Ok(None);
+    }
+    let expressions_component = required_component(
+        model.field(node.fields().start)?,
+        "equivalent-classes expressions",
+    )?;
+    let ComponentValue::Collection(expressions) = model.resolve(expressions_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "equivalent-classes expressions did not resolve to a collection",
+        ));
+    };
+    let mut classes = Vec::new();
+    budget.claim_owned(
+        expressions
+            .len()
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("equivalent-classes member allocation overflowed")
+            })?,
+    )?;
+    classes.try_reserve_exact(expressions.len()).map_err(|_| {
+        EncodedValidationError::resource("equivalent-classes member allocation failed")
+    })?;
+    for item_index in expressions.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "equivalent-classes member")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "equivalent-classes member did not resolve to a node",
+            ));
+        };
+        let Some(class_id) = named_class_id(model, symbols, signature, identifier)? else {
+            return Ok(None);
+        };
+        classes.push(class_id);
+    }
+    if classes.len() < 2 {
+        return Err(EncodedValidationError::invariant(
+            "equivalent-classes root has fewer than two members",
+        ));
+    }
+    let provenance = equivalent_digest(domain, &classes, budget)?;
+    let mut edges = Vec::new();
+    budget.claim_owned(
+        classes
+            .len()
+            .checked_mul(size_of::<RawEdge>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("equivalent-classes edge allocation overflowed")
+            })?,
+    )?;
+    edges.try_reserve_exact(classes.len()).map_err(|_| {
+        EncodedValidationError::resource("equivalent-classes edge allocation failed")
+    })?;
+    for (index, sub_class) in classes.iter().copied().enumerate() {
+        let following = index.checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("equivalent-classes edge index overflowed")
+        })?;
+        edges.push(RawEdge {
+            sub_class,
+            super_class: classes[following % classes.len()],
+            provenance,
+        });
+    }
+    Ok(Some(edges))
+}
+
+fn annotations_are_empty<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    node: NodeRef,
+    relative_field: usize,
+) -> EncodedResult<bool> {
+    let field_index = node
+        .fields()
+        .start
+        .checked_add(relative_field)
+        .ok_or_else(|| EncodedValidationError::invariant("annotation field index overflowed"))?;
+    let component = required_component(model.field(field_index)?, "axiom annotations")?;
+    let ComponentValue::Collection(annotations) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(
+            "axiom annotations did not resolve to a collection",
+        ));
+    };
+    Ok(annotations.is_empty())
+}
+
+fn named_class_field<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    signature: &[ClassSignatureBinding],
+    node: NodeRef,
+    relative_field: usize,
+) -> EncodedResult<Option<u32>> {
+    let field_index = node
+        .fields()
+        .start
+        .checked_add(relative_field)
+        .ok_or_else(|| EncodedValidationError::invariant("class field index overflowed"))?;
+    let component = required_component(model.field(field_index)?, "named-class field")?;
+    let ComponentValue::Node(identifier) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(
+            "class-expression field did not resolve to a node",
+        ));
+    };
+    named_class_id(model, symbols, signature, identifier)
+}
+
+fn named_class_id<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    signature: &[ClassSignatureBinding],
+    identifier: NodeId,
+) -> EncodedResult<Option<u32>> {
+    if model.node(identifier)?.tag() != ENTITY_TAG {
+        return Ok(None);
+    }
+    let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
+        EncodedValidationError::invariant(
+            "named class is absent from the reachable entity-node mapping",
+        )
+    })?;
+    Ok(signature
+        .binary_search_by_key(&entity_id, |binding| binding.entity_id)
+        .ok()
+        .map(|index| signature[index].class_expression_id))
+}
+
+fn retain_edge(
+    edges: &mut Vec<RawEdge>,
+    edge: RawEdge,
+    thing: u32,
+    nothing: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    if edge.sub_class == nothing || edge.super_class == thing || edge.sub_class == edge.super_class
+    {
+        return Ok(());
+    }
+    budget.claim_owned(size_of::<RawEdge>())?;
+    edges
+        .try_reserve(1)
+        .map_err(|_| EncodedValidationError::resource("named-class edge allocation failed"))?;
+    edges.push(edge);
+    Ok(())
+}
+
+fn normalize_edges(
+    mut raw: Vec<RawEdge>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedEdge>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_by_key(|edge| (edge.sub_class, edge.super_class, edge.provenance));
+    let mut normalized = Vec::<NormalizedEdge>::new();
+    for edge in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.sub_class == edge.sub_class && previous.super_class == edge.super_class {
+                if previous.provenance.last() != Some(&edge.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "named-class edge provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(edge.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedEdge>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("normalized named-class edge allocation failed")
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("named-class edge provenance allocation failed")
+        })?;
+        provenance.push(edge.provenance);
+        normalized.push(NormalizedEdge {
+            sub_class: edge.sub_class,
+            super_class: edge.super_class,
+            provenance,
+        });
+    }
+    Ok(normalized)
+}
+
+fn freeze_provenance(
+    edges: &[NormalizedEdge],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(Vec<DecodedProvenanceEntry>, Vec<ProvenanceKey>)> {
+    let builtin: [u8; 32] = Sha256::digest(BUILTIN_PROVENANCE_INPUT).into();
+    let mut keys = Vec::new();
+    push_provenance_key(
+        &mut keys,
+        ProvenanceKey {
+            source_sha256: vec![builtin],
+            generated: true,
+        },
+        budget,
+    )?;
+    for edge in edges {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: edge.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    budget.claim_work(sort_work(keys.len()))?;
+    keys.sort();
+    keys.dedup();
+    PhaseBudget::count(keys.len(), budget.limits.max_provenance, "provenance count")?;
+
+    let mut entries = Vec::new();
+    budget.claim_owned(
+        keys.len()
+            .checked_mul(size_of::<DecodedProvenanceEntry>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("named-class provenance output overflowed")
+            })?,
+    )?;
+    entries.try_reserve_exact(keys.len()).map_err(|_| {
+        EncodedValidationError::resource("named-class provenance output allocation failed")
+    })?;
+    for (identifier, key) in keys.iter().enumerate() {
+        budget.claim_owned(
+            key.source_sha256
+                .len()
+                .checked_mul(size_of::<[u8; 32]>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "named-class provenance digest output overflowed",
+                    )
+                })?,
+        )?;
+        entries.push(DecodedProvenanceEntry {
+            provenance_id: u32::try_from(identifier).map_err(|_| {
+                EncodedValidationError::resource("named-class provenance ID exceeds u32")
+            })?,
+            source_sha256: key.source_sha256.clone(),
+            generated: key.generated,
+        });
+    }
+    Ok((entries, keys))
+}
+
+fn push_provenance_key(
+    keys: &mut Vec<ProvenanceKey>,
+    key: ProvenanceKey,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    budget.claim_owned(size_of::<ProvenanceKey>())?;
+    budget.claim_owned(
+        key.source_sha256
+            .len()
+            .checked_mul(size_of::<[u8; 32]>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("named-class provenance key overflowed")
+            })?,
+    )?;
+    keys.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("named-class provenance-key allocation failed")
+    })?;
+    keys.push(key);
+    Ok(())
+}
+
+type PredicateIndex = Vec<(u32, u32)>;
+type FrozenPredicates = (Vec<DecodedPredicate>, PredicateIndex);
+
+fn freeze_predicates(
+    edges: &[NormalizedEdge],
+    nothing: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<FrozenPredicates> {
+    let mut class_ids = Vec::new();
+    push_u32(&mut class_ids, nothing, "predicate class", budget)?;
+    for edge in edges {
+        push_u32(&mut class_ids, edge.sub_class, "predicate class", budget)?;
+        push_u32(&mut class_ids, edge.super_class, "predicate class", budget)?;
+    }
+    budget.claim_work(sort_work(class_ids.len()))?;
+    class_ids.sort_unstable();
+    class_ids.dedup();
+
+    let mut ordered = Vec::<(String, u32)>::new();
+    for class_id in class_ids {
+        // The scalar predicate identity is canonical JSON ending in
+        // `"symbol_id":<id>}`.  Retaining the closing delimiter matters:
+        // lexicographically, `10}` precedes `1}` even though the bare decimal
+        // string `"1"` precedes `"10"`.
+        let key = format!("{class_id}}}");
+        budget.claim_owned(size_of::<(String, u32)>())?;
+        budget.claim_owned(key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("named-class predicate ordering allocation failed")
+        })?;
+        ordered.push((key, class_id));
+    }
+    budget.claim_work(sort_work(ordered.len()))?;
+    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut predicates = Vec::new();
+    let mut predicate_by_class = Vec::new();
+    budget.claim_owned(
+        ordered
+            .len()
+            .checked_mul(
+                size_of::<DecodedPredicate>() + size_of::<(u32, u32)>() + size_of::<TermSort>(),
+            )
+            .ok_or_else(|| {
+                EncodedValidationError::resource("named-class predicate output overflowed")
+            })?,
+    )?;
+    predicates.try_reserve_exact(ordered.len()).map_err(|_| {
+        EncodedValidationError::resource("named-class predicate output allocation failed")
+    })?;
+    predicate_by_class
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("named-class predicate index allocation failed")
+        })?;
+    for (identifier, (_, class_id)) in ordered.into_iter().enumerate() {
+        let predicate_id = u32::try_from(identifier).map_err(|_| {
+            EncodedValidationError::resource("named-class predicate ID exceeds u32")
+        })?;
+        predicates.push(DecodedPredicate {
+            predicate_id,
+            kind: PredicateKind::Concept,
+            argument_sorts: vec![TermSort::Object],
+            symbol_id: Some(class_id),
+            role_id: None,
+            cardinality: None,
+            filler_predicate_id: None,
+            annotation: Vec::new(),
+            internal_key: None,
+        });
+        predicate_by_class.push((class_id, predicate_id));
+    }
+    predicate_by_class.sort_unstable_by_key(|(class_id, _)| *class_id);
+    Ok((predicates, predicate_by_class))
+}
+
+fn freeze_clauses(
+    edges: &[NormalizedEdge],
+    nothing: u32,
+    predicate_by_class: &[(u32, u32)],
+    provenance_keys: &[ProvenanceKey],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedClause>> {
+    let following = edges
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("named-class clause count overflowed"))?;
+    PhaseBudget::count(following, budget.limits.max_clauses, "clause count")?;
+    let builtin: [u8; 32] = Sha256::digest(BUILTIN_PROVENANCE_INPUT).into();
+    let mut ordered = Vec::<(Vec<u8>, DecodedClause)>::new();
+    let bottom_predicate = predicate_id(predicate_by_class, nothing)?;
+    let bottom_provenance = provenance_id(provenance_keys, &[builtin], true)?;
+    push_clause(
+        &mut ordered,
+        bottom_predicate,
+        None,
+        bottom_provenance,
+        budget,
+    )?;
+    for edge in edges {
+        let body = predicate_id(predicate_by_class, edge.sub_class)?;
+        let head = predicate_id(predicate_by_class, edge.super_class)?;
+        let provenance = provenance_id(provenance_keys, &edge.provenance, false)?;
+        push_clause(&mut ordered, body, Some(head), provenance, budget)?;
+    }
+    budget.claim_work(sort_work(ordered.len()))?;
+    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut clauses = Vec::new();
+    budget.claim_owned(
+        ordered
+            .len()
+            .checked_mul(size_of::<DecodedClause>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("named-class clause output overflowed")
+            })?,
+    )?;
+    clauses.try_reserve_exact(ordered.len()).map_err(|_| {
+        EncodedValidationError::resource("named-class clause output allocation failed")
+    })?;
+    for (identifier, (_, mut clause)) in ordered.into_iter().enumerate() {
+        clause.clause_id = u32::try_from(identifier)
+            .map_err(|_| EncodedValidationError::resource("named-class clause ID exceeds u32"))?;
+        clauses.push(clause);
+    }
+    Ok(clauses)
+}
+
+fn push_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    body_predicate: u32,
+    head_predicate: Option<u32>,
+    provenance_id: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let key = rule_key(body_predicate, head_predicate);
+    budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>())?;
+    budget.claim_owned(key.len())?;
+    let atom_count = 1_usize + usize::from(head_predicate.is_some());
+    budget.claim_owned(
+        atom_count
+            .checked_mul(size_of::<DecodedAtom>() + size_of::<DecodedTerm>())
+            .and_then(|value| value.checked_add(2 * size_of::<u32>()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("named-class clause payload size overflowed")
+            })?,
+    )?;
+    clauses
+        .try_reserve(1)
+        .map_err(|_| EncodedValidationError::resource("named-class clause allocation failed"))?;
+    clauses.push((
+        key,
+        DecodedClause {
+            clause_id: 0,
+            body: vec![variable_atom(body_predicate)],
+            head: head_predicate.map(variable_atom).into_iter().collect(),
+            provenance_ids: vec![provenance_id],
+            join_order: vec![0],
+        },
+    ));
+    Ok(())
+}
+
+fn variable_atom(predicate_id: u32) -> DecodedAtom {
+    DecodedAtom {
+        predicate_id,
+        arguments: vec![DecodedTerm::Variable {
+            index: 0,
+            sort: TermSort::Object,
+        }],
+    }
+}
+
+fn predicate_id(index: &[(u32, u32)], class_id: u32) -> EncodedResult<u32> {
+    index
+        .binary_search_by_key(&class_id, |(candidate, _)| *candidate)
+        .ok()
+        .map(|position| index[position].1)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("named-class predicate index is incomplete")
+        })
+}
+
+fn provenance_id(
+    keys: &[ProvenanceKey],
+    source_sha256: &[[u8; 32]],
+    generated: bool,
+) -> EncodedResult<u32> {
+    let identifier = keys
+        .binary_search_by(|candidate| {
+            (candidate.source_sha256.as_slice(), candidate.generated)
+                .cmp(&(source_sha256, generated))
+        })
+        .map_err(|_| {
+            EncodedValidationError::invariant("named-class provenance index is incomplete")
+        })?;
+    u32::try_from(identifier)
+        .map_err(|_| EncodedValidationError::resource("named-class provenance ID exceeds u32"))
+}
+
+fn push_u32(
+    target: &mut Vec<u32>,
+    value: u32,
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    budget.claim_owned(size_of::<u32>())?;
+    target.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource(format!("named-class {name} allocation failed"))
+    })?;
+    target.push(value);
+    Ok(())
+}
+
+fn subclass_digest(
+    domain: &DecodedSymbolDomain,
+    sub_class: u32,
+    super_class: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<[u8; 32]> {
+    let mut encoded = Vec::new();
+    push_varint(&mut encoded, u64::from(SUBCLASS_TAG), budget)?;
+    push_node(&mut encoded, class_key(domain, sub_class)?, budget)?;
+    push_node(&mut encoded, class_key(domain, super_class)?, budget)?;
+    push_empty_set(&mut encoded, budget)?;
+    budget.claim_work(encoded.len())?;
+    Ok(Sha256::digest(encoded).into())
+}
+
+fn equivalent_digest(
+    domain: &DecodedSymbolDomain,
+    classes: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<[u8; 32]> {
+    let mut encoded = Vec::new();
+    push_varint(&mut encoded, u64::from(EQUIVALENT_CLASSES_TAG), budget)?;
+    push_byte(&mut encoded, 6, budget)?;
+    push_varint(
+        &mut encoded,
+        u64::try_from(classes.len()).map_err(|_| {
+            EncodedValidationError::resource("equivalent-classes arity exceeds u64")
+        })?,
+        budget,
+    )?;
+    for class_id in classes {
+        push_frame(&mut encoded, class_key(domain, *class_id)?, budget)?;
+    }
+    push_empty_set(&mut encoded, budget)?;
+    budget.claim_work(encoded.len())?;
+    Ok(Sha256::digest(encoded).into())
+}
+
+fn class_key(domain: &DecodedSymbolDomain, identifier: u32) -> EncodedResult<&[u8]> {
+    domain
+        .values
+        .get(
+            usize::try_from(identifier).map_err(|_| {
+                EncodedValidationError::invariant("class-expression ID exceeds usize")
+            })?,
+        )
+        .map(|value| value.key.as_slice())
+        .ok_or_else(|| EncodedValidationError::invariant("class-expression ID is dangling"))
+}
+
+fn push_node(
+    target: &mut Vec<u8>,
+    encoded_node: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    push_byte(target, 1, budget)?;
+    push_frame(target, encoded_node, budget)
+}
+
+fn push_empty_set(target: &mut Vec<u8>, budget: &mut PhaseBudget) -> EncodedResult<()> {
+    push_byte(target, 6, budget)?;
+    push_varint(target, 0, budget)
+}
+
+fn push_frame(target: &mut Vec<u8>, value: &[u8], budget: &mut PhaseBudget) -> EncodedResult<()> {
+    let length = u64::try_from(value.len())
+        .map_err(|_| EncodedValidationError::resource("canonical frame length exceeds u64"))?;
+    push_varint(target, length, budget)?;
+    push_bytes(target, value, budget)
+}
+
+fn push_varint(
+    target: &mut Vec<u8>,
+    mut value: u64,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    loop {
+        let payload = u8::try_from(value & 0x7f)
+            .map_err(|_| EncodedValidationError::invariant("canonical varint byte exceeds u8"))?;
+        value >>= 7;
+        push_byte(target, payload | if value == 0 { 0 } else { 0x80 }, budget)?;
+        if value == 0 {
+            return Ok(());
+        }
+    }
+}
+
+fn push_byte(target: &mut Vec<u8>, value: u8, budget: &mut PhaseBudget) -> EncodedResult<()> {
+    budget.claim_owned(1)?;
+    target
+        .try_reserve(1)
+        .map_err(|_| EncodedValidationError::resource("canonical axiom allocation failed"))?;
+    target.push(value);
+    Ok(())
+}
+
+fn push_bytes(target: &mut Vec<u8>, value: &[u8], budget: &mut PhaseBudget) -> EncodedResult<()> {
+    budget.claim_owned(value.len())?;
+    target
+        .try_reserve(value.len())
+        .map_err(|_| EncodedValidationError::resource("canonical axiom allocation failed"))?;
+    target.extend_from_slice(value);
+    Ok(())
+}
+
+fn rule_key(body_predicate: u32, head_predicate: Option<u32>) -> Vec<u8> {
+    let body = atom_json(body_predicate);
+    match head_predicate {
+        Some(predicate) => {
+            format!("{{\"body\":[{body}],\"head\":[{}]}}", atom_json(predicate)).into_bytes()
+        }
+        None => format!("{{\"body\":[{body}],\"head\":[]}}").into_bytes(),
+    }
+}
+
+fn atom_json(predicate_id: u32) -> String {
+    format!(
+        "{{\"arguments\":[{{\"index\":0,\"schema_version\":1,\"sort\":\"object\",\"type\":\"Variable\"}}],\"predicate_id\":{predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}"
+    )
+}
+
+fn required_component<T>(value: Option<T>, name: &'static str) -> EncodedResult<T> {
+    value.ok_or_else(|| {
+        EncodedValidationError::invariant(format!("validated {name} component disappeared"))
+    })
+}
+
+const fn predicate_kind_name(kind: PredicateKind) -> &'static str {
+    match kind {
+        PredicateKind::Concept => "concept",
+        PredicateKind::NegatedConcept => "negated_concept",
+        PredicateKind::Nominal => "nominal",
+        PredicateKind::NegatedNominal => "negated_nominal",
+        PredicateKind::ObjectRole => "object_role",
+        PredicateKind::NegatedObjectRole => "negated_object_role",
+        PredicateKind::DataRole => "data_role",
+        PredicateKind::NegatedDataRole => "negated_data_role",
+        PredicateKind::DataRange => "data_range",
+        PredicateKind::NegatedDataRange => "negated_data_range",
+        PredicateKind::Equality => "equality",
+        PredicateKind::Inequality => "inequality",
+        PredicateKind::AtLeastObject => "at_least_object",
+        PredicateKind::AtLeastData => "at_least_data",
+        PredicateKind::AnnotatedEquality => "annotated_equality",
+        PredicateKind::AutomatonState => "automaton_state",
+        PredicateKind::DisjointGuard => "disjoint_guard",
+        PredicateKind::OrderingGuard => "ordering_guard",
+        PredicateKind::NamedIndividual => "named_individual",
+    }
+}
+
+const fn term_sort_name(sort: TermSort) -> &'static str {
+    match sort {
+        TermSort::Object => "object",
+        TermSort::Data => "data",
+    }
+}
+
+fn sort_work(count: usize) -> usize {
+    if count < 2 {
+        return count;
+    }
+    let comparisons = usize::BITS - (count - 1).leading_zeros();
+    count.saturating_mul(usize::try_from(comparisons).unwrap_or(usize::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoded::model::ValidatedModel;
+    use crate::encoded::symbols::{compile_symbol_phase, SymbolPhaseLimits};
+    use crate::encoded::{EncodedColumns, EncodedLimits};
+
+    #[derive(Clone, Debug)]
+    struct OwnedColumns {
+        root_kinds: Vec<u8>,
+        root_ids: Vec<u8>,
+        node_tags: Vec<u8>,
+        node_field_offsets: Vec<u8>,
+        field_kinds: Vec<u8>,
+        field_values: Vec<u8>,
+        field_lengths: Vec<u8>,
+        item_kinds: Vec<u8>,
+        item_values: Vec<u8>,
+        item_lengths: Vec<u8>,
+        scalar_bytes: Vec<u8>,
+    }
+
+    impl OwnedColumns {
+        fn borrowed(&self) -> EncodedColumns<&[u8]> {
+            EncodedColumns {
+                root_kinds: &self.root_kinds,
+                root_ids: &self.root_ids,
+                node_tags: &self.node_tags,
+                node_field_offsets: &self.node_field_offsets,
+                field_kinds: &self.field_kinds,
+                field_values: &self.field_values,
+                field_lengths: &self.field_lengths,
+                item_kinds: &self.item_kinds,
+                item_values: &self.item_values,
+                item_lengths: &self.item_lengths,
+                scalar_bytes: &self.scalar_bytes,
+            }
+        }
+    }
+
+    fn le16(values: &[u16]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn le32(values: &[u32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn le64(values: &[u64]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn equivalent_classes() -> OwnedColumns {
+        OwnedColumns {
+            root_kinds: vec![2],
+            root_ids: le32(&[5]),
+            node_tags: le16(&[1, 1, 2, 2, 62]),
+            node_field_offsets: le64(&[0, 1, 2, 4, 6, 8]),
+            field_kinds: vec![2, 2, 5, 1, 5, 1, 6, 6],
+            field_values: le64(&[0, 5, 10, 1, 15, 2, 0, 2]),
+            field_lengths: le64(&[5, 5, 5, 0, 5, 0, 2, 0]),
+            item_kinds: vec![1, 1],
+            item_values: le64(&[3, 4]),
+            item_lengths: le64(&[0, 0]),
+            scalar_bytes: b"urn:Aurn:Bclassclass".to_vec(),
+        }
+    }
+
+    #[test]
+    fn equivalent_named_classes_freeze_existing_native_records() -> EncodedResult<()> {
+        let owned = equivalent_classes();
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let symbols = compile_symbol_phase(&model, SymbolPhaseLimits::default())?;
+        let phase = compile_named_class_phase(&model, &symbols, NamedClassPhaseLimits::default())?;
+
+        assert_eq!(phase.class_domain.kind, SymbolKind::ClassExpression);
+        assert_eq!(phase.class_domain.values.len(), 4);
+        assert_eq!(phase.class_signature.len(), 4);
+        assert!(phase
+            .class_signature
+            .iter()
+            .all(|binding| !binding.declared));
+        assert_eq!(phase.compiled_roots, 1);
+        assert_eq!(phase.deferred_roots, 0);
+        assert_eq!(phase.predicates.len(), 3);
+        assert_eq!(phase.clauses.len(), 3);
+        assert_eq!(phase.provenance.len(), 2);
+        assert!(phase
+            .predicates
+            .iter()
+            .all(|predicate| predicate.kind == PredicateKind::Concept));
+        assert!(phase.clauses.iter().all(|clause| {
+            clause.body.len() == 1 && clause.join_order == [0] && clause.provenance_ids.len() == 1
+        }));
+        let manifest: serde_json::Value = serde_json::from_slice(&phase.canonical_manifest_json()?)
+            .map_err(|_| EncodedValidationError::invariant("manifest did not decode"))?;
+        assert_eq!(manifest["family"], "named_class_axioms");
+        assert_eq!(manifest["compiled_roots"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn clause_limit_rolls_back_without_mutating_symbol_transaction() -> EncodedResult<()> {
+        let owned = equivalent_classes();
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let symbols = compile_symbol_phase(&model, SymbolPhaseLimits::default())?;
+        let before = symbols.clone();
+        let limits = NamedClassPhaseLimits {
+            max_clauses: 0,
+            ..NamedClassPhaseLimits::default()
+        };
+        let error = compile_named_class_phase(&model, &symbols, limits).err();
+        assert!(error.is_some_and(|value| {
+            value.code == "NATIVE_ENCODED_RESOURCE_LIMIT" && value.message.contains("clause")
+        }));
+        assert_eq!(symbols, before);
+        Ok(())
+    }
+}

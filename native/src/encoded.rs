@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod model;
+pub mod named_classes;
 pub mod symbols;
 
 use std::cmp::Ordering;

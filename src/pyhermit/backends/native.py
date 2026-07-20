@@ -195,7 +195,7 @@ class NativeBackendFactory:
         return self._info
 
     def _validate_encoded_handoff(self, view: OntologyView) -> None:
-        """Privately preflight borrowed columns and the first compiler phase."""
+        """Privately preflight borrowed columns, symbols, and named-class clauses."""
 
         validator = self._validate_encoded
         if validator is None:

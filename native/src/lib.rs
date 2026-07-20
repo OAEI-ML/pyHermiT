@@ -613,9 +613,15 @@ fn validate_encoded_columns_v1(
         )?;
         let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
             .map_err(encoded_validation_error)?;
-        encoded::symbols::compile_symbol_phase(
+        let symbols = encoded::symbols::compile_symbol_phase(
             &model,
             encoded::symbols::SymbolPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        encoded::named_classes::compile_named_class_phase(
+            &model,
+            &symbols,
+            encoded::named_classes::NamedClassPhaseLimits::default(),
         )
         .map(drop)
         .map_err(encoded_validation_error)
@@ -679,6 +685,65 @@ fn encoded_symbol_manifest_v1(
             ErrorKind::Poisoned,
             "NATIVE_PANIC",
             "native encoded-symbol manifest panic was contained",
+        )
+        .into_pyerr(py)),
+    }
+}
+
+#[pyfunction(name = "_encoded_named_class_manifest_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_named_class_manifest_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let symbols = encoded::symbols::compile_symbol_phase(
+            &model,
+            encoded::symbols::SymbolPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        let phase = encoded::named_classes::compile_named_class_phase(
+            &model,
+            &symbols,
+            encoded::named_classes::NamedClassPhaseLimits::default(),
+        )
+        .map_err(encoded_validation_error)?;
+        phase
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    }));
+    match result {
+        Ok(value) => value.map_err(|error| error.into_pyerr(py)),
+        Err(_) => Err(NativeError::new(
+            ErrorKind::Poisoned,
+            "NATIVE_PANIC",
+            "native encoded named-class manifest panic was contained",
         )
         .into_pyerr(py)),
     }
@@ -931,6 +996,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeSession>()?;
     module.add_function(wrap_pyfunction!(validate_encoded_columns_v1, module)?)?;
     module.add_function(wrap_pyfunction!(encoded_symbol_manifest_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(encoded_named_class_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(self_test, module)?)?;
     module.add_function(wrap_pyfunction!(create_session, module)?)?;
     Ok(())

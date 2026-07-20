@@ -77,6 +77,20 @@ def _encoded_symbol_manifest_v1(
     item_lengths: memoryview,
     scalar_bytes: memoryview,
 ) -> bytes: ...
+def _encoded_named_class_manifest_v1(
+    *,
+    root_kinds: memoryview,
+    root_ids: memoryview,
+    node_tags: memoryview,
+    node_field_offsets: memoryview,
+    field_kinds: memoryview,
+    field_values: memoryview,
+    field_lengths: memoryview,
+    item_kinds: memoryview,
+    item_values: memoryview,
+    item_lengths: memoryview,
+    scalar_bytes: memoryview,
+) -> bytes: ...
 def self_test() -> None: ...
 def create_session(
     ir: bytes,
