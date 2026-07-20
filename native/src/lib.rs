@@ -1510,6 +1510,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     | encoded::symbols::RootHandler::InverseFunctionalObjectProperty
                     | encoded::symbols::RootHandler::ReflexiveObjectProperty
                     | encoded::symbols::RootHandler::DataPropertyDomain
+                    | encoded::symbols::RootHandler::DataPropertyRange
                     | encoded::symbols::RootHandler::FunctionalDataProperty
             )
         });
