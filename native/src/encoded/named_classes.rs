@@ -4,12 +4,12 @@
 //! a scalar-compatible named `individual` domain. It compiles named-only
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, and named `ObjectPropertyDomain` /
-//! `ObjectPropertyRange` / positive `ObjectPropertyAssertion` axioms into the
-//! existing native predicate, clause, fact, and provenance records. Exact
-//! nested annotations participate in source provenance, with segmented
-//! anonymous scopes remapped before hashing. Predicate and clause identifiers
-//! are dense within this fragment and must be remapped when a later phase
-//! assembles the complete program; no fragment is publishable on its own.
+//! `ObjectPropertyRange` / positive and negative `ObjectPropertyAssertion`
+//! axioms into the existing native predicate, clause, fact, and provenance
+//! records. Exact nested annotations participate in source provenance, with
+//! segmented anonymous scopes remapped before hashing. Predicate and clause
+//! identifiers are dense within this fragment and must be remapped when a later
+//! phase assembles the complete program; no fragment is publishable on its own.
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #![forbid(unsafe_code)]
@@ -43,6 +43,7 @@ const SAME_INDIVIDUAL_TAG: u16 = 110;
 const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
 const CLASS_ASSERTION_TAG: u16 = 112;
 const OBJECT_PROPERTY_ASSERTION_TAG: u16 = 113;
+const NEGATIVE_OBJECT_PROPERTY_ASSERTION_TAG: u16 = 114;
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
 const DISJOINT_GUARD_DOMAIN: &[u8] = b"pyhermit:linear-disjoint-classes:v1\0";
 const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
@@ -117,6 +118,7 @@ pub struct NamedClassPhase {
     pub predicates: Vec<DecodedPredicate>,
     pub clauses: Vec<DecodedClause>,
     pub positive_facts: Vec<DecodedGroundAtom>,
+    pub negative_facts: Vec<DecodedGroundAtom>,
     pub provenance: Vec<DecodedProvenanceEntry>,
     pub compiled_roots: usize,
     pub deferred_roots: usize,
@@ -128,6 +130,7 @@ pub struct NamedClassPhase {
     normalized_object_constraints: Vec<NormalizedObjectConstraint>,
     normalized_facts: Vec<NormalizedFact>,
     normalized_object_facts: Vec<NormalizedObjectFact>,
+    normalized_negative_object_facts: Vec<NormalizedObjectFact>,
     normalized_equalities: Vec<NormalizedEqualityFact>,
     normalized_inequalities: Vec<NormalizedInequalityFact>,
     manifest_limit: usize,
@@ -202,6 +205,11 @@ impl NamedClassPhase {
             .iter()
             .map(ground_atom_manifest)
             .collect();
+        let negative_facts = self
+            .negative_facts
+            .iter()
+            .map(ground_atom_manifest)
+            .collect();
         let provenance = self
             .provenance
             .iter()
@@ -228,6 +236,7 @@ impl NamedClassPhase {
             predicates,
             clauses,
             positive_facts,
+            negative_facts,
             provenance,
         })
         .map_err(|_| {
@@ -256,6 +265,7 @@ struct NamedClassManifest<'a> {
     predicates: Vec<PredicateManifest<'a>>,
     clauses: Vec<ClauseManifest<'a>>,
     positive_facts: Vec<GroundAtomManifest<'a>>,
+    negative_facts: Vec<GroundAtomManifest<'a>>,
     provenance: Vec<ProvenanceManifest>,
 }
 
@@ -667,6 +677,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut raw_object_constraints = Vec::<RawObjectConstraint>::new();
     let mut raw_facts = Vec::<RawFact>::new();
     let mut raw_object_facts = Vec::<RawObjectFact>::new();
+    let mut raw_negative_object_facts = Vec::<RawObjectFact>::new();
     let mut raw_equalities = Vec::<RawEqualityFact>::new();
     let mut raw_inequalities = Vec::<RawInequalityFact>::new();
     let mut compiled_root_digests = Vec::<[u8; 32]>::new();
@@ -977,6 +988,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     object_roles,
                     &individual_signature,
                     root.node,
+                    OBJECT_PROPERTY_ASSERTION_TAG,
                     scope_maps,
                     &mut budget,
                 )? {
@@ -994,6 +1006,49 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                             )
                         })?;
                         raw_object_facts.push(fact);
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
+            RootHandler::NegativeObjectPropertyAssertion => {
+                let Some(object_roles) = object_roles else {
+                    deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "named-class deferred-root count overflowed",
+                        )
+                    })?;
+                    continue;
+                };
+                match named_object_assertion(
+                    model,
+                    symbols,
+                    object_roles,
+                    &individual_signature,
+                    root.node,
+                    NEGATIVE_OBJECT_PROPERTY_ASSERTION_TAG,
+                    scope_maps,
+                    &mut budget,
+                )? {
+                    Some(fact) => {
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            fact.provenance,
+                            &mut budget,
+                        )?;
+                        budget.claim_owned(size_of::<RawObjectFact>())?;
+                        raw_negative_object_facts.try_reserve(1).map_err(|_| {
+                            EncodedValidationError::resource(
+                                "named negative object-property assertion allocation failed",
+                            )
+                        })?;
+                        raw_negative_object_facts.push(fact);
                     }
                     None => {
                         deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
@@ -1030,6 +1085,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let object_constraints = normalize_object_constraints(raw_object_constraints, &mut budget)?;
     let facts = normalize_facts(raw_facts, &mut budget)?;
     let object_facts = normalize_object_facts(raw_object_facts, &mut budget)?;
+    let negative_object_facts = normalize_object_facts(raw_negative_object_facts, &mut budget)?;
     let equalities = normalize_equalities(raw_equalities, &mut budget)?;
     let inequalities = normalize_inequalities(raw_inequalities, &mut budget)?;
     let (provenance, provenance_keys) = freeze_provenance(
@@ -1038,6 +1094,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &object_constraints,
         &facts,
         &object_facts,
+        &negative_object_facts,
         &equalities,
         &inequalities,
         &mut budget,
@@ -1046,6 +1103,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         predicates,
         predicate_by_class,
         predicate_by_object_role,
+        predicate_by_negative_object_role,
         guard_predicates,
         named_predicate,
         equality_predicate,
@@ -1056,6 +1114,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &object_constraints,
         &facts,
         &object_facts,
+        &negative_object_facts,
         &equalities,
         &inequalities,
         thing,
@@ -1092,6 +1151,15 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &scalar_predicate_ids,
         &mut budget,
     )?;
+    let negative_facts = freeze_negative_facts(
+        &negative_object_facts,
+        &individual_domain,
+        &predicate_by_negative_object_role,
+        &provenance_keys,
+        &scalar_predicate_ids,
+        positive_facts.len(),
+        &mut budget,
+    )?;
     Ok(NamedClassPhase {
         class_domain,
         class_signature,
@@ -1101,6 +1169,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         predicates,
         clauses,
         positive_facts,
+        negative_facts,
         provenance,
         compiled_roots,
         deferred_roots,
@@ -1112,6 +1181,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_object_constraints: object_constraints,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
+        normalized_negative_object_facts: negative_object_facts,
         normalized_equalities: equalities,
         normalized_inequalities: inequalities,
         manifest_limit: limits.max_manifest_bytes,
@@ -1865,11 +1935,12 @@ fn named_object_assertion<B: ByteSource>(
     object_roles: &ObjectRolePhase,
     individual_signature: &[IndividualSignatureBinding],
     root: NodeId,
+    expected_tag: u16,
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<RawObjectFact>> {
     let node = model.node(root)?;
-    if node.tag() != OBJECT_PROPERTY_ASSERTION_TAG || node.field_count() != 4 {
+    if node.tag() != expected_tag || node.field_count() != 4 {
         return Err(EncodedValidationError::invariant(
             "object-property assertion root no longer has schema-1 shape",
         ));
@@ -2362,6 +2433,7 @@ fn freeze_provenance(
     object_constraints: &[NormalizedObjectConstraint],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
+    negative_object_facts: &[NormalizedObjectFact],
     equalities: &[NormalizedEqualityFact],
     inequalities: &[NormalizedInequalityFact],
     budget: &mut PhaseBudget,
@@ -2417,6 +2489,16 @@ fn freeze_provenance(
         )?;
     }
     for fact in object_facts {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: fact.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    for fact in negative_object_facts {
         push_provenance_key(
             &mut keys,
             ProvenanceKey {
@@ -2511,6 +2593,7 @@ fn push_provenance_key(
 enum PredicateOwner {
     Concept(u32),
     ObjectRole(u32),
+    NegatedObjectRole(u32),
     Equality,
     Inequality,
     NamedIndividual,
@@ -2534,6 +2617,7 @@ type FrozenPredicates = (
     Vec<DecodedPredicate>,
     PredicateIndex,
     ObjectPredicateIndex,
+    ObjectPredicateIndex,
     GuardPredicateIndex,
     Option<u32>,
     Option<u32>,
@@ -2547,6 +2631,7 @@ fn freeze_predicates(
     object_constraints: &[NormalizedObjectConstraint],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
+    negative_object_facts: &[NormalizedObjectFact],
     equalities: &[NormalizedEqualityFact],
     inequalities: &[NormalizedInequalityFact],
     thing: u32,
@@ -2664,6 +2749,30 @@ fn freeze_predicates(
             owner: PredicateOwner::ObjectRole(role_id),
         });
     }
+    let mut negative_object_role_ids = Vec::new();
+    for fact in negative_object_facts {
+        push_u32(
+            &mut negative_object_role_ids,
+            fact.role_id,
+            "predicate negative object role",
+            budget,
+        )?;
+    }
+    budget.claim_work(sort_work(negative_object_role_ids.len()))?;
+    negative_object_role_ids.sort_unstable();
+    negative_object_role_ids.dedup();
+    for role_id in negative_object_role_ids {
+        let key = role_predicate_key(PredicateKind::NegatedObjectRole, role_id);
+        budget.claim_owned(size_of::<PendingPredicate>())?;
+        budget.claim_owned(key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("negated object-role predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::NegatedObjectRole(role_id),
+        });
+    }
     for disjoint in disjoints {
         let internal_key = crate::model::hex(&disjoint.guard_digest);
         budget.claim_owned(internal_key.len())?;
@@ -2701,6 +2810,7 @@ fn freeze_predicates(
     let mut predicates = Vec::new();
     let mut predicate_by_class = Vec::new();
     let mut predicate_by_object_role = Vec::new();
+    let mut predicate_by_negative_object_role = Vec::new();
     let mut guard_predicates = Vec::new();
     let mut named_predicate = None;
     let mut equality_predicate = None;
@@ -2710,7 +2820,7 @@ fn freeze_predicates(
             .len()
             .checked_mul(
                 size_of::<DecodedPredicate>()
-                    + 2 * size_of::<(u32, u32)>()
+                    + 3 * size_of::<(u32, u32)>()
                     + size_of::<([u8; 32], u32, u32)>()
                     + size_of::<TermSort>(),
             )
@@ -2730,6 +2840,13 @@ fn freeze_predicates(
         .try_reserve_exact(ordered.len())
         .map_err(|_| {
             EncodedValidationError::resource("object-role predicate index allocation failed")
+        })?;
+    predicate_by_negative_object_role
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| {
+            EncodedValidationError::resource(
+                "negated object-role predicate index allocation failed",
+            )
         })?;
     guard_predicates
         .try_reserve_exact(ordered.len())
@@ -2769,6 +2886,21 @@ fn freeze_predicates(
                     internal_key: None,
                 });
                 predicate_by_object_role.push((role_id, predicate_id));
+            }
+            PredicateOwner::NegatedObjectRole(role_id) => {
+                budget.claim_owned(size_of::<TermSort>())?;
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::NegatedObjectRole,
+                    argument_sorts: vec![TermSort::Object, TermSort::Object],
+                    symbol_id: None,
+                    role_id: Some(role_id),
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: Vec::new(),
+                    internal_key: None,
+                });
+                predicate_by_negative_object_role.push((role_id, predicate_id));
             }
             PredicateOwner::Equality => {
                 budget.claim_owned(size_of::<TermSort>())?;
@@ -2838,11 +2970,13 @@ fn freeze_predicates(
     }
     predicate_by_class.sort_unstable_by_key(|(class_id, _)| *class_id);
     predicate_by_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
+    predicate_by_negative_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     guard_predicates.sort_unstable_by_key(|(digest, sequence, _)| (*digest, *sequence));
     Ok((
         predicates,
         predicate_by_class,
         predicate_by_object_role,
+        predicate_by_negative_object_role,
         guard_predicates,
         named_predicate,
         equality_predicate,
@@ -3303,6 +3437,111 @@ fn freeze_positive_facts(
     Ok(output)
 }
 
+fn freeze_negative_facts(
+    facts: &[NormalizedObjectFact],
+    individual_domain: &DecodedSymbolDomain,
+    predicate_by_negative_object_role: &[(u32, u32)],
+    provenance_keys: &[ProvenanceKey],
+    scalar_predicate_ids: &[u32],
+    positive_fact_count: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedGroundAtom>> {
+    let total_fact_count = positive_fact_count
+        .checked_add(facts.len())
+        .ok_or_else(|| EncodedValidationError::resource("ground-fact count overflowed"))?;
+    PhaseBudget::count(
+        total_fact_count,
+        budget.limits.max_facts,
+        "ground fact count",
+    )?;
+    budget.claim_work(
+        facts
+            .len()
+            .checked_add(sort_work(facts.len()))
+            .ok_or_else(|| EncodedValidationError::resource("negative-fact work overflowed"))?,
+    )?;
+    budget.claim_owned(
+        facts
+            .len()
+            .checked_mul(size_of::<(Vec<u8>, DecodedGroundAtom)>())
+            .ok_or_else(|| EncodedValidationError::resource("negative-fact input overflowed"))?,
+    )?;
+    let mut ordered = Vec::<(Vec<u8>, DecodedGroundAtom)>::new();
+    ordered
+        .try_reserve_exact(facts.len())
+        .map_err(|_| EncodedValidationError::resource("negative-fact input allocation failed"))?;
+    for fact in facts {
+        if [fact.source_individual, fact.target_individual]
+            .into_iter()
+            .any(|individual_id| {
+                usize::try_from(individual_id)
+                    .ok()
+                    .is_none_or(|identifier| identifier >= individual_domain.values.len())
+            })
+        {
+            return Err(EncodedValidationError::invariant(
+                "named negative object-property assertion has a dangling individual ID",
+            ));
+        }
+        let predicate_id = object_predicate_id(predicate_by_negative_object_role, fact.role_id)?;
+        let scalar_predicate_id = scalar_predicate_ids
+            .get(usize::try_from(predicate_id).map_err(|_| {
+                EncodedValidationError::invariant("negative-fact predicate ID exceeds usize")
+            })?)
+            .copied()
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "scalar negative-fact predicate mapping is incomplete",
+                )
+            })?;
+        let provenance_id = provenance_id(provenance_keys, &fact.provenance, false)?;
+        let provenance_ids = vec![provenance_id];
+        let arguments = GroundArguments::Binary(fact.source_individual, fact.target_individual);
+        let key = ground_fact_key(scalar_predicate_id, arguments, &provenance_ids);
+        budget.claim_owned(
+            key.len()
+                .checked_add(size_of::<u32>())
+                .and_then(|value| value.checked_add(2 * size_of::<DecodedTerm>()))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("negative-fact payload overflowed")
+                })?,
+        )?;
+        ordered.push((
+            key,
+            DecodedGroundAtom {
+                predicate_id,
+                arguments: vec![
+                    DecodedTerm::Individual {
+                        individual_id: fact.source_individual,
+                    },
+                    DecodedTerm::Individual {
+                        individual_id: fact.target_individual,
+                    },
+                ],
+                provenance_ids,
+            },
+        ));
+    }
+    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+    if ordered.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(EncodedValidationError::invariant(
+            "negative object-property facts contain duplicate identities",
+        ));
+    }
+    let mut output = Vec::new();
+    budget.claim_owned(
+        ordered
+            .len()
+            .checked_mul(size_of::<DecodedGroundAtom>())
+            .ok_or_else(|| EncodedValidationError::resource("negative-fact result overflowed"))?,
+    )?;
+    output
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| EncodedValidationError::resource("negative-fact result allocation failed"))?;
+    output.extend(ordered.into_iter().map(|(_, fact)| fact));
+    Ok(output)
+}
+
 fn push_clause(
     clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
     body_predicates: &[u32],
@@ -3678,6 +3917,7 @@ fn scalar_predicate_ids(
 fn role_predicate_key(kind: PredicateKind, role_id: u32) -> Vec<u8> {
     let (sorts, name) = match kind {
         PredicateKind::ObjectRole => ("\"object\",\"object\"", "object_role"),
+        PredicateKind::NegatedObjectRole => ("\"object\",\"object\"", "negated_object_role"),
         PredicateKind::DataRole => ("\"object\",\"data\"", "data_role"),
         _ => ("", "invalid"),
     };
@@ -3690,6 +3930,21 @@ fn role_predicate_key(kind: PredicateKind, role_id: u32) -> Vec<u8> {
 fn named_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
     let unary_object = predicate.argument_sorts == [TermSort::Object];
     let binary_object = predicate.argument_sorts == [TermSort::Object, TermSort::Object];
+    if predicate.kind == PredicateKind::NegatedObjectRole
+        && binary_object
+        && predicate.symbol_id.is_none()
+        && predicate.cardinality.is_none()
+        && predicate.filler_predicate_id.is_none()
+        && predicate.annotation.is_empty()
+        && predicate.internal_key.is_none()
+    {
+        return predicate
+            .role_id
+            .map(|role_id| role_predicate_key(PredicateKind::NegatedObjectRole, role_id))
+            .ok_or_else(|| {
+                EncodedValidationError::invariant("negated object-role predicate lost its role ID")
+            });
+    }
     if predicate.role_id.is_some()
         || predicate.cardinality.is_some()
         || predicate.filler_predicate_id.is_some()
@@ -4007,16 +4262,24 @@ fn merge_named_class_phases_impl(
     )?;
     drop(entity_domain);
 
-    let (edges, disjoints, object_constraints, facts, object_facts, equalities, inequalities) =
-        merge_normalized_sources(
-            phases,
-            &class_maps,
-            &individual_maps,
-            &class_domain,
-            source_object_roles,
-            merged_object_roles,
-            &mut budget,
-        )?;
+    let (
+        edges,
+        disjoints,
+        object_constraints,
+        facts,
+        object_facts,
+        negative_object_facts,
+        equalities,
+        inequalities,
+    ) = merge_normalized_sources(
+        phases,
+        &class_maps,
+        &individual_maps,
+        &class_domain,
+        source_object_roles,
+        merged_object_roles,
+        &mut budget,
+    )?;
     let thing = class_id_by_display(&class_domain, THING_DISPLAY)?;
     let nothing = class_id_by_display(&class_domain, NOTHING_DISPLAY)?;
     let (provenance, provenance_keys) = freeze_provenance(
@@ -4025,6 +4288,7 @@ fn merge_named_class_phases_impl(
         &object_constraints,
         &facts,
         &object_facts,
+        &negative_object_facts,
         &equalities,
         &inequalities,
         &mut budget,
@@ -4033,6 +4297,7 @@ fn merge_named_class_phases_impl(
         predicates,
         predicate_by_class,
         predicate_by_object_role,
+        predicate_by_negative_object_role,
         guard_predicates,
         named_predicate,
         equality_predicate,
@@ -4043,6 +4308,7 @@ fn merge_named_class_phases_impl(
         &object_constraints,
         &facts,
         &object_facts,
+        &negative_object_facts,
         &equalities,
         &inequalities,
         thing,
@@ -4077,6 +4343,15 @@ fn merge_named_class_phases_impl(
         inequality_predicate,
         &provenance_keys,
         &scalar_predicate_ids,
+        &mut budget,
+    )?;
+    let negative_facts = freeze_negative_facts(
+        &negative_object_facts,
+        &individual_domain,
+        &predicate_by_negative_object_role,
+        &provenance_keys,
+        &scalar_predicate_ids,
+        positive_facts.len(),
         &mut budget,
     )?;
     let compiled_source_count = phases.iter().try_fold(0_usize, |total, (_, phase)| {
@@ -4133,6 +4408,7 @@ fn merge_named_class_phases_impl(
         predicates,
         clauses,
         positive_facts,
+        negative_facts,
         provenance,
         compiled_roots,
         deferred_roots,
@@ -4144,6 +4420,7 @@ fn merge_named_class_phases_impl(
         normalized_object_constraints: object_constraints,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
+        normalized_negative_object_facts: negative_object_facts,
         normalized_equalities: equalities,
         normalized_inequalities: inequalities,
         manifest_limit: limits.max_manifest_bytes,
@@ -4418,6 +4695,7 @@ type NormalizedSources = (
     Vec<NormalizedObjectConstraint>,
     Vec<NormalizedFact>,
     Vec<NormalizedObjectFact>,
+    Vec<NormalizedObjectFact>,
     Vec<NormalizedEqualityFact>,
     Vec<NormalizedInequalityFact>,
 );
@@ -4436,6 +4714,7 @@ fn merge_normalized_sources(
     let mut raw_object_constraints = Vec::new();
     let mut raw_facts = Vec::new();
     let mut raw_object_facts = Vec::new();
+    let mut raw_negative_object_facts = Vec::new();
     let mut raw_equalities = Vec::new();
     let mut raw_inequalities = Vec::new();
     for (phase_index, (_, phase)) in phases.iter().enumerate() {
@@ -4623,6 +4902,53 @@ fn merge_normalized_sources(
                 }
             }
         }
+        if !phase.normalized_negative_object_facts.is_empty() {
+            let source_roles = source_object_roles
+                .and_then(|roles| roles.get(phase_index))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged negative object-property assertions lost their source role domain",
+                    )
+                })?;
+            let merged_roles = merged_object_roles.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "merged negative object-property assertions lost their global role domain",
+                )
+            })?;
+            for fact in &phase.normalized_negative_object_facts {
+                if fact.provenance.is_empty() {
+                    return Err(EncodedValidationError::invariant(
+                        "merged negative object-property assertion lost provenance",
+                    ));
+                }
+                let role_id = remap_object_role(source_roles, merged_roles, fact.role_id, budget)?;
+                let source_individual = mapped_id(
+                    individual_map,
+                    fact.source_individual,
+                    "negative object-property assertion source individual",
+                )?;
+                let target_individual = mapped_id(
+                    individual_map,
+                    fact.target_individual,
+                    "negative object-property assertion target individual",
+                )?;
+                for provenance in &fact.provenance {
+                    budget.claim_work(1)?;
+                    budget.claim_owned(size_of::<RawObjectFact>())?;
+                    raw_negative_object_facts.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "merged negative object-property assertion allocation failed",
+                        )
+                    })?;
+                    raw_negative_object_facts.push(RawObjectFact {
+                        role_id,
+                        source_individual,
+                        target_individual,
+                        provenance: *provenance,
+                    });
+                }
+            }
+        }
         for equality in &phase.normalized_equalities {
             if equality.provenance.is_empty() {
                 return Err(EncodedValidationError::invariant(
@@ -4694,6 +5020,7 @@ fn merge_normalized_sources(
         normalize_object_constraints(raw_object_constraints, budget)?,
         normalize_facts(raw_facts, budget)?,
         normalize_object_facts(raw_object_facts, budget)?,
+        normalize_object_facts(raw_negative_object_facts, budget)?,
         normalize_equalities(raw_equalities, budget)?,
         normalize_inequalities(raw_inequalities, budget)?,
     ))

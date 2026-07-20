@@ -199,6 +199,7 @@ def _expected_manifest(
     compiled_roots: int,
     include_object_constraints: bool = False,
     include_object_assertions: bool = False,
+    include_negative_object_assertions: bool = False,
 ) -> dict[str, object]:
     normalized, program, ontology = compile_captured_bundle(
         capture_ontology(snapshot).captured,
@@ -224,7 +225,12 @@ def _expected_manifest(
     }
     constraint_provenance_ids: set[int] = set()
     assertion_provenance_ids: set[int] = set()
-    if include_object_constraints or include_object_assertions:
+    negative_assertion_provenance_ids: set[int] = set()
+    if (
+        include_object_constraints
+        or include_object_assertions
+        or include_negative_object_assertions
+    ):
         provenance_id_by_key = {
             (value.source_sha256, value.generated): value.provenance_id
             for value in program.provenance.entries
@@ -243,6 +249,12 @@ def _expected_manifest(
             provenance_id_by_key[(record.provenance_sha256, record.generated)]
             for record in normalized.records
             if isinstance(record.statement, owl.ObjectPropertyAssertion)
+        }
+    if include_negative_object_assertions:
+        negative_assertion_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if isinstance(record.statement, owl.NegativeObjectPropertyAssertion)
         }
     predicates_by_id = {value.predicate_id: value for value in program.predicates.predicates}
     constraint_clauses = {
@@ -263,7 +275,15 @@ def _expected_manifest(
         if assertion_provenance_ids.intersection(fact.provenance_ids)
         and predicates_by_id[fact.predicate_id].kind is PredicateKind.OBJECT_ROLE
     }
-    selected_role_predicates = constraint_role_predicates | assertion_role_predicates
+    negative_assertion_role_predicates = {
+        fact.predicate_id
+        for fact in program.negative_facts
+        if negative_assertion_provenance_ids.intersection(fact.provenance_ids)
+        and predicates_by_id[fact.predicate_id].kind is PredicateKind.NEGATED_OBJECT_ROLE
+    }
+    selected_role_predicates = (
+        constraint_role_predicates | assertion_role_predicates | negative_assertion_role_predicates
+    )
     fragment_predicates = [
         value
         for value in program.predicates.predicates
@@ -314,6 +334,11 @@ def _expected_manifest(
         for value in program.positive_facts
         if value.predicate_id in predicate_remap
     ]
+    negative_facts = [
+        _ground_atom_payload(value, predicate_remap)
+        for value in program.negative_facts
+        if value.predicate_id in predicate_remap
+    ]
 
     return {
         "schema_version": 1,
@@ -342,6 +367,7 @@ def _expected_manifest(
         "predicates": predicates,
         "clauses": clauses,
         "positive_facts": positive_facts,
+        "negative_facts": negative_facts,
         "provenance": [
             {
                 "provenance_id": value.provenance_id,
@@ -655,6 +681,41 @@ def test_annotated_named_object_assertions_and_inverse_roles_match_scalar_exactl
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_annotated_negative_object_assertions_and_inverse_roles_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(AnnotationProperty(:meta))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(NamedIndividual(:j))",
+            (
+                "NegativeObjectPropertyAssertion("
+                'Annotation(Annotation(:meta "nested") :note "left") :p :i :j)'
+            ),
+            'NegativeObjectPropertyAssertion(Annotation(:note "right"@en) :p :i :j)',
+            (
+                "NegativeObjectPropertyAssertion(Annotation(:note <urn:annotation:value>) "
+                "ObjectInverseOf(:q) :i :j)"
+            ),
+            "ObjectPropertyAssertion(:p :j :i)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_object_assertions=True,
+        include_negative_object_assertions=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_composite_anonymous_object_assertions_group_sources_exactly() -> None:
     source = functional(
         "Declaration(ObjectProperty(:p))",
@@ -675,6 +736,36 @@ def test_composite_anonymous_object_assertions_group_sources_exactly() -> None:
         composite,
         compiled_roots=4,
         include_object_assertions=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_negative_object_assertion_annotations_group_sources_exactly() -> None:
+    def source(annotation: str) -> bytes:
+        return functional(
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(NamedIndividual(:j))",
+            f'NegativeObjectPropertyAssertion(Annotation(:note "{annotation}") :p :i :j)',
+            (
+                f'NegativeObjectPropertyAssertion(Annotation(:note "{annotation}") '
+                "ObjectInverseOf(:q) :i :j)"
+            ),
+        )
+
+    left = pyowl_core.load_snapshot(source("left"), options=OPTIONS)
+    right = pyowl_core.load_snapshot(source("right"), options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_negative_object_assertions=True,
     )
     assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
@@ -712,12 +803,48 @@ def test_composite_object_assertions_remap_local_roles_and_individuals_exactly()
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_anonymous_object_assertion_operand_defers_the_whole_root() -> None:
+def test_composite_negative_object_assertions_remap_local_roles_and_individuals_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:z))",
+            "Declaration(NamedIndividual(:zSource))",
+            "Declaration(NamedIndividual(:zTarget))",
+            "NegativeObjectPropertyAssertion(:z :zSource :zTarget)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:a))",
+            "Declaration(NamedIndividual(:aSource))",
+            "Declaration(NamedIndividual(:aTarget))",
+            "NegativeObjectPropertyAssertion(ObjectInverseOf(:a) :aSource :aTarget)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_negative_object_assertions=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+@pytest.mark.parametrize(
+    "constructor",
+    ["ObjectPropertyAssertion", "NegativeObjectPropertyAssertion"],
+)
+def test_anonymous_object_assertion_operand_defers_the_whole_root(constructor: str) -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(ObjectProperty(:p))",
             "Declaration(NamedIndividual(:i))",
-            "ObjectPropertyAssertion(:p :i _:anonymous)",
+            f"{constructor}(:p :i _:anonymous)",
         ),
         options=OPTIONS,
     )

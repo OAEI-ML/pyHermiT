@@ -1501,6 +1501,7 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                     | encoded::symbols::RootHandler::DifferentIndividuals
                     | encoded::symbols::RootHandler::ClassAssertion
                     | encoded::symbols::RootHandler::ObjectPropertyAssertion
+                    | encoded::symbols::RootHandler::NegativeObjectPropertyAssertion
                     | encoded::symbols::RootHandler::ObjectPropertyDomain
                     | encoded::symbols::RootHandler::ObjectPropertyRange
             )
