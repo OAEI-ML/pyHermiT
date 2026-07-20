@@ -5,8 +5,8 @@
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
-//! plus named `DataPropertyDomain` axioms into the existing
-//! native predicate, clause, fact, and provenance records. Exact nested
+//! plus named `DataPropertyDomain` and `FunctionalDataProperty` axioms into the
+//! existing native predicate, clause, fact, and provenance records. Exact nested
 //! annotations participate in source provenance, with segmented anonymous
 //! scopes remapped before hashing.
 //! Predicate and clause identifiers are dense within this fragment and must be
@@ -45,6 +45,7 @@ const FUNCTIONAL_OBJECT_PROPERTY_TAG: u16 = 76;
 const INVERSE_FUNCTIONAL_OBJECT_PROPERTY_TAG: u16 = 77;
 const REFLEXIVE_OBJECT_PROPERTY_TAG: u16 = 78;
 const DATA_PROPERTY_DOMAIN_TAG: u16 = 93;
+const FUNCTIONAL_DATA_PROPERTY_TAG: u16 = 95;
 const OBJECT_INVERSE_OF_TAG: u16 = 10;
 const SAME_INDIVIDUAL_TAG: u16 = 110;
 const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
@@ -138,6 +139,7 @@ pub struct NamedClassPhase {
     normalized_object_constraints: Vec<NormalizedObjectConstraint>,
     normalized_object_characteristics: Vec<NormalizedObjectCharacteristic>,
     normalized_data_domains: Vec<NormalizedDataDomain>,
+    normalized_data_functionalities: Vec<NormalizedDataFunctionality>,
     normalized_facts: Vec<NormalizedFact>,
     normalized_object_facts: Vec<NormalizedObjectFact>,
     normalized_negative_object_facts: Vec<NormalizedObjectFact>,
@@ -488,6 +490,18 @@ struct NormalizedDataDomain {
     provenance: Vec<[u8; 32]>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RawDataFunctionality {
+    role_id: u32,
+    provenance: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NormalizedDataFunctionality {
+    role_id: u32,
+    provenance: Vec<[u8; 32]>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RawFact {
     class_id: u32,
@@ -751,6 +765,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut raw_object_constraints = Vec::<RawObjectConstraint>::new();
     let mut raw_object_characteristics = Vec::<RawObjectCharacteristic>::new();
     let mut raw_data_domains = Vec::<RawDataDomain>::new();
+    let mut raw_data_functionalities = Vec::<RawDataFunctionality>::new();
     let mut raw_facts = Vec::<RawFact>::new();
     let mut raw_object_facts = Vec::<RawObjectFact>::new();
     let mut raw_negative_object_facts = Vec::<RawObjectFact>::new();
@@ -988,6 +1003,37 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                         })?;
                     }
                 }
+            }
+            RootHandler::FunctionalDataProperty => {
+                let Some(data_roles) = data_roles else {
+                    deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "named-class deferred-root count overflowed",
+                        )
+                    })?;
+                    continue;
+                };
+                let functionality = named_data_functionality(
+                    model,
+                    symbols,
+                    data_roles,
+                    root.node,
+                    scope_maps,
+                    &mut budget,
+                )?;
+                retain_compiled_root(
+                    &mut compiled_root_digests,
+                    &mut compiled_roots,
+                    functionality.provenance,
+                    &mut budget,
+                )?;
+                budget.claim_owned(size_of::<RawDataFunctionality>())?;
+                raw_data_functionalities.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "named functional data-property allocation failed",
+                    )
+                })?;
+                raw_data_functionalities.push(functionality);
             }
             RootHandler::SameIndividual => {
                 match named_same_individuals(
@@ -1238,6 +1284,8 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let object_characteristics =
         normalize_object_characteristics(raw_object_characteristics, &mut budget)?;
     let data_domains = normalize_data_domains(raw_data_domains, &mut budget)?;
+    let data_functionalities =
+        normalize_data_functionalities(raw_data_functionalities, &mut budget)?;
     let facts = normalize_facts(raw_facts, &mut budget)?;
     let object_facts = normalize_object_facts(raw_object_facts, &mut budget)?;
     let negative_object_facts = normalize_object_facts(raw_negative_object_facts, &mut budget)?;
@@ -1249,6 +1297,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &object_constraints,
         &object_characteristics,
         &data_domains,
+        &data_functionalities,
         &facts,
         &object_facts,
         &negative_object_facts,
@@ -1265,6 +1314,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         guard_predicates,
         named_predicate,
         equality_predicate,
+        data_equality_predicate,
         inequality_predicate,
     ) = freeze_predicates(
         &edges,
@@ -1272,6 +1322,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &object_constraints,
         &object_characteristics,
         &data_domains,
+        &data_functionalities,
         &facts,
         &object_facts,
         &negative_object_facts,
@@ -1295,12 +1346,14 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &object_constraints,
         &object_characteristics,
         &data_domains,
+        &data_functionalities,
         thing,
         nothing,
         &predicate_by_class,
         &predicate_by_object_role,
         &predicate_by_data_role,
         equality_predicate,
+        data_equality_predicate,
         &guard_predicates,
         &provenance_keys,
         &mut budget,
@@ -1354,6 +1407,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_object_constraints: object_constraints,
         normalized_object_characteristics: object_characteristics,
         normalized_data_domains: data_domains,
+        normalized_data_functionalities: data_functionalities,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
         normalized_negative_object_facts: negative_object_facts,
@@ -1860,6 +1914,29 @@ fn named_data_domain<B: ByteSource>(
         class_id,
         provenance,
     }))
+}
+
+fn named_data_functionality<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    data_roles: &DataRolePhase,
+    root: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<RawDataFunctionality> {
+    let node = model.node(root)?;
+    if node.tag() != FUNCTIONAL_DATA_PROPERTY_TAG || node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "functional-data-property root no longer has schema-1 shape",
+        ));
+    }
+    let property = node_field(model, node, 0, "functional data-property role")?;
+    let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    Ok(RawDataFunctionality {
+        role_id,
+        provenance,
+    })
 }
 
 fn named_data_role_id<B: ByteSource>(
@@ -2677,6 +2754,50 @@ fn normalize_data_domains(
     Ok(normalized)
 }
 
+fn normalize_data_functionalities(
+    mut raw: Vec<RawDataFunctionality>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedDataFunctionality>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_unstable();
+    let mut normalized = Vec::<NormalizedDataFunctionality>::new();
+    for functionality in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.role_id == functionality.role_id {
+                if previous.provenance.last() != Some(&functionality.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "functional data-property provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(functionality.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedDataFunctionality>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "normalized functional data-property allocation failed",
+            )
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "functional data-property provenance allocation failed",
+            )
+        })?;
+        provenance.push(functionality.provenance);
+        normalized.push(NormalizedDataFunctionality {
+            role_id: functionality.role_id,
+            provenance,
+        });
+    }
+    Ok(normalized)
+}
+
 fn normalize_object_facts(
     mut raw: Vec<RawObjectFact>,
     budget: &mut PhaseBudget,
@@ -2823,6 +2944,7 @@ fn freeze_provenance(
     object_constraints: &[NormalizedObjectConstraint],
     object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
+    data_functionalities: &[NormalizedDataFunctionality],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
     negative_object_facts: &[NormalizedObjectFact],
@@ -2885,6 +3007,16 @@ fn freeze_provenance(
             &mut keys,
             ProvenanceKey {
                 source_sha256: domain.provenance.clone(),
+                generated: false,
+            },
+            budget,
+        )?;
+    }
+    for functionality in data_functionalities {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: functionality.provenance.clone(),
                 generated: false,
             },
             budget,
@@ -3007,7 +3139,7 @@ enum PredicateOwner {
     ObjectRole(u32),
     NegatedObjectRole(u32),
     DataRole(u32),
-    Equality,
+    Equality(TermSort),
     Inequality,
     NamedIndividual,
     DisjointGuard {
@@ -3036,6 +3168,7 @@ type FrozenPredicates = (
     Option<u32>,
     Option<u32>,
     Option<u32>,
+    Option<u32>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -3045,6 +3178,7 @@ fn freeze_predicates(
     object_constraints: &[NormalizedObjectConstraint],
     object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
+    data_functionalities: &[NormalizedDataFunctionality],
     facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
     negative_object_facts: &[NormalizedObjectFact],
@@ -3097,7 +3231,7 @@ fn freeze_predicates(
             .iter()
             .any(|value| value.kind != ObjectCharacteristicKind::Reflexive)
     {
-        let key = equality_predicate_key();
+        let key = equality_predicate_key(TermSort::Object);
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
         ordered.try_reserve(1).map_err(|_| {
@@ -3105,7 +3239,19 @@ fn freeze_predicates(
         })?;
         ordered.push(PendingPredicate {
             key,
-            owner: PredicateOwner::Equality,
+            owner: PredicateOwner::Equality(TermSort::Object),
+        });
+    }
+    if !data_functionalities.is_empty() {
+        let key = equality_predicate_key(TermSort::Data);
+        budget.claim_owned(size_of::<PendingPredicate>())?;
+        budget.claim_owned(key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("data equality predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::Equality(TermSort::Data),
         });
     }
     if !inequalities.is_empty() {
@@ -3217,6 +3363,14 @@ fn freeze_predicates(
             budget,
         )?;
     }
+    for functionality in data_functionalities {
+        push_u32(
+            &mut data_role_ids,
+            functionality.role_id,
+            "predicate data role",
+            budget,
+        )?;
+    }
     budget.claim_work(sort_work(data_role_ids.len()))?;
     data_role_ids.sort_unstable();
     data_role_ids.dedup();
@@ -3274,6 +3428,7 @@ fn freeze_predicates(
     let mut guard_predicates = Vec::new();
     let mut named_predicate = None;
     let mut equality_predicate = None;
+    let mut data_equality_predicate = None;
     let mut inequality_predicate = None;
     budget.claim_owned(
         ordered
@@ -3382,12 +3537,12 @@ fn freeze_predicates(
                 });
                 predicate_by_data_role.push((role_id, predicate_id));
             }
-            PredicateOwner::Equality => {
+            PredicateOwner::Equality(sort) => {
                 budget.claim_owned(size_of::<TermSort>())?;
                 predicates.push(DecodedPredicate {
                     predicate_id,
                     kind: PredicateKind::Equality,
-                    argument_sorts: vec![TermSort::Object, TermSort::Object],
+                    argument_sorts: vec![sort, sort],
                     symbol_id: None,
                     role_id: None,
                     cardinality: None,
@@ -3395,7 +3550,10 @@ fn freeze_predicates(
                     annotation: Vec::new(),
                     internal_key: None,
                 });
-                equality_predicate = Some(predicate_id);
+                match sort {
+                    TermSort::Object => equality_predicate = Some(predicate_id),
+                    TermSort::Data => data_equality_predicate = Some(predicate_id),
+                }
             }
             PredicateOwner::Inequality => {
                 budget.claim_owned(size_of::<TermSort>())?;
@@ -3462,6 +3620,7 @@ fn freeze_predicates(
         guard_predicates,
         named_predicate,
         equality_predicate,
+        data_equality_predicate,
         inequality_predicate,
     ))
 }
@@ -3473,12 +3632,14 @@ fn freeze_clauses(
     object_constraints: &[NormalizedObjectConstraint],
     object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
+    data_functionalities: &[NormalizedDataFunctionality],
     thing: u32,
     nothing: u32,
     predicate_by_class: &[(u32, u32)],
     predicate_by_object_role: &[(u32, u32)],
     predicate_by_data_role: &[(u32, u32)],
     equality_predicate: Option<u32>,
+    data_equality_predicate: Option<u32>,
     guard_predicates: &[([u8; 32], u32, u32)],
     provenance_keys: &[ProvenanceKey],
     budget: &mut PhaseBudget,
@@ -3489,6 +3650,7 @@ fn freeze_clauses(
         .and_then(|value| value.checked_add(object_constraints.len()))
         .and_then(|value| value.checked_add(object_characteristics.len()))
         .and_then(|value| value.checked_add(data_domains.len()))
+        .and_then(|value| value.checked_add(data_functionalities.len()))
         .ok_or_else(|| EncodedValidationError::resource("named-class clause count overflowed"))?;
     for disjoint in disjoints {
         let count = disjoint
@@ -3557,6 +3719,16 @@ fn freeze_clauses(
         let class = predicate_id(predicate_by_class, domain.class_id)?;
         let provenance = provenance_id(provenance_keys, &domain.provenance, false)?;
         push_data_domain_clause(&mut ordered, role, class, provenance, budget)?;
+    }
+    for functionality in data_functionalities {
+        let role = data_predicate_id(predicate_by_data_role, functionality.role_id)?;
+        let equality = data_equality_predicate.ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "functional data-property clause lost the data equality predicate",
+            )
+        })?;
+        let provenance = provenance_id(provenance_keys, &functionality.provenance, false)?;
+        push_data_functionality_clause(&mut ordered, role, equality, provenance, budget)?;
     }
     for disjoint in disjoints {
         let provenance = provenance_id(provenance_keys, &disjoint.provenance, false)?;
@@ -4304,6 +4476,45 @@ fn push_data_domain_clause(
     Ok(())
 }
 
+fn push_data_functionality_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    role_predicate_id: u32,
+    equality_predicate_id: u32,
+    provenance_id: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let first = data_variable_atom(role_predicate_id, 0, 1);
+    let second = data_variable_atom(role_predicate_id, 0, 2);
+    let head = data_equality_variable_atom(equality_predicate_id, 1, 2);
+    let key = data_functionality_rule_key(role_predicate_id, equality_predicate_id);
+    budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>() + key.len())?;
+    budget.claim_owned(
+        3_usize
+            .checked_mul(size_of::<DecodedAtom>())
+            .and_then(|value| value.checked_add(6 * size_of::<DecodedTerm>()))
+            .and_then(|value| value.checked_add(3 * size_of::<u32>()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "functional data-property clause payload overflowed",
+                )
+            })?,
+    )?;
+    clauses.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("functional data-property clause allocation failed")
+    })?;
+    clauses.push((
+        key,
+        DecodedClause {
+            clause_id: 0,
+            body: vec![first, second],
+            head: vec![head],
+            provenance_ids: vec![provenance_id],
+            join_order: vec![0, 1],
+        },
+    ));
+    Ok(())
+}
+
 fn variable_atom(predicate_id: u32) -> DecodedAtom {
     variable_atom_at(predicate_id, 0, TermSort::Object)
 }
@@ -4338,6 +4549,22 @@ fn data_variable_atom(predicate_id: u32, left: u32, right: u32) -> DecodedAtom {
             DecodedTerm::Variable {
                 index: left,
                 sort: TermSort::Object,
+            },
+            DecodedTerm::Variable {
+                index: right,
+                sort: TermSort::Data,
+            },
+        ],
+    }
+}
+
+fn data_equality_variable_atom(predicate_id: u32, left: u32, right: u32) -> DecodedAtom {
+    DecodedAtom {
+        predicate_id,
+        arguments: vec![
+            DecodedTerm::Variable {
+                index: left,
+                sort: TermSort::Data,
             },
             DecodedTerm::Variable {
                 index: right,
@@ -4669,6 +4896,10 @@ fn role_predicate_key(kind: PredicateKind, role_id: u32) -> Vec<u8> {
 fn named_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
     let unary_object = predicate.argument_sorts == [TermSort::Object];
     let binary_object = predicate.argument_sorts == [TermSort::Object, TermSort::Object];
+    let equality_sort = match predicate.argument_sorts.as_slice() {
+        [left, right] if left == right => Some(*left),
+        _ => None,
+    };
     if predicate.kind == PredicateKind::NegatedObjectRole
         && binary_object
         && predicate.symbol_id.is_none()
@@ -4706,12 +4937,14 @@ fn named_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
                 })
         }
         PredicateKind::Equality
-            if binary_object
+            if equality_sort.is_some()
                 && predicate.symbol_id.is_none()
                 && predicate.annotation.is_empty()
                 && predicate.internal_key.is_none() =>
         {
-            Ok(equality_predicate_key())
+            Ok(equality_predicate_key(equality_sort.ok_or_else(|| {
+                EncodedValidationError::invariant("equality predicate lost its term sort")
+            })?))
         }
         PredicateKind::Inequality
             if binary_object
@@ -4758,9 +4991,12 @@ fn named_individual_predicate_key() -> Vec<u8> {
         .to_vec()
 }
 
-fn equality_predicate_key() -> Vec<u8> {
-    b"{\"annotation\":[],\"argument_sorts\":[\"object\",\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"equality\",\"role_id\":null,\"symbol_id\":null}"
-        .to_vec()
+fn equality_predicate_key(sort: TermSort) -> Vec<u8> {
+    let sort = term_sort_name(sort);
+    format!(
+        "{{\"annotation\":[],\"argument_sorts\":[\"{sort}\",\"{sort}\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"equality\",\"role_id\":null,\"symbol_id\":null}}"
+    )
+    .into_bytes()
 }
 
 fn inequality_predicate_key() -> Vec<u8> {
@@ -4879,6 +5115,23 @@ fn data_domain_rule_key(role_predicate_id: u32, class_predicate_id: u32) -> Vec<
     let head = format!(
         "{{\"arguments\":[{}],\"predicate_id\":{class_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
         variable_json(0, TermSort::Object),
+    );
+    format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
+}
+
+fn data_functionality_rule_key(role_predicate_id: u32, equality_predicate_id: u32) -> Vec<u8> {
+    let role_atom = |value: u32| {
+        format!(
+            "{{\"arguments\":[{},{}],\"predicate_id\":{role_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
+            variable_json(0, TermSort::Object),
+            variable_json(value, TermSort::Data),
+        )
+    };
+    let body = format!("{},{}", role_atom(1), role_atom(2));
+    let head = format!(
+        "{{\"arguments\":[{},{}],\"predicate_id\":{equality_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
+        variable_json(1, TermSort::Data),
+        variable_json(2, TermSort::Data),
     );
     format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
 }
@@ -5120,6 +5373,7 @@ fn merge_named_class_phases_impl(
         object_constraints,
         object_characteristics,
         data_domains,
+        data_functionalities,
         facts,
         object_facts,
         negative_object_facts,
@@ -5144,6 +5398,7 @@ fn merge_named_class_phases_impl(
         &object_constraints,
         &object_characteristics,
         &data_domains,
+        &data_functionalities,
         &facts,
         &object_facts,
         &negative_object_facts,
@@ -5160,6 +5415,7 @@ fn merge_named_class_phases_impl(
         guard_predicates,
         named_predicate,
         equality_predicate,
+        data_equality_predicate,
         inequality_predicate,
     ) = freeze_predicates(
         &edges,
@@ -5167,6 +5423,7 @@ fn merge_named_class_phases_impl(
         &object_constraints,
         &object_characteristics,
         &data_domains,
+        &data_functionalities,
         &facts,
         &object_facts,
         &negative_object_facts,
@@ -5190,12 +5447,14 @@ fn merge_named_class_phases_impl(
         &object_constraints,
         &object_characteristics,
         &data_domains,
+        &data_functionalities,
         thing,
         nothing,
         &predicate_by_class,
         &predicate_by_object_role,
         &predicate_by_data_role,
         equality_predicate,
+        data_equality_predicate,
         &guard_predicates,
         &provenance_keys,
         &mut budget,
@@ -5294,6 +5553,7 @@ fn merge_named_class_phases_impl(
         normalized_object_constraints: object_constraints,
         normalized_object_characteristics: object_characteristics,
         normalized_data_domains: data_domains,
+        normalized_data_functionalities: data_functionalities,
         normalized_facts: facts,
         normalized_object_facts: object_facts,
         normalized_negative_object_facts: negative_object_facts,
@@ -5589,6 +5849,7 @@ type NormalizedSources = (
     Vec<NormalizedObjectConstraint>,
     Vec<NormalizedObjectCharacteristic>,
     Vec<NormalizedDataDomain>,
+    Vec<NormalizedDataFunctionality>,
     Vec<NormalizedFact>,
     Vec<NormalizedObjectFact>,
     Vec<NormalizedObjectFact>,
@@ -5613,6 +5874,7 @@ fn merge_normalized_sources(
     let mut raw_object_constraints = Vec::new();
     let mut raw_object_characteristics = Vec::new();
     let mut raw_data_domains = Vec::new();
+    let mut raw_data_functionalities = Vec::new();
     let mut raw_facts = Vec::new();
     let mut raw_object_facts = Vec::new();
     let mut raw_negative_object_facts = Vec::new();
@@ -5798,6 +6060,42 @@ fn merge_normalized_sources(
                     raw_data_domains.push(RawDataDomain {
                         role_id,
                         class_id,
+                        provenance: *provenance,
+                    });
+                }
+            }
+        }
+        if !phase.normalized_data_functionalities.is_empty() {
+            let source_roles = source_data_roles
+                .and_then(|roles| roles.get(phase_index))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged functional data properties lost their source role domain",
+                    )
+                })?;
+            let merged_roles = merged_data_roles.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "merged functional data properties lost their global role domain",
+                )
+            })?;
+            for functionality in &phase.normalized_data_functionalities {
+                if functionality.provenance.is_empty() {
+                    return Err(EncodedValidationError::invariant(
+                        "merged functional data property lost provenance",
+                    ));
+                }
+                let role_id =
+                    remap_data_role(source_roles, merged_roles, functionality.role_id, budget)?;
+                for provenance in &functionality.provenance {
+                    budget.claim_work(1)?;
+                    budget.claim_owned(size_of::<RawDataFunctionality>())?;
+                    raw_data_functionalities.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "merged functional data-property allocation failed",
+                        )
+                    })?;
+                    raw_data_functionalities.push(RawDataFunctionality {
+                        role_id,
                         provenance: *provenance,
                     });
                 }
@@ -5995,6 +6293,7 @@ fn merge_normalized_sources(
         normalize_object_constraints(raw_object_constraints, budget)?,
         normalize_object_characteristics(raw_object_characteristics, budget)?,
         normalize_data_domains(raw_data_domains, budget)?,
+        normalize_data_functionalities(raw_data_functionalities, budget)?,
         normalize_facts(raw_facts, budget)?,
         normalize_object_facts(raw_object_facts, budget)?,
         normalize_object_facts(raw_negative_object_facts, budget)?,

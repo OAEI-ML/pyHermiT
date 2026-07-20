@@ -200,6 +200,7 @@ def _expected_manifest(
     include_object_constraints: bool = False,
     include_object_characteristics: bool = False,
     include_data_domains: bool = False,
+    include_data_functionalities: bool = False,
     include_object_assertions: bool = False,
     include_negative_object_assertions: bool = False,
 ) -> dict[str, object]:
@@ -228,12 +229,14 @@ def _expected_manifest(
     constraint_provenance_ids: set[int] = set()
     characteristic_provenance_ids: set[int] = set()
     data_domain_provenance_ids: set[int] = set()
+    data_functionality_provenance_ids: set[int] = set()
     assertion_provenance_ids: set[int] = set()
     negative_assertion_provenance_ids: set[int] = set()
     if (
         include_object_constraints
         or include_object_characteristics
         or include_data_domains
+        or include_data_functionalities
         or include_object_assertions
         or include_negative_object_assertions
     ):
@@ -269,6 +272,12 @@ def _expected_manifest(
             for record in normalized.records
             if isinstance(record.statement, owl.DataPropertyDomain)
         }
+    if include_data_functionalities:
+        data_functionality_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if isinstance(record.statement, owl.FunctionalDataProperty)
+        }
     if include_object_assertions:
         assertion_provenance_ids = {
             provenance_id_by_key[(record.provenance_sha256, record.generated)]
@@ -297,6 +306,11 @@ def _expected_manifest(
         for clause in program.clauses
         if data_domain_provenance_ids.intersection(clause.provenance_ids)
     }
+    data_functionality_clauses = {
+        clause.clause_id
+        for clause in program.clauses
+        if data_functionality_provenance_ids.intersection(clause.provenance_ids)
+    }
     constraint_role_predicates = {
         atom.predicate_id
         for clause in program.clauses
@@ -318,6 +332,13 @@ def _expected_manifest(
         for atom in clause.body + clause.head
         if predicates_by_id[atom.predicate_id].kind is PredicateKind.DATA_ROLE
     }
+    data_functionality_role_predicates = {
+        atom.predicate_id
+        for clause in program.clauses
+        if clause.clause_id in data_functionality_clauses
+        for atom in clause.body + clause.head
+        if predicates_by_id[atom.predicate_id].kind is PredicateKind.DATA_ROLE
+    }
     assertion_role_predicates = {
         fact.predicate_id
         for fact in program.positive_facts
@@ -334,6 +355,7 @@ def _expected_manifest(
         constraint_role_predicates
         | characteristic_role_predicates
         | data_domain_role_predicates
+        | data_functionality_role_predicates
         | assertion_role_predicates
         | negative_assertion_role_predicates
     )
@@ -371,6 +393,7 @@ def _expected_manifest(
             and clause.clause_id not in constraint_clauses
             and clause.clause_id not in characteristic_clauses
             and clause.clause_id not in data_domain_clauses
+            and clause.clause_id not in data_functionality_clauses
         ):
             continue
         if any(atom.predicate_id not in predicate_remap for atom in clause.body + clause.head):
@@ -777,6 +800,34 @@ def test_annotated_named_data_property_domains_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_annotated_functional_data_properties_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(AnnotationProperty(:meta))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(NamedIndividual(:j))",
+            'FunctionalDataProperty(Annotation(Annotation(:meta "nested") :note "left") :p)',
+            'FunctionalDataProperty(Annotation(:note "right"@en) :p)',
+            "FunctionalDataProperty(Annotation(:note _:source) :q)",
+            "SameIndividual(:i :j)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_data_functionalities=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_annotated_named_object_assertions_and_inverse_roles_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -1145,6 +1196,57 @@ def test_composite_data_domains_remap_distinct_local_role_and_class_domains() ->
         composite,
         compiled_roots=2,
         include_data_domains=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_anonymous_functional_data_properties_group_sources_exactly() -> None:
+    source = functional(
+        "Declaration(DataProperty(:p))",
+        "Declaration(DataProperty(:q))",
+        "Declaration(AnnotationProperty(:note))",
+        "FunctionalDataProperty(Annotation(:note _:same) :p)",
+        "FunctionalDataProperty(Annotation(:note _:same) :q)",
+    )
+    left = pyowl_core.load_snapshot(source, options=OPTIONS)
+    right = pyowl_core.load_snapshot(source, options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_data_functionalities=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_functional_data_properties_remap_distinct_local_role_domains() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:z))",
+            "FunctionalDataProperty(:z)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:a))",
+            "FunctionalDataProperty(:a)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_data_functionalities=True,
     )
     assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
