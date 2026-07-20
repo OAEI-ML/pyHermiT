@@ -8,7 +8,7 @@ import hashlib
 import struct
 import sys
 from dataclasses import dataclass
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -22,8 +22,15 @@ from pyhermit.backends.native_events import (
 from pyhermit.backends.native_wire import RESULT_HEADER_LENGTH, RESULT_MAGIC, ResultKind
 from pyhermit.backends.protocol import CompiledOntology, DeltaOutcome, EntityRef
 from pyhermit.config import ReasonerConfig
+from pyhermit.encoded_input import (
+    ENCODED_BUFFER_WIDTHS,
+    ENCODED_NATIVE_FEATURE,
+    ENCODED_SCHEMA_NAME,
+    ENCODED_SCHEMA_VERSION,
+)
 from pyhermit.events import CancellationSource, ProgressEvent
 from pyhermit.exceptions import BackendMismatchError, BackendPoisonedError, BackendVersionError
+from pyhermit.facade import Reasoner
 
 
 @dataclass(frozen=True)
@@ -322,6 +329,157 @@ def test_factory_rejects_a_package_version_mismatch() -> None:
     with pytest.raises(BackendVersionError) as caught:
         NativeBackendFactory(extension)
     assert caught.value.context["reason"] == "package_version_mismatch"
+
+
+def test_encoded_handoff_is_absent_without_requesting_core_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    factory = NativeBackendFactory(extension)
+
+    def unexpected_negotiation(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("encoded input must not be requested without a native validator")
+
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        unexpected_negotiation,
+    )
+
+    factory._validate_encoded_handoff(object())  # type: ignore[arg-type]
+
+
+def test_encoded_handoff_preserves_scalar_fallback_when_core_schema_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    validated = False
+    requested: dict[str, int] = {}
+
+    def validate(**_buffers: memoryview) -> None:
+        nonlocal validated
+        validated = True
+
+    def negotiate(_view: object, schemas: dict[str, int]) -> object:
+        requested.update(schemas)
+        return SimpleNamespace(lease=None)
+
+    extension._validate_encoded_columns_v1 = validate
+    monkeypatch.setattr("pyhermit.backends.native.negotiate_encoded_input", negotiate)
+
+    NativeBackendFactory(extension)._validate_encoded_handoff(object())  # type: ignore[arg-type]
+
+    assert requested == {ENCODED_SCHEMA_NAME: ENCODED_SCHEMA_VERSION}
+    assert not validated
+
+
+def test_encoded_handoff_borrows_the_exact_public_column_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    buffers = {name: memoryview(bytes([index])) for index, name in enumerate(ENCODED_BUFFER_WIDTHS)}
+    received: dict[str, memoryview] = {}
+
+    def validate(**values: memoryview) -> None:
+        received.update(values)
+
+    extension._validate_encoded_columns_v1 = validate
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=SimpleNamespace(buffers=buffers)),
+    )
+    factory = NativeBackendFactory(extension)
+
+    factory._validate_encoded_handoff(object())  # type: ignore[arg-type]
+
+    assert tuple(received) == tuple(ENCODED_BUFFER_WIDTHS)
+    assert all(received[name] is buffers[name] for name in ENCODED_BUFFER_WIDTHS)
+    assert ENCODED_NATIVE_FEATURE not in factory.info.complete_features
+
+
+def test_encoded_handoff_is_fail_closed_after_advertised_input_is_observed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    failure = BackendMismatchError("hostile encoded columns")
+
+    def reject(**_buffers: memoryview) -> None:
+        raise failure
+
+    extension._validate_encoded_columns_v1 = reject
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(
+            lease=SimpleNamespace(buffers={name: memoryview(b"") for name in ENCODED_BUFFER_WIDTHS})
+        ),
+    )
+
+    with pytest.raises(BackendMismatchError) as caught:
+        NativeBackendFactory(extension)._validate_encoded_handoff(object())  # type: ignore[arg-type]
+
+    assert caught.value is failure
+
+
+def test_encoded_handoff_rejects_a_non_none_native_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    extension._validate_encoded_columns_v1 = lambda **_buffers: object()
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(
+            lease=SimpleNamespace(buffers={name: memoryview(b"") for name in ENCODED_BUFFER_WIDTHS})
+        ),
+    )
+
+    with pytest.raises(BackendMismatchError) as caught:
+        NativeBackendFactory(extension)._validate_encoded_handoff(object())  # type: ignore[arg-type]
+
+    assert caught.value.context["reason"] == "encoded_validator_result_invalid"
+
+
+def test_facade_runs_the_encoded_gate_before_scalar_compilation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reasoner = object.__new__(Reasoner)
+    reasoner._config = ReasonerConfig()
+    observed_view = object()
+    failure = BackendMismatchError("hostile encoded columns")
+
+    def reject(view: object) -> None:
+        assert view is observed_view
+        raise failure
+
+    def unexpected_compile(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("scalar compilation must not run after encoded rejection")
+
+    reasoner._factory = SimpleNamespace(_validate_encoded_handoff=reject)
+    monkeypatch.setattr("pyhermit.facade.compile_captured_bundle", unexpected_compile)
+
+    with pytest.raises(BackendMismatchError) as caught:
+        reasoner._compile_runtime(SimpleNamespace(view=observed_view))  # type: ignore[arg-type]
+
+    assert caught.value is failure
+
+
+def test_facade_reaches_scalar_compilation_when_the_private_gate_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reasoner = object.__new__(Reasoner)
+    reasoner._config = ReasonerConfig()
+    reasoner._factory = SimpleNamespace()
+    reached_scalar = RuntimeError("scalar compilation reached")
+
+    def stop_at_scalar(*_args: object, **_kwargs: object) -> object:
+        raise reached_scalar
+
+    monkeypatch.setattr("pyhermit.facade.compile_captured_bundle", stop_at_scalar)
+
+    with pytest.raises(RuntimeError) as caught:
+        reasoner._compile_runtime(  # type: ignore[arg-type]
+            SimpleNamespace(view=object(), captured=object())
+        )
+
+    assert caught.value is reached_scalar
 
 
 def test_events_are_validated_and_callbacks_run_after_native_return(

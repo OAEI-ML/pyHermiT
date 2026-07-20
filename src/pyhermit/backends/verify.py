@@ -90,6 +90,11 @@ class VerifyBackendFactory:
     def info(self) -> BackendInfo:
         return self._info
 
+    def _validate_encoded_handoff(self, view: object) -> None:
+        hook = getattr(self._native, "_validate_encoded_handoff", None)
+        if callable(hook):
+            hook(view)
+
     def create_session(
         self,
         ontology: CompiledOntology,

@@ -240,3 +240,25 @@ def test_verify_factory_suppresses_callbacks_only_on_python_shadow(
     assert python.config.warnings is None
     assert python.config.semantic_items() == config.semantic_items()
     session.close()
+
+
+def test_verify_factory_forwards_the_private_encoded_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NativeFactory(_Factory):
+        def __init__(self) -> None:
+            super().__init__("native", _Session())
+            self.validated: list[object] = []
+
+        def _validate_encoded_handoff(self, view: object) -> None:
+            self.validated.append(view)
+
+    native = NativeFactory()
+    python = _Factory("python", _Session())
+    monkeypatch.setattr("pyhermit.backends.verify.PythonBackendFactory", lambda: python)
+    factory = VerifyBackendFactory(native)  # type: ignore[arg-type]
+    view = object()
+
+    factory._validate_encoded_handoff(view)
+
+    assert native.validated == [view]

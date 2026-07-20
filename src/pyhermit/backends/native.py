@@ -17,6 +17,8 @@ from contextlib import suppress
 from types import ModuleType
 from typing import NoReturn, Protocol, TypeVar, cast
 
+from pyowl_core import OntologyView
+
 from pyhermit._version import __version__
 from pyhermit.backends.native_events import NativeSessionEvent, decode_events
 from pyhermit.backends.native_wire import (
@@ -40,6 +42,12 @@ from pyhermit.backends.protocol import (
 from pyhermit.backends.verify import VerifyBackendFactory
 from pyhermit.config import ReasonerConfig
 from pyhermit.core import current_core_versions
+from pyhermit.encoded_input import (
+    ENCODED_BUFFER_WIDTHS,
+    ENCODED_SCHEMA_NAME,
+    ENCODED_SCHEMA_VERSION,
+    negotiate_encoded_input,
+)
 from pyhermit.events import CancellationToken, ProgressCallback, ProgressEvent
 from pyhermit.exceptions import (
     BackendMismatchError,
@@ -117,7 +125,7 @@ class _InputCodec(Protocol):
 class NativeBackendFactory:
     """Validate extension metadata and create one retained coarse native session."""
 
-    __slots__ = ("_create_session", "_handle_type", "_info")
+    __slots__ = ("_create_session", "_handle_type", "_info", "_validate_encoded")
 
     def __init__(self, module: ModuleType) -> None:
         if not isinstance(module, ModuleType):
@@ -129,6 +137,7 @@ class NativeBackendFactory:
         handle_type = getattr(module, "CancellationHandle", None)
         create_session = getattr(module, "create_session", None)
         self_test = getattr(module, "self_test", None)
+        validate_encoded = getattr(module, "_validate_encoded_columns_v1", None)
         if not isinstance(implementation, str) or not implementation:
             _version_error("native implementation version is invalid", "metadata_invalid")
         if implementation != __version__:
@@ -154,6 +163,8 @@ class NativeBackendFactory:
             or not callable(self_test)
         ):
             _version_error("native extension surface is incomplete", "metadata_invalid")
+        if validate_encoded is not None and not callable(validate_encoded):
+            _version_error("native encoded validator is invalid", "metadata_invalid")
         try:
             self_test()
         except Exception as error:
@@ -164,6 +175,7 @@ class NativeBackendFactory:
         core = current_core_versions()
         self._handle_type = handle_type
         self._create_session = create_session
+        self._validate_encoded = validate_encoded
         self._info = BackendInfo(
             name="native",
             package_version=__version__,
@@ -181,6 +193,26 @@ class NativeBackendFactory:
     @property
     def info(self) -> BackendInfo:
         return self._info
+
+    def _validate_encoded_handoff(self, view: OntologyView) -> None:
+        """Privately preflight borrowed public columns without selecting them for execution."""
+
+        validator = self._validate_encoded
+        if validator is None:
+            return
+        negotiation = negotiate_encoded_input(
+            view,
+            {ENCODED_SCHEMA_NAME: ENCODED_SCHEMA_VERSION},
+        )
+        lease = negotiation.lease
+        if lease is None:
+            return
+        result = validator(**{name: lease.buffers[name] for name in ENCODED_BUFFER_WIDTHS})
+        if result is not None:
+            raise BackendMismatchError(
+                "native encoded validator returned an incompatible result",
+                context={"reason": "encoded_validator_result_invalid"},
+            )
 
     def create_session(
         self,

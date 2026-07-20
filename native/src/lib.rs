@@ -50,7 +50,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PySequence};
+use pyo3::types::{PyBytes, PyMemoryView, PySequence};
 
 pub use cancel::{CancellationHandle, CancellationState};
 use error::{ErrorKind, NativeError, NativeResult};
@@ -77,6 +77,22 @@ const EVENT_CAPACITY: usize = 256;
 const POLL_STRIDE_MAX: u64 = 1_000_000;
 const MAX_STATE_TRACE_BYTES: usize = 64 * 1024 * 1024;
 const PYTHON_VERSION_SOURCE: &str = include_str!("../../src/pyhermit/_version.py");
+
+#[derive(Clone, Copy)]
+struct BorrowedPyBytes<'a, 'py> {
+    view: &'a Bound<'py, PyAny>,
+    len: usize,
+}
+
+impl encoded::ByteSource for BorrowedPyBytes<'_, '_> {
+    fn len(self) -> usize {
+        self.len
+    }
+
+    fn byte(self, index: usize) -> Option<u8> {
+        self.view.get_item(index).ok()?.extract().ok()
+    }
+}
 
 struct SessionOwned {
     ontology: Arc<DecodedOntology>,
@@ -465,6 +481,122 @@ impl NativeSession {
     }
 }
 
+fn borrowed_py_bytes<'a, 'py>(
+    buffer: &'a Bound<'py, PyAny>,
+    name: &str,
+) -> NativeResult<BorrowedPyBytes<'a, 'py>> {
+    let invalid = |message: &str| {
+        NativeError::new(
+            ErrorKind::Wire,
+            "NATIVE_ENCODED_VIEW_INVALID",
+            format!("encoded buffer {name} {message}"),
+        )
+    };
+    if !buffer.is_exact_instance_of::<PyMemoryView>() {
+        return Err(invalid("is not an exact memoryview"));
+    }
+    let readonly = buffer
+        .getattr("readonly")
+        .and_then(|value| value.extract::<bool>())
+        .map_err(|_| invalid("has invalid readonly metadata"))?;
+    if !readonly {
+        return Err(NativeError::new(
+            ErrorKind::Wire,
+            "NATIVE_ENCODED_VIEW_INVALID",
+            format!("encoded buffer {name} is writable"),
+        ));
+    }
+    let dimensions = buffer
+        .getattr("ndim")
+        .and_then(|value| value.extract::<usize>())
+        .map_err(|_| invalid("has invalid dimensional metadata"))?;
+    let item_size = buffer
+        .getattr("itemsize")
+        .and_then(|value| value.extract::<usize>())
+        .map_err(|_| invalid("has invalid item-size metadata"))?;
+    let contiguous = buffer
+        .getattr("c_contiguous")
+        .and_then(|value| value.extract::<bool>())
+        .map_err(|_| invalid("has invalid contiguity metadata"))?;
+    let format = buffer
+        .getattr("format")
+        .and_then(|value| value.extract::<String>())
+        .map_err(|_| invalid("has invalid format metadata"))?;
+    if dimensions != 1 || item_size != 1 || !contiguous || format != "B" {
+        return Err(invalid(
+            "is not a contiguous one-dimensional unsigned-byte memoryview",
+        ));
+    }
+    let len = buffer
+        .getattr("nbytes")
+        .and_then(|value| value.extract::<usize>())
+        .map_err(|_| invalid("has invalid byte-length metadata"))?;
+    if buffer.len().map_err(|_| invalid("has invalid length"))? != len {
+        return Err(invalid("has inconsistent byte-length metadata"));
+    }
+    Ok(BorrowedPyBytes { view: buffer, len })
+}
+
+fn encoded_validation_error(error: encoded::EncodedValidationError) -> NativeError {
+    let kind = match error.code {
+        "NATIVE_ENCODED_VIEW_INVALID" => ErrorKind::Wire,
+        "NATIVE_ENCODED_RESOURCE_LIMIT" => ErrorKind::Resource,
+        _ => ErrorKind::Invariant,
+    };
+    let mapped = NativeError::new(kind, error.code, error.message);
+    if kind == ErrorKind::Resource {
+        mapped.with_context("limit", "encoded-structural-validation")
+    } else {
+        mapped
+    }
+}
+
+#[pyfunction(name = "_validate_encoded_columns_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[allow(clippy::too_many_arguments)]
+fn validate_encoded_columns_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let columns = encoded::EncodedColumns {
+            root_kinds: borrowed_py_bytes(root_kinds, "root_kinds")?,
+            root_ids: borrowed_py_bytes(root_ids, "root_ids")?,
+            node_tags: borrowed_py_bytes(node_tags, "node_tags")?,
+            node_field_offsets: borrowed_py_bytes(node_field_offsets, "node_field_offsets")?,
+            field_kinds: borrowed_py_bytes(field_kinds, "field_kinds")?,
+            field_values: borrowed_py_bytes(field_values, "field_values")?,
+            field_lengths: borrowed_py_bytes(field_lengths, "field_lengths")?,
+            item_kinds: borrowed_py_bytes(item_kinds, "item_kinds")?,
+            item_values: borrowed_py_bytes(item_values, "item_values")?,
+            item_lengths: borrowed_py_bytes(item_lengths, "item_lengths")?,
+            scalar_bytes: borrowed_py_bytes(scalar_bytes, "scalar_bytes")?,
+        };
+        encoded::validate_columns(columns, encoded::EncodedLimits::default())
+            .map(drop)
+            .map_err(encoded_validation_error)
+    }));
+    match result {
+        Ok(value) => value.map_err(|error| error.into_pyerr(py)),
+        Err(_) => Err(NativeError::new(
+            ErrorKind::Poisoned,
+            "NATIVE_PANIC",
+            "native encoded-column validation panic was contained",
+        )
+        .into_pyerr(py)),
+    }
+}
+
 #[pyfunction]
 fn self_test(py: Python<'_>) -> PyResult<()> {
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -710,6 +842,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     module.add_class::<CancellationHandle>()?;
     module.add_class::<NativeSession>()?;
+    module.add_function(wrap_pyfunction!(validate_encoded_columns_v1, module)?)?;
     module.add_function(wrap_pyfunction!(self_test, module)?)?;
     module.add_function(wrap_pyfunction!(create_session, module)?)?;
     Ok(())

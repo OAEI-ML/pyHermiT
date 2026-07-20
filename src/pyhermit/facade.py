@@ -491,6 +491,9 @@ class Reasoner:
             self._flush_locked()
 
     def _compile_runtime(self, validated: ValidatedOntology) -> _Runtime:
+        validate_encoded = getattr(self._factory, "_validate_encoded_handoff", None)
+        if callable(validate_encoded):
+            validate_encoded(validated.view)
         bundle = compile_captured_bundle(
             validated.captured,
             self._config,
