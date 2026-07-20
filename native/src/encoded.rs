@@ -17,6 +17,7 @@ pub mod named_classes;
 pub mod object_role_hierarchy;
 pub mod object_roles;
 pub mod role_automata;
+pub mod role_model;
 pub mod role_semantics;
 pub mod simple_roles;
 pub mod symbols;

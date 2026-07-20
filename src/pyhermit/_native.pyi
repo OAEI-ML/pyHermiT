@@ -246,6 +246,21 @@ def _encoded_object_role_automata_manifest_v1(
 def _encoded_object_role_automata_slices_manifest_v1(
     *, slices: tuple[tuple[object, ...], ...]
 ) -> bytes: ...
+def _encoded_role_model_manifest_v1(
+    *,
+    root_kinds: memoryview,
+    root_ids: memoryview,
+    node_tags: memoryview,
+    node_field_offsets: memoryview,
+    field_kinds: memoryview,
+    field_values: memoryview,
+    field_lengths: memoryview,
+    item_kinds: memoryview,
+    item_values: memoryview,
+    item_lengths: memoryview,
+    scalar_bytes: memoryview,
+) -> bytes: ...
+def _encoded_role_model_slices_manifest_v1(*, slices: tuple[tuple[object, ...], ...]) -> bytes: ...
 def _encoded_object_role_accepts_v1(
     *,
     target_role_id: int,
