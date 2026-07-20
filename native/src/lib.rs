@@ -656,7 +656,7 @@ fn validate_encoded_selection_v1(
     item_lengths: &Bound<'_, PyAny>,
     scalar_bytes: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
-    let result = catch_unwind(AssertUnwindSafe(|| {
+    contain_encoded_selection(py, || {
         let columns = borrowed_encoded_columns(
             root_kinds,
             root_ids,
@@ -687,7 +687,14 @@ fn validate_encoded_selection_v1(
         )
         .map(drop)
         .map_err(encoded_validation_error)
-    }));
+    })
+}
+
+fn contain_encoded_selection<T>(
+    py: Python<'_>,
+    operation: impl FnOnce() -> NativeResult<T>,
+) -> PyResult<T> {
+    let result = catch_unwind(AssertUnwindSafe(operation));
     match result {
         Ok(value) => value.map_err(|error| error.into_pyerr(py)),
         Err(_) => Err(NativeError::new(
@@ -697,6 +704,12 @@ fn validate_encoded_selection_v1(
         )
         .into_pyerr(py)),
     }
+}
+
+#[pyfunction(name = "_debug_encoded_selection_panic_v1")]
+#[allow(clippy::panic)]
+fn debug_encoded_selection_panic_v1(py: Python<'_>) -> PyResult<()> {
+    contain_encoded_selection(py, || -> NativeResult<()> { std::panic::panic_any(()) })
 }
 
 #[pyfunction(name = "_encoded_symbol_manifest_v1")]
@@ -1058,6 +1071,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeSession>()?;
     module.add_function(wrap_pyfunction!(validate_encoded_columns_v1, module)?)?;
     module.add_function(wrap_pyfunction!(validate_encoded_selection_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(debug_encoded_selection_panic_v1, module)?)?;
     module.add_function(wrap_pyfunction!(encoded_symbol_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(encoded_named_class_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(self_test, module)?)?;

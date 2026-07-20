@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import mmap
+import weakref
 from collections.abc import Iterator
+from gc import collect
 from types import SimpleNamespace
 from typing import TypeVar, cast
 
@@ -170,6 +173,39 @@ def _set_local_root_count(owner: _View, root_count: int) -> None:
     )
 
 
+def _move_local_buffers_to_mmap(owner: _View) -> mmap.mmap:
+    names = tuple(owner.encoded.buffers)
+    payload = b"".join(bytes(owner.encoded.buffers[name]) for name in names)
+    mapping = mmap.mmap(-1, len(payload))
+    mapping[:] = payload
+    exported = memoryview(mapping).toreadonly()
+    cursor = 0
+    buffers: dict[str, memoryview] = {}
+    for name in names:
+        following = cursor + owner.encoded.buffers[name].nbytes
+        buffers[name] = exported[cursor:following]
+        cursor = following
+    exported.release()
+    owner.encoded.buffers = buffers
+    raw_direct = owner.encoded.segments[0]
+    direct = EncodedStructuralSegmentLease(
+        segment=raw_direct,
+        role=1,
+        owner=_as_view(owner),
+        source=None,
+        posting_mode=0,
+        root_ids=memoryview(b""),
+        anonymous_scope_map=memoryview(b""),
+        member_token=None,
+    )
+    owner.encoded.structural_fingerprint = encoded_input._encoded_fingerprint(
+        buffers,
+        (direct,),
+        owner.encoded.descriptor,
+    )
+    return mapping
+
+
 def test_native_capability_absence_does_not_request_core_buffers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -222,6 +258,31 @@ def test_valid_handoff_retains_owner_and_read_only_buffers(
             {"schema_version": 1, "scope": owl.AxiomScope.CLOSURE},
         )
     ]
+
+
+def test_lease_retains_closeable_buffer_owner_until_the_handoff_is_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
+    owner = _View()
+    mapping = _move_local_buffers_to_mmap(owner)
+    owner_reference = weakref.ref(owner)
+
+    result = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1})
+    lease = result.lease
+    assert lease is not None
+    del owner
+    collect()
+
+    assert owner_reference() is lease.owner
+    with pytest.raises(BufferError):
+        mapping.close()
+
+    del lease, result
+    collect()
+    assert owner_reference() is None
+    mapping.close()
+    assert mapping.closed
 
 
 def test_overlay_segment_graph_retains_and_orders_each_local_column_owner(

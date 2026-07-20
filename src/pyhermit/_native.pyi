@@ -79,6 +79,7 @@ def _validate_encoded_selection_v1(
     item_lengths: memoryview,
     scalar_bytes: memoryview,
 ) -> None: ...
+def _debug_encoded_selection_panic_v1() -> None: ...
 def _encoded_symbol_manifest_v1(
     *,
     root_kinds: memoryview,
