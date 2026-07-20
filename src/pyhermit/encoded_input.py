@@ -19,6 +19,24 @@ import pyowl_core as owl
 ENCODED_SCHEMA_NAME = "pyowl-core/structural-columns"
 ENCODED_SCHEMA_VERSION = 1
 ENCODED_NATIVE_FEATURE = "encoded-structural-compiler-v1"
+ENCODED_DESCRIPTOR_SHA256 = bytes.fromhex(
+    "9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5"
+)
+ENCODED_BUFFER_WIDTHS: Mapping[str, int] = MappingProxyType(
+    {
+        "field_kinds": 1,
+        "field_lengths": 8,
+        "field_values": 8,
+        "item_kinds": 1,
+        "item_lengths": 8,
+        "item_values": 8,
+        "node_field_offsets": 8,
+        "node_tags": 2,
+        "root_ids": 4,
+        "root_kinds": 1,
+        "scalar_bytes": 1,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -178,6 +196,10 @@ def _validate_encoded_view(
     descriptor_digest = getattr(encoded, "descriptor_digest", authoritative_digest)
     if type(descriptor_digest) is not bytes or descriptor_digest != authoritative_digest:
         raise _protocol_error("encoded descriptor digest does not match its bytes")
+    if authoritative_digest != ENCODED_DESCRIPTOR_SHA256:
+        raise _protocol_error(
+            "encoded descriptor does not match the frozen pyowl-core structural-columns v1 ledger"
+        )
 
     fingerprint = _required_attribute(encoded, "structural_fingerprint")
     if type(fingerprint) is not owl.Fingerprint:
@@ -194,6 +216,17 @@ def _validate_encoded_view(
         if type(name) is not str or not name:
             raise _protocol_error("encoded buffer names must be nonempty exact strings")
         buffers[name] = _readonly_bytes(name, value)
+    if set(buffers) != set(ENCODED_BUFFER_WIDTHS):
+        missing = sorted(set(ENCODED_BUFFER_WIDTHS) - set(buffers))
+        extra = sorted(set(buffers) - set(ENCODED_BUFFER_WIDTHS))
+        raise _protocol_error(
+            f"encoded schema 1 buffer set differs (missing={missing!r}, extra={extra!r})"
+        )
+    for name, width in ENCODED_BUFFER_WIDTHS.items():
+        if buffers[name].nbytes % width:
+            raise _protocol_error(
+                f"encoded buffer {name!r} length is not divisible by its {width}-byte scalar width"
+            )
 
     raw_segments = _required_attribute(encoded, "segments")
     if type(raw_segments) is not tuple:
@@ -275,6 +308,8 @@ def _protocol_error(message: str) -> owl.BackendProtocolError:
 
 
 __all__ = [
+    "ENCODED_BUFFER_WIDTHS",
+    "ENCODED_DESCRIPTOR_SHA256",
     "ENCODED_NATIVE_FEATURE",
     "ENCODED_SCHEMA_NAME",
     "ENCODED_SCHEMA_VERSION",

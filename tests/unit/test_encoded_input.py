@@ -6,8 +6,11 @@ from typing import TypeVar, cast
 
 import pyowl_core as owl
 import pytest
+from pyowl_core.backends.native_views import ENCODED_STRUCTURAL_DESCRIPTOR_V1
 
 from pyhermit.encoded_input import (
+    ENCODED_BUFFER_WIDTHS,
+    ENCODED_DESCRIPTOR_SHA256,
     ENCODED_SCHEMA_NAME,
     ENCODED_SCHEMA_VERSION,
     negotiate_encoded_input,
@@ -32,11 +35,11 @@ class _EncodedStructuralView:
         self.model_schema = 1
         self.owner = owner
         self.scope = owl.AxiomScope.CLOSURE
-        self.descriptor = b"pyhermit encoded input fixture"
+        self.descriptor = ENCODED_STRUCTURAL_DESCRIPTOR_V1
         self.descriptor_digest = hashlib.sha256(self.descriptor).digest()
         self.buffers = {
-            "components": memoryview(b"components"),
-            "roots": memoryview(b"roots"),
+            name: memoryview(b"\x00" * (8 if name == "node_field_offsets" else 0))
+            for name in ENCODED_BUFFER_WIDTHS
         }
         self.segments: tuple[object, ...] = ()
         self.structural_fingerprint = owl.Fingerprint("sha256", 1, b"e" * 32)
@@ -155,10 +158,11 @@ def test_valid_handoff_retains_owner_and_read_only_buffers(
     assert lease.encoded_view is view.encoded
     assert lease.structural_fingerprint is view.encoded.structural_fingerprint
     assert lease.structural_fingerprint != view.structural_fingerprint
-    assert tuple(lease.buffers) == ("components", "roots")
-    assert lease.buffer_count == 2
-    assert lease.buffer_bytes == 15
+    assert tuple(lease.buffers) == tuple(ENCODED_BUFFER_WIDTHS)
+    assert lease.buffer_count == 11
+    assert lease.buffer_bytes == 8
     assert all(buffer.readonly for buffer in lease.buffers.values())
+    assert lease.descriptor_digest == ENCODED_DESCRIPTOR_SHA256
     assert view.requests == [
         (
             _EncodedStructuralView,
@@ -177,9 +181,45 @@ def test_descriptor_digest_is_derived_when_core_uses_the_minimal_public_surface(
     result = negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
 
     assert result.lease is not None
-    assert result.lease.descriptor_digest == hashlib.sha256(
-        view.encoded.descriptor
-    ).digest()
+    assert result.lease.descriptor_digest == hashlib.sha256(view.encoded.descriptor).digest()
+
+
+def test_self_consistent_descriptor_drift_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
+    view = _View()
+    view.encoded.descriptor += b" "
+    view.encoded.descriptor_digest = hashlib.sha256(view.encoded.descriptor).digest()
+
+    with pytest.raises(owl.BackendProtocolError, match="frozen"):
+        negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
+
+
+@pytest.mark.parametrize(
+    "buffers",
+    [
+        {name: memoryview(b"") for name in ENCODED_BUFFER_WIDTHS if name != "root_ids"},
+        {
+            **{name: memoryview(b"") for name in ENCODED_BUFFER_WIDTHS},
+            "private_layout": memoryview(b""),
+        },
+        {
+            **{name: memoryview(b"") for name in ENCODED_BUFFER_WIDTHS},
+            "root_ids": memoryview(b"\x00"),
+        },
+    ],
+)
+def test_buffer_ledger_and_scalar_widths_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    buffers: dict[str, memoryview],
+) -> None:
+    monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
+    view = _View()
+    view.encoded.buffers = buffers
+
+    with pytest.raises(owl.BackendProtocolError, match="buffer"):
+        negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
 
 
 @pytest.mark.parametrize(
