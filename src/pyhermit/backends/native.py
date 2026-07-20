@@ -207,12 +207,13 @@ class NativeBackendFactory:
         lease = negotiation.lease
         if lease is None:
             return
-        result = validator(**{name: lease.buffers[name] for name in ENCODED_BUFFER_WIDTHS})
-        if result is not None:
-            raise BackendMismatchError(
-                "native encoded validator returned an incompatible result",
-                context={"reason": "encoded_validator_result_invalid"},
-            )
+        for local in lease.local_leases():
+            result = validator(**{name: local.buffers[name] for name in ENCODED_BUFFER_WIDTHS})
+            if result is not None:
+                raise BackendMismatchError(
+                    "native encoded validator returned an incompatible result",
+                    context={"reason": "encoded_validator_result_invalid"},
+                )
 
     def create_session(
         self,

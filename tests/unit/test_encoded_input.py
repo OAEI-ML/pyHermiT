@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import TypeVar, cast
 
 import pyowl_core as owl
 import pytest
-from pyowl_core.backends.native_views import ENCODED_STRUCTURAL_DESCRIPTOR_V1
+from pyowl_core.backends.native_views import (
+    produce_encoded_structural_view_v1,
+)
 
+import pyhermit.encoded_input as encoded_input
 from pyhermit.encoded_input import (
     ENCODED_BUFFER_WIDTHS,
     ENCODED_DESCRIPTOR_SHA256,
     ENCODED_SCHEMA_NAME,
-    ENCODED_SCHEMA_VERSION,
+    EncodedStructuralSegmentLease,
     negotiate_encoded_input,
 )
 
@@ -30,19 +34,18 @@ _FEATURES = frozenset(
 
 class _EncodedStructuralView:
     def __init__(self, owner: _View) -> None:
-        self.schema_name = ENCODED_SCHEMA_NAME
-        self.schema_version = ENCODED_SCHEMA_VERSION
-        self.model_schema = 1
-        self.owner = owner
-        self.scope = owl.AxiomScope.CLOSURE
-        self.descriptor = ENCODED_STRUCTURAL_DESCRIPTOR_V1
+        published = produce_encoded_structural_view_v1(_as_view(owner))
+        self.schema_name = published.schema_name
+        self.schema_version = published.schema_version
+        self.model_schema = published.model_schema
+        self.owner = published.owner
+        self.scope = published.scope
+        self.document_key = published.document_key
+        self.descriptor = published.descriptor
         self.descriptor_digest = hashlib.sha256(self.descriptor).digest()
-        self.buffers = {
-            name: memoryview(b"\x00" * (8 if name == "node_field_offsets" else 0))
-            for name in ENCODED_BUFFER_WIDTHS
-        }
-        self.segments: tuple[object, ...] = ()
-        self.structural_fingerprint = owl.Fingerprint("sha256", 1, b"e" * 32)
+        self.buffers = published.buffers
+        self.segments = published.segments
+        self.structural_fingerprint = published.structural_fingerprint
 
 
 class _View:
@@ -117,6 +120,29 @@ def _as_view(value: _View) -> owl.OntologyView:
     return cast(owl.OntologyView, value)
 
 
+def _segment(
+    *,
+    role: int,
+    owner: _View,
+    source: _EncodedStructuralView | None,
+    posting_mode: int = 0,
+    root_ids: memoryview | None = None,
+    anonymous_scope_map: memoryview | None = None,
+    member_token: bytes | None = None,
+) -> object:
+    return SimpleNamespace(
+        role=role,
+        owner=owner,
+        source=source,
+        posting_mode=posting_mode,
+        root_ids=memoryview(b"") if root_ids is None else root_ids,
+        anonymous_scope_map=(
+            memoryview(b"") if anonymous_scope_map is None else anonymous_scope_map
+        ),
+        member_token=member_token,
+    )
+
+
 def test_native_capability_absence_does_not_request_core_buffers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,6 +195,91 @@ def test_valid_handoff_retains_owner_and_read_only_buffers(
             {"schema_version": 1, "scope": owl.AxiomScope.CLOSURE},
         )
     ]
+
+
+def test_overlay_segment_graph_retains_and_orders_each_local_column_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
+    source_owner = _View()
+    source_result = negotiate_encoded_input(_as_view(source_owner), {ENCODED_SCHEMA_NAME: 1})
+    source_lease = source_result.lease
+    assert source_lease is not None
+    owner = _View()
+    raw_segment = _segment(
+        role=2,
+        owner=source_owner,
+        source=source_owner.encoded,
+    )
+    fingerprint_segment = EncodedStructuralSegmentLease(
+        segment=raw_segment,
+        role=2,
+        owner=_as_view(source_owner),
+        source=source_lease,
+        posting_mode=0,
+        root_ids=memoryview(b""),
+        anonymous_scope_map=memoryview(b""),
+        member_token=None,
+    )
+    owner.encoded.segments = (raw_segment,)
+    owner.encoded.structural_fingerprint = encoded_input._encoded_fingerprint(
+        owner.encoded.buffers,
+        (fingerprint_segment,),
+        owner.encoded.descriptor,
+    )
+
+    result = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1})
+
+    lease = result.lease
+    assert lease is not None
+    assert lease.segments[0].segment is raw_segment
+    assert lease.segments[0].source is not None
+    assert tuple(item.encoded_view for item in lease.local_leases()) == (
+        owner.encoded,
+        source_owner.encoded,
+    )
+
+
+@pytest.mark.parametrize("defect", ["role", "posting", "scope_map", "cycle"])
+def test_hostile_segment_graphs_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    defect: str,
+) -> None:
+    monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
+    owner = _View()
+    if defect == "role":
+        segment = _segment(role=99, owner=owner, source=None)
+    elif defect == "posting":
+        segment = _segment(
+            role=1,
+            owner=owner,
+            source=None,
+            root_ids=memoryview(b"\x01\x00\x00\x00"),
+        )
+    elif defect == "scope_map":
+        segment = _segment(
+            role=1,
+            owner=owner,
+            source=None,
+            anonymous_scope_map=memoryview(b"x" * 64),
+        )
+    else:
+        segment = _segment(role=2, owner=owner, source=owner.encoded)
+    owner.encoded.segments = (segment,)
+
+    with pytest.raises(owl.BackendProtocolError, match="encoded"):
+        negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1})
+
+
+def test_encoded_publication_fingerprint_is_recomputed_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
+    owner = _View()
+    owner.encoded.structural_fingerprint = owl.Fingerprint("sha256", 1, b"x" * 32)
+
+    with pytest.raises(owl.BackendProtocolError, match="fingerprint"):
+        negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1})
 
 
 def test_descriptor_digest_is_derived_when_core_uses_the_minimal_public_surface(

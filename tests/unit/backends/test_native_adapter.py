@@ -124,6 +124,19 @@ class _Session:
         self.closed = True
 
 
+class _EncodedLease:
+    def __init__(
+        self,
+        buffers: dict[str, memoryview],
+        local: tuple[_EncodedLease, ...] | None = None,
+    ) -> None:
+        self.buffers = buffers
+        self._local = local
+
+    def local_leases(self) -> tuple[_EncodedLease, ...]:
+        return (self,) if self._local is None else self._local
+
+
 def _compiled() -> CompiledOntology:
     fingerprint = _Fingerprint(b"x" * 32)
     ir = _IR(b"ir")
@@ -385,7 +398,7 @@ def test_encoded_handoff_borrows_the_exact_public_column_ledger(
     extension._validate_encoded_columns_v1 = validate
     monkeypatch.setattr(
         "pyhermit.backends.native.negotiate_encoded_input",
-        lambda _view, _schemas: SimpleNamespace(lease=SimpleNamespace(buffers=buffers)),
+        lambda _view, _schemas: SimpleNamespace(lease=_EncodedLease(buffers)),
     )
     factory = NativeBackendFactory(extension)
 
@@ -394,6 +407,31 @@ def test_encoded_handoff_borrows_the_exact_public_column_ledger(
     assert tuple(received) == tuple(ENCODED_BUFFER_WIDTHS)
     assert all(received[name] is buffers[name] for name in ENCODED_BUFFER_WIDTHS)
     assert ENCODED_NATIVE_FEATURE not in factory.info.complete_features
+
+
+def test_encoded_handoff_preflights_each_unique_segment_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    top_buffers = {name: memoryview(b"top") for name in ENCODED_BUFFER_WIDTHS}
+    source_buffers = {name: memoryview(b"source") for name in ENCODED_BUFFER_WIDTHS}
+    source = _EncodedLease(source_buffers)
+    top = _EncodedLease(top_buffers)
+    top._local = (top, source)
+    observed: list[memoryview] = []
+
+    def validate(**buffers: memoryview) -> None:
+        observed.append(buffers["scalar_bytes"])
+
+    extension._validate_encoded_columns_v1 = validate
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=top),
+    )
+
+    NativeBackendFactory(extension)._validate_encoded_handoff(object())  # type: ignore[arg-type]
+
+    assert observed == [top_buffers["scalar_bytes"], source_buffers["scalar_bytes"]]
 
 
 def test_encoded_handoff_is_fail_closed_after_advertised_input_is_observed(
@@ -409,7 +447,7 @@ def test_encoded_handoff_is_fail_closed_after_advertised_input_is_observed(
     monkeypatch.setattr(
         "pyhermit.backends.native.negotiate_encoded_input",
         lambda _view, _schemas: SimpleNamespace(
-            lease=SimpleNamespace(buffers={name: memoryview(b"") for name in ENCODED_BUFFER_WIDTHS})
+            lease=_EncodedLease({name: memoryview(b"") for name in ENCODED_BUFFER_WIDTHS})
         ),
     )
 
@@ -427,7 +465,7 @@ def test_encoded_handoff_rejects_a_non_none_native_result(
     monkeypatch.setattr(
         "pyhermit.backends.native.negotiate_encoded_input",
         lambda _view, _schemas: SimpleNamespace(
-            lease=SimpleNamespace(buffers={name: memoryview(b"") for name in ENCODED_BUFFER_WIDTHS})
+            lease=_EncodedLease({name: memoryview(b"") for name in ENCODED_BUFFER_WIDTHS})
         ),
     )
 
