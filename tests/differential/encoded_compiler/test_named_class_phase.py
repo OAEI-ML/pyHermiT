@@ -4564,6 +4564,38 @@ def test_composite_datatype_definitions_remap_distinct_local_domains_exactly() -
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_composite_boolean_datatype_definitions_remap_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:Z))",
+            "DatatypeDefinition(:Z DataUnionOf(xsd:string xsd:integer))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:A))",
+            "DatatypeDefinition(:A DataUnionOf(xsd:string xsd:integer))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_datatype_definitions=True,
+    )
+    assert not any(
+        value["generated"]
+        for value in cast(list[dict[str, object]], actual["data_range_symbols"])
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_composite_anonymous_named_keys_group_sources_exactly() -> None:
     source = functional(
         "Declaration(Class(:A))",
@@ -4797,11 +4829,43 @@ def test_nested_data_complements_defer_without_leaking_symbols() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_complex_datatype_definition_still_defers_the_whole_root() -> None:
+def test_boolean_datatype_definitions_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Datatype(:D))",
+            "Declaration(Datatype(:E))",
+            "Declaration(Datatype(:F))",
             "DatatypeDefinition(:D DataUnionOf(xsd:string xsd:integer))",
+            "DatatypeDefinition(:E DataIntersectionOf("
+            "DataComplementOf(xsd:string) xsd:integer))",
+            'DatatypeDefinition(:F DataUnionOf(DataOneOf("alpha") '
+            "DatatypeRestriction(xsd:integer "
+            'xsd:minInclusive "1"^^xsd:integer)))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=3,
+        include_datatype_definitions=True,
+    )
+    assert not any(
+        value["generated"]
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_partial_boolean_datatype_definition_defers_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:D))",
+            "DatatypeDefinition(:D DataUnionOf(xsd:string "
+            "DataComplementOf(DataUnionOf(xsd:integer xsd:boolean))))",
         ),
         options=OPTIONS,
     )
@@ -4810,9 +4874,9 @@ def test_complex_datatype_definition_still_defers_the_whole_root() -> None:
 
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 1
-    assert all(
-        predicate["kind"] != PredicateKind.DATA_RANGE.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    assert not any(
+        str(value["display"]).startswith(("DataIntersectionOf:", "DataUnionOf:"))
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
