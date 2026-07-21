@@ -1750,6 +1750,36 @@ def test_partial_boolean_equivalence_defers_without_generated_symbol_leaks() -> 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_flat_boolean_class_assertion_definitions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(AnnotationProperty(:note))",
+            "ClassAssertion(ObjectIntersectionOf(:A :B) :i)",
+            'ClassAssertion(Annotation(:note "same definition") '
+            "ObjectIntersectionOf(:A :B) :i)",
+            "ClassAssertion(ObjectUnionOf(ObjectComplementOf(:B) "
+            "ObjectOneOf(:i)) _:anonymous)",
+            "SubClassOf(:C ObjectIntersectionOf(:A :B))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=4)
+    assert sum(
+        bool(value["generated"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    ) == 2
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_generated_class_entity_remapping_matches_scalar_exactly() -> None:
     long_iri = "<urn:test:long:" + ("z" * 240) + ">"
     snapshot = pyowl_core.load_snapshot(
@@ -1782,6 +1812,7 @@ def test_composite_boolean_definitions_use_the_global_logical_namespace() -> Non
         "Declaration(Class(:B))",
         "Declaration(Class(:C))",
         "Declaration(Class(:D))",
+        "Declaration(NamedIndividual(:i))",
     )
     left = pyowl_core.load_snapshot(
         functional(
@@ -1794,6 +1825,7 @@ def test_composite_boolean_definitions_use_the_global_logical_namespace() -> Non
         functional(
             *declarations,
             "EquivalentClasses(ObjectUnionOf(:A :B) :D)",
+            "ClassAssertion(ObjectIntersectionOf(:B :C) :i)",
         ),
         options=OPTIONS,
     )
@@ -1804,7 +1836,7 @@ def test_composite_boolean_definitions_use_the_global_logical_namespace() -> Non
         logical_fingerprint=composite.logical_fingerprint.digest,
     )
 
-    assert manifest == _expected_manifest(composite, compiled_roots=2)
+    assert manifest == _expected_manifest(composite, compiled_roots=3)
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(
         namespace in str(value["display"])

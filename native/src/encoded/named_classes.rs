@@ -1682,6 +1682,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     symbols,
                     &class_domain,
                     &class_signature,
+                    &definitions,
                     &individual_domain,
                     &individual_signature,
                     root.node,
@@ -2192,6 +2193,15 @@ fn class_boolean_definitions<B: ByteSource>(
                 &mut definitions,
                 budget,
             )?,
+            RootHandler::ClassAssertion => retain_class_assertion_boolean_definition(
+                model,
+                symbols,
+                root.node,
+                namespace,
+                scope_maps,
+                &mut definitions,
+                budget,
+            )?,
             _ => {}
         }
     }
@@ -2269,6 +2279,65 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
         retain_class_boolean_definition(definitions, definition, provenance, budget)?;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_class_assertion_boolean_definition<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    root: NodeId,
+    namespace: [u8; 32],
+    scope_maps: &[AnonymousScopeMap],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let node = model.node(root)?;
+    if node.tag() != CLASS_ASSERTION_TAG || node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "class-assertion root no longer has schema-1 shape",
+        ));
+    }
+    let expression = node_field(model, node, 0, "class-assertion class expression")?;
+    if atomic_class_selection(model, symbols, expression, budget)?.is_some() {
+        return Ok(());
+    }
+    let Some(definition) = class_boolean_definition_candidate(
+        model,
+        symbols,
+        expression,
+        DefinitionPolarity::Positive,
+        namespace,
+        scope_maps,
+        budget,
+    )?
+    else {
+        return Ok(());
+    };
+    let individual = node_field(model, node, 1, "class-assertion individual")?;
+    if !supported_class_assertion_individual(model, symbols, individual)? {
+        return Ok(());
+    }
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    retain_class_boolean_definition(definitions, definition, provenance, budget)
+}
+
+fn supported_class_assertion_individual<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+) -> EncodedResult<bool> {
+    match model.node(identifier)?.tag() {
+        ANONYMOUS_INDIVIDUAL_TAG => Ok(true),
+        ENTITY_TAG => {
+            let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "class-assertion individual is absent from the reachable entity mapping",
+                )
+            })?;
+            Ok(class_entity_display(symbols, entity_id)?.starts_with(NAMED_INDIVIDUAL_PREFIX))
+        }
+        _ => Ok(false),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2827,6 +2896,14 @@ fn class_signature<B: ByteSource>(
                 if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
                     push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                } else if let Some(definition) =
+                    class_boolean_definition(definitions, expression, DefinitionPolarity::Positive)
+                {
+                    push_class_boolean_definition_selections(
+                        &mut selected_expressions,
+                        definition,
+                        budget,
+                    )?;
                 }
             }
             RootHandler::SubClassOf => {
@@ -8301,6 +8378,7 @@ fn named_class_assertion<B: ByteSource>(
     symbols: &SymbolPhase,
     class_domain: &DecodedSymbolDomain,
     class_signature: &[ClassSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
     individual_domain: &DecodedSymbolDomain,
     individual_signature: &[IndividualSignatureBinding],
     root: NodeId,
@@ -8318,6 +8396,7 @@ fn named_class_assertion<B: ByteSource>(
         symbols,
         class_domain,
         class_signature,
+        definitions,
         node,
         scope_maps,
         budget,
@@ -8348,11 +8427,13 @@ fn named_class_assertion<B: ByteSource>(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn class_assertion_literal<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
     assertion: NodeRef,
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
@@ -8363,12 +8444,14 @@ fn class_assertion_literal<B: ByteSource>(
         0,
         "class-assertion class-expression operand",
     )?;
-    atomic_class_expression_literal(
+    class_expression_literal_with_definitions(
         model,
         symbols,
         class_domain,
         signature,
         identifier,
+        DefinitionPolarity::Positive,
+        definitions,
         scope_maps,
         budget,
     )
