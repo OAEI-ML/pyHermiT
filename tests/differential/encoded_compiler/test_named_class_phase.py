@@ -4431,15 +4431,16 @@ def test_composite_generated_data_range_definitions_use_global_namespace() -> No
     left = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:z))",
-            "DataPropertyRange(:z DataUnionOf(xsd:string xsd:integer))",
+            "DataPropertyRange(:z DataUnionOf(xsd:string xsd:integer xsd:boolean))",
         ),
         options=OPTIONS,
     )
     right = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:a))",
-            "DataPropertyRange(:a DataComplementOf(DataIntersectionOf("
-            "DataComplementOf(xsd:string) DataComplementOf(xsd:integer))))",
+            "DataPropertyRange(:a DataUnionOf(xsd:string "
+            "DataComplementOf(DataIntersectionOf(DataComplementOf(xsd:integer) "
+            "DataComplementOf(xsd:boolean)))))",
         ),
         options=OPTIONS,
     )
@@ -4801,6 +4802,43 @@ def test_partial_generated_data_range_defers_without_symbol_leaks() -> None:
         value["generated"]
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_nested_homogeneous_data_booleans_flatten_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(Datatype(:D))",
+            "Declaration(Datatype(:E))",
+            "DataPropertyRange(:p DataUnionOf(xsd:string "
+            "DataUnionOf(xsd:integer xsd:boolean)))",
+            "DataPropertyRange(:q DataIntersectionOf(xsd:string "
+            "DataComplementOf(DataUnionOf(DataComplementOf(xsd:integer) "
+            "DataComplementOf(xsd:boolean)))))",
+            "DatatypeDefinition(:D DataUnionOf(xsd:string "
+            "DataUnionOf(xsd:integer xsd:boolean)))",
+            "DatatypeDefinition(:E DataIntersectionOf(xsd:string "
+            "DataIntersectionOf(xsd:integer xsd:boolean)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_data_ranges=True,
+        include_generated_data_definitions=True,
+        include_datatype_definitions=True,
+    )
+    assert sum(
+        bool(value["generated"])
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ) == 2
+    assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

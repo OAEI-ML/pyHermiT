@@ -2539,18 +2539,14 @@ fn flat_data_boolean_expression<B: ByteSource>(
             "data Boolean expression has fewer than two operands",
         ));
     }
+    let intersection = (node.tag() == DATA_INTERSECTION_OF_TAG) != complemented;
     let mut selections = Vec::<AtomicDataRangeSelection>::new();
-    budget.claim_owned(
-        operands
-            .len()
-            .checked_mul(size_of::<AtomicDataRangeSelection>())
-            .ok_or_else(|| {
-                EncodedValidationError::resource("data Boolean operand allocation overflowed")
-            })?,
+    let operand_depth = child_expression_depth(depth, "data-range depth overflowed")?;
+    PhaseBudget::count(
+        operand_depth,
+        budget.limits.max_canonical_depth,
+        "data-range depth",
     )?;
-    selections
-        .try_reserve_exact(operands.len())
-        .map_err(|_| EncodedValidationError::resource("data Boolean operand allocation failed"))?;
     for item_index in operands.items() {
         budget.claim_work(1)?;
         let item = required_component(model.item(item_index)?, "data Boolean operand")?;
@@ -2559,27 +2555,34 @@ fn flat_data_boolean_expression<B: ByteSource>(
                 "data Boolean operand did not resolve to a node",
             ));
         };
-        if !stable_data_range_literal_expression(model, symbols, operand, budget)? {
+        if !collect_flat_data_boolean_operand(
+            model,
+            symbols,
+            operand,
+            complemented,
+            intersection,
+            operand_depth,
+            &mut selections,
+            budget,
+        )? {
             return Ok(None);
         }
-        let selection =
-            atomic_data_range_selection(model, symbols, operand, budget)?.ok_or_else(|| {
-                EncodedValidationError::invariant(
-                    "validated stable data-range literal became unsupported",
-                )
-            })?;
+    }
+    if selections.len() < 2 {
+        return Ok(None);
+    }
+    for (index, selection) in selections.iter().copied().enumerate() {
         if atomic_data_range_selection_is_top(model, symbols, selection)?
             || atomic_data_range_selection_is_bottom(model, symbols, selection)?
             || selections
                 .iter()
+                .take(index)
                 .copied()
                 .any(|known| atomic_data_range_selections_match(known, selection))
         {
             return Ok(None);
         }
-        selections.push(selection);
     }
-    let intersection = (node.tag() == DATA_INTERSECTION_OF_TAG) != complemented;
     let mut keyed = Vec::<(Vec<u8>, AtomicDataRangeSelection)>::new();
     budget.claim_owned(
         selections
@@ -2594,9 +2597,6 @@ fn flat_data_boolean_expression<B: ByteSource>(
         .map_err(|_| EncodedValidationError::resource("data Boolean key allocation failed"))?;
     let mut expression_symbols = Vec::<DataRangeSymbolSeed>::new();
     for mut selection in selections {
-        if complemented {
-            selection.negative = !selection.negative;
-        }
         selection.expression = selection.base;
         let base_key = canonical::canonical_node_key(model, selection.base, scope_maps, budget)?;
         if model.node(selection.base)?.tag() != ENTITY_TAG {
@@ -2656,6 +2656,113 @@ fn flat_data_boolean_expression<B: ByteSource>(
         intersection,
         operands,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_flat_data_boolean_operand<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    inherited_complement: bool,
+    intersection: bool,
+    initial_depth: usize,
+    selections: &mut Vec<AtomicDataRangeSelection>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<bool> {
+    let mut base = identifier;
+    let mut complemented = inherited_complement;
+    let mut depth = initial_depth;
+    loop {
+        let node = model.node(base)?;
+        if node.tag() != DATA_COMPLEMENT_OF_TAG {
+            break;
+        }
+        if node.field_count() != 1 {
+            return Err(EncodedValidationError::invariant(
+                "nested data complement no longer has schema-1 shape",
+            ));
+        }
+        depth = child_expression_depth(depth, "data-range depth overflowed")?;
+        PhaseBudget::count(depth, budget.limits.max_canonical_depth, "data-range depth")?;
+        budget.claim_work(1)?;
+        base = node_field(model, node, 0, "nested data-complement operand")?;
+        complemented = !complemented;
+    }
+    let node = model.node(base)?;
+    if matches!(node.tag(), DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG) {
+        if node.field_count() != 1 {
+            return Err(EncodedValidationError::invariant(
+                "nested data Boolean expression no longer has schema-1 shape",
+            ));
+        }
+        let nested_intersection = (node.tag() == DATA_INTERSECTION_OF_TAG) != complemented;
+        if nested_intersection != intersection {
+            return Ok(false);
+        }
+        let component = required_component(
+            model.field(node.fields().start)?,
+            "nested data Boolean operands",
+        )?;
+        let ComponentValue::Collection(operands) = model.resolve(component)? else {
+            return Err(EncodedValidationError::invariant(
+                "nested data Boolean operands did not resolve to a collection",
+            ));
+        };
+        if operands.len() < 2 {
+            return Err(EncodedValidationError::invariant(
+                "nested data Boolean expression has fewer than two operands",
+            ));
+        }
+        let operand_depth = child_expression_depth(depth, "data-range depth overflowed")?;
+        PhaseBudget::count(
+            operand_depth,
+            budget.limits.max_canonical_depth,
+            "data-range depth",
+        )?;
+        for item_index in operands.items() {
+            budget.claim_work(1)?;
+            let item = required_component(model.item(item_index)?, "nested data Boolean operand")?;
+            let ComponentValue::Node(operand) = model.resolve(item)? else {
+                return Err(EncodedValidationError::invariant(
+                    "nested data Boolean operand did not resolve to a node",
+                ));
+            };
+            if !collect_flat_data_boolean_operand(
+                model,
+                symbols,
+                operand,
+                complemented,
+                intersection,
+                operand_depth,
+                selections,
+                budget,
+            )? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    let Some(mut selection) =
+        positive_atomic_data_range_selection(model, symbols, base, depth, budget)?
+    else {
+        return Ok(false);
+    };
+    selection.negative = complemented;
+    selection.expression = selection.base;
+    let following = selections.len().checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("flattened data Boolean operand count overflowed")
+    })?;
+    PhaseBudget::count(
+        following,
+        budget.limits.max_data_range_symbols,
+        "flattened data Boolean operand count",
+    )?;
+    budget.claim_owned(size_of::<AtomicDataRangeSelection>())?;
+    selections.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("flattened data Boolean operand allocation failed")
+    })?;
+    selections.push(selection);
+    Ok(true)
 }
 
 fn synthetic_data_complement_key(
@@ -5869,33 +5976,6 @@ fn atomic_data_range_selection<B: ByteSource>(
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<AtomicDataRangeSelection>> {
     atomic_data_range_selection_at_depth(model, symbols, identifier, 0, budget)
-}
-
-fn stable_data_range_literal_expression<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    symbols: &SymbolPhase,
-    identifier: NodeId,
-    budget: &mut PhaseBudget,
-) -> EncodedResult<bool> {
-    let node = model.node(identifier)?;
-    match node.tag() {
-        ENTITY_TAG | DATA_ONE_OF_TAG | DATATYPE_RESTRICTION_TAG => {
-            Ok(atomic_data_range_selection(model, symbols, identifier, budget)?.is_some())
-        }
-        DATA_COMPLEMENT_OF_TAG => {
-            if node.field_count() != 1 {
-                return Err(EncodedValidationError::invariant(
-                    "data complement no longer has schema-1 shape",
-                ));
-            }
-            let operand = node_field(model, node, 0, "data-complement operand")?;
-            Ok(matches!(
-                model.node(operand)?.tag(),
-                ENTITY_TAG | DATA_ONE_OF_TAG | DATATYPE_RESTRICTION_TAG
-            ) && atomic_data_range_selection(model, symbols, identifier, budget)?.is_some())
-        }
-        _ => Ok(false),
-    }
 }
 
 fn atomic_data_range_selection_at_depth<B: ByteSource>(
