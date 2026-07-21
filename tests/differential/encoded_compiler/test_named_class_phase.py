@@ -1821,6 +1821,43 @@ def test_flat_boolean_property_constraint_definitions_match_scalar_exactly() -> 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_flat_boolean_key_definitions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(AnnotationProperty(:note))",
+            "HasKey(ObjectIntersectionOf(:A :B) (:p :q) (:d))",
+            'HasKey(Annotation(:note "same definition") '
+            "ObjectIntersectionOf(:A :B) (:p :q) (:d))",
+            "HasKey(ObjectUnionOf(ObjectComplementOf(:B) ObjectOneOf(:i)) () (:e))",
+            "SubClassOf(ObjectIntersectionOf(:A :B) :C)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_keys=True,
+    )
+    assert sum(
+        bool(value["generated"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    ) == 2
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_generated_class_entity_remapping_matches_scalar_exactly() -> None:
     long_iri = "<urn:test:long:" + ("z" * 240) + ">"
     snapshot = pyowl_core.load_snapshot(
@@ -1908,6 +1945,7 @@ def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
         functional(
             *declarations,
             "DataPropertyDomain(:data ObjectUnionOf(:B :C))",
+            "HasKey(ObjectIntersectionOf(:A :B) (:p) (:data))",
         ),
         options=OPTIONS,
     )
@@ -1920,9 +1958,10 @@ def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
 
     assert manifest == _expected_manifest(
         composite,
-        compiled_roots=2,
+        compiled_roots=3,
         include_object_constraints=True,
         include_data_domains=True,
+        include_keys=True,
     )
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(
@@ -4586,14 +4625,15 @@ def test_complex_datatype_definition_still_defers_the_whole_root() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_complex_has_key_still_defers_the_whole_root() -> None:
+def test_partially_unsupported_has_key_defers_without_generated_symbols() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:d))",
-            "HasKey(ObjectIntersectionOf(:A :B) (:p) (:d))",
+            "HasKey(ObjectIntersectionOf(:A ObjectSomeValuesFrom(:q :B)) (:p) (:d))",
         ),
         options=OPTIONS,
     )
@@ -4602,6 +4642,12 @@ def test_complex_has_key_still_defers_the_whole_root() -> None:
 
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 1
+    assert not any(
+        value["generated"]
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
     assert all(
         predicate["kind"]
         not in {

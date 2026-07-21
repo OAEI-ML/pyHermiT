@@ -1521,6 +1521,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     data_roles,
                     &class_domain,
                     &class_signature,
+                    &definitions,
                     root.node,
                     scope_maps,
                     &mut budget,
@@ -2240,6 +2241,17 @@ fn class_boolean_definitions<B: ByteSource>(
                     )?;
                 }
             }
+            RootHandler::HasKey => retain_key_boolean_definition(
+                model,
+                symbols,
+                object_roles,
+                data_roles,
+                root.node,
+                namespace,
+                scope_maps,
+                &mut definitions,
+                budget,
+            )?,
             _ => {}
         }
     }
@@ -2436,6 +2448,98 @@ fn retain_class_constraint_boolean_definition<B: ByteSource>(
         symbols,
         expression,
         DefinitionPolarity::Positive,
+        namespace,
+        scope_maps,
+        budget,
+    )?
+    else {
+        return Ok(());
+    };
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    retain_class_boolean_definition(definitions, definition, provenance, budget)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_key_boolean_definition<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
+    root: NodeId,
+    namespace: [u8; 32],
+    scope_maps: &[AnonymousScopeMap],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let node = model.node(root)?;
+    if node.tag() != HAS_KEY_TAG || node.field_count() != 4 {
+        return Err(EncodedValidationError::invariant(
+            "has-key root no longer has schema-1 shape",
+        ));
+    }
+    let object_component = required_component(
+        model.field(node.fields().start + 1)?,
+        "has-key object properties",
+    )?;
+    let ComponentValue::Collection(object_properties) = model.resolve(object_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "has-key object properties did not resolve to a collection",
+        ));
+    };
+    let data_component = required_component(
+        model.field(node.fields().start + 2)?,
+        "has-key data properties",
+    )?;
+    let ComponentValue::Collection(data_properties) = model.resolve(data_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "has-key data properties did not resolve to a collection",
+        ));
+    };
+    if object_properties.is_empty() && data_properties.is_empty() {
+        return Err(EncodedValidationError::invariant(
+            "has-key root no longer contains a property",
+        ));
+    }
+    if (!object_properties.is_empty() && object_roles.is_none())
+        || (!data_properties.is_empty() && data_roles.is_none())
+    {
+        return Ok(());
+    }
+    for item_index in object_properties.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "has-key object property")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "has-key object property did not resolve to a node",
+            ));
+        };
+        let roles = object_roles.ok_or_else(|| {
+            EncodedValidationError::invariant("has-key object role domain disappeared")
+        })?;
+        let _role_id = named_object_role_id(model, symbols, roles, identifier, budget)?;
+    }
+    for item_index in data_properties.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "has-key data property")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "has-key data property did not resolve to a node",
+            ));
+        };
+        let roles = data_roles.ok_or_else(|| {
+            EncodedValidationError::invariant("has-key data role domain disappeared")
+        })?;
+        let _role_id = named_data_role_id(model, symbols, roles, identifier, budget)?;
+    }
+    let expression = node_field(model, node, 0, "has-key class expression")?;
+    if atomic_class_selection(model, symbols, expression, budget)?.is_some() {
+        return Ok(());
+    }
+    let Some(definition) = class_boolean_definition_candidate(
+        model,
+        symbols,
+        expression,
+        DefinitionPolarity::Negative,
         namespace,
         scope_maps,
         budget,
@@ -3307,6 +3411,14 @@ fn class_signature<B: ByteSource>(
                 if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
                     push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                } else if let Some(definition) =
+                    class_boolean_definition(definitions, expression, DefinitionPolarity::Negative)
+                {
+                    push_class_boolean_definition_selections(
+                        &mut selected_expressions,
+                        definition,
+                        budget,
+                    )?;
                 }
             }
             _ => {}
@@ -8024,6 +8136,7 @@ fn named_key<B: ByteSource>(
     data_roles: Option<&DataRolePhase>,
     class_domain: &DecodedSymbolDomain,
     class_signature: &[ClassSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
     root: NodeId,
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
@@ -8034,13 +8147,15 @@ fn named_key<B: ByteSource>(
             "has-key root no longer has schema-1 shape",
         ));
     }
-    let Some(class) = atomic_class_field(
+    let expression = node_field(model, node, 0, "has-key class expression")?;
+    let Some((class_id, negative)) = class_expression_literal_with_definitions(
         model,
         symbols,
         class_domain,
         class_signature,
-        node,
-        0,
+        expression,
+        DefinitionPolarity::Negative,
+        definitions,
         scope_maps,
         budget,
     )?
@@ -8133,7 +8248,7 @@ fn named_key<B: ByteSource>(
     data_role_ids.dedup();
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
     Ok(Some(RawKey {
-        class,
+        class: ClassLiteral { class_id, negative },
         object_role_ids,
         data_role_ids,
         provenance,
@@ -8858,40 +8973,6 @@ fn named_assertion_role<B: ByteSource>(
     let property = node_field(model, node, 0, "inverse object-property assertion role")?;
     let (role_id, inverted) = named_assertion_role(model, symbols, object_roles, property, budget)?;
     Ok((role_id, !inverted))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn atomic_class_field<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    symbols: &SymbolPhase,
-    class_domain: &DecodedSymbolDomain,
-    signature: &[ClassSignatureBinding],
-    node: NodeRef,
-    relative_field: usize,
-    scope_maps: &[AnonymousScopeMap],
-    budget: &mut PhaseBudget,
-) -> EncodedResult<Option<ClassLiteral>> {
-    let field_index = node
-        .fields()
-        .start
-        .checked_add(relative_field)
-        .ok_or_else(|| EncodedValidationError::invariant("class field index overflowed"))?;
-    let component = required_component(model.field(field_index)?, "named-class field")?;
-    let ComponentValue::Node(identifier) = model.resolve(component)? else {
-        return Err(EncodedValidationError::invariant(
-            "class-expression field did not resolve to a node",
-        ));
-    };
-    Ok(atomic_class_expression_literal(
-        model,
-        symbols,
-        class_domain,
-        signature,
-        identifier,
-        scope_maps,
-        budget,
-    )?
-    .map(|(class_id, negative)| ClassLiteral { class_id, negative }))
 }
 
 #[allow(clippy::too_many_arguments)]
