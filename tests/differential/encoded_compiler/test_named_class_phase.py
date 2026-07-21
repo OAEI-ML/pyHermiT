@@ -162,8 +162,11 @@ def _projected_atom_payload(
 ) -> dict[str, object]:
     arguments: list[dict[str, object]] = []
     for argument in value.arguments:
-        assert isinstance(argument, Variable)
-        arguments.append({"index": argument.index, "sort": argument.sort.value})
+        if isinstance(argument, Variable):
+            arguments.append({"index": argument.index, "sort": argument.sort.value})
+        else:
+            assert isinstance(argument, IndividualTerm)
+            arguments.append({"individual_id": argument.individual_id})
     return {
         "predicate_id": predicate_remap[value.predicate_id],
         "arguments": arguments,
@@ -176,15 +179,24 @@ def _projected_atom_key(
 ) -> dict[str, object]:
     arguments: list[dict[str, object]] = []
     for argument in value.arguments:
-        assert isinstance(argument, Variable)
-        arguments.append(
-            {
-                "type": "Variable",
-                "index": argument.index,
-                "sort": argument.sort.value,
-                "schema_version": 1,
-            }
-        )
+        if isinstance(argument, Variable):
+            arguments.append(
+                {
+                    "type": "Variable",
+                    "index": argument.index,
+                    "sort": argument.sort.value,
+                    "schema_version": 1,
+                }
+            )
+        else:
+            assert isinstance(argument, IndividualTerm)
+            arguments.append(
+                {
+                    "type": "IndividualTerm",
+                    "individual_id": argument.individual_id,
+                    "schema_version": 1,
+                }
+            )
     return {
         "type": "Atom",
         "predicate_id": predicate_remap[value.predicate_id],
@@ -280,6 +292,8 @@ def _expected_manifest(
     fragment_kinds = {
         PredicateKind.CONCEPT,
         PredicateKind.NEGATED_CONCEPT,
+        PredicateKind.NOMINAL,
+        PredicateKind.NEGATED_NOMINAL,
         PredicateKind.DISJOINT_GUARD,
         PredicateKind.EQUALITY,
         PredicateKind.INEQUALITY,
@@ -580,8 +594,19 @@ def _expected_manifest(
         unary_named_clause = bool(clause.body) and not any(
             atom.arguments not in expected_variables for atom in clause.body + clause.head
         )
+        nominal_clause = any(
+            predicates_by_id[atom.predicate_id].kind
+            in {PredicateKind.NOMINAL, PredicateKind.NEGATED_NOMINAL}
+            for atom in clause.body + clause.head
+        ) and all(
+            isinstance(argument, IndividualTerm)
+            or argument == Variable(0, TermSort.OBJECT)
+            for atom in clause.body + clause.head
+            for argument in atom.arguments
+        )
         if (
             not unary_named_clause
+            and not nominal_clause
             and clause.clause_id not in constraint_clauses
             and clause.clause_id not in characteristic_clauses
             and clause.clause_id not in data_domain_clauses
@@ -1364,6 +1389,48 @@ def test_atomic_complement_class_assertions_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_named_nominal_class_assertions_match_scalar_semantics_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(NamedIndividual(:a))",
+            "Declaration(NamedIndividual(:b))",
+            "Declaration(NamedIndividual(:c))",
+            "Declaration(NamedIndividual(:d))",
+            "Declaration(AnnotationProperty(:note))",
+            "ClassAssertion(ObjectOneOf(:a :b) :c)",
+            'ClassAssertion(Annotation(:note "duplicate") ObjectOneOf(:a :b) :c)',
+            "ClassAssertion(ObjectOneOf(:d) :d)",
+            "ClassAssertion(ObjectComplementOf(ObjectOneOf(:a :b)) :d)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=4)
+    class_symbols = cast(
+        list[dict[str, object]], manifest["class_expression_symbols"]
+    )
+    assert sum(
+        str(value["display"]).startswith("ObjectOneOf:")
+        for value in class_symbols
+    ) == 2
+    predicates = cast(list[dict[str, object]], manifest["predicates"])
+    assert sum(
+        predicate["kind"] == PredicateKind.NOMINAL.value
+        for predicate in predicates
+    ) == 2
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value
+        for predicate in predicates
+    ) == 1
+    assert sum(
+        predicate["kind"] == PredicateKind.EQUALITY.value
+        for predicate in predicates
+    ) == 1
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_composite_atomic_complements_remap_local_class_domains_exactly() -> None:
     left = pyowl_core.load_snapshot(
         functional(
@@ -1393,6 +1460,33 @@ def test_composite_atomic_complements_remap_local_class_domains_exactly() -> Non
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     ) == 2
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_named_nominal_assertions_remap_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(NamedIndividual(:z1))",
+            "Declaration(NamedIndividual(:z2))",
+            "Declaration(NamedIndividual(:zc))",
+            "ClassAssertion(ObjectOneOf(:z1 :z2) :zc)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(NamedIndividual(:a1))",
+            "Declaration(NamedIndividual(:ac))",
+            "ClassAssertion(ObjectComplementOf(ObjectOneOf(:a1)) :ac)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert manifest == _expected_manifest(composite, compiled_roots=2)
+    assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
@@ -3592,6 +3686,38 @@ def test_nested_complement_class_assertion_defers_without_partial_symbols() -> N
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert manifest["negative_facts"] == []
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_unsupported_nominal_assertions_defer_without_partial_symbols() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(NamedIndividual(:a))",
+            "Declaration(NamedIndividual(:b))",
+            "ClassAssertion(ObjectOneOf(_:anonymous) :a)",
+            "ClassAssertion(ObjectComplementOf("
+            "ObjectComplementOf(ObjectOneOf(:a))) :b)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 2
+    assert all(
+        not str(value["display"]).startswith(
+            ("ObjectOneOf:", "ObjectComplementOf:")
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"]
+        not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

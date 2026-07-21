@@ -48,6 +48,7 @@ const LITERAL_TAG: u16 = 4;
 const DATA_COMPLEMENT_OF_TAG: u16 = 23;
 const DATA_ONE_OF_TAG: u16 = 24;
 const DATATYPE_RESTRICTION_TAG: u16 = 25;
+const OBJECT_ONE_OF_TAG: u16 = 33;
 const OBJECT_COMPLEMENT_OF_TAG: u16 = 32;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
@@ -192,6 +193,7 @@ pub struct NamedClassPhase {
     pub work: u64,
     pub owned_bytes: usize,
     compiled_root_digests: Vec<[u8; 32]>,
+    nominal_bindings: Vec<NominalBinding>,
     normalized_edges: Vec<NormalizedEdge>,
     normalized_disjoints: Vec<NormalizedDisjoint>,
     normalized_object_constraints: Vec<NormalizedObjectConstraint>,
@@ -516,6 +518,19 @@ struct NormalizedEdge {
 struct ClassLiteral {
     class_id: u32,
     negative: bool,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NominalBinding {
+    class_id: u32,
+    individual_ids: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NominalUsage {
+    None,
+    Positive,
+    Negative,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -931,6 +946,14 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &declared_individual_ids,
         object_roles.is_some(),
         data_roles.is_some(),
+        scope_maps,
+        &mut budget,
+    )?;
+    let nominal_bindings = nominal_bindings(
+        model,
+        symbols,
+        &class_domain,
+        &individual_signature,
         scope_maps,
         &mut budget,
     )?;
@@ -1466,6 +1489,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                 match named_class_assertion(
                     model,
                     symbols,
+                    &class_domain,
                     &class_signature,
                     &individual_domain,
                     &individual_signature,
@@ -1754,6 +1778,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         data_inequality_predicate,
         ordering_predicate,
     ) = freeze_predicates(
+        &nominal_bindings,
         &edges,
         &disjoints,
         &object_constraints,
@@ -1785,6 +1810,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &mut budget,
     )?;
     let clauses = freeze_clauses(
+        &nominal_bindings,
         &edges,
         &disjoints,
         &object_constraints,
@@ -1805,6 +1831,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &predicate_by_data_range,
         &predicate_by_negative_data_range,
         equality_predicate,
+        inequality_predicate,
         data_equality_predicate,
         data_inequality_predicate,
         ordering_predicate,
@@ -1831,6 +1858,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &named_individuals,
         named_predicate,
         equality_predicate,
+        nominal_usage(&nominal_bindings, &facts),
         object_characteristics
             .iter()
             .any(|value| value.kind != ObjectCharacteristicKind::Reflexive),
@@ -1875,6 +1903,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         work: budget.work,
         owned_bytes: budget.owned_bytes,
         compiled_root_digests,
+        nominal_bindings,
         normalized_edges: edges,
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
@@ -1956,7 +1985,7 @@ fn class_signature<B: ByteSource>(
         });
     }
 
-    let mut complements = Vec::<NodeId>::new();
+    let mut selected_expressions = Vec::<NodeId>::new();
     'root_selection: for root in &symbols.roots {
         budget.claim_work(1)?;
         let root_node = model.node(root.node)?;
@@ -1968,10 +1997,21 @@ fn class_signature<B: ByteSource>(
                     0,
                     "class-assertion class-expression operand",
                 )?;
-                if atomic_class_entity(model, symbols, expression)?
+                if let Some((base, negative)) =
+                    atomic_named_nominal(model, symbols, expression, budget)?
+                {
+                    push_class_expression_selection(&mut selected_expressions, base, budget)?;
+                    if negative {
+                        push_class_expression_selection(
+                            &mut selected_expressions,
+                            expression,
+                            budget,
+                        )?;
+                    }
+                } else if atomic_class_entity(model, symbols, expression)?
                     .is_some_and(|(_, negative)| negative)
                 {
-                    push_complement_selection(&mut complements, expression, budget)?;
+                    push_class_expression_selection(&mut selected_expressions, expression, budget)?;
                 }
             }
             RootHandler::SubClassOf => {
@@ -1989,10 +2029,14 @@ fn class_signature<B: ByteSource>(
                 let sub_negative = sub_literal.1;
                 let super_negative = super_literal.1;
                 if sub_negative {
-                    push_complement_selection(&mut complements, sub_class, budget)?;
+                    push_class_expression_selection(&mut selected_expressions, sub_class, budget)?;
                 }
                 if super_negative {
-                    push_complement_selection(&mut complements, super_class, budget)?;
+                    push_class_expression_selection(
+                        &mut selected_expressions,
+                        super_class,
+                        budget,
+                    )?;
                 }
             }
             RootHandler::EquivalentClasses => {
@@ -2032,7 +2076,11 @@ fn class_signature<B: ByteSource>(
                     if atomic_class_entity(model, symbols, identifier)?
                         .is_some_and(|(_, negative)| negative)
                     {
-                        push_complement_selection(&mut complements, identifier, budget)?;
+                        push_class_expression_selection(
+                            &mut selected_expressions,
+                            identifier,
+                            budget,
+                        )?;
                     }
                 }
             }
@@ -2087,7 +2135,11 @@ fn class_signature<B: ByteSource>(
                     if atomic_class_entity(model, symbols, identifier)?
                         .is_some_and(|(_, negative)| negative)
                     {
-                        push_complement_selection(&mut complements, identifier, budget)?;
+                        push_class_expression_selection(
+                            &mut selected_expressions,
+                            identifier,
+                            budget,
+                        )?;
                     }
                 }
             }
@@ -2103,7 +2155,7 @@ fn class_signature<B: ByteSource>(
                 if atomic_class_entity(model, symbols, expression)?
                     .is_some_and(|(_, negative)| negative)
                 {
-                    push_complement_selection(&mut complements, expression, budget)?;
+                    push_class_expression_selection(&mut selected_expressions, expression, budget)?;
                 }
             }
             RootHandler::DataPropertyDomain if has_data_roles => {
@@ -2112,7 +2164,7 @@ fn class_signature<B: ByteSource>(
                 if atomic_class_entity(model, symbols, expression)?
                     .is_some_and(|(_, negative)| negative)
                 {
-                    push_complement_selection(&mut complements, expression, budget)?;
+                    push_class_expression_selection(&mut selected_expressions, expression, budget)?;
                 }
             }
             RootHandler::HasKey => {
@@ -2146,16 +2198,16 @@ fn class_signature<B: ByteSource>(
                 if atomic_class_entity(model, symbols, expression)?
                     .is_some_and(|(_, negative)| negative)
                 {
-                    push_complement_selection(&mut complements, expression, budget)?;
+                    push_class_expression_selection(&mut selected_expressions, expression, budget)?;
                 }
             }
             _ => {}
         }
     }
-    budget.claim_work(sort_work(complements.len()))?;
-    complements.sort_unstable();
-    complements.dedup();
-    for identifier in complements {
+    budget.claim_work(sort_work(selected_expressions.len()))?;
+    selected_expressions.sort_unstable();
+    selected_expressions.dedup();
+    for identifier in selected_expressions {
         let following = pending.len().checked_add(1).ok_or_else(|| {
             EncodedValidationError::resource("class-expression symbol count overflowed")
         })?;
@@ -2167,18 +2219,16 @@ fn class_signature<B: ByteSource>(
         let key = canonical::canonical_node_key(model, identifier, scope_maps, budget)?;
         budget.claim_work(key.len())?;
         let digest = crate::model::hex(&Sha256::digest(&key));
-        let display_len = "ObjectComplementOf:"
-            .len()
-            .checked_add(digest.len())
-            .ok_or_else(|| {
-                EncodedValidationError::resource("class-complement display length overflowed")
-            })?;
+        let prefix = class_expression_prefix(model.node(identifier)?.tag())?;
+        let display_len = prefix.len().checked_add(digest.len()).ok_or_else(|| {
+            EncodedValidationError::resource("class-expression display length overflowed")
+        })?;
         budget.claim_owned(display_len)?;
         let mut display = String::new();
         display.try_reserve_exact(display_len).map_err(|_| {
-            EncodedValidationError::resource("class-complement display allocation failed")
+            EncodedValidationError::resource("class-expression display allocation failed")
         })?;
-        display.push_str("ObjectComplementOf:");
+        display.push_str(prefix);
         display.push_str(&digest);
         budget.claim_owned(size_of::<PendingClassSymbol>())?;
         budget.claim_owned(size_of::<DecodedSymbolValue>())?;
@@ -2245,17 +2295,203 @@ fn class_signature<B: ByteSource>(
     ))
 }
 
-fn push_complement_selection(
-    complements: &mut Vec<NodeId>,
+fn class_expression_prefix(tag: u16) -> EncodedResult<&'static str> {
+    match tag {
+        OBJECT_ONE_OF_TAG => Ok("ObjectOneOf:"),
+        OBJECT_COMPLEMENT_OF_TAG => Ok("ObjectComplementOf:"),
+        _ => Err(EncodedValidationError::invariant(
+            "selected class expression has an unsupported constructor",
+        )),
+    }
+}
+
+fn push_class_expression_selection(
+    expressions: &mut Vec<NodeId>,
     identifier: NodeId,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
     budget.claim_owned(size_of::<NodeId>())?;
-    complements.try_reserve(1).map_err(|_| {
-        EncodedValidationError::resource("class-complement selection allocation failed")
+    expressions.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("class-expression selection allocation failed")
     })?;
-    complements.push(identifier);
+    expressions.push(identifier);
     Ok(())
+}
+
+fn is_named_nominal<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<bool> {
+    let node = model.node(identifier)?;
+    if node.tag() != OBJECT_ONE_OF_TAG {
+        return Ok(false);
+    }
+    if node.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "object nominal no longer has schema-1 shape",
+        ));
+    }
+    let component = required_component(
+        model.field(node.fields().start)?,
+        "object nominal individuals",
+    )?;
+    let ComponentValue::Collection(individuals) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(
+            "object nominal individuals did not resolve to a collection",
+        ));
+    };
+    for item_index in individuals.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "object nominal individual")?;
+        let ComponentValue::Node(individual) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "object nominal member did not resolve to an individual node",
+            ));
+        };
+        if model.node(individual)?.tag() != ENTITY_TAG {
+            return Ok(false);
+        }
+        let entity_id = symbols.entity_symbol_for_node(individual).ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "object nominal member is absent from the reachable entity mapping",
+            )
+        })?;
+        let entity = symbols
+            .entity_domain
+            .values
+            .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+            .ok_or_else(|| {
+                EncodedValidationError::invariant("object nominal entity ID is dangling")
+            })?;
+        if !entity.display.starts_with(NAMED_INDIVIDUAL_PREFIX) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn atomic_named_nominal<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<(NodeId, bool)>> {
+    if is_named_nominal(model, symbols, identifier, budget)? {
+        return Ok(Some((identifier, false)));
+    }
+    let node = model.node(identifier)?;
+    if node.tag() != OBJECT_COMPLEMENT_OF_TAG {
+        return Ok(None);
+    }
+    if node.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "class complement no longer has schema-1 shape",
+        ));
+    }
+    let operand = node_field(model, node, 0, "nominal-complement operand")?;
+    Ok(is_named_nominal(model, symbols, operand, budget)?.then_some((operand, true)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nominal_bindings<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    class_domain: &DecodedSymbolDomain,
+    individual_signature: &[IndividualSignatureBinding],
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NominalBinding>> {
+    let mut bindings = Vec::new();
+    for index in 0..model.summary().node_count {
+        budget.claim_work(1)?;
+        let node = model.node_at(index)?.ok_or_else(|| {
+            EncodedValidationError::invariant("object nominal node disappeared during traversal")
+        })?;
+        if node.tag() != OBJECT_ONE_OF_TAG {
+            continue;
+        }
+        let key = canonical::canonical_node_key(model, node.id(), scope_maps, budget)?;
+        budget.claim_work(binary_search_work(class_domain.values.len()))?;
+        let Ok(class_index) = class_domain
+            .values
+            .binary_search_by(|candidate| candidate.key.cmp(&key))
+        else {
+            continue;
+        };
+        if !is_named_nominal(model, symbols, node.id(), budget)? {
+            return Err(EncodedValidationError::invariant(
+                "selected object nominal contains a non-named individual",
+            ));
+        }
+        let component = required_component(
+            model.field(node.fields().start)?,
+            "selected object nominal individuals",
+        )?;
+        let ComponentValue::Collection(individuals) = model.resolve(component)? else {
+            return Err(EncodedValidationError::invariant(
+                "selected object nominal individuals changed shape",
+            ));
+        };
+        let mut individual_ids = Vec::new();
+        budget.claim_owned(individuals.len().checked_mul(size_of::<u32>()).ok_or_else(
+            || EncodedValidationError::resource("object nominal individual IDs overflowed"),
+        )?)?;
+        individual_ids
+            .try_reserve_exact(individuals.len())
+            .map_err(|_| {
+                EncodedValidationError::resource("object nominal individual ID allocation failed")
+            })?;
+        for item_index in individuals.items() {
+            budget.claim_work(1)?;
+            let item =
+                required_component(model.item(item_index)?, "selected object nominal member")?;
+            let ComponentValue::Node(individual) = model.resolve(item)? else {
+                return Err(EncodedValidationError::invariant(
+                    "selected object nominal member changed shape",
+                ));
+            };
+            individual_ids.push(
+                named_individual_id(model, symbols, individual_signature, individual)?.ok_or_else(
+                    || {
+                        EncodedValidationError::invariant(
+                            "selected object nominal member is not a named individual",
+                        )
+                    },
+                )?,
+            );
+        }
+        if !individual_ids.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(EncodedValidationError::invariant(
+                "object nominal individual IDs are not canonical",
+            ));
+        }
+        budget.claim_owned(size_of::<NominalBinding>())?;
+        bindings.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("object nominal binding allocation failed")
+        })?;
+        bindings.push(NominalBinding {
+            class_id: u32::try_from(class_index).map_err(|_| {
+                EncodedValidationError::resource("object nominal class ID exceeds u32")
+            })?,
+            individual_ids,
+        });
+    }
+    budget.claim_work(sort_work(bindings.len()))?;
+    bindings.sort();
+    if bindings.windows(2).any(|pair| pair[0] == pair[1]) {
+        bindings.dedup();
+    }
+    if bindings
+        .windows(2)
+        .any(|pair| pair[0].class_id == pair[1].class_id)
+    {
+        return Err(EncodedValidationError::invariant(
+            "object nominal class ID has conflicting individual members",
+        ));
+    }
+    Ok(bindings)
 }
 
 fn atomic_class_entity<B: ByteSource>(
@@ -5703,6 +5939,7 @@ fn named_different_individuals<B: ByteSource>(
 fn named_class_assertion<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    class_domain: &DecodedSymbolDomain,
     class_signature: &[ClassSignatureBinding],
     individual_domain: &DecodedSymbolDomain,
     individual_signature: &[IndividualSignatureBinding],
@@ -5716,8 +5953,15 @@ fn named_class_assertion<B: ByteSource>(
             "class-assertion root no longer has schema-1 shape",
         ));
     }
-    let Some((class_id, negative)) =
-        class_assertion_literal(model, symbols, class_signature, node)?
+    let Some((class_id, negative)) = class_assertion_literal(
+        model,
+        symbols,
+        class_domain,
+        class_signature,
+        node,
+        scope_maps,
+        budget,
+    )?
     else {
         return Ok(None);
     };
@@ -5747,8 +5991,11 @@ fn named_class_assertion<B: ByteSource>(
 fn class_assertion_literal<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
     assertion: NodeRef,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<(u32, bool)>> {
     let identifier = node_field(
         model,
@@ -5756,7 +6003,27 @@ fn class_assertion_literal<B: ByteSource>(
         0,
         "class-assertion class-expression operand",
     )?;
-    atomic_class_literal(model, symbols, signature, identifier)
+    if let Some(literal) = atomic_class_literal(model, symbols, signature, identifier)? {
+        return Ok(Some(literal));
+    }
+    let Some((base, negative)) = atomic_named_nominal(model, symbols, identifier, budget)? else {
+        return Ok(None);
+    };
+    let key = canonical::canonical_node_key(model, base, scope_maps, budget)?;
+    budget.claim_work(binary_search_work(class_domain.values.len()))?;
+    let class_index = class_domain
+        .values
+        .binary_search_by(|candidate| candidate.key.cmp(&key))
+        .map_err(|_| {
+            EncodedValidationError::invariant(
+                "object nominal is absent from the class-expression domain",
+            )
+        })?;
+    Ok(Some((
+        u32::try_from(class_index)
+            .map_err(|_| EncodedValidationError::resource("object nominal ID exceeds u32"))?,
+        negative,
+    )))
 }
 
 fn atomic_class_literal<B: ByteSource>(
@@ -7007,6 +7274,14 @@ fn push_provenance_key(
 enum PredicateOwner {
     Concept(u32),
     NegatedConcept(u32),
+    Nominal {
+        class_id: u32,
+        individual_ids: Vec<u32>,
+    },
+    NegatedNominal {
+        class_id: u32,
+        individual_ids: Vec<u32>,
+    },
     ObjectRole(u32),
     NegatedObjectRole(u32),
     DataRole(u32),
@@ -7033,6 +7308,27 @@ struct PendingPredicate {
 type PredicateIndex = Vec<(u32, u32)>;
 type ObjectPredicateIndex = Vec<(u32, u32)>;
 type GuardPredicateIndex = Vec<([u8; 32], u32, u32)>;
+
+fn nominal_binding(bindings: &[NominalBinding], class_id: u32) -> Option<&NominalBinding> {
+    bindings
+        .binary_search_by_key(&class_id, |binding| binding.class_id)
+        .ok()
+        .map(|index| &bindings[index])
+}
+
+fn nominal_usage(bindings: &[NominalBinding], facts: &[NormalizedFact]) -> NominalUsage {
+    if bindings.is_empty() {
+        NominalUsage::None
+    } else if facts
+        .iter()
+        .any(|fact| fact.negative && nominal_binding(bindings, fact.class_id).is_some())
+    {
+        NominalUsage::Negative
+    } else {
+        NominalUsage::Positive
+    }
+}
+
 type FrozenPredicates = (
     Vec<DecodedPredicate>,
     PredicateIndex,
@@ -7054,6 +7350,7 @@ type FrozenPredicates = (
 
 #[allow(clippy::too_many_arguments)]
 fn freeze_predicates(
+    nominal_bindings: &[NominalBinding],
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
@@ -7077,6 +7374,21 @@ fn freeze_predicates(
     has_named_individuals: bool,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<FrozenPredicates> {
+    if !nominal_bindings
+        .windows(2)
+        .all(|pair| pair[0].class_id < pair[1].class_id)
+        || nominal_bindings.iter().any(|binding| {
+            binding.individual_ids.is_empty()
+                || !binding
+                    .individual_ids
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+        })
+    {
+        return Err(EncodedValidationError::invariant(
+            "object nominal bindings are not canonical",
+        ));
+    }
     let mut class_ids = Vec::new();
     let mut negative_class_ids = Vec::new();
     push_u32(&mut class_ids, nothing, "predicate class", budget)?;
@@ -7188,9 +7500,13 @@ fn freeze_predicates(
     budget.claim_work(sort_work(negative_class_ids.len()))?;
     negative_class_ids.sort_unstable();
     negative_class_ids.dedup();
+    let has_negative_nominals = negative_class_ids
+        .iter()
+        .any(|class_id| nominal_binding(nominal_bindings, *class_id).is_some());
 
     let mut ordered = Vec::<PendingPredicate>::new();
     if !equalities.is_empty()
+        || !nominal_bindings.is_empty()
         || !keys.is_empty()
         || object_characteristics
             .iter()
@@ -7219,7 +7535,7 @@ fn freeze_predicates(
             owner: PredicateOwner::Equality(TermSort::Data),
         });
     }
-    if !inequalities.is_empty() {
+    if !inequalities.is_empty() || has_negative_nominals {
         let key = inequality_predicate_key(TermSort::Object);
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
@@ -7268,21 +7584,58 @@ fn freeze_predicates(
         });
     }
     for class_id in class_ids {
-        let key = concept_predicate_key(class_id);
+        let nominal = nominal_binding(nominal_bindings, class_id);
+        let key = nominal.map_or_else(
+            || concept_predicate_key(class_id),
+            |binding| nominal_predicate_key(class_id, &binding.individual_ids, false),
+        );
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
+        if let Some(binding) = nominal {
+            budget.claim_owned(
+                binding
+                    .individual_ids
+                    .len()
+                    .checked_mul(size_of::<u32>())
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource("nominal predicate annotation overflowed")
+                    })?,
+            )?;
+        }
         ordered.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("named-class predicate ordering allocation failed")
         })?;
         ordered.push(PendingPredicate {
             key,
-            owner: PredicateOwner::Concept(class_id),
+            owner: nominal.map_or(PredicateOwner::Concept(class_id), |binding| {
+                PredicateOwner::Nominal {
+                    class_id,
+                    individual_ids: binding.individual_ids.clone(),
+                }
+            }),
         });
     }
-    for class_id in negative_class_ids {
-        let key = negated_concept_predicate_key(class_id);
+    for class_id in negative_class_ids.iter().copied() {
+        let nominal = nominal_binding(nominal_bindings, class_id);
+        let key = nominal.map_or_else(
+            || negated_concept_predicate_key(class_id),
+            |binding| nominal_predicate_key(class_id, &binding.individual_ids, true),
+        );
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
+        if let Some(binding) = nominal {
+            budget.claim_owned(
+                binding
+                    .individual_ids
+                    .len()
+                    .checked_mul(size_of::<u32>())
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "negated nominal predicate annotation overflowed",
+                        )
+                    })?,
+            )?;
+        }
         ordered.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource(
                 "negated named-class predicate ordering allocation failed",
@@ -7290,7 +7643,12 @@ fn freeze_predicates(
         })?;
         ordered.push(PendingPredicate {
             key,
-            owner: PredicateOwner::NegatedConcept(class_id),
+            owner: nominal.map_or(PredicateOwner::NegatedConcept(class_id), |binding| {
+                PredicateOwner::NegatedNominal {
+                    class_id,
+                    individual_ids: binding.individual_ids.clone(),
+                }
+            }),
         });
     }
     let mut object_role_ids = Vec::new();
@@ -7673,6 +8031,40 @@ fn freeze_predicates(
                 });
                 predicate_by_negative_class.push((class_id, predicate_id));
             }
+            PredicateOwner::Nominal {
+                class_id,
+                individual_ids,
+            } => {
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::Nominal,
+                    argument_sorts: vec![TermSort::Object],
+                    symbol_id: Some(class_id),
+                    role_id: None,
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: individual_ids,
+                    internal_key: None,
+                });
+                predicate_by_class.push((class_id, predicate_id));
+            }
+            PredicateOwner::NegatedNominal {
+                class_id,
+                individual_ids,
+            } => {
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::NegatedNominal,
+                    argument_sorts: vec![TermSort::Object],
+                    symbol_id: Some(class_id),
+                    role_id: None,
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: individual_ids,
+                    internal_key: None,
+                });
+                predicate_by_negative_class.push((class_id, predicate_id));
+            }
             PredicateOwner::ObjectRole(role_id) => {
                 budget.claim_owned(size_of::<TermSort>())?;
                 predicates.push(DecodedPredicate {
@@ -7879,6 +8271,7 @@ fn freeze_predicates(
 
 #[allow(clippy::too_many_arguments)]
 fn freeze_clauses(
+    nominal_bindings: &[NominalBinding],
     edges: &[NormalizedEdge],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
@@ -7899,6 +8292,7 @@ fn freeze_clauses(
     predicate_by_data_range: &[(u32, u32)],
     predicate_by_negative_data_range: &[(u32, u32)],
     equality_predicate: Option<u32>,
+    inequality_predicate: Option<u32>,
     data_equality_predicate: Option<u32>,
     data_inequality_predicate: Option<u32>,
     ordering_predicate: Option<u32>,
@@ -8000,6 +8394,24 @@ fn freeze_clauses(
     budget.claim_work(sort_work(negative_data_range_ids.len()))?;
     negative_data_range_ids.sort_unstable();
     negative_data_range_ids.dedup();
+    let nominal_clause_count = nominal_bindings
+        .iter()
+        .try_fold(0_usize, |count, binding| {
+            let positive = binding.individual_ids.len().checked_add(1).ok_or_else(|| {
+                EncodedValidationError::resource("object nominal clause count overflowed")
+            })?;
+            let negative = if negative_class_ids.binary_search(&binding.class_id).is_ok() {
+                binding.individual_ids.len()
+            } else {
+                0
+            };
+            count
+                .checked_add(positive)
+                .and_then(|value| value.checked_add(negative))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("object nominal clause count overflowed")
+                })
+        })?;
     let datatype_definition_clauses =
         datatype_definitions
             .iter()
@@ -8022,6 +8434,7 @@ fn freeze_clauses(
         .and_then(|value| value.checked_add(datatype_definition_clauses))
         .and_then(|value| value.checked_add(keys.len()))
         .and_then(|value| value.checked_add(data_functionalities.len()))
+        .and_then(|value| value.checked_add(nominal_clause_count))
         .and_then(|value| value.checked_add(negative_class_ids.len().checked_mul(2)?))
         .and_then(|value| value.checked_add(negative_data_range_ids.len().checked_mul(2)?))
         .ok_or_else(|| EncodedValidationError::resource("named-class clause count overflowed"))?;
@@ -8053,7 +8466,7 @@ fn freeze_clauses(
     )?;
     if !negative_class_ids.is_empty() {
         let thing_predicate = predicate_id(predicate_by_class, thing)?;
-        for class_id in negative_class_ids {
+        for class_id in negative_class_ids.iter().copied() {
             let positive = predicate_id(predicate_by_class, class_id)?;
             let negative = predicate_id(predicate_by_negative_class, class_id)?;
             push_clause(
@@ -8068,6 +8481,30 @@ fn freeze_clauses(
                 &mut ordered,
                 &[thing_predicate],
                 &[positive, negative],
+                bottom_provenance,
+                scalar_predicate_ids,
+                budget,
+            )?;
+        }
+    }
+    if !nominal_bindings.is_empty() {
+        let equality = equality_predicate.ok_or_else(|| {
+            EncodedValidationError::invariant("object nominal lost the equality predicate")
+        })?;
+        for binding in nominal_bindings {
+            let positive = predicate_id(predicate_by_class, binding.class_id)?;
+            let negative = if negative_class_ids.binary_search(&binding.class_id).is_ok() {
+                Some(predicate_id(predicate_by_negative_class, binding.class_id)?)
+            } else {
+                None
+            };
+            push_nominal_clauses(
+                &mut ordered,
+                positive,
+                negative,
+                equality,
+                inequality_predicate,
+                &binding.individual_ids,
                 bottom_provenance,
                 scalar_predicate_ids,
                 budget,
@@ -8343,6 +8780,7 @@ fn freeze_positive_facts(
     named_individuals: &[u32],
     named_predicate: Option<u32>,
     equality_predicate: Option<u32>,
+    nominal_usage: NominalUsage,
     has_object_functionality: bool,
     has_keys: bool,
     inequality_predicate: Option<u32>,
@@ -8389,7 +8827,10 @@ fn freeze_positive_facts(
         }
     };
     let equality_predicate = match (
-        equalities.is_empty() && !has_object_functionality && !has_keys,
+        equalities.is_empty()
+            && nominal_usage == NominalUsage::None
+            && !has_object_functionality
+            && !has_keys,
         equality_predicate,
     ) {
         (true, None) => None,
@@ -8400,7 +8841,10 @@ fn freeze_positive_facts(
             ));
         }
     };
-    let inequality_predicate = match (inequalities.is_empty(), inequality_predicate) {
+    let inequality_predicate = match (
+        inequalities.is_empty() && nominal_usage != NominalUsage::Negative,
+        inequality_predicate,
+    ) {
         (true, None) => None,
         (false, Some(identifier)) => Some(identifier),
         _ => {
@@ -9038,6 +9482,205 @@ fn push_clause(
         scalar_predicate_ids,
         budget,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_nominal_clauses(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    nominal_predicate: u32,
+    negated_nominal_predicate: Option<u32>,
+    equality_predicate: u32,
+    inequality_predicate: Option<u32>,
+    individual_ids: &[u32],
+    provenance_id: u32,
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let variable = DecodedTerm::Variable {
+        index: 0,
+        sort: TermSort::Object,
+    };
+    let nominal_atom = DecodedAtom {
+        predicate_id: nominal_predicate,
+        arguments: vec![variable.clone()],
+    };
+    let equality_atoms = individual_ids
+        .iter()
+        .copied()
+        .map(|individual_id| DecodedAtom {
+            predicate_id: equality_predicate,
+            arguments: vec![variable.clone(), DecodedTerm::Individual { individual_id }],
+        })
+        .collect::<Vec<_>>();
+    push_mixed_clause(
+        clauses,
+        vec![nominal_atom.clone()],
+        equality_atoms.clone(),
+        provenance_id,
+        scalar_predicate_ids,
+        budget,
+    )?;
+    for equality_atom in equality_atoms {
+        push_mixed_clause(
+            clauses,
+            vec![equality_atom],
+            vec![nominal_atom.clone()],
+            provenance_id,
+            scalar_predicate_ids,
+            budget,
+        )?;
+    }
+    if let Some(negative) = negated_nominal_predicate {
+        let inequality = inequality_predicate.ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "negated object nominal lost the inequality predicate",
+            )
+        })?;
+        let negative_atom = DecodedAtom {
+            predicate_id: negative,
+            arguments: vec![variable.clone()],
+        };
+        for individual_id in individual_ids {
+            push_mixed_clause(
+                clauses,
+                vec![negative_atom.clone()],
+                vec![DecodedAtom {
+                    predicate_id: inequality,
+                    arguments: vec![
+                        variable.clone(),
+                        DecodedTerm::Individual {
+                            individual_id: *individual_id,
+                        },
+                    ],
+                }],
+                provenance_id,
+                scalar_predicate_ids,
+                budget,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn push_mixed_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    body: Vec<DecodedAtom>,
+    head: Vec<DecodedAtom>,
+    provenance_id: u32,
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let mut body = ordered_scalar_atoms(body, scalar_predicate_ids)?;
+    let mut head = ordered_scalar_atoms(head, scalar_predicate_ids)?;
+    body.dedup_by(|left, right| left.0 == right.0);
+    head.dedup_by(|left, right| left.0 == right.0);
+    if body
+        .iter()
+        .any(|body_atom| head.iter().any(|head_atom| body_atom.0 == head_atom.0))
+    {
+        return Ok(());
+    }
+    let body_json = body
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let head_json = head
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let key = format!("{{\"body\":[{body_json}],\"head\":[{head_json}]}}").into_bytes();
+    let body_count = body.len();
+    let atom_count = body
+        .len()
+        .checked_add(head.len())
+        .ok_or_else(|| EncodedValidationError::resource("mixed nominal atom count overflowed"))?;
+    let term_count = body
+        .iter()
+        .chain(&head)
+        .try_fold(0_usize, |count, (_, atom)| {
+            count.checked_add(atom.arguments.len()).ok_or_else(|| {
+                EncodedValidationError::resource("mixed nominal term count overflowed")
+            })
+        })?;
+    budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>())?;
+    budget.claim_owned(key.len())?;
+    budget.claim_owned(
+        atom_count
+            .checked_mul(size_of::<DecodedAtom>())
+            .and_then(|value| value.checked_add(term_count.checked_mul(size_of::<DecodedTerm>())?))
+            .and_then(|value| {
+                value.checked_add(body_count.checked_add(1)?.checked_mul(size_of::<u32>())?)
+            })
+            .ok_or_else(|| {
+                EncodedValidationError::resource("mixed nominal clause payload overflowed")
+            })?,
+    )?;
+    clauses
+        .try_reserve(1)
+        .map_err(|_| EncodedValidationError::resource("mixed nominal clause allocation failed"))?;
+    clauses.push((
+        key,
+        DecodedClause {
+            clause_id: 0,
+            body: body.into_iter().map(|(_, atom)| atom).collect(),
+            head: head.into_iter().map(|(_, atom)| atom).collect(),
+            provenance_ids: vec![provenance_id],
+            join_order: (0..u32::try_from(body_count).map_err(|_| {
+                EncodedValidationError::resource("mixed nominal join order exceeds u32")
+            })?)
+                .collect(),
+        },
+    ));
+    Ok(())
+}
+
+fn ordered_scalar_atoms(
+    atoms: Vec<DecodedAtom>,
+    scalar_predicate_ids: &[u32],
+) -> EncodedResult<Vec<(String, DecodedAtom)>> {
+    let mut ordered = Vec::new();
+    ordered.try_reserve_exact(atoms.len()).map_err(|_| {
+        EncodedValidationError::resource("mixed nominal atom ordering allocation failed")
+    })?;
+    for atom in atoms {
+        let scalar_predicate_id = scalar_predicate_ids
+            .get(usize::try_from(atom.predicate_id).unwrap_or(usize::MAX))
+            .copied()
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "mixed nominal scalar predicate mapping is incomplete",
+                )
+            })?;
+        let arguments = atom
+            .arguments
+            .iter()
+            .map(decoded_term_json)
+            .collect::<Vec<_>>()
+            .join(",");
+        let key = format!(
+            "{{\"arguments\":[{arguments}],\"predicate_id\":{scalar_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}"
+        );
+        ordered.push((key, atom));
+    }
+    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(ordered)
+}
+
+fn decoded_term_json(term: &DecodedTerm) -> String {
+    match term {
+        DecodedTerm::Variable { index, sort } => variable_json(*index, *sort),
+        DecodedTerm::Individual { individual_id } => format!(
+            "{{\"individual_id\":{individual_id},\"schema_version\":1,\"type\":\"IndividualTerm\"}}"
+        ),
+        DecodedTerm::Data {
+            source_literal_id,
+            data_identity_id,
+        } => format!(
+            "{{\"data_identity_id\":{data_identity_id},\"schema_version\":1,\"source_literal_id\":{source_literal_id},\"type\":\"DataConstant\"}}"
+        ),
+    }
 }
 
 fn push_typed_clause(
@@ -10491,6 +11134,22 @@ fn named_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
                     )
                 })
         }
+        PredicateKind::Nominal if unary_object && predicate.internal_key.is_none() => predicate
+            .symbol_id
+            .map(|symbol_id| nominal_predicate_key(symbol_id, &predicate.annotation, false))
+            .ok_or_else(|| {
+                EncodedValidationError::invariant("nominal predicate lost its class symbol")
+            }),
+        PredicateKind::NegatedNominal if unary_object && predicate.internal_key.is_none() => {
+            predicate
+                .symbol_id
+                .map(|symbol_id| nominal_predicate_key(symbol_id, &predicate.annotation, true))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "negated nominal predicate lost its class symbol",
+                    )
+                })
+        }
         PredicateKind::DataRange
             if unary_data
                 && predicate.annotation.is_empty()
@@ -10580,6 +11239,23 @@ fn concept_predicate_key(class_id: u32) -> Vec<u8> {
 fn negated_concept_predicate_key(class_id: u32) -> Vec<u8> {
     format!(
         "{{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"negated_concept\",\"role_id\":null,\"symbol_id\":{class_id}}}"
+    )
+    .into_bytes()
+}
+
+fn nominal_predicate_key(class_id: u32, individual_ids: &[u32], negative: bool) -> Vec<u8> {
+    let annotation = individual_ids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let kind = if negative {
+        "negated_nominal"
+    } else {
+        "nominal"
+    };
+    format!(
+        "{{\"annotation\":[{annotation}],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"{kind}\",\"role_id\":null,\"symbol_id\":{class_id}}}"
     )
     .into_bytes()
 }
@@ -11046,6 +11722,8 @@ fn merge_named_class_phases_impl(
         &individual_domain,
         &mut budget,
     )?;
+    let nominal_bindings =
+        merge_nominal_bindings(phases, &class_maps, &individual_maps, &mut budget)?;
     budget.claim_owned(
         individual_signature
             .len()
@@ -11150,6 +11828,7 @@ fn merge_named_class_phases_impl(
         data_inequality_predicate,
         ordering_predicate,
     ) = freeze_predicates(
+        &nominal_bindings,
         &edges,
         &disjoints,
         &object_constraints,
@@ -11181,6 +11860,7 @@ fn merge_named_class_phases_impl(
         &mut budget,
     )?;
     let clauses = freeze_clauses(
+        &nominal_bindings,
         &edges,
         &disjoints,
         &object_constraints,
@@ -11201,6 +11881,7 @@ fn merge_named_class_phases_impl(
         &predicate_by_data_range,
         &predicate_by_negative_data_range,
         equality_predicate,
+        inequality_predicate,
         data_equality_predicate,
         data_inequality_predicate,
         ordering_predicate,
@@ -11227,6 +11908,7 @@ fn merge_named_class_phases_impl(
         &named_individuals,
         named_predicate,
         equality_predicate,
+        nominal_usage(&nominal_bindings, &facts),
         object_characteristics
             .iter()
             .any(|value| value.kind != ObjectCharacteristicKind::Reflexive),
@@ -11311,6 +11993,7 @@ fn merge_named_class_phases_impl(
         work: budget.work,
         owned_bytes: budget.owned_bytes,
         compiled_root_digests,
+        nominal_bindings,
         normalized_edges: edges,
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
@@ -11761,6 +12444,98 @@ fn merge_individual_signatures(
             }
         })
         .collect()
+}
+
+fn merge_nominal_bindings(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    class_maps: &[Vec<u32>],
+    individual_maps: &[Vec<u32>],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NominalBinding>> {
+    if class_maps.len() != phases.len() || individual_maps.len() != phases.len() {
+        return Err(EncodedValidationError::invariant(
+            "object nominal mappings do not align with their slices",
+        ));
+    }
+    let mut merged = Vec::new();
+    for (phase_index, (_, phase)) in phases.iter().enumerate() {
+        for binding in &phase.nominal_bindings {
+            budget.claim_work(1)?;
+            let class_value = phase
+                .class_domain
+                .values
+                .get(usize::try_from(binding.class_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "source object nominal has a dangling class ID",
+                    )
+                })?;
+            if !class_value.display.starts_with("ObjectOneOf:") || binding.individual_ids.is_empty()
+            {
+                return Err(EncodedValidationError::invariant(
+                    "source object nominal binding changed shape",
+                ));
+            }
+            let class_id = mapped_id(
+                &class_maps[phase_index],
+                binding.class_id,
+                "object nominal class",
+            )?;
+            let mut individual_ids = Vec::new();
+            budget.claim_owned(
+                binding
+                    .individual_ids
+                    .len()
+                    .checked_mul(size_of::<u32>())
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "merged object nominal individual IDs overflowed",
+                        )
+                    })?,
+            )?;
+            individual_ids
+                .try_reserve_exact(binding.individual_ids.len())
+                .map_err(|_| {
+                    EncodedValidationError::resource(
+                        "merged object nominal individual allocation failed",
+                    )
+                })?;
+            for individual_id in &binding.individual_ids {
+                individual_ids.push(mapped_id(
+                    &individual_maps[phase_index],
+                    *individual_id,
+                    "object nominal individual",
+                )?);
+            }
+            individual_ids.sort_unstable();
+            individual_ids.dedup();
+            if individual_ids.is_empty() {
+                return Err(EncodedValidationError::invariant(
+                    "merged object nominal lost all individuals",
+                ));
+            }
+            budget.claim_owned(size_of::<NominalBinding>())?;
+            merged.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource("merged object nominal allocation failed")
+            })?;
+            merged.push(NominalBinding {
+                class_id,
+                individual_ids,
+            });
+        }
+    }
+    budget.claim_work(sort_work(merged.len()))?;
+    merged.sort();
+    merged.dedup();
+    if merged
+        .windows(2)
+        .any(|pair| pair[0].class_id == pair[1].class_id)
+    {
+        return Err(EncodedValidationError::invariant(
+            "merged object nominal has conflicting individual members",
+        ));
+    }
+    Ok(merged)
 }
 
 type NormalizedSources = (
