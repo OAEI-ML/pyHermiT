@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::cmp::Ordering;
 use std::mem::size_of;
 
 use num_bigint::{BigInt, BigUint, Sign};
@@ -492,14 +493,18 @@ struct ProvenanceManifest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RawEdge {
     sub_class: u32,
+    sub_negative: bool,
     super_class: u32,
+    super_negative: bool,
     provenance: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NormalizedEdge {
     sub_class: u32,
+    sub_negative: bool,
     super_class: u32,
+    super_negative: bool,
     provenance: Vec<[u8; 32]>,
 }
 
@@ -1917,24 +1922,44 @@ fn class_signature<B: ByteSource>(
     let mut complements = Vec::<NodeId>::new();
     for root in &symbols.roots {
         budget.claim_work(1)?;
-        if root.handler != RootHandler::ClassAssertion {
-            continue;
-        }
         let root_node = model.node(root.node)?;
-        let expression = node_field(
-            model,
-            root_node,
-            0,
-            "class-assertion class-expression operand",
-        )?;
-        if atomic_complement_operand(model, symbols, expression)?.is_none() {
-            continue;
+        match root.handler {
+            RootHandler::ClassAssertion => {
+                let expression = node_field(
+                    model,
+                    root_node,
+                    0,
+                    "class-assertion class-expression operand",
+                )?;
+                if atomic_class_entity(model, symbols, expression)?
+                    .is_some_and(|(_, negative)| negative)
+                {
+                    push_complement_selection(&mut complements, expression, budget)?;
+                }
+            }
+            RootHandler::SubClassOf => {
+                let sub_class = node_field(model, root_node, 0, "subclass antecedent")?;
+                let super_class = node_field(model, root_node, 1, "subclass consequent")?;
+                let Some(sub_literal) = atomic_class_entity(model, symbols, sub_class)? else {
+                    continue;
+                };
+                let Some(super_literal) = atomic_class_entity(model, symbols, super_class)? else {
+                    continue;
+                };
+                if atomic_class_edge_is_trivial(symbols, sub_literal, super_literal)? {
+                    continue;
+                }
+                let sub_negative = sub_literal.1;
+                let super_negative = super_literal.1;
+                if sub_negative {
+                    push_complement_selection(&mut complements, sub_class, budget)?;
+                }
+                if super_negative {
+                    push_complement_selection(&mut complements, super_class, budget)?;
+                }
+            }
+            _ => {}
         }
-        budget.claim_owned(size_of::<NodeId>())?;
-        complements.try_reserve(1).map_err(|_| {
-            EncodedValidationError::resource("class-complement selection allocation failed")
-        })?;
-        complements.push(expression);
     }
     budget.claim_work(sort_work(complements.len()))?;
     complements.sort_unstable();
@@ -2027,6 +2052,69 @@ fn class_signature<B: ByteSource>(
         },
         bindings,
     ))
+}
+
+fn push_complement_selection(
+    complements: &mut Vec<NodeId>,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    budget.claim_owned(size_of::<NodeId>())?;
+    complements.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("class-complement selection allocation failed")
+    })?;
+    complements.push(identifier);
+    Ok(())
+}
+
+fn atomic_class_entity<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+) -> EncodedResult<Option<(u32, bool)>> {
+    if model.node(identifier)?.tag() == ENTITY_TAG {
+        let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "atomic class is absent from the reachable entity mapping",
+            )
+        })?;
+        let entity = symbols
+            .entity_domain
+            .values
+            .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+            .ok_or_else(|| {
+                EncodedValidationError::invariant("atomic class entity ID is dangling")
+            })?;
+        return Ok(entity
+            .display
+            .starts_with("class:")
+            .then_some((entity_id, false)));
+    }
+    Ok(atomic_complement_operand(model, symbols, identifier)?.map(|entity_id| (entity_id, true)))
+}
+
+fn atomic_class_edge_is_trivial(
+    symbols: &SymbolPhase,
+    sub_literal: (u32, bool),
+    super_literal: (u32, bool),
+) -> EncodedResult<bool> {
+    let sub_entity = symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(sub_literal.0).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("atomic subclass entity ID is dangling")
+        })?;
+    let super_entity = symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(super_literal.0).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("atomic superclass entity ID is dangling")
+        })?;
+    Ok((sub_literal == super_literal)
+        || (!sub_literal.1 && sub_entity.display == NOTHING_DISPLAY)
+        || (!super_literal.1 && super_entity.display == THING_DISPLAY))
 }
 
 fn atomic_complement_operand<B: ByteSource>(
@@ -4235,16 +4323,24 @@ fn named_subclass<B: ByteSource>(
             "subclass root no longer has schema-1 shape",
         ));
     }
-    let Some(sub_class) = named_class_field(model, symbols, signature, node, 0)? else {
+    let sub_class_node = node_field(model, node, 0, "subclass antecedent")?;
+    let Some((sub_class, sub_negative)) =
+        atomic_class_literal(model, symbols, signature, sub_class_node)?
+    else {
         return Ok(None);
     };
-    let Some(super_class) = named_class_field(model, symbols, signature, node, 1)? else {
+    let super_class_node = node_field(model, node, 1, "subclass consequent")?;
+    let Some((super_class, super_negative)) =
+        atomic_class_literal(model, symbols, signature, super_class_node)?
+    else {
         return Ok(None);
     };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
     Ok(Some(RawEdge {
         sub_class,
+        sub_negative,
         super_class,
+        super_negative,
         provenance,
     }))
 }
@@ -4321,7 +4417,9 @@ fn named_equivalent_classes<B: ByteSource>(
         })?;
         edges.push(RawEdge {
             sub_class,
+            sub_negative: false,
             super_class: classes[following % classes.len()],
+            super_negative: false,
             provenance,
         });
     }
@@ -4412,7 +4510,9 @@ fn named_disjoint_classes<B: ByteSource>(
             if class_id != thing {
                 edges.push(RawEdge {
                     sub_class: class_id,
+                    sub_negative: false,
                     super_class: nothing,
+                    super_negative: false,
                     provenance,
                 });
             }
@@ -5205,10 +5305,16 @@ fn class_assertion_literal<B: ByteSource>(
         0,
         "class-assertion class-expression operand",
     )?;
-    if let Some(class_id) = named_class_id(model, symbols, signature, identifier)? {
-        return Ok(Some((class_id, false)));
-    }
-    let Some(entity_id) = atomic_complement_operand(model, symbols, identifier)? else {
+    atomic_class_literal(model, symbols, signature, identifier)
+}
+
+fn atomic_class_literal<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    signature: &[ClassSignatureBinding],
+    identifier: NodeId,
+) -> EncodedResult<Option<(u32, bool)>> {
+    let Some((entity_id, negative)) = atomic_class_entity(model, symbols, identifier)? else {
         return Ok(None);
     };
     let class_id = signature
@@ -5217,10 +5323,10 @@ fn class_assertion_literal<B: ByteSource>(
         .map(|index| signature[index].class_expression_id)
         .ok_or_else(|| {
             EncodedValidationError::invariant(
-                "class-complement operand is absent from the class signature",
+                "atomic class operand is absent from the class signature",
             )
         })?;
-    Ok(Some((class_id, true)))
+    Ok(Some((class_id, negative)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5551,7 +5657,9 @@ fn retain_edge(
     nothing: u32,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
-    if edge.sub_class == nothing || edge.super_class == thing || edge.sub_class == edge.super_class
+    if (!edge.sub_negative && edge.sub_class == nothing)
+        || (!edge.super_negative && edge.super_class == thing)
+        || (edge.sub_class == edge.super_class && edge.sub_negative == edge.super_negative)
     {
         return Ok(());
     }
@@ -5568,12 +5676,24 @@ fn normalize_edges(
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<NormalizedEdge>> {
     budget.claim_work(sort_work(raw.len()))?;
-    raw.sort_by_key(|edge| (edge.sub_class, edge.super_class, edge.provenance));
+    raw.sort_by_key(|edge| {
+        (
+            edge.sub_class,
+            edge.sub_negative,
+            edge.super_class,
+            edge.super_negative,
+            edge.provenance,
+        )
+    });
     let mut normalized = Vec::<NormalizedEdge>::new();
     for edge in raw {
         budget.claim_work(1)?;
         if let Some(previous) = normalized.last_mut() {
-            if previous.sub_class == edge.sub_class && previous.super_class == edge.super_class {
+            if previous.sub_class == edge.sub_class
+                && previous.sub_negative == edge.sub_negative
+                && previous.super_class == edge.super_class
+                && previous.super_negative == edge.super_negative
+            {
                 if previous.provenance.last() != Some(&edge.provenance) {
                     budget.claim_owned(size_of::<[u8; 32]>())?;
                     previous.provenance.try_reserve(1).map_err(|_| {
@@ -5597,7 +5717,9 @@ fn normalize_edges(
         provenance.push(edge.provenance);
         normalized.push(NormalizedEdge {
             sub_class: edge.sub_class,
+            sub_negative: edge.sub_negative,
             super_class: edge.super_class,
+            super_negative: edge.super_negative,
             provenance,
         });
     }
@@ -6530,6 +6652,22 @@ fn freeze_predicates(
     for edge in edges {
         push_u32(&mut class_ids, edge.sub_class, "predicate class", budget)?;
         push_u32(&mut class_ids, edge.super_class, "predicate class", budget)?;
+        if edge.sub_negative {
+            push_u32(
+                &mut negative_class_ids,
+                edge.sub_class,
+                "negated predicate class",
+                budget,
+            )?;
+        }
+        if edge.super_negative {
+            push_u32(
+                &mut negative_class_ids,
+                edge.super_class,
+                "negated predicate class",
+                budget,
+            )?;
+        }
     }
     for disjoint in disjoints {
         for class_id in &disjoint.classes {
@@ -7229,6 +7367,24 @@ fn freeze_clauses(
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<DecodedClause>> {
     let mut negative_class_ids = Vec::new();
+    for edge in edges {
+        if edge.sub_negative {
+            push_u32(
+                &mut negative_class_ids,
+                edge.sub_class,
+                "complement clause class",
+                budget,
+            )?;
+        }
+        if edge.super_negative {
+            push_u32(
+                &mut negative_class_ids,
+                edge.super_class,
+                "complement clause class",
+                budget,
+            )?;
+        }
+    }
     for fact in facts.iter().filter(|fact| fact.negative) {
         push_u32(
             &mut negative_class_ids,
@@ -7287,6 +7443,7 @@ fn freeze_clauses(
         &[bottom_predicate],
         &[],
         bottom_provenance,
+        scalar_predicate_ids,
         budget,
     )?;
     if !negative_class_ids.is_empty() {
@@ -7299,6 +7456,7 @@ fn freeze_clauses(
                 &[positive, negative],
                 &[],
                 bottom_provenance,
+                scalar_predicate_ids,
                 budget,
             )?;
             push_clause(
@@ -7306,15 +7464,33 @@ fn freeze_clauses(
                 &[thing_predicate],
                 &[positive, negative],
                 bottom_provenance,
+                scalar_predicate_ids,
                 budget,
             )?;
         }
     }
     for edge in edges {
-        let body = predicate_id(predicate_by_class, edge.sub_class)?;
-        let head = predicate_id(predicate_by_class, edge.super_class)?;
+        let body = class_literal_predicate_id(
+            predicate_by_class,
+            predicate_by_negative_class,
+            edge.sub_class,
+            edge.sub_negative,
+        )?;
+        let head = class_literal_predicate_id(
+            predicate_by_class,
+            predicate_by_negative_class,
+            edge.super_class,
+            edge.super_negative,
+        )?;
         let provenance = provenance_id(provenance_keys, &edge.provenance, false)?;
-        push_clause(&mut ordered, &[body], &[head], provenance, budget)?;
+        push_clause(
+            &mut ordered,
+            &[body],
+            &[head],
+            provenance,
+            scalar_predicate_ids,
+            budget,
+        )?;
     }
     for constraint in object_constraints {
         let role = object_predicate_id(predicate_by_object_role, constraint.role_id)?;
@@ -7442,11 +7618,26 @@ fn freeze_clauses(
                     &[previous_id, member],
                     &[],
                     provenance,
+                    scalar_predicate_ids,
                     budget,
                 )?;
-                push_clause(&mut ordered, &[previous_id], &[current], provenance, budget)?;
+                push_clause(
+                    &mut ordered,
+                    &[previous_id],
+                    &[current],
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
             }
-            push_clause(&mut ordered, &[member], &[current], provenance, budget)?;
+            push_clause(
+                &mut ordered,
+                &[member],
+                &[current],
+                provenance,
+                scalar_predicate_ids,
+                budget,
+            )?;
             previous = Some(current);
         }
     }
@@ -8173,6 +8364,7 @@ fn push_clause(
     body_predicates: &[u32],
     head_predicates: &[u32],
     provenance_id: u32,
+    scalar_predicate_ids: &[u32],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
     let mut body_ids = body_predicates.to_vec();
@@ -8186,9 +8378,24 @@ fn push_clause(
                 EncodedValidationError::resource("named-class clause ID payload overflowed")
             })?,
     )?;
-    body_ids.sort_unstable();
+    if body_ids.iter().chain(&head_ids).any(|predicate_id| {
+        usize::try_from(*predicate_id)
+            .ok()
+            .is_none_or(|index| index >= scalar_predicate_ids.len())
+    }) {
+        return Err(EncodedValidationError::invariant(
+            "clause scalar predicate mapping is incomplete",
+        ));
+    }
+    let scalar_id = |predicate_id: &u32| {
+        scalar_predicate_ids
+            .get(usize::try_from(*predicate_id).unwrap_or(usize::MAX))
+            .copied()
+            .unwrap_or(u32::MAX)
+    };
+    body_ids.sort_unstable_by(|left, right| decimal_lexical_cmp(scalar_id(left), scalar_id(right)));
     body_ids.dedup();
-    head_ids.sort_unstable();
+    head_ids.sort_unstable_by(|left, right| decimal_lexical_cmp(scalar_id(left), scalar_id(right)));
     head_ids.dedup();
     if body_ids.iter().any(|value| head_ids.contains(value)) {
         return Ok(());
@@ -8233,6 +8440,26 @@ fn push_clause(
         },
     ));
     Ok(())
+}
+
+fn decimal_lexical_cmp(left: u32, right: u32) -> Ordering {
+    let mut left_digits = [0_u8; 10];
+    let mut right_digits = [0_u8; 10];
+    let left_start = write_decimal_digits(left, &mut left_digits);
+    let right_start = write_decimal_digits(right, &mut right_digits);
+    left_digits[left_start..].cmp(&right_digits[right_start..])
+}
+
+fn write_decimal_digits(mut value: u32, digits: &mut [u8; 10]) -> usize {
+    let mut index = digits.len();
+    loop {
+        index -= 1;
+        digits[index] = b'0' + u8::try_from(value % 10).unwrap_or(0);
+        value /= 10;
+        if value == 0 {
+            return index;
+        }
+    }
 }
 
 fn push_object_constraint_clause(
@@ -9164,6 +9391,22 @@ fn data_equality_variable_atom(predicate_id: u32, left: u32, right: u32) -> Deco
             },
         ],
     }
+}
+
+fn class_literal_predicate_id(
+    positive_index: &[(u32, u32)],
+    negative_index: &[(u32, u32)],
+    class_id: u32,
+    negative: bool,
+) -> EncodedResult<u32> {
+    predicate_id(
+        if negative {
+            negative_index
+        } else {
+            positive_index
+        },
+        class_id,
+    )
 }
 
 fn predicate_id(index: &[(u32, u32)], class_id: u32) -> EncodedResult<u32> {
@@ -10888,7 +11131,9 @@ fn merge_normalized_sources(
                 })?;
                 raw_edges.push(RawEdge {
                     sub_class,
+                    sub_negative: edge.sub_negative,
                     super_class,
+                    super_negative: edge.super_negative,
                     provenance: *provenance,
                 });
             }
@@ -11652,6 +11897,13 @@ mod tests {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect()
+    }
+
+    #[test]
+    fn projected_clause_atoms_preserve_scalar_lexical_predicate_order() {
+        let mut identifiers = [2, 10, 1, 11, 100, 0, u32::MAX];
+        identifiers.sort_by(|left, right| decimal_lexical_cmp(*left, *right));
+        assert_eq!(identifiers, [0, 1, 10, 100, 11, 2, u32::MAX]);
     }
 
     #[test]

@@ -649,6 +649,72 @@ def test_named_class_signature_predicates_clauses_and_provenance_match_scalar() 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_atomic_complement_subclass_literals_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A ObjectComplementOf(:B))",
+            'SubClassOf(Annotation(:note "duplicate") :A ObjectComplementOf(:B))',
+            "SubClassOf(ObjectComplementOf(:B) :C)",
+            "SubClassOf(ObjectComplementOf(:A) ObjectComplementOf(:C))",
+            "SubClassOf(ObjectComplementOf(:A) owl:Nothing)",
+            "SubClassOf(owl:Thing ObjectComplementOf(:A))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=6)
+    class_symbols = cast(
+        list[dict[str, object]], manifest["class_expression_symbols"]
+    )
+    complement_count = sum(
+        str(value["display"]).startswith("ObjectComplementOf:")
+        for value in class_symbols
+    )
+    assert complement_count == 3
+    assert len(cast(list[object], manifest["class_signature"])) == (
+        len(class_symbols) - complement_count
+    )
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    ) == 3
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+@pytest.mark.parametrize(
+    "axiom",
+    [
+        "SubClassOf(ObjectComplementOf(:A) ObjectComplementOf(:A))",
+        "SubClassOf(ObjectComplementOf(:A) owl:Thing)",
+        "SubClassOf(owl:Nothing ObjectComplementOf(:A))",
+    ],
+)
+def test_trivial_atomic_complement_subclasses_normalize_without_symbol_leaks(
+    axiom: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional("Declaration(Class(:A))", axiom),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=1)
+    assert all(
+        not str(value["display"]).startswith("ObjectComplementOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_semantic_source_literal_symbols_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -841,6 +907,32 @@ def test_contextual_multi_slice_program_matches_scalar_composite_exactly() -> No
     )
 
     assert actual == _expected_manifest(composite, compiled_roots=4)
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_atomic_complement_subclasses_remap_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:Y))",
+            "Declaration(Class(:Z))",
+            "SubClassOf(ObjectComplementOf(:Z) :Y)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "SubClassOf(:A ObjectComplementOf(:B))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(composite, compiled_roots=2)
+    assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
@@ -2991,6 +3083,43 @@ def test_nested_complement_class_assertion_defers_without_partial_symbols() -> N
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert manifest["negative_facts"] == []
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+@pytest.mark.parametrize(
+    "axiom",
+    [
+        "SubClassOf(ObjectComplementOf(:A) ObjectSomeValuesFrom(:p :B))",
+        "SubClassOf(ObjectSomeValuesFrom(:p :A) ObjectComplementOf(:B))",
+    ],
+)
+def test_partial_atomic_complement_subclass_defers_without_leaking_symbols(
+    axiom: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            axiom,
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
+    assert all(
+        not str(value["display"]).startswith("ObjectComplementOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
