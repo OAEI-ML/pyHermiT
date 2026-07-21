@@ -1849,6 +1849,68 @@ def test_composite_base64_whitespace_aliases_share_one_identity_exactly() -> Non
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_uri_data_assertions_preserve_spelling_and_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "urn:example:value"^^xsd:anyURI)',
+            'NegativeDataPropertyAssertion(:q :i "URN:example:value"^^xsd:anyURI)',
+            'DataPropertyAssertion(:p :i "../café?q=one two"^^xsd:anyURI)',
+            'NegativeDataPropertyAssertion(:q :i ""^^xsd:anyURI)',
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_data_assertions=True,
+        include_negative_data_assertions=True,
+    )
+    assert actual["data_value_symbols"] == _expected_data_value_symbols(snapshot)
+    assert len(cast(list[object], actual["source_literal_symbols"])) == 4
+    assert len(cast(list[object], actual["data_value_symbols"])) == 4
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_uri_spelling_remaps_one_shared_identity_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:z))",
+            "Declaration(NamedIndividual(:zSource))",
+            'DataPropertyAssertion(:z :zSource "relative/path"^^xsd:anyURI)',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:a))",
+            "Declaration(NamedIndividual(:aSource))",
+            'NegativeDataPropertyAssertion(:a :aSource "relative/path"^^xsd:anyURI)',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_data_assertions=True,
+        include_negative_data_assertions=True,
+    )
+    assert len(cast(list[object], actual["source_literal_symbols"])) == 1
+    assert len(cast(list[object], actual["data_value_symbols"])) == 1
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 @pytest.mark.parametrize(
     ("constructor", "predicate_kind"),
     [
@@ -1856,7 +1918,7 @@ def test_composite_base64_whitespace_aliases_share_one_identity_exactly() -> Non
         ("NegativeDataPropertyAssertion", PredicateKind.NEGATED_DATA_ROLE),
     ],
 )
-def test_uri_data_assertion_defers_without_a_partial_data_fact(
+def test_date_time_data_assertion_defers_without_a_partial_data_fact(
     constructor: str,
     predicate_kind: PredicateKind,
 ) -> None:
@@ -1864,7 +1926,7 @@ def test_uri_data_assertion_defers_without_a_partial_data_fact(
         functional(
             "Declaration(DataProperty(:p))",
             "Declaration(NamedIndividual(:i))",
-            f'{constructor}(:p :i "urn:example:value"^^xsd:anyURI)',
+            f'{constructor}(:p :i "2024-01-01T00:00:00Z"^^xsd:dateTime)',
         ),
         options=OPTIONS,
     )

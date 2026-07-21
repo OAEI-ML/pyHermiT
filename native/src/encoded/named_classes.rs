@@ -71,6 +71,7 @@ const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
 const OBJECT_PROPERTY_PREFIX: &str = "object_property:";
 const DATA_PROPERTY_PREFIX: &str = "data_property:";
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
+const ANY_URI_IDENTITY_PREFIX: &str = "[\"any-uri-v1\",";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
 const OWL_RATIONAL_IRI: &str = "http://www.w3.org/2002/07/owl#rational";
@@ -81,6 +82,7 @@ const XSD_FLOAT_IRI: &str = "http://www.w3.org/2001/XMLSchema#float";
 const XSD_DOUBLE_IRI: &str = "http://www.w3.org/2001/XMLSchema#double";
 const XSD_HEX_BINARY_IRI: &str = "http://www.w3.org/2001/XMLSchema#hexBinary";
 const XSD_BASE64_BINARY_IRI: &str = "http://www.w3.org/2001/XMLSchema#base64Binary";
+const XSD_ANY_URI_IRI: &str = "http://www.w3.org/2001/XMLSchema#anyURI";
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 
@@ -2217,6 +2219,9 @@ fn literal_data_identity_key(
     if let Some(kind) = binary_kind {
         return binary_data_identity_key(lexical, kind, budget).map(Some);
     }
+    if datatype_iri == XSD_ANY_URI_IRI {
+        return uri_data_identity_key(lexical, budget).map(Some);
+    }
     string_data_identity_key(lexical, datatype_iri, language, budget)
 }
 
@@ -3011,6 +3016,36 @@ fn invalid_base64<T>() -> EncodedResult<T> {
     Err(EncodedValidationError::invariant(
         "base64Binary literal is outside its datatype lexical space",
     ))
+}
+
+fn uri_data_identity_key(lexical: &str, budget: &mut PhaseBudget) -> EncodedResult<Vec<u8>> {
+    let character_count = lexical.chars().count();
+    PhaseBudget::count(
+        character_count,
+        budget.limits.max_literal_characters,
+        "literal character count",
+    )?;
+    budget.claim_work(character_count)?;
+    if !lexical.chars().all(is_xml_character) {
+        return Err(EncodedValidationError::invariant(
+            "anyURI literal is outside its datatype lexical space",
+        ));
+    }
+    let content_len = json_string_content_len(lexical)?;
+    let payload_len = ANY_URI_IDENTITY_PREFIX
+        .len()
+        .checked_add(content_len)
+        .and_then(|value| value.checked_add(3))
+        .ok_or_else(|| EncodedValidationError::resource("anyURI identity length overflowed"))?;
+    budget.claim_owned(payload_len)?;
+    let payload = serde_json::to_vec(&("any-uri-v1", lexical))
+        .map_err(|_| EncodedValidationError::invariant("anyURI identity encoding failed"))?;
+    if payload.len() != payload_len {
+        return Err(EncodedValidationError::invariant(
+            "anyURI identity length disagrees with canonical JSON",
+        ));
+    }
+    prefixed_data_identity_key(&payload, budget)
 }
 
 fn rational_bigint_data_identity_key(
@@ -10726,6 +10761,20 @@ mod tests {
             error.code == "NATIVE_ENCODED_RESOURCE_LIMIT"
                 && error.message.contains("decoded binary byte count")
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn uri_identities_preserve_relative_spelling_and_unicode_exactly() -> EncodedResult<()> {
+        let mut budget = PhaseBudget::new(NamedClassPhaseLimits::default());
+        assert_eq!(
+            uri_data_identity_key("../café?q=one two", &mut budget)?,
+            "pyhermit:data-identity:v1\0[\"any-uri-v1\",\"../café?q=one two\"]".as_bytes()
+        );
+        assert_eq!(
+            uri_data_identity_key("", &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"any-uri-v1\",\"\"]"
+        );
         Ok(())
     }
 
