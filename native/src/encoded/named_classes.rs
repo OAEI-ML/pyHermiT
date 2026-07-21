@@ -1241,6 +1241,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     symbols,
                     &class_domain,
                     &class_signature,
+                    &definitions,
                     root.node,
                     thing,
                     nothing,
@@ -2252,6 +2253,15 @@ fn class_boolean_definitions<B: ByteSource>(
                 &mut definitions,
                 budget,
             )?,
+            RootHandler::DisjointClasses => retain_disjoint_boolean_definitions(
+                model,
+                symbols,
+                root.node,
+                namespace,
+                scope_maps,
+                &mut definitions,
+                budget,
+            )?,
             _ => {}
         }
     }
@@ -2549,6 +2559,71 @@ fn retain_key_boolean_definition<B: ByteSource>(
     };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
     retain_class_boolean_definition(definitions, definition, provenance, budget)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_disjoint_boolean_definitions<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    root: NodeId,
+    namespace: [u8; 32],
+    scope_maps: &[AnonymousScopeMap],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let node = model.node(root)?;
+    if node.tag() != DISJOINT_CLASSES_TAG || node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-classes root no longer has schema-1 shape",
+        ));
+    }
+    let expressions_component = required_component(
+        model.field(node.fields().start)?,
+        "disjoint-classes expressions",
+    )?;
+    let ComponentValue::Collection(expressions) = model.resolve(expressions_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-classes expressions did not resolve to a collection",
+        ));
+    };
+    let mut pending = Vec::<ClassBooleanDefinition>::new();
+    for item_index in expressions.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "disjoint-classes member")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "disjoint-classes member did not resolve to a node",
+            ));
+        };
+        if atomic_class_selection(model, symbols, identifier, budget)?.is_some() {
+            continue;
+        }
+        let Some(definition) = class_boolean_definition_candidate(
+            model,
+            symbols,
+            identifier,
+            DefinitionPolarity::Negative,
+            namespace,
+            scope_maps,
+            budget,
+        )?
+        else {
+            return Ok(());
+        };
+        budget.claim_owned(size_of::<ClassBooleanDefinition>())?;
+        pending.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("disjoint Boolean definition allocation failed")
+        })?;
+        pending.push(definition);
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    for definition in pending {
+        retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3093,6 +3168,9 @@ fn class_signature<B: ByteSource>(
     }
 
     let mut selected_expressions = Vec::<NodeId>::new();
+    for definition in definitions {
+        push_class_boolean_definition_selections(&mut selected_expressions, definition, budget)?;
+    }
     'root_selection: for root in &symbols.roots {
         budget.claim_work(1)?;
         let root_node = model.node(root.node)?;
@@ -3259,16 +3337,23 @@ fn class_signature<B: ByteSource>(
                             "disjoint-classes member did not resolve to a node",
                         ));
                     };
-                    let Some(selection) =
+                    if let Some(selection) =
                         atomic_class_selection(model, symbols, identifier, budget)?
-                    else {
-                        continue 'root_selection;
-                    };
-                    if matches!(selection.source, AtomicClassSource::Entity(entity_id)
-                        if !selection.negative
-                            && class_entity_display(symbols, entity_id)? == NOTHING_DISPLAY)
                     {
-                        continue;
+                        if matches!(selection.source, AtomicClassSource::Entity(entity_id)
+                            if !selection.negative
+                                && class_entity_display(symbols, entity_id)? == NOTHING_DISPLAY)
+                        {
+                            continue;
+                        }
+                    } else if class_boolean_definition(
+                        definitions,
+                        identifier,
+                        DefinitionPolarity::Negative,
+                    )
+                    .is_none()
+                    {
+                        continue 'root_selection;
                     }
                     live_count = live_count.checked_add(1).ok_or_else(|| {
                         EncodedValidationError::resource(
@@ -7353,6 +7438,7 @@ fn named_disjoint_classes<B: ByteSource>(
     symbols: &SymbolPhase,
     class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
     root: NodeId,
     thing: u32,
     nothing: u32,
@@ -7383,14 +7469,17 @@ fn named_disjoint_classes<B: ByteSource>(
                 "disjoint-classes member did not resolve to a node",
             ));
         };
-        let Some(selection) = atomic_class_selection(model, symbols, identifier, budget)? else {
-            return Ok(None);
-        };
-        if matches!(selection.source, AtomicClassSource::Entity(entity_id)
-            if !selection.negative
-                && class_entity_display(symbols, entity_id)? == NOTHING_DISPLAY)
+        if let Some(selection) = atomic_class_selection(model, symbols, identifier, budget)? {
+            if matches!(selection.source, AtomicClassSource::Entity(entity_id)
+                if !selection.negative
+                    && class_entity_display(symbols, entity_id)? == NOTHING_DISPLAY)
+            {
+                continue;
+            }
+        } else if class_boolean_definition(definitions, identifier, DefinitionPolarity::Negative)
+            .is_none()
         {
-            continue;
+            return Ok(None);
         }
         live_count = live_count.checked_add(1).ok_or_else(|| {
             EncodedValidationError::resource("disjoint-class live-member count overflowed")
@@ -7407,7 +7496,7 @@ fn named_disjoint_classes<B: ByteSource>(
     budget.claim_owned(
         expressions
             .len()
-            .checked_mul(size_of::<(ClassLiteral, NodeId)>())
+            .checked_mul(size_of::<(ClassLiteral, Vec<u8>)>())
             .ok_or_else(|| {
                 EncodedValidationError::resource("disjoint-classes member allocation overflowed")
             })?,
@@ -7423,25 +7512,43 @@ fn named_disjoint_classes<B: ByteSource>(
                 "disjoint-classes member did not resolve to a node",
             ));
         };
-        let selection =
-            atomic_class_selection(model, symbols, identifier, budget)?.ok_or_else(|| {
-                EncodedValidationError::invariant(
-                    "validated disjoint-class member became unsupported",
-                )
-            })?;
-        let Some((class_id, negative)) = atomic_class_expression_literal(
+        let selection = atomic_class_selection(model, symbols, identifier, budget)?;
+        let Some((class_id, negative)) = class_expression_literal_with_definitions(
             model,
             symbols,
             class_domain,
             signature,
             identifier,
+            DefinitionPolarity::Negative,
+            definitions,
             scope_maps,
             budget,
         )?
         else {
             return Ok(None);
         };
-        classes.push((ClassLiteral { class_id, negative }, selection.expression));
+        let literal = ClassLiteral { class_id, negative };
+        let key = if let Some(selection) = selection {
+            normalized_class_literal_key(
+                model,
+                class_domain,
+                literal,
+                selection.expression,
+                scope_maps,
+                budget,
+            )?
+        } else {
+            let definition =
+                class_boolean_definition(definitions, identifier, DefinitionPolarity::Negative)
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "validated disjoint Boolean definition disappeared",
+                        )
+                    })?;
+            budget.claim_owned(definition.generated_key.len())?;
+            definition.generated_key.clone()
+        };
+        classes.push((literal, key));
     }
     if classes.len() < 2 {
         return Err(EncodedValidationError::invariant(
@@ -7449,35 +7556,21 @@ fn named_disjoint_classes<B: ByteSource>(
         ));
     }
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
-    normalize_disjoint_class_literals(
-        model,
-        class_domain,
-        classes,
-        thing,
-        nothing,
-        provenance,
-        scope_maps,
-        budget,
-    )
-    .map(Some)
+    normalize_disjoint_class_literals(classes, thing, nothing, provenance, budget).map(Some)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn normalize_disjoint_class_literals<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    class_domain: &DecodedSymbolDomain,
-    classes: Vec<(ClassLiteral, NodeId)>,
+fn normalize_disjoint_class_literals(
+    classes: Vec<(ClassLiteral, Vec<u8>)>,
     thing: u32,
     nothing: u32,
     provenance: [u8; 32],
-    scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<NamedDisjointOutput> {
     let mut keyed = Vec::new();
     budget.claim_owned(
         classes
             .len()
-            .checked_mul(size_of::<(Vec<u8>, ClassLiteral, NodeId)>())
+            .checked_mul(size_of::<(Vec<u8>, ClassLiteral)>())
             .ok_or_else(|| {
                 EncodedValidationError::resource("live disjoint-class allocation overflowed")
             })?,
@@ -7485,16 +7578,8 @@ fn normalize_disjoint_class_literals<B: ByteSource>(
     keyed
         .try_reserve_exact(classes.len())
         .map_err(|_| EncodedValidationError::resource("live disjoint-class allocation failed"))?;
-    for (literal, expression) in classes {
-        let key = normalized_class_literal_key(
-            model,
-            class_domain,
-            literal,
-            expression,
-            scope_maps,
-            budget,
-        )?;
-        keyed.push((key, literal, expression));
+    for (literal, key) in classes {
+        keyed.push((key, literal));
     }
     budget.claim_work(sort_work(keyed.len()))?;
     keyed.sort_by(|left, right| left.0.cmp(&right.0));
@@ -7739,7 +7824,7 @@ fn named_reducible_disjoint_union<B: ByteSource>(
     budget.claim_owned(
         expressions
             .len()
-            .checked_mul(size_of::<(ClassLiteral, NodeId)>())
+            .checked_mul(size_of::<(ClassLiteral, Vec<u8>)>())
             .ok_or_else(|| {
                 EncodedValidationError::resource("disjoint-union member allocation overflowed")
             })?,
@@ -7781,18 +7866,19 @@ fn named_reducible_disjoint_union<B: ByteSource>(
             provenance,
             generated: false,
         });
-        members.push((ClassLiteral { class_id, negative }, selection.expression));
+        let literal = ClassLiteral { class_id, negative };
+        let key = normalized_class_literal_key(
+            model,
+            class_domain,
+            literal,
+            selection.expression,
+            scope_maps,
+            budget,
+        )?;
+        members.push((literal, key));
     }
-    let mut output = normalize_disjoint_class_literals(
-        model,
-        class_domain,
-        members,
-        thing,
-        nothing,
-        provenance,
-        scope_maps,
-        budget,
-    )?;
+    let mut output =
+        normalize_disjoint_class_literals(members, thing, nothing, provenance, budget)?;
     output
         .edges
         .try_reserve(definition_edges.len())

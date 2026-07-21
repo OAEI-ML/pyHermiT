@@ -1858,6 +1858,65 @@ def test_flat_boolean_key_definitions_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_flat_boolean_disjoint_definitions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(AnnotationProperty(:note))",
+            "DisjointClasses(ObjectIntersectionOf(:A :B) :C)",
+            'DisjointClasses(Annotation(:note "same definition") '
+            "ObjectIntersectionOf(:A :B) :C)",
+            "DisjointClasses(:A ObjectUnionOf(ObjectComplementOf(:B) :C) "
+            "ObjectIntersectionOf(ObjectOneOf(:i) :D))",
+            "SubClassOf(ObjectIntersectionOf(:A :B) :D)",
+            "DisjointClasses(ObjectIntersectionOf(:A :D) owl:Nothing)",
+            "DisjointClasses(ObjectUnionOf(:A :D) owl:Thing)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=6)
+    assert sum(
+        bool(value["generated"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    ) == 5
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_partial_boolean_disjoint_defers_without_generated_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "DisjointClasses(ObjectIntersectionOf(:A :B) "
+            "ObjectSomeValuesFrom(:p :C))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
+    assert not any(
+        value["generated"]
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_generated_class_entity_remapping_matches_scalar_exactly() -> None:
     long_iri = "<urn:test:long:" + ("z" * 240) + ">"
     snapshot = pyowl_core.load_snapshot(
@@ -1946,6 +2005,7 @@ def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
             *declarations,
             "DataPropertyDomain(:data ObjectUnionOf(:B :C))",
             "HasKey(ObjectIntersectionOf(:A :B) (:p) (:data))",
+            "DisjointClasses(ObjectUnionOf(:A :C) :B)",
         ),
         options=OPTIONS,
     )
@@ -1958,7 +2018,7 @@ def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
 
     assert manifest == _expected_manifest(
         composite,
-        compiled_roots=3,
+        compiled_roots=4,
         include_object_constraints=True,
         include_data_domains=True,
         include_keys=True,
