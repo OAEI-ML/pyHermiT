@@ -2,13 +2,12 @@
 //!
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
 //! a scalar-compatible named `individual` domain and the exact semantic
-//! `source_literal` domain plus scalar-compatible string, Boolean, and integer
-//! `data_value`
-//! identities needed by later datatype/ABox phases. It compiles named-only
+//! `source_literal` domain plus scalar-compatible string, Boolean, integer, and decimal
+//! `data_value` identities needed by later datatype/ABox phases. It compiles named-only
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
-//! plus named data-property domains, ranges, functionality, string/Boolean/integer
+//! plus named data-property domains, ranges, functionality, string/Boolean/integer/decimal
 //! positive and negative assertions, named datatype definitions, and named-class keys
 //! into the existing native predicate, clause, fact, and provenance records. Exact
 //! nested annotations participate in source provenance, with segmented anonymous
@@ -23,6 +22,7 @@
 use std::mem::size_of;
 
 use num_bigint::{BigInt, Sign};
+use num_integer::Integer;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -73,6 +73,7 @@ const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
 const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema#";
 const XSD_BOOLEAN_IRI: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+const XSD_DECIMAL_IRI: &str = "http://www.w3.org/2001/XMLSchema#decimal";
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 
@@ -87,6 +88,7 @@ pub struct NamedClassPhaseLimits {
     pub max_data_value_symbols: usize,
     pub max_literal_characters: usize,
     pub max_numeric_digits: usize,
+    pub max_decimal_exponent: usize,
     pub max_compiled_roots: usize,
     pub max_predicates: usize,
     pub max_clauses: usize,
@@ -111,6 +113,7 @@ impl Default for NamedClassPhaseLimits {
             max_data_value_symbols: 16_000_000,
             max_literal_characters: 1_000_000,
             max_numeric_digits: 100_000,
+            max_decimal_exponent: 100_000,
             max_compiled_roots: 100_000_000,
             max_predicates: 100_000_000,
             max_clauses: 100_000_000,
@@ -2183,6 +2186,9 @@ fn literal_data_identity_key(
     if let Some(bounds) = integer_datatype_bounds(datatype_iri) {
         return integer_data_identity_key(lexical, bounds, budget).map(Some);
     }
+    if datatype_iri == XSD_DECIMAL_IRI {
+        return decimal_data_identity_key(lexical, budget).map(Some);
+    }
     string_data_identity_key(lexical, datatype_iri, language, budget)
 }
 
@@ -2276,6 +2282,107 @@ fn integer_data_identity_key(
             "integer literal is outside its datatype value space",
         ));
     }
+    rational_bigint_data_identity_key(value, BigInt::from(1_u8), budget)
+}
+
+fn decimal_data_identity_key(lexical: &str, budget: &mut PhaseBudget) -> EncodedResult<Vec<u8>> {
+    let character_count = lexical.chars().count();
+    PhaseBudget::count(
+        character_count,
+        budget.limits.max_literal_characters,
+        "literal character count",
+    )?;
+    let bytes = lexical.as_bytes();
+    let (negative, unsigned) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        Some(_) | None => (false, bytes),
+    };
+    budget.claim_work(bytes.len())?;
+    let mut point = None;
+    for (index, byte) in unsigned.iter().copied().enumerate() {
+        if byte == b'.' {
+            if point.replace(index).is_some() {
+                return Err(EncodedValidationError::invariant(
+                    "decimal literal is outside its datatype lexical space",
+                ));
+            }
+        } else if !byte.is_ascii_digit() {
+            return Err(EncodedValidationError::invariant(
+                "decimal literal is outside its datatype lexical space",
+            ));
+        }
+    }
+    let (whole, fraction) = point.map_or((unsigned, &b""[..]), |index| {
+        (&unsigned[..index], &unsigned[index + 1..])
+    });
+    if whole.is_empty() && fraction.is_empty() {
+        return Err(EncodedValidationError::invariant(
+            "decimal literal is outside its datatype lexical space",
+        ));
+    }
+    let inserted_zero = usize::from(whole.is_empty());
+    let digit_count = whole
+        .len()
+        .checked_add(fraction.len())
+        .and_then(|value| value.checked_add(inserted_zero))
+        .ok_or_else(|| EncodedValidationError::resource("decimal digit count overflowed"))?;
+    PhaseBudget::count(
+        digit_count,
+        budget.limits.max_numeric_digits,
+        "numeric digit count",
+    )?;
+    PhaseBudget::count(
+        fraction.len(),
+        budget.limits.max_decimal_exponent,
+        "decimal scale",
+    )?;
+    let temporary_bytes = digit_count
+        .checked_add(fraction.len())
+        .and_then(|value| value.checked_mul(4))
+        .and_then(|value| value.checked_add(2))
+        .ok_or_else(|| EncodedValidationError::resource("decimal temporary size overflowed"))?;
+    budget.claim_owned(temporary_bytes)?;
+    budget.claim_work(fraction.len())?;
+    let mut digits = Vec::new();
+    digits
+        .try_reserve_exact(digit_count)
+        .map_err(|_| EncodedValidationError::resource("decimal digit allocation failed"))?;
+    if whole.is_empty() {
+        digits.push(b'0');
+    } else {
+        digits.extend_from_slice(whole);
+    }
+    digits.extend_from_slice(fraction);
+    let magnitude = BigInt::parse_bytes(&digits, 10).ok_or_else(|| {
+        EncodedValidationError::invariant("decimal literal magnitude could not be decoded")
+    })?;
+    let numerator = if negative { -magnitude } else { magnitude };
+    let exponent = u32::try_from(fraction.len())
+        .map_err(|_| EncodedValidationError::resource("decimal scale exceeds u32"))?;
+    let denominator = BigInt::from(10_u8).pow(exponent);
+    rational_bigint_data_identity_key(numerator, denominator, budget)
+}
+
+fn rational_bigint_data_identity_key(
+    numerator: BigInt,
+    denominator: BigInt,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    if denominator.sign() != Sign::Plus {
+        return Err(EncodedValidationError::invariant(
+            "numeric identity denominator must be positive",
+        ));
+    }
+    let divisor = numerator.gcd(&denominator);
+    let reduced_numerator = numerator / &divisor;
+    let reduced_denominator = denominator / divisor;
+    let numerator_token = bigint_token(&reduced_numerator, budget)?;
+    let denominator_token = bigint_token(&reduced_denominator, budget)?;
+    rational_data_identity_key(&numerator_token, &denominator_token, budget)
+}
+
+fn bigint_token(value: &BigInt, budget: &mut PhaseBudget) -> EncodedResult<String> {
     let sign = if value.sign() == Sign::Minus {
         '-'
     } else {
@@ -2287,13 +2394,13 @@ fn integer_data_identity_key(
         .checked_add(1)
         .ok_or_else(|| EncodedValidationError::resource("integer token length overflowed"))?;
     budget.claim_owned(token_len)?;
-    let mut numerator = String::new();
-    numerator
+    let mut token = String::new();
+    token
         .try_reserve_exact(token_len)
         .map_err(|_| EncodedValidationError::resource("integer token allocation failed"))?;
-    numerator.push(sign);
-    numerator.push_str(&magnitude);
-    rational_data_identity_key(&numerator, "+1", budget)
+    token.push(sign);
+    token.push_str(&magnitude);
+    Ok(token)
 }
 
 fn rational_data_identity_key(
@@ -9837,6 +9944,40 @@ mod tests {
         assert!(resource.is_some_and(|error| {
             error.code == "NATIVE_ENCODED_RESOURCE_LIMIT"
                 && error.message.contains("numeric digit count")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn decimal_identities_reduce_exactly_and_reject_hostile_scales() -> EncodedResult<()> {
+        let mut budget = PhaseBudget::new(NamedClassPhaseLimits::default());
+        assert_eq!(
+            decimal_data_identity_key("0.2500", &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"numeric-rational-hex-v1\",\"+1\",\"+4\"]"
+        );
+        assert_eq!(
+            decimal_data_identity_key("-0.00", &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"numeric-rational-hex-v1\",\"+0\",\"+1\"]"
+        );
+        assert_eq!(
+            decimal_data_identity_key("12.", &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"numeric-rational-hex-v1\",\"+c\",\"+1\"]"
+        );
+
+        let invalid = decimal_data_identity_key("1e2", &mut budget).err();
+        assert!(invalid.is_some_and(|error| {
+            error.code == "NATIVE_ENCODED_INVARIANT"
+                && error.message.contains("datatype lexical space")
+        }));
+
+        let limits = NamedClassPhaseLimits {
+            max_decimal_exponent: 2,
+            ..NamedClassPhaseLimits::default()
+        };
+        let mut limited = PhaseBudget::new(limits);
+        let resource = decimal_data_identity_key("0.001", &mut limited).err();
+        assert!(resource.is_some_and(|error| {
+            error.code == "NATIVE_ENCODED_RESOURCE_LIMIT" && error.message.contains("decimal scale")
         }));
         Ok(())
     }
