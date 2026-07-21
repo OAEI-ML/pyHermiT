@@ -45,11 +45,15 @@ const NAMED_CLASS_PHASE_SCHEMA_VERSION: u16 = 1;
 const ENTITY_TAG: u16 = 2;
 const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
 const LITERAL_TAG: u16 = 4;
+const DATA_INTERSECTION_OF_TAG: u16 = 21;
+const DATA_UNION_OF_TAG: u16 = 22;
 const DATA_COMPLEMENT_OF_TAG: u16 = 23;
 const DATA_ONE_OF_TAG: u16 = 24;
 const DATATYPE_RESTRICTION_TAG: u16 = 25;
-const OBJECT_ONE_OF_TAG: u16 = 33;
+const OBJECT_INTERSECTION_OF_TAG: u16 = 30;
+const OBJECT_UNION_OF_TAG: u16 = 31;
 const OBJECT_COMPLEMENT_OF_TAG: u16 = 32;
+const OBJECT_ONE_OF_TAG: u16 = 33;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
 const DISJOINT_CLASSES_TAG: u16 = 63;
@@ -2393,10 +2397,25 @@ fn atomic_class_selection<B: ByteSource>(
     identifier: NodeId,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<AtomicClassSelection>> {
+    atomic_class_selection_at_depth(model, symbols, identifier, 0, budget)
+}
+
+fn atomic_class_selection_at_depth<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    initial_depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassSelection>> {
     let mut base = identifier;
     let mut negative = false;
     let mut normalized_complement = None;
-    let mut depth = 0_usize;
+    let mut depth = initial_depth;
+    PhaseBudget::count(
+        depth,
+        budget.limits.max_canonical_depth,
+        "class-expression depth",
+    )?;
     loop {
         let node = model.node(base)?;
         if node.tag() != OBJECT_COMPLEMENT_OF_TAG {
@@ -2413,15 +2432,42 @@ fn atomic_class_selection<B: ByteSource>(
         PhaseBudget::count(
             depth,
             budget.limits.max_canonical_depth,
-            "class-complement depth",
+            "class-expression depth",
         )?;
         budget.claim_work(1)?;
         normalized_complement = Some(base);
         base = node_field(model, node, 0, "class-complement operand")?;
         negative = !negative;
     }
-    if model.node(base)?.tag() == ENTITY_TAG {
-        let entity_id = symbols.entity_symbol_for_node(base).ok_or_else(|| {
+
+    let base_node = model.node(base)?;
+    let base_is_atomic = matches!(base_node.tag(), ENTITY_TAG | OBJECT_ONE_OF_TAG);
+    let Some(selection) = positive_atomic_class_selection(model, symbols, base, depth, budget)?
+    else {
+        return Ok(None);
+    };
+    if !negative {
+        return Ok(Some(selection));
+    }
+    complement_atomic_class_selection(
+        model,
+        symbols,
+        selection,
+        normalized_complement.unwrap_or(identifier),
+        base_is_atomic,
+    )
+}
+
+fn positive_atomic_class_selection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassSelection>> {
+    let node = model.node(identifier)?;
+    if node.tag() == ENTITY_TAG {
+        let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
             EncodedValidationError::invariant(
                 "atomic class is absent from the reachable entity mapping",
             )
@@ -2430,48 +2476,136 @@ fn atomic_class_selection<B: ByteSource>(
         if !display.starts_with("class:") {
             return Ok(None);
         }
-        if negative && display == THING_DISPLAY {
-            return Ok(Some(AtomicClassSelection {
-                source: AtomicClassSource::Entity(class_id_by_display(
-                    &symbols.entity_domain,
-                    NOTHING_DISPLAY,
-                )?),
-                expression: base,
-                negative: false,
-            }));
-        }
-        if negative && display == NOTHING_DISPLAY {
-            return Ok(Some(AtomicClassSelection {
-                source: AtomicClassSource::Entity(class_id_by_display(
-                    &symbols.entity_domain,
-                    THING_DISPLAY,
-                )?),
-                expression: base,
-                negative: false,
-            }));
-        }
         return Ok(Some(AtomicClassSelection {
             source: AtomicClassSource::Entity(entity_id),
-            expression: if negative {
-                normalized_complement.unwrap_or(base)
-            } else {
-                base
-            },
-            negative,
+            expression: identifier,
+            negative: false,
         }));
     }
-    if !is_named_nominal(model, symbols, base, budget)? {
+    if node.tag() == OBJECT_ONE_OF_TAG {
+        if !is_named_nominal(model, symbols, identifier, budget)? {
+            return Ok(None);
+        }
+        return Ok(Some(AtomicClassSelection {
+            source: AtomicClassSource::Nominal(identifier),
+            expression: identifier,
+            negative: false,
+        }));
+    }
+    if !matches!(node.tag(), OBJECT_INTERSECTION_OF_TAG | OBJECT_UNION_OF_TAG) {
         return Ok(None);
     }
-    Ok(Some(AtomicClassSelection {
-        source: AtomicClassSource::Nominal(base),
-        expression: if negative {
-            normalized_complement.unwrap_or(base)
-        } else {
-            base
-        },
-        negative,
-    }))
+    if node.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "class Boolean expression no longer has schema-1 shape",
+        ));
+    }
+    let component =
+        required_component(model.field(node.fields().start)?, "class Boolean operands")?;
+    let ComponentValue::Collection(operands) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(
+            "class Boolean operands did not resolve to a collection",
+        ));
+    };
+    let operand_depth = depth
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("class-expression depth overflowed"))?;
+    PhaseBudget::count(
+        operand_depth,
+        budget.limits.max_canonical_depth,
+        "class-expression depth",
+    )?;
+    let intersection = node.tag() == OBJECT_INTERSECTION_OF_TAG;
+    let mut retained = None;
+    let mut identity = None;
+    for item_index in operands.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "class Boolean operand")?;
+        let ComponentValue::Node(operand) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "class Boolean operand did not resolve to a node",
+            ));
+        };
+        let Some(selection) =
+            atomic_class_selection_at_depth(model, symbols, operand, operand_depth, budget)?
+        else {
+            return Ok(None);
+        };
+        let is_thing = atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?;
+        let is_nothing = atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?;
+        if (intersection && is_nothing) || (!intersection && is_thing) {
+            return Ok(Some(selection));
+        }
+        if (intersection && is_thing) || (!intersection && is_nothing) {
+            identity.get_or_insert(selection);
+            continue;
+        }
+        if retained.is_some_and(|known| atomic_class_selections_match(known, selection)) {
+            continue;
+        }
+        if retained.is_some() {
+            return Ok(None);
+        }
+        retained = Some(selection);
+    }
+    Ok(retained.or(identity))
+}
+
+fn atomic_class_selection_has_display(
+    symbols: &SymbolPhase,
+    selection: AtomicClassSelection,
+    display: &str,
+) -> EncodedResult<bool> {
+    match selection.source {
+        AtomicClassSource::Entity(entity_id) if !selection.negative => {
+            Ok(class_entity_display(symbols, entity_id)? == display)
+        }
+        AtomicClassSource::Entity(_) | AtomicClassSource::Nominal(_) => Ok(false),
+    }
+}
+
+fn atomic_class_selections_match(left: AtomicClassSelection, right: AtomicClassSelection) -> bool {
+    left.source == right.source && left.negative == right.negative
+}
+
+fn complement_atomic_class_selection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    mut selection: AtomicClassSelection,
+    complement_expression: NodeId,
+    base_is_atomic: bool,
+) -> EncodedResult<Option<AtomicClassSelection>> {
+    if atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)? {
+        selection.source = AtomicClassSource::Entity(class_id_by_display(
+            &symbols.entity_domain,
+            NOTHING_DISPLAY,
+        )?);
+        selection.negative = false;
+        return Ok(Some(selection));
+    }
+    if atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)? {
+        selection.source =
+            AtomicClassSource::Entity(class_id_by_display(&symbols.entity_domain, THING_DISPLAY)?);
+        selection.negative = false;
+        return Ok(Some(selection));
+    }
+    if selection.negative {
+        let node = model.node(selection.expression)?;
+        if node.tag() != OBJECT_COMPLEMENT_OF_TAG || node.field_count() != 1 {
+            return Err(EncodedValidationError::invariant(
+                "normalized negative class literal lost its complement expression",
+            ));
+        }
+        selection.expression = node_field(model, node, 0, "normalized class-complement operand")?;
+        selection.negative = false;
+        return Ok(Some(selection));
+    }
+    if !base_is_atomic {
+        return Ok(None);
+    }
+    selection.expression = complement_expression;
+    selection.negative = true;
+    Ok(Some(selection))
 }
 
 fn push_atomic_class_selection(
@@ -2790,10 +2924,21 @@ fn atomic_data_range_selection<B: ByteSource>(
     identifier: NodeId,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<AtomicDataRangeSelection>> {
+    atomic_data_range_selection_at_depth(model, symbols, identifier, 0, budget)
+}
+
+fn atomic_data_range_selection_at_depth<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    initial_depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicDataRangeSelection>> {
     let mut base = identifier;
     let mut negative = false;
     let mut normalized_complement = None;
-    let mut depth = 0_usize;
+    let mut depth = initial_depth;
+    PhaseBudget::count(depth, budget.limits.max_canonical_depth, "data-range depth")?;
     loop {
         let node = model.node(base)?;
         if node.tag() != DATA_COMPLEMENT_OF_TAG {
@@ -2807,20 +2952,43 @@ fn atomic_data_range_selection<B: ByteSource>(
         depth = depth
             .checked_add(1)
             .ok_or_else(|| EncodedValidationError::resource("data-complement depth overflowed"))?;
-        PhaseBudget::count(
-            depth,
-            budget.limits.max_canonical_depth,
-            "data-complement depth",
-        )?;
+        PhaseBudget::count(depth, budget.limits.max_canonical_depth, "data-range depth")?;
         budget.claim_work(1)?;
         normalized_complement = Some(base);
         base = node_field(model, node, 0, "data-complement operand")?;
         negative = !negative;
     }
     let base_node = model.node(base)?;
-    let supported = match base_node.tag() {
+    let base_is_atomic = matches!(
+        base_node.tag(),
+        ENTITY_TAG | DATA_ONE_OF_TAG | DATATYPE_RESTRICTION_TAG
+    );
+    let Some(selection) =
+        positive_atomic_data_range_selection(model, symbols, base, depth, budget)?
+    else {
+        return Ok(None);
+    };
+    if !negative {
+        return Ok(Some(selection));
+    }
+    Ok(complement_atomic_data_range_selection(
+        selection,
+        normalized_complement.unwrap_or(identifier),
+        base_is_atomic,
+    ))
+}
+
+fn positive_atomic_data_range_selection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicDataRangeSelection>> {
+    let node = model.node(identifier)?;
+    let supported = match node.tag() {
         ENTITY_TAG => {
-            let entity_id = symbols.entity_symbol_for_node(base).ok_or_else(|| {
+            let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
                 EncodedValidationError::invariant(
                     "atomic data-range entity is absent from the reachable entity mapping",
                 )
@@ -2834,8 +3002,8 @@ fn atomic_data_range_selection<B: ByteSource>(
                 })?;
             entity.display.starts_with("datatype:")
         }
-        DATA_ONE_OF_TAG if base_node.field_count() == 1 => true,
-        DATATYPE_RESTRICTION_TAG if base_node.field_count() == 2 => true,
+        DATA_ONE_OF_TAG if node.field_count() == 1 => true,
+        DATATYPE_RESTRICTION_TAG if node.field_count() == 2 => true,
         DATA_ONE_OF_TAG | DATATYPE_RESTRICTION_TAG => {
             return Err(EncodedValidationError::invariant(
                 "atomic data-range expression no longer has schema-1 shape",
@@ -2843,18 +3011,137 @@ fn atomic_data_range_selection<B: ByteSource>(
         }
         _ => false,
     };
-    if !supported {
+    if supported {
+        return Ok(Some(AtomicDataRangeSelection {
+            base: identifier,
+            expression: identifier,
+            negative: false,
+        }));
+    }
+    if !matches!(node.tag(), DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG) {
         return Ok(None);
     }
-    Ok(Some(AtomicDataRangeSelection {
-        base,
-        expression: if negative {
-            normalized_complement.unwrap_or(base)
-        } else {
-            base
+    if node.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "data Boolean expression no longer has schema-1 shape",
+        ));
+    }
+    let component = required_component(model.field(node.fields().start)?, "data Boolean operands")?;
+    let ComponentValue::Collection(operands) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(
+            "data Boolean operands did not resolve to a collection",
+        ));
+    };
+    let operand_depth = depth
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("data-range depth overflowed"))?;
+    PhaseBudget::count(
+        operand_depth,
+        budget.limits.max_canonical_depth,
+        "data-range depth",
+    )?;
+    let intersection = node.tag() == DATA_INTERSECTION_OF_TAG;
+    let mut retained = None;
+    let mut identity = None;
+    for item_index in operands.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "data Boolean operand")?;
+        let ComponentValue::Node(operand) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "data Boolean operand did not resolve to a node",
+            ));
+        };
+        let Some(selection) =
+            atomic_data_range_selection_at_depth(model, symbols, operand, operand_depth, budget)?
+        else {
+            return Ok(None);
+        };
+        let is_top = atomic_data_range_selection_is_top(model, symbols, selection)?;
+        let is_bottom = atomic_data_range_selection_is_bottom(model, symbols, selection)?;
+        if (intersection && is_bottom) || (!intersection && is_top) {
+            return Ok(Some(selection));
+        }
+        if (intersection && is_top) || (!intersection && is_bottom) {
+            identity.get_or_insert(selection);
+            continue;
+        }
+        if retained.is_some_and(|known| atomic_data_range_selections_match(known, selection)) {
+            continue;
+        }
+        if retained.is_some() {
+            return Ok(None);
+        }
+        retained = Some(selection);
+    }
+    Ok(retained.or(identity))
+}
+
+fn atomic_data_range_selection_is_top<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    selection: AtomicDataRangeSelection,
+) -> EncodedResult<bool> {
+    if selection.negative || model.node(selection.base)?.tag() != ENTITY_TAG {
+        return Ok(false);
+    }
+    let entity_id = symbols
+        .entity_symbol_for_node(selection.base)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "atomic data-range entity is absent from the reachable entity mapping",
+            )
+        })?;
+    let entity = symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("atomic datatype entity ID is dangling")
+        })?;
+    Ok(entity.display == RDFS_LITERAL_DISPLAY)
+}
+
+fn atomic_data_range_selection_is_bottom<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    selection: AtomicDataRangeSelection,
+) -> EncodedResult<bool> {
+    if !selection.negative {
+        return Ok(false);
+    }
+    atomic_data_range_selection_is_top(
+        model,
+        symbols,
+        AtomicDataRangeSelection {
+            negative: false,
+            ..selection
         },
-        negative,
-    }))
+    )
+}
+
+fn atomic_data_range_selections_match(
+    left: AtomicDataRangeSelection,
+    right: AtomicDataRangeSelection,
+) -> bool {
+    left.base == right.base && left.negative == right.negative
+}
+
+const fn complement_atomic_data_range_selection(
+    mut selection: AtomicDataRangeSelection,
+    complement_expression: NodeId,
+    base_is_atomic: bool,
+) -> Option<AtomicDataRangeSelection> {
+    if selection.negative {
+        selection.expression = selection.base;
+        selection.negative = false;
+        return Some(selection);
+    }
+    if !base_is_atomic {
+        return None;
+    }
+    selection.expression = complement_expression;
+    selection.negative = true;
+    Some(selection)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -5271,28 +5558,79 @@ fn named_disjoint_classes<B: ByteSource>(
         ));
     }
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
-    let mut live = Vec::new();
+    let mut keyed = Vec::new();
     budget.claim_owned(
         classes
             .len()
-            .checked_mul(size_of::<(ClassLiteral, NodeId)>())
+            .checked_mul(size_of::<(Vec<u8>, ClassLiteral, NodeId)>())
             .ok_or_else(|| {
                 EncodedValidationError::resource("live disjoint-class allocation overflowed")
             })?,
     )?;
-    live.try_reserve_exact(classes.len())
+    keyed
+        .try_reserve_exact(classes.len())
         .map_err(|_| EncodedValidationError::resource("live disjoint-class allocation failed"))?;
-    live.extend(
-        classes
-            .into_iter()
-            .filter(|(literal, _)| literal.negative || literal.class_id != nothing),
-    );
+    for (literal, expression) in classes {
+        let key = canonical::canonical_node_key(model, expression, scope_maps, budget)?;
+        budget.claim_owned(key.len())?;
+        keyed.push((key, literal, expression));
+    }
+    budget.claim_work(sort_work(keyed.len()))?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut live = Vec::new();
+    let mut edges = Vec::new();
+    budget.claim_owned(
+        keyed
+            .len()
+            .checked_mul(size_of::<(ClassLiteral, NodeId)>())
+            .and_then(|value| value.checked_add(keyed.len().checked_mul(size_of::<RawEdge>())?))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("normalized disjoint-class allocation overflowed")
+            })?,
+    )?;
+    live.try_reserve_exact(keyed.len()).map_err(|_| {
+        EncodedValidationError::resource("normalized disjoint-class allocation failed")
+    })?;
+    edges.try_reserve_exact(keyed.len()).map_err(|_| {
+        EncodedValidationError::resource("duplicate disjoint-class edge allocation failed")
+    })?;
+    let mut index = 0_usize;
+    while index < keyed.len() {
+        let mut end = index.checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("disjoint-class group index overflowed")
+        })?;
+        while end < keyed.len() && keyed[end].0 == keyed[index].0 {
+            if keyed[end].1 != keyed[index].1 {
+                return Err(EncodedValidationError::invariant(
+                    "normalized disjoint-class key has conflicting literals",
+                ));
+            }
+            end = end.checked_add(1).ok_or_else(|| {
+                EncodedValidationError::resource("disjoint-class group index overflowed")
+            })?;
+        }
+        let literal = keyed[index].1;
+        if end - index > 1 {
+            if literal.negative || literal.class_id != nothing {
+                edges.push(RawEdge {
+                    sub_class: literal.class_id,
+                    sub_negative: literal.negative,
+                    super_class: nothing,
+                    super_negative: false,
+                    provenance,
+                });
+            }
+        } else if literal.negative || literal.class_id != nothing {
+            live.push((literal, keyed[index].2));
+        }
+        index = end;
+    }
 
     if live
         .iter()
         .any(|(literal, _)| !literal.negative && literal.class_id == thing)
     {
-        let mut edges = Vec::new();
         let edge_count = live.len().saturating_sub(1);
         budget.claim_owned(
             edge_count
@@ -5303,7 +5641,7 @@ fn named_disjoint_classes<B: ByteSource>(
                     )
                 })?,
         )?;
-        edges.try_reserve_exact(edge_count).map_err(|_| {
+        edges.try_reserve(edge_count).map_err(|_| {
             EncodedValidationError::resource("top disjoint-class edge allocation failed")
         })?;
         for (literal, _) in live {
@@ -5347,7 +5685,7 @@ fn named_disjoint_classes<B: ByteSource>(
         None
     };
     Ok(Some(NamedDisjointOutput {
-        edges: Vec::new(),
+        edges,
         disjoint,
         provenance,
     }))

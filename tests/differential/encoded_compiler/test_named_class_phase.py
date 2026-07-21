@@ -1549,6 +1549,61 @@ def test_nested_atomic_class_complements_reduce_by_parity_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_reducible_class_booleans_collapse_to_atomic_literals_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:a))",
+            "Declaration(NamedIndividual(:i))",
+            "ClassAssertion(ObjectIntersectionOf(:A owl:Thing) :i)",
+            "SubClassOf(ObjectUnionOf(:A owl:Nothing) "
+            "ObjectIntersectionOf(:B owl:Thing))",
+            "EquivalentClasses(ObjectIntersectionOf(ObjectComplementOf(:A) "
+            "owl:Thing) ObjectUnionOf(:B owl:Nothing))",
+            "DisjointClasses(ObjectUnionOf(ObjectOneOf(:a) owl:Nothing) "
+            "ObjectIntersectionOf(:B owl:Thing))",
+            "ObjectPropertyDomain(:p ObjectIntersectionOf(:A owl:Thing))",
+            "ObjectPropertyRange(:p ObjectUnionOf(:B owl:Nothing))",
+            "DataPropertyDomain(:d ObjectIntersectionOf(ObjectComplementOf(:A) "
+            "owl:Thing))",
+            "HasKey(ObjectUnionOf(ObjectOneOf(:a) owl:Nothing) (:p) (:d))",
+            "SubClassOf(ObjectIntersectionOf(:A owl:Nothing) :B)",
+            "SubClassOf(:A ObjectUnionOf(:B owl:Thing))",
+            "SubClassOf(ObjectIntersectionOf(:A "
+            "ObjectComplementOf(ObjectComplementOf(:A))) :B)",
+            "SubClassOf(ObjectComplementOf(ObjectUnionOf("
+            "ObjectComplementOf(:A) owl:Nothing)) :B)",
+            "DisjointClasses(ObjectIntersectionOf(:A owl:Thing) "
+            "ObjectUnionOf(:A owl:Nothing))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=13,
+        include_object_constraints=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    class_symbols = cast(
+        list[dict[str, object]], manifest["class_expression_symbols"]
+    )
+    assert not any(
+        str(value["display"]).startswith(
+            ("ObjectIntersectionOf:", "ObjectUnionOf:")
+        )
+        for value in class_symbols
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 @pytest.mark.parametrize(
     "axiom",
     [
@@ -1705,6 +1760,50 @@ def test_composite_nested_complements_remap_normalized_literals_exactly() -> Non
             "DatatypeDefinition(:A DataComplementOf(DataComplementOf("
             "DatatypeRestriction(xsd:integer "
             'xsd:minInclusive "2"^^xsd:integer))))',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right))
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_reducible_booleans_remap_atomic_literals_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:Z))",
+            "Declaration(Class(:Y))",
+            "Declaration(DataProperty(:zd))",
+            "SubClassOf(ObjectIntersectionOf(:Z owl:Thing) "
+            "ObjectUnionOf(:Y owl:Nothing))",
+            'DataPropertyRange(:zd DataIntersectionOf(DataOneOf("z") '
+            "rdfs:Literal))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(NamedIndividual(:a))",
+            "Declaration(ObjectProperty(:ap))",
+            "Declaration(Datatype(:A))",
+            "ObjectPropertyDomain(:ap ObjectUnionOf(ObjectOneOf(:a) "
+            "owl:Nothing))",
+            "DatatypeDefinition(:A DataUnionOf("
+            "DatatypeRestriction(xsd:integer "
+            'xsd:minInclusive "2"^^xsd:integer) '
+            "DataComplementOf(rdfs:Literal)))",
         ),
         options=OPTIONS,
     )
@@ -2096,6 +2195,53 @@ def test_nested_atomic_data_complements_reduce_by_parity_exactly() -> None:
         predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 2
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_reducible_data_booleans_collapse_to_atomic_ranges_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(DataProperty(:r))",
+            "Declaration(DataProperty(:s))",
+            "Declaration(Datatype(:D))",
+            "Declaration(Datatype(:E))",
+            "Declaration(Datatype(:F))",
+            "Declaration(Datatype(:G))",
+            "DataPropertyRange(:p DataIntersectionOf(xsd:string rdfs:Literal))",
+            'DataPropertyRange(:q DataUnionOf(DataOneOf("alpha") '
+            "DataComplementOf(rdfs:Literal)))",
+            "DatatypeDefinition(:D DataIntersectionOf("
+            "DatatypeRestriction(xsd:integer "
+            'xsd:minInclusive "1"^^xsd:integer) rdfs:Literal))',
+            'DatatypeDefinition(:E DataUnionOf(DataComplementOf(DataOneOf("blocked")) '
+            "DataComplementOf(rdfs:Literal)))",
+            "DataPropertyRange(:r DataUnionOf(xsd:string rdfs:Literal))",
+            "DatatypeDefinition(:F DataIntersectionOf(xsd:string "
+            "DataComplementOf(rdfs:Literal)))",
+            "DataPropertyRange(:s DataComplementOf(DataUnionOf("
+            "DataComplementOf(xsd:string) DataComplementOf(rdfs:Literal))))",
+            "DatatypeDefinition(:G DataIntersectionOf(xsd:string "
+            "DataComplementOf(DataComplementOf(xsd:string))))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=8,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
+    )
+    data_symbols = cast(list[dict[str, object]], manifest["data_range_symbols"])
+    assert not any(
+        str(value["display"]).startswith(("DataIntersectionOf:", "DataUnionOf:"))
+        for value in data_symbols
+    )
+    assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
