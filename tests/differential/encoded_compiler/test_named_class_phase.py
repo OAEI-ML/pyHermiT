@@ -32,6 +32,7 @@ from pyhermit.clauses.model import (
 from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE
 from pyhermit.exceptions import BackendMismatchError
 from pyhermit.inputs import capture_ontology
+from pyhermit.normalize import DataRangeInclusion
 
 OPTIONS = pyowl_core.LoadOptions(
     imports=pyowl_core.ImportPolicy.IGNORE,
@@ -256,6 +257,7 @@ def _expected_manifest(
     include_object_characteristics: bool = False,
     include_data_domains: bool = False,
     include_data_ranges: bool = False,
+    include_generated_data_definitions: bool = False,
     include_datatype_definitions: bool = False,
     include_keys: bool = False,
     include_data_functionalities: bool = False,
@@ -283,6 +285,8 @@ def _expected_manifest(
                 "DataComplementOf:",
                 "DataOneOf:",
                 "DatatypeRestriction:",
+                "DataIntersectionOf:",
+                "DataUnionOf:",
             )
         )
     ]
@@ -313,6 +317,7 @@ def _expected_manifest(
     characteristic_provenance_ids: set[int] = set()
     data_domain_provenance_ids: set[int] = set()
     data_range_provenance_ids: set[int] = set()
+    generated_data_definition_provenance_ids: set[int] = set()
     datatype_definition_provenance_ids: set[int] = set()
     key_provenance_ids: set[int] = set()
     data_functionality_provenance_ids: set[int] = set()
@@ -325,6 +330,7 @@ def _expected_manifest(
         or include_object_characteristics
         or include_data_domains
         or include_data_ranges
+        or include_generated_data_definitions
         or include_datatype_definitions
         or include_keys
         or include_data_functionalities
@@ -370,6 +376,12 @@ def _expected_manifest(
             provenance_id_by_key[(record.provenance_sha256, record.generated)]
             for record in normalized.records
             if isinstance(record.statement, owl.DataPropertyRange)
+        }
+    if include_generated_data_definitions:
+        generated_data_definition_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if isinstance(record.statement, DataRangeInclusion)
         }
     if include_datatype_definitions:
         datatype_definition_provenance_ids = {
@@ -434,6 +446,11 @@ def _expected_manifest(
         for clause in program.clauses
         if data_range_provenance_ids.intersection(clause.provenance_ids)
     }
+    generated_data_definition_clauses = {
+        clause.clause_id
+        for clause in program.clauses
+        if generated_data_definition_provenance_ids.intersection(clause.provenance_ids)
+    }
     datatype_definition_clauses = {
         clause.clause_id
         for clause in program.clauses
@@ -485,6 +502,14 @@ def _expected_manifest(
         if predicates_by_id[atom.predicate_id].kind
         in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
     }
+    generated_data_definition_predicates = {
+        atom.predicate_id
+        for clause in program.clauses
+        if clause.clause_id in generated_data_definition_clauses
+        for atom in clause.body + clause.head
+        if predicates_by_id[atom.predicate_id].kind
+        in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
+    }
     datatype_definition_predicates = {
         atom.predicate_id
         for clause in program.clauses
@@ -493,7 +518,11 @@ def _expected_manifest(
         if predicates_by_id[atom.predicate_id].kind
         in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
     }
-    selected_data_range_predicates = data_range_predicates | datatype_definition_predicates
+    selected_data_range_predicates = (
+        data_range_predicates
+        | generated_data_definition_predicates
+        | datatype_definition_predicates
+    )
     complemented_data_range_symbols = {
         predicates_by_id[predicate_id].symbol_id
         for predicate_id in selected_data_range_predicates
@@ -620,6 +649,7 @@ def _expected_manifest(
             and clause.clause_id not in characteristic_clauses
             and clause.clause_id not in data_domain_clauses
             and clause.clause_id not in data_range_clauses
+            and clause.clause_id not in generated_data_definition_clauses
             and clause.clause_id not in datatype_definition_clauses
             and clause.clause_id not in key_clauses
             and clause.clause_id not in data_functionality_clauses
@@ -4397,6 +4427,44 @@ def test_composite_data_ranges_remap_distinct_local_role_and_datatype_domains() 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_composite_generated_data_range_definitions_use_global_namespace() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:z))",
+            "DataPropertyRange(:z DataUnionOf(xsd:string xsd:integer))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:a))",
+            "DataPropertyRange(:a DataUnionOf(xsd:string xsd:integer))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_data_ranges=True,
+        include_generated_data_definitions=True,
+    )
+    namespace = f":data:{composite.logical_fingerprint.hex}:"
+    assert sum(
+        namespace in str(value["display"])
+        for value in cast(list[dict[str, object]], actual["data_range_symbols"])
+        if value["generated"]
+    ) == 1
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_composite_atomic_data_complements_remap_exactly() -> None:
     left = pyowl_core.load_snapshot(
         functional(
@@ -4647,11 +4715,47 @@ def test_complex_data_property_domain_still_defers_the_whole_root() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_complex_data_property_range_still_defers_the_whole_root() -> None:
+def test_generated_data_property_range_definitions_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(DataProperty(:r))",
+            "Declaration(AnnotationProperty(:note))",
             "DataPropertyRange(:p DataUnionOf(xsd:string xsd:integer))",
+            'DataPropertyRange(Annotation(:note "same definition") :p '
+            "DataUnionOf(xsd:string xsd:integer))",
+            "DataPropertyRange(:q DataIntersectionOf("
+            "DataComplementOf(xsd:string) xsd:integer))",
+            'DataPropertyRange(:r DataUnionOf(DataOneOf("alpha") '
+            "DatatypeRestriction(xsd:integer "
+            'xsd:minInclusive "1"^^xsd:integer)))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_data_ranges=True,
+        include_generated_data_definitions=True,
+    )
+    assert sum(
+        bool(value["generated"])
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ) == 3
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_partial_generated_data_range_defers_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "DataPropertyRange(:p DataUnionOf(xsd:string "
+            "DataComplementOf(DataUnionOf(xsd:integer xsd:boolean))))",
         ),
         options=OPTIONS,
     )
@@ -4660,13 +4764,9 @@ def test_complex_data_property_range_still_defers_the_whole_root() -> None:
 
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 1
-    assert all(
-        predicate["kind"]
-        not in {
-            PredicateKind.DATA_ROLE.value,
-            PredicateKind.DATA_RANGE.value,
-        }
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    assert not any(
+        value["generated"]
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
