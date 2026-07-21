@@ -2,12 +2,12 @@
 //!
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
 //! a scalar-compatible named `individual` domain and the exact semantic
-//! `source_literal` domain plus scalar-compatible string, Boolean, integer, and decimal
+//! `source_literal` domain plus scalar-compatible string, Boolean, and exact numeric
 //! `data_value` identities needed by later datatype/ABox phases. It compiles named-only
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
-//! plus named data-property domains, ranges, functionality, string/Boolean/integer/decimal
+//! plus named data-property domains, ranges, functionality, string/Boolean/exact-numeric
 //! positive and negative assertions, named datatype definitions, and named-class keys
 //! into the existing native predicate, clause, fact, and provenance records. Exact
 //! nested annotations participate in source provenance, with segmented anonymous
@@ -71,6 +71,7 @@ const OBJECT_PROPERTY_PREFIX: &str = "object_property:";
 const DATA_PROPERTY_PREFIX: &str = "data_property:";
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
+const OWL_RATIONAL_IRI: &str = "http://www.w3.org/2002/07/owl#rational";
 const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema#";
 const XSD_BOOLEAN_IRI: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 const XSD_DECIMAL_IRI: &str = "http://www.w3.org/2001/XMLSchema#decimal";
@@ -2189,6 +2190,9 @@ fn literal_data_identity_key(
     if datatype_iri == XSD_DECIMAL_IRI {
         return decimal_data_identity_key(lexical, budget).map(Some);
     }
+    if datatype_iri == OWL_RATIONAL_IRI {
+        return rational_literal_data_identity_key(lexical, budget).map(Some);
+    }
     string_data_identity_key(lexical, datatype_iri, language, budget)
 }
 
@@ -2361,6 +2365,75 @@ fn decimal_data_identity_key(lexical: &str, budget: &mut PhaseBudget) -> Encoded
     let exponent = u32::try_from(fraction.len())
         .map_err(|_| EncodedValidationError::resource("decimal scale exceeds u32"))?;
     let denominator = BigInt::from(10_u8).pow(exponent);
+    rational_bigint_data_identity_key(numerator, denominator, budget)
+}
+
+fn rational_literal_data_identity_key(
+    lexical: &str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let character_count = lexical.chars().count();
+    PhaseBudget::count(
+        character_count,
+        budget.limits.max_literal_characters,
+        "literal character count",
+    )?;
+    let bytes = lexical.as_bytes();
+    let (negative, unsigned) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        Some(_) | None => (false, bytes),
+    };
+    budget.claim_work(bytes.len())?;
+    let Some(slash) = unsigned.iter().position(|byte| *byte == b'/') else {
+        return Err(EncodedValidationError::invariant(
+            "rational literal is outside its datatype lexical space",
+        ));
+    };
+    let numerator_digits = &unsigned[..slash];
+    let denominator_digits = &unsigned[slash + 1..];
+    if numerator_digits.is_empty()
+        || denominator_digits.is_empty()
+        || !numerator_digits.iter().all(u8::is_ascii_digit)
+        || !denominator_digits.iter().all(u8::is_ascii_digit)
+    {
+        return Err(EncodedValidationError::invariant(
+            "rational literal is outside its datatype lexical space",
+        ));
+    }
+    PhaseBudget::count(
+        numerator_digits.len(),
+        budget.limits.max_numeric_digits,
+        "numeric numerator digit count",
+    )?;
+    PhaseBudget::count(
+        denominator_digits.len(),
+        budget.limits.max_numeric_digits,
+        "numeric denominator digit count",
+    )?;
+    let temporary_bytes = numerator_digits
+        .len()
+        .checked_add(denominator_digits.len())
+        .and_then(|value| value.checked_mul(4))
+        .and_then(|value| value.checked_add(2))
+        .ok_or_else(|| EncodedValidationError::resource("rational temporary size overflowed"))?;
+    budget.claim_owned(temporary_bytes)?;
+    let numerator_magnitude = BigInt::parse_bytes(numerator_digits, 10).ok_or_else(|| {
+        EncodedValidationError::invariant("rational numerator could not be decoded")
+    })?;
+    let denominator = BigInt::parse_bytes(denominator_digits, 10).ok_or_else(|| {
+        EncodedValidationError::invariant("rational denominator could not be decoded")
+    })?;
+    if denominator.sign() != Sign::Plus {
+        return Err(EncodedValidationError::invariant(
+            "rational literal is outside its datatype lexical space",
+        ));
+    }
+    let numerator = if negative {
+        -numerator_magnitude
+    } else {
+        numerator_magnitude
+    };
     rational_bigint_data_identity_key(numerator, denominator, budget)
 }
 
@@ -9978,6 +10051,39 @@ mod tests {
         let resource = decimal_data_identity_key("0.001", &mut limited).err();
         assert!(resource.is_some_and(|error| {
             error.code == "NATIVE_ENCODED_RESOURCE_LIMIT" && error.message.contains("decimal scale")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn rational_identities_reduce_exactly_and_reject_zero_denominators() -> EncodedResult<()> {
+        let mut budget = PhaseBudget::new(NamedClassPhaseLimits::default());
+        assert_eq!(
+            rational_literal_data_identity_key("6/8", &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"numeric-rational-hex-v1\",\"+3\",\"+4\"]"
+        );
+        assert_eq!(
+            rational_literal_data_identity_key("-0/7", &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"numeric-rational-hex-v1\",\"+0\",\"+1\"]"
+        );
+
+        for lexical in ["1/0", "1/+2", "1/2/3"] {
+            let invalid = rational_literal_data_identity_key(lexical, &mut budget).err();
+            assert!(invalid.is_some_and(|error| {
+                error.code == "NATIVE_ENCODED_INVARIANT"
+                    && error.message.contains("datatype lexical space")
+            }));
+        }
+
+        let limits = NamedClassPhaseLimits {
+            max_numeric_digits: 2,
+            ..NamedClassPhaseLimits::default()
+        };
+        let mut limited = PhaseBudget::new(limits);
+        let resource = rational_literal_data_identity_key("1/100", &mut limited).err();
+        assert!(resource.is_some_and(|error| {
+            error.code == "NATIVE_ENCODED_RESOURCE_LIMIT"
+                && error.message.contains("denominator digit count")
         }));
         Ok(())
     }
