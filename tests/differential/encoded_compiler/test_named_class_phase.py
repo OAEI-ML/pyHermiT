@@ -1661,6 +1661,24 @@ def test_builtin_restrictions_and_cardinalities_reduce_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_reduced_restriction_disjoint_duplicates_force_empty_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:p))",
+            "DisjointClasses(ObjectMinCardinality(0 :p :A) "
+            "ObjectMaxCardinality(2 :p owl:Nothing))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=1)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_reducible_restrictions_require_retained_inputs() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(

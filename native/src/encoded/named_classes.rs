@@ -6089,19 +6089,25 @@ fn named_disjoint_classes<B: ByteSource>(
         .try_reserve_exact(classes.len())
         .map_err(|_| EncodedValidationError::resource("live disjoint-class allocation failed"))?;
     for (literal, expression) in classes {
-        let key = canonical::canonical_node_key(model, expression, scope_maps, budget)?;
-        budget.claim_owned(key.len())?;
+        let key = normalized_class_literal_key(
+            model,
+            class_domain,
+            literal,
+            expression,
+            scope_maps,
+            budget,
+        )?;
         keyed.push((key, literal, expression));
     }
     budget.claim_work(sort_work(keyed.len()))?;
     keyed.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let mut live = Vec::new();
+    let mut live = Vec::<(ClassLiteral, Vec<u8>)>::new();
     let mut edges = Vec::new();
     budget.claim_owned(
         keyed
             .len()
-            .checked_mul(size_of::<(ClassLiteral, NodeId)>())
+            .checked_mul(size_of::<(ClassLiteral, Vec<u8>)>())
             .and_then(|value| value.checked_add(keyed.len().checked_mul(size_of::<RawEdge>())?))
             .ok_or_else(|| {
                 EncodedValidationError::resource("normalized disjoint-class allocation overflowed")
@@ -6140,7 +6146,7 @@ fn named_disjoint_classes<B: ByteSource>(
                 });
             }
         } else if literal.negative || literal.class_id != nothing {
-            live.push((literal, keyed[index].2));
+            live.push((literal, std::mem::take(&mut keyed[index].0)));
         }
         index = end;
     }
@@ -6181,7 +6187,7 @@ fn named_disjoint_classes<B: ByteSource>(
     }
 
     let disjoint = if live.len() >= 2 {
-        let guard_digest = disjoint_guard_digest_nodes(model, &live, scope_maps, budget)?;
+        let guard_digest = disjoint_guard_digest_keys(&live, budget)?;
         let mut literals = Vec::new();
         budget.claim_owned(
             live.len()
@@ -6207,6 +6213,36 @@ fn named_disjoint_classes<B: ByteSource>(
         disjoint,
         provenance,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalized_class_literal_key<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    class_domain: &DecodedSymbolDomain,
+    literal: ClassLiteral,
+    expression: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    if literal.negative {
+        let key = canonical::canonical_node_key(model, expression, scope_maps, budget)?;
+        budget.claim_owned(key.len())?;
+        return Ok(key);
+    }
+    let source = &class_domain
+        .values
+        .get(usize::try_from(literal.class_id).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("normalized class literal ID is dangling")
+        })?
+        .key;
+    budget.claim_owned(source.len())?;
+    let mut key = Vec::new();
+    key.try_reserve_exact(source.len()).map_err(|_| {
+        EncodedValidationError::resource("normalized class literal key allocation failed")
+    })?;
+    key.extend_from_slice(source);
+    Ok(key)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11947,19 +11983,16 @@ fn push_u32(
     Ok(())
 }
 
-fn disjoint_guard_digest_nodes<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    classes: &[(ClassLiteral, NodeId)],
-    scope_maps: &[AnonymousScopeMap],
+fn disjoint_guard_digest_keys(
+    classes: &[(ClassLiteral, Vec<u8>)],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<[u8; 32]> {
     let mut digest = Sha256::new();
     digest.update(DISJOINT_GUARD_DOMAIN);
     budget.claim_work(DISJOINT_GUARD_DOMAIN.len())?;
-    for (_, identifier) in classes {
-        let key = canonical::canonical_node_key(model, *identifier, scope_maps, budget)?;
+    for (_, key) in classes {
         budget.claim_work(key.len())?;
-        digest.update(&key);
+        digest.update(key);
     }
     Ok(digest.finalize().into())
 }
