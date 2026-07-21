@@ -2407,6 +2407,86 @@ def test_generated_disjoint_unions_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_recursive_generated_disjoint_unions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(Class(:U))",
+            "Declaration(Class(:V))",
+            "Declaration(AnnotationProperty(:note))",
+            "DisjointUnion(:U ObjectIntersectionOf(:A "
+            "ObjectUnionOf(:B :C)) :D)",
+            'DisjointUnion(Annotation(:note "same recursive definitions") :U '
+            "ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) :D)",
+            "DisjointUnion(:V ObjectUnionOf(:A :B) :C)",
+            "SubClassOf(ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) :D)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=4)
+    assert sum(
+        bool(value["generated"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    ) == 7
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_recursive_disjoint_unions_remap_composite_slices_exactly() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(Class(:D))",
+        "Declaration(Class(:E))",
+        "Declaration(Class(:U))",
+        "Declaration(Class(:V))",
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "DisjointUnion(:U ObjectIntersectionOf(:A "
+            "ObjectUnionOf(:B :C)) :D)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "DisjointUnion(:V ObjectIntersectionOf(:A "
+            "ObjectUnionOf(:B :C)) :E)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(composite, compiled_roots=2)
+    generated = [
+        value
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ]
+    assert len(generated) == 6
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert all(namespace in str(value["display"]) for value in generated)
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -2414,7 +2494,8 @@ def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
             "Declaration(Class(:B))",
             "Declaration(Class(:U))",
             "Declaration(ObjectProperty(:p))",
-            "DisjointUnion(:U :A ObjectSomeValuesFrom(:p :B))",
+            "DisjointUnion(:U ObjectIntersectionOf(:A :B) "
+            "ObjectSomeValuesFrom(:p :B))",
         ),
         options=OPTIONS,
     )
@@ -2426,7 +2507,11 @@ def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
     assert not any(
         value["generated"]
         or str(value["display"]).startswith(
-            ("ObjectUnionOf:", "ObjectSomeValuesFrom:")
+            (
+                "ObjectIntersectionOf:",
+                "ObjectUnionOf:",
+                "ObjectSomeValuesFrom:",
+            )
         )
         for value in cast(
             list[dict[str, object]], manifest["class_expression_symbols"]

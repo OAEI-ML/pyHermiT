@@ -3833,18 +3833,14 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
     if reducible_class_boolean_operands(model, symbols, expressions, false, 0, budget)?.is_some() {
         return Ok(());
     }
-    let mut keyed = Vec::<(Vec<u8>, AtomicClassSelection)>::new();
-    budget.claim_owned(
-        expressions
-            .len()
-            .checked_mul(size_of::<(Vec<u8>, AtomicClassSelection)>())
-            .ok_or_else(|| {
-                EncodedValidationError::resource("disjoint-union definition allocation overflowed")
-            })?,
+    let member_depth = child_expression_depth(0, "class-expression depth overflowed")?;
+    PhaseBudget::count(
+        member_depth,
+        budget.limits.max_canonical_depth,
+        "class-expression depth",
     )?;
-    keyed.try_reserve_exact(expressions.len()).map_err(|_| {
-        EncodedValidationError::resource("disjoint-union definition allocation failed")
-    })?;
+    let mut normalized_members = Vec::new();
+    let mut pending = Vec::new();
     for item_index in expressions.items() {
         budget.claim_work(1)?;
         let item = required_component(model.item(item_index)?, "disjoint-union member")?;
@@ -3853,87 +3849,68 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
                 "disjoint-union member did not resolve to a node",
             ));
         };
-        if !stable_class_literal_expression(model, symbols, identifier, budget)? {
+        let Some(term) = normalized_class_term(
+            model,
+            symbols,
+            identifier,
+            false,
+            member_depth,
+            scope_maps,
+            budget,
+        )?
+        else {
             return Ok(());
+        };
+        if let NormalizedClassTerm::Boolean(boolean) = &term {
+            let _generated_key = atomize_normalized_class_boolean(
+                boolean.clone(),
+                Some(identifier),
+                DefinitionPolarity::Negative,
+                namespace,
+                &mut pending,
+                budget,
+            )?;
         }
-        let selection =
-            atomic_class_selection(model, symbols, identifier, budget)?.ok_or_else(|| {
-                EncodedValidationError::invariant("stable disjoint-union member became unsupported")
-            })?;
-        if atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?
-            || atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?
-            || keyed
-                .iter()
-                .any(|(_, known)| atomic_class_selections_match(*known, selection))
-        {
-            return Ok(());
-        }
-        let key = canonical::canonical_node_key(model, selection.expression, scope_maps, budget)?;
-        keyed.push((key, selection));
+        push_normalized_class_term(&mut normalized_members, term, budget)?;
     }
-    if keyed.len() < 2 {
+    let Some(union) = normalized_class_boolean_term(symbols, normalized_members, false, budget)?
+    else {
         return Ok(());
-    }
-    budget.claim_work(sort_work(keyed.len()))?;
-    keyed.sort_by(|left, right| left.0.cmp(&right.0));
-    if keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-        return Ok(());
-    }
-    let expression_key = synthetic_boolean_key(
-        OBJECT_UNION_OF_TAG,
-        keyed.iter().map(|(key, _)| key.as_slice()),
-        keyed.len(),
-        budget,
-    )?;
-    let mut expression_symbols = Vec::new();
-    let expression_seed =
-        class_expression_symbol_seed(&expression_key, OBJECT_UNION_OF_TAG, budget)?;
-    push_class_expression_symbol_seed(&mut expression_symbols, expression_seed, budget)?;
-    let (generated_key, generated_display) = generated_class_symbol(
-        namespace,
-        &expression_key,
-        DefinitionPolarity::Positive,
-        budget,
-    )?;
-    budget.claim_owned(
-        size_of::<NodeId>()
-            .checked_add(
-                keyed
-                    .len()
-                    .checked_mul(size_of::<ClassBooleanOperand>())
-                    .ok_or_else(|| {
-                        EncodedValidationError::resource(
-                            "synthetic class Boolean operands overflowed",
-                        )
-                    })?,
-            )
-            .ok_or_else(|| {
-                EncodedValidationError::resource("synthetic class Boolean ownership overflowed")
-            })?,
-    )?;
-    let mut operands = Vec::new();
-    operands.try_reserve_exact(keyed.len()).map_err(|_| {
-        EncodedValidationError::resource("synthetic class Boolean operand allocation failed")
-    })?;
-    operands.extend(
-        keyed
-            .iter()
-            .map(|(_, selection)| ClassBooleanOperand::Atomic(*selection)),
-    );
-    let definition = ClassBooleanDefinition {
-        expressions: Vec::new(),
-        roots: vec![root],
-        expression_key,
-        expression_symbols,
-        intersection: false,
-        operands,
-        polarity: DefinitionPolarity::Positive,
-        generated_key,
-        generated_display,
-        provenance: Vec::new(),
     };
+    let NormalizedClassTerm::Boolean(union) = union else {
+        return Ok(());
+    };
+    let previous_count = pending.len();
+    let outer_key = atomize_normalized_class_boolean(
+        union,
+        None,
+        DefinitionPolarity::Positive,
+        namespace,
+        &mut pending,
+        budget,
+    )?;
+    let new_count = pending.len();
+    let outer = pending.last_mut().ok_or_else(|| {
+        EncodedValidationError::invariant("recursive disjoint-union definition disappeared")
+    })?;
+    if new_count <= previous_count
+        || outer.generated_key != outer_key
+        || outer.polarity != DefinitionPolarity::Positive
+    {
+        return Err(EncodedValidationError::invariant(
+            "recursive disjoint-union outer definition changed",
+        ));
+    }
+    budget.claim_owned(size_of::<NodeId>())?;
+    outer.roots.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("recursive disjoint-union root allocation failed")
+    })?;
+    outer.roots.push(root);
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
-    retain_class_boolean_definition(definitions, definition, provenance, budget)
+    for definition in pending {
+        retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+    }
+    Ok(())
 }
 
 fn synthetic_boolean_key<'a>(
@@ -4204,9 +4181,7 @@ fn normalized_class_term<B: ByteSource>(
         budget.limits.max_canonical_depth,
         "class-expression depth",
     )?;
-    let mut operands = Vec::<NormalizedClassTerm>::new();
-    let mut absorbing = None;
-    let mut identity = None;
+    let mut terms = Vec::<NormalizedClassTerm>::new();
     for item_index in source_operands.items() {
         budget.claim_work(1)?;
         let item = required_component(model.item(item_index)?, "recursive class Boolean operand")?;
@@ -4227,6 +4202,21 @@ fn normalized_class_term<B: ByteSource>(
         else {
             return Ok(None);
         };
+        push_normalized_class_term(&mut terms, term, budget)?;
+    }
+    normalized_class_boolean_term(symbols, terms, intersection, budget)
+}
+
+fn normalized_class_boolean_term(
+    symbols: &SymbolPhase,
+    terms: Vec<NormalizedClassTerm>,
+    intersection: bool,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<NormalizedClassTerm>> {
+    let mut operands = Vec::<NormalizedClassTerm>::new();
+    let mut absorbing = None;
+    let mut identity = None;
+    for term in terms {
         if let NormalizedClassTerm::Atomic(atomic) = &term {
             let is_thing =
                 atomic_class_selection_has_display(symbols, atomic.selection, THING_DISPLAY)?;
@@ -4484,34 +4474,6 @@ fn atomize_normalized_class_boolean(
         provenance: Vec::new(),
     });
     Ok(returned_key)
-}
-
-fn stable_class_literal_expression<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    symbols: &SymbolPhase,
-    identifier: NodeId,
-    budget: &mut PhaseBudget,
-) -> EncodedResult<bool> {
-    let node = model.node(identifier)?;
-    match node.tag() {
-        ENTITY_TAG => Ok(true),
-        OBJECT_ONE_OF_TAG => is_named_nominal(model, symbols, identifier, budget),
-        OBJECT_COMPLEMENT_OF_TAG => {
-            if node.field_count() != 1 {
-                return Err(EncodedValidationError::invariant(
-                    "class complement no longer has schema-1 shape",
-                ));
-            }
-            let operand = node_field(model, node, 0, "class-complement operand")?;
-            let operand_node = model.node(operand)?;
-            match operand_node.tag() {
-                ENTITY_TAG => Ok(true),
-                OBJECT_ONE_OF_TAG => is_named_nominal(model, symbols, operand, budget),
-                _ => Ok(false),
-            }
-        }
-        _ => Ok(false),
-    }
 }
 
 fn retain_class_boolean_definition(
@@ -5317,13 +5279,19 @@ fn class_signature<B: ByteSource>(
                             "disjoint-union member did not resolve to a node",
                         ));
                     };
-                    let selection = atomic_class_selection(model, symbols, identifier, budget)?
-                        .ok_or_else(|| {
-                            EncodedValidationError::invariant(
-                                "validated disjoint-union member became unsupported",
-                            )
-                        })?;
-                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                    if let Some(selection) =
+                        atomic_class_selection(model, symbols, identifier, budget)?
+                    {
+                        push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                    } else if class_boolean_definition(
+                        definitions,
+                        identifier,
+                        DefinitionPolarity::Negative,
+                    )
+                    .is_none()
+                    {
+                        continue 'root_selection;
+                    }
                 }
             }
             RootHandler::ObjectPropertyDomain | RootHandler::ObjectPropertyRange
@@ -9854,18 +9822,15 @@ fn named_disjoint_union<B: ByteSource>(
                 "disjoint-union member did not resolve to a node",
             ));
         };
-        let selection =
-            atomic_class_selection(model, symbols, identifier, budget)?.ok_or_else(|| {
-                EncodedValidationError::invariant(
-                    "validated disjoint-union member became unsupported",
-                )
-            })?;
-        let Some((class_id, negative)) = atomic_class_expression_literal(
+        let selection = atomic_class_selection(model, symbols, identifier, budget)?;
+        let Some((class_id, negative)) = class_expression_literal_with_definitions(
             model,
             symbols,
             class_domain,
             signature,
             identifier,
+            DefinitionPolarity::Negative,
+            definitions,
             scope_maps,
             budget,
         )?
@@ -9885,7 +9850,7 @@ fn named_disjoint_union<B: ByteSource>(
             model,
             class_domain,
             literal,
-            selection.expression,
+            selection.map_or(identifier, |selection| selection.expression),
             scope_maps,
             budget,
         )?;
