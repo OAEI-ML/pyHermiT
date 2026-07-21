@@ -45,6 +45,7 @@ const NAMED_CLASS_PHASE_SCHEMA_VERSION: u16 = 1;
 const ENTITY_TAG: u16 = 2;
 const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
 const LITERAL_TAG: u16 = 4;
+const DATA_COMPLEMENT_OF_TAG: u16 = 23;
 const OBJECT_COMPLEMENT_OF_TAG: u16 = 32;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
@@ -71,6 +72,7 @@ const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
 const DISJOINT_GUARD_DOMAIN: &[u8] = b"pyhermit:linear-disjoint-classes:v1\0";
 const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
 const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
+const RDFS_LITERAL_DISPLAY: &str = "datatype:http://www.w3.org/2000/01/rdf-schema#Literal";
 const NAMED_INDIVIDUAL_PREFIX: &str = "named_individual:";
 const ANONYMOUS_INDIVIDUAL_PREFIX: &str = "anonymous:";
 const OBJECT_PROPERTY_PREFIX: &str = "object_property:";
@@ -586,30 +588,36 @@ struct NormalizedDataDomain {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DataRangeLiteral {
+    range_id: u32,
+    negative: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RawDataRange {
     role_id: u32,
-    range_id: u32,
+    range: DataRangeLiteral,
     provenance: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct NormalizedDataRange {
     role_id: u32,
-    range_id: u32,
+    range: DataRangeLiteral,
     provenance: Vec<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RawDatatypeDefinition {
-    left_range: u32,
-    right_range: u32,
+    left_range: DataRangeLiteral,
+    right_range: DataRangeLiteral,
     provenance: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct NormalizedDatatypeDefinition {
-    left_range: u32,
-    right_range: u32,
+    left_range: DataRangeLiteral,
+    right_range: DataRangeLiteral,
     provenance: Vec<[u8; 32]>,
 }
 
@@ -907,7 +915,13 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         scope_maps,
         &mut budget,
     )?;
-    let data_range_domain = named_data_range_domain(symbols, &mut budget)?;
+    let data_range_domain = named_data_range_domain(
+        model,
+        symbols,
+        data_roles.is_some(),
+        scope_maps,
+        &mut budget,
+    )?;
     let declared_individual_ids = declared_individual_ids(symbols, &mut budget)?;
     let (individual_domain, individual_signature) = individual_signature(
         model,
@@ -941,6 +955,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     );
     let thing = class_id_by_display(&class_domain, THING_DISPLAY)?;
     let nothing = class_id_by_display(&class_domain, NOTHING_DISPLAY)?;
+    let top_data_range = data_range_id_by_display(&data_range_domain, RDFS_LITERAL_DISPLAY)?;
     let scalar_object_role_count = object_roles.map_or_else(
         || scalar_object_role_count(&symbols.entity_domain),
         |roles| Ok(roles.object_role_domain.values.len()),
@@ -1728,6 +1743,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         predicate_by_data_role,
         predicate_by_negative_data_role,
         predicate_by_data_range,
+        predicate_by_negative_data_range,
         guard_predicates,
         named_predicate,
         equality_predicate,
@@ -1754,6 +1770,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &inequalities,
         thing,
         nothing,
+        top_data_range,
         !individual_domain.values.is_empty(),
         !named_individuals.is_empty(),
         &mut budget,
@@ -1778,11 +1795,13 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &facts,
         thing,
         nothing,
+        top_data_range,
         &predicate_by_class,
         &predicate_by_negative_class,
         &predicate_by_object_role,
         &predicate_by_data_role,
         &predicate_by_data_range,
+        &predicate_by_negative_data_range,
         equality_predicate,
         data_equality_predicate,
         data_inequality_predicate,
@@ -2325,17 +2344,20 @@ fn atomic_complement_operand<B: ByteSource>(
     Ok(entity.display.starts_with("class:").then_some(entity_id))
 }
 
-fn named_data_range_domain(
+fn named_data_range_domain<B: ByteSource>(
+    model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    has_data_roles: bool,
+    scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<DecodedSymbolDomain> {
-    let mut values = Vec::new();
+    let mut pending = Vec::new();
     for entity in &symbols.entity_domain.values {
         budget.claim_work(1)?;
         if !entity.display.starts_with("datatype:") {
             continue;
         }
-        let following = values.len().checked_add(1).ok_or_else(|| {
+        let following = pending.len().checked_add(1).ok_or_else(|| {
             EncodedValidationError::resource("named data-range symbol count overflowed")
         })?;
         PhaseBudget::count(
@@ -2346,24 +2368,141 @@ fn named_data_range_domain(
         budget.claim_owned(size_of::<DecodedSymbolValue>())?;
         budget.claim_owned(entity.key.len())?;
         budget.claim_owned(entity.display.len())?;
-        values.try_reserve(1).map_err(|_| {
+        pending.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("named data-range symbol allocation failed")
         })?;
-        let identifier = u32::try_from(values.len()).map_err(|_| {
-            EncodedValidationError::resource("named data-range symbol ID exceeds u32")
-        })?;
-        values.push(DecodedSymbolValue {
-            identifier,
+        pending.push(DecodedSymbolValue {
+            identifier: 0,
             key: entity.key.clone(),
             display: entity.display.clone(),
             generated: entity.generated,
             query_local: entity.query_local,
         });
     }
+
+    let mut complements = Vec::new();
+    for root in &symbols.roots {
+        budget.claim_work(1)?;
+        let range = match root.handler {
+            RootHandler::DataPropertyRange if has_data_roles => node_field(
+                model,
+                model.node(root.node)?,
+                1,
+                "data-property range value",
+            )?,
+            RootHandler::DatatypeDefinition => {
+                node_field(model, model.node(root.node)?, 1, "datatype defining range")?
+            }
+            _ => continue,
+        };
+        if atomic_data_complement_operand(model, symbols, range)?.is_some() {
+            budget.claim_owned(size_of::<NodeId>())?;
+            complements.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource("data-complement selection allocation failed")
+            })?;
+            complements.push(range);
+        }
+    }
+    budget.claim_work(sort_work(complements.len()))?;
+    complements.sort_unstable();
+    complements.dedup();
+    for identifier in complements {
+        let following = pending.len().checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("data-range symbol count overflowed")
+        })?;
+        PhaseBudget::count(
+            following,
+            budget.limits.max_data_range_symbols,
+            "data-range symbol count",
+        )?;
+        let key = canonical::canonical_node_key(model, identifier, scope_maps, budget)?;
+        budget.claim_work(key.len())?;
+        let digest = crate::model::hex(&Sha256::digest(&key));
+        let display_len = "DataComplementOf:"
+            .len()
+            .checked_add(digest.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("data-complement display length overflowed")
+            })?;
+        budget.claim_owned(size_of::<DecodedSymbolValue>())?;
+        budget.claim_owned(display_len)?;
+        let mut display = String::new();
+        display.try_reserve_exact(display_len).map_err(|_| {
+            EncodedValidationError::resource("data-complement display allocation failed")
+        })?;
+        display.push_str("DataComplementOf:");
+        display.push_str(&digest);
+        pending.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("data-complement symbol allocation failed")
+        })?;
+        pending.push(DecodedSymbolValue {
+            identifier: 0,
+            key,
+            display,
+            generated: false,
+            query_local: false,
+        });
+    }
+
+    budget.claim_work(sort_work(pending.len()))?;
+    pending.sort_by(|left, right| left.key.cmp(&right.key));
+    let mut values = Vec::<DecodedSymbolValue>::new();
+    values.try_reserve_exact(pending.len()).map_err(|_| {
+        EncodedValidationError::resource("data-range symbol result allocation failed")
+    })?;
+    for mut candidate in pending {
+        if let Some(previous) = values.last() {
+            if previous.key == candidate.key {
+                if previous.display != candidate.display
+                    || previous.generated != candidate.generated
+                    || previous.query_local != candidate.query_local
+                {
+                    return Err(EncodedValidationError::invariant(
+                        "data-range symbol key has conflicting metadata",
+                    ));
+                }
+                continue;
+            }
+        }
+        candidate.identifier = u32::try_from(values.len())
+            .map_err(|_| EncodedValidationError::resource("data-range symbol ID exceeds u32"))?;
+        values.push(candidate);
+    }
     Ok(DecodedSymbolDomain {
         kind: SymbolKind::DataRange,
         values,
     })
+}
+
+fn atomic_data_complement_operand<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+) -> EncodedResult<Option<u32>> {
+    let node = model.node(identifier)?;
+    if node.tag() != DATA_COMPLEMENT_OF_TAG || node.field_count() != 1 {
+        return Ok(None);
+    }
+    let operand = node_field(model, node, 0, "data-complement operand")?;
+    if model.node(operand)?.tag() != ENTITY_TAG {
+        return Ok(None);
+    }
+    let entity_id = symbols.entity_symbol_for_node(operand).ok_or_else(|| {
+        EncodedValidationError::invariant(
+            "data-complement operand is absent from the reachable entity mapping",
+        )
+    })?;
+    let entity = symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("data-complement operand entity ID is dangling")
+        })?;
+    Ok(
+        (entity.display.starts_with("datatype:") && entity.display != RDFS_LITERAL_DISPLAY)
+            .then_some(entity_id),
+    )
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -4486,6 +4625,19 @@ fn class_id_by_display(domain: &DecodedSymbolDomain, display: &str) -> EncodedRe
         })
 }
 
+fn data_range_id_by_display(domain: &DecodedSymbolDomain, display: &str) -> EncodedResult<u32> {
+    domain
+        .values
+        .iter()
+        .find(|value| value.display == display)
+        .map(|value| value.identifier)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "data-range signature is missing the universal data range",
+            )
+        })
+}
+
 fn named_subclass<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
@@ -4889,16 +5041,50 @@ fn named_data_range<B: ByteSource>(
     }
     let property = node_field(model, node, 0, "data-property range role")?;
     let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
-    let range = node_field(model, node, 1, "data-property range value")?;
-    let Some(range_id) = named_data_range_id(model, symbols, data_range_domain, range, budget)?
+    let range_node = node_field(model, node, 1, "data-property range value")?;
+    let Some(range) =
+        atomic_data_range_literal(model, symbols, data_range_domain, range_node, budget)?
     else {
         return Ok(None);
     };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
     Ok(Some(RawDataRange {
         role_id,
-        range_id,
+        range,
         provenance,
+    }))
+}
+
+fn atomic_data_range_literal<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    data_range_domain: &DecodedSymbolDomain,
+    range: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<DataRangeLiteral>> {
+    if model.node(range)?.tag() == ENTITY_TAG {
+        return named_data_range_id(model, symbols, data_range_domain, range, budget).map(
+            |value| {
+                value.map(|range_id| DataRangeLiteral {
+                    range_id,
+                    negative: false,
+                })
+            },
+        );
+    }
+    if atomic_data_complement_operand(model, symbols, range)?.is_none() {
+        return Ok(None);
+    }
+    let operand = node_field(model, model.node(range)?, 0, "data-complement operand")?;
+    let range_id = named_data_range_id(model, symbols, data_range_domain, operand, budget)?
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "data-complement operand is absent from the named data-range domain",
+            )
+        })?;
+    Ok(Some(DataRangeLiteral {
+        range_id,
+        negative: true,
     }))
 }
 
@@ -4963,13 +5149,17 @@ fn named_datatype_definition<B: ByteSource>(
         ));
     }
     let datatype = node_field(model, node, 0, "defined datatype")?;
-    let left_range = named_data_range_id(model, symbols, data_range_domain, datatype, budget)?
+    let left_range_id = named_data_range_id(model, symbols, data_range_domain, datatype, budget)?
         .ok_or_else(|| {
-            EncodedValidationError::invariant("datatype-definition subject is not a named datatype")
-        })?;
+        EncodedValidationError::invariant("datatype-definition subject is not a named datatype")
+    })?;
+    let left_range = DataRangeLiteral {
+        range_id: left_range_id,
+        negative: false,
+    };
     let data_range = node_field(model, node, 1, "datatype defining range")?;
     let Some(right_range) =
-        named_data_range_id(model, symbols, data_range_domain, data_range, budget)?
+        atomic_data_range_literal(model, symbols, data_range_domain, data_range, budget)?
     else {
         return Ok(None);
     };
@@ -6166,7 +6356,7 @@ fn normalize_data_ranges(
     for range in raw {
         budget.claim_work(1)?;
         if let Some(previous) = normalized.last_mut() {
-            if previous.role_id == range.role_id && previous.range_id == range.range_id {
+            if previous.role_id == range.role_id && previous.range == range.range {
                 if previous.provenance.last() != Some(&range.provenance) {
                     budget.claim_owned(size_of::<[u8; 32]>())?;
                     previous.provenance.try_reserve(1).map_err(|_| {
@@ -6190,7 +6380,7 @@ fn normalize_data_ranges(
         provenance.push(range.provenance);
         normalized.push(NormalizedDataRange {
             role_id: range.role_id,
-            range_id: range.range_id,
+            range: range.range,
             provenance,
         });
     }
@@ -6773,6 +6963,7 @@ enum PredicateOwner {
     DataRole(u32),
     NegatedDataRole(u32),
     DataRange(u32),
+    NegatedDataRange(u32),
     Equality(TermSort),
     Inequality(TermSort),
     OrderingGuard,
@@ -6801,6 +6992,7 @@ type FrozenPredicates = (
     ObjectPredicateIndex,
     ObjectPredicateIndex,
     ObjectPredicateIndex,
+    PredicateIndex,
     PredicateIndex,
     GuardPredicateIndex,
     Option<u32>,
@@ -6831,6 +7023,7 @@ fn freeze_predicates(
     inequalities: &[NormalizedInequalityFact],
     thing: u32,
     nothing: u32,
+    top_data_range: u32,
     has_individuals: bool,
     has_named_individuals: bool,
     budget: &mut PhaseBudget,
@@ -7208,25 +7401,53 @@ fn freeze_predicates(
         });
     }
     let mut data_range_ids = Vec::new();
+    let mut negative_data_range_ids = Vec::new();
     for range in data_ranges {
         push_u32(
             &mut data_range_ids,
-            range.range_id,
+            range.range.range_id,
             "predicate data range",
             budget,
         )?;
+        if range.range.negative {
+            push_u32(
+                &mut negative_data_range_ids,
+                range.range.range_id,
+                "negated predicate data range",
+                budget,
+            )?;
+        }
     }
     for definition in datatype_definitions {
         push_u32(
             &mut data_range_ids,
-            definition.left_range,
+            definition.left_range.range_id,
             "predicate defined datatype",
             budget,
         )?;
         push_u32(
             &mut data_range_ids,
-            definition.right_range,
+            definition.right_range.range_id,
             "predicate datatype defining range",
+            budget,
+        )?;
+        for range in [definition.left_range, definition.right_range]
+            .into_iter()
+            .filter(|range| range.negative)
+        {
+            push_u32(
+                &mut negative_data_range_ids,
+                range.range_id,
+                "negated predicate data range",
+                budget,
+            )?;
+        }
+    }
+    if !negative_data_range_ids.is_empty() {
+        push_u32(
+            &mut data_range_ids,
+            top_data_range,
+            "predicate universal data range",
             budget,
         )?;
     }
@@ -7243,6 +7464,21 @@ fn freeze_predicates(
         ordered.push(PendingPredicate {
             key,
             owner: PredicateOwner::DataRange(range_id),
+        });
+    }
+    budget.claim_work(sort_work(negative_data_range_ids.len()))?;
+    negative_data_range_ids.sort_unstable();
+    negative_data_range_ids.dedup();
+    for range_id in negative_data_range_ids {
+        let key = negated_data_range_predicate_key(range_id);
+        budget.claim_owned(size_of::<PendingPredicate>())?;
+        budget.claim_owned(key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("negated data-range predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::NegatedDataRange(range_id),
         });
     }
     for disjoint in disjoints {
@@ -7287,6 +7523,7 @@ fn freeze_predicates(
     let mut predicate_by_data_role = Vec::new();
     let mut predicate_by_negative_data_role = Vec::new();
     let mut predicate_by_data_range = Vec::new();
+    let mut predicate_by_negative_data_range = Vec::new();
     let mut guard_predicates = Vec::new();
     let mut named_predicate = None;
     let mut equality_predicate = None;
@@ -7461,6 +7698,20 @@ fn freeze_predicates(
                 });
                 predicate_by_data_range.push((range_id, predicate_id));
             }
+            PredicateOwner::NegatedDataRange(range_id) => {
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::NegatedDataRange,
+                    argument_sorts: vec![TermSort::Data],
+                    symbol_id: Some(range_id),
+                    role_id: None,
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: Vec::new(),
+                    internal_key: None,
+                });
+                predicate_by_negative_data_range.push((range_id, predicate_id));
+            }
             PredicateOwner::Equality(sort) => {
                 budget.claim_owned(size_of::<TermSort>())?;
                 predicates.push(DecodedPredicate {
@@ -7555,6 +7806,7 @@ fn freeze_predicates(
     predicate_by_data_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_negative_data_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_data_range.sort_unstable_by_key(|(range_id, _)| *range_id);
+    predicate_by_negative_data_range.sort_unstable_by_key(|(range_id, _)| *range_id);
     guard_predicates.sort_unstable_by_key(|(digest, sequence, _)| (*digest, *sequence));
     Ok((
         predicates,
@@ -7565,6 +7817,7 @@ fn freeze_predicates(
         predicate_by_data_role,
         predicate_by_negative_data_role,
         predicate_by_data_range,
+        predicate_by_negative_data_range,
         guard_predicates,
         named_predicate,
         equality_predicate,
@@ -7589,11 +7842,13 @@ fn freeze_clauses(
     facts: &[NormalizedFact],
     thing: u32,
     nothing: u32,
+    top_data_range: u32,
     predicate_by_class: &[(u32, u32)],
     predicate_by_negative_class: &[(u32, u32)],
     predicate_by_object_role: &[(u32, u32)],
     predicate_by_data_role: &[(u32, u32)],
     predicate_by_data_range: &[(u32, u32)],
+    predicate_by_negative_data_range: &[(u32, u32)],
     equality_predicate: Option<u32>,
     data_equality_predicate: Option<u32>,
     data_inequality_predicate: Option<u32>,
@@ -7671,6 +7926,31 @@ fn freeze_clauses(
     budget.claim_work(sort_work(negative_class_ids.len()))?;
     negative_class_ids.sort_unstable();
     negative_class_ids.dedup();
+    let mut negative_data_range_ids = Vec::new();
+    for range in data_ranges.iter().filter(|range| range.range.negative) {
+        push_u32(
+            &mut negative_data_range_ids,
+            range.range.range_id,
+            "complement clause data range",
+            budget,
+        )?;
+    }
+    for definition in datatype_definitions {
+        for range in [definition.left_range, definition.right_range]
+            .into_iter()
+            .filter(|range| range.negative)
+        {
+            push_u32(
+                &mut negative_data_range_ids,
+                range.range_id,
+                "complement clause data range",
+                budget,
+            )?;
+        }
+    }
+    budget.claim_work(sort_work(negative_data_range_ids.len()))?;
+    negative_data_range_ids.sort_unstable();
+    negative_data_range_ids.dedup();
     let datatype_definition_clauses =
         datatype_definitions
             .iter()
@@ -7694,6 +7974,7 @@ fn freeze_clauses(
         .and_then(|value| value.checked_add(keys.len()))
         .and_then(|value| value.checked_add(data_functionalities.len()))
         .and_then(|value| value.checked_add(negative_class_ids.len().checked_mul(2)?))
+        .and_then(|value| value.checked_add(negative_data_range_ids.len().checked_mul(2)?))
         .ok_or_else(|| EncodedValidationError::resource("named-class clause count overflowed"))?;
     for disjoint in disjoints {
         let count = disjoint
@@ -7738,6 +8019,31 @@ fn freeze_clauses(
                 &mut ordered,
                 &[thing_predicate],
                 &[positive, negative],
+                bottom_provenance,
+                scalar_predicate_ids,
+                budget,
+            )?;
+        }
+    }
+    if !negative_data_range_ids.is_empty() {
+        let universal = predicate_id(predicate_by_data_range, top_data_range)?;
+        for range_id in negative_data_range_ids {
+            let positive = predicate_id(predicate_by_data_range, range_id)?;
+            let negative = predicate_id(predicate_by_negative_data_range, range_id)?;
+            push_typed_clause(
+                &mut ordered,
+                &[positive, negative],
+                &[],
+                TermSort::Data,
+                bottom_provenance,
+                scalar_predicate_ids,
+                budget,
+            )?;
+            push_typed_clause(
+                &mut ordered,
+                &[universal],
+                &[positive, negative],
+                TermSort::Data,
                 bottom_provenance,
                 scalar_predicate_ids,
                 budget,
@@ -7816,13 +8122,25 @@ fn freeze_clauses(
     }
     for range in data_ranges {
         let role = data_predicate_id(predicate_by_data_role, range.role_id)?;
-        let data_range = predicate_id(predicate_by_data_range, range.range_id)?;
+        let data_range = data_range_literal_predicate_id(
+            predicate_by_data_range,
+            predicate_by_negative_data_range,
+            range.range,
+        )?;
         let provenance = provenance_id(provenance_keys, &range.provenance, false)?;
         push_data_range_clause(&mut ordered, role, data_range, provenance, budget)?;
     }
     for definition in datatype_definitions {
-        let left = predicate_id(predicate_by_data_range, definition.left_range)?;
-        let right = predicate_id(predicate_by_data_range, definition.right_range)?;
+        let left = data_range_literal_predicate_id(
+            predicate_by_data_range,
+            predicate_by_negative_data_range,
+            definition.left_range,
+        )?;
+        let right = data_range_literal_predicate_id(
+            predicate_by_data_range,
+            predicate_by_negative_data_range,
+            definition.right_range,
+        )?;
         let provenance = provenance_id(provenance_keys, &definition.provenance, false)?;
         push_datatype_definition_clause(&mut ordered, left, right, provenance, budget)?;
         push_datatype_definition_clause(&mut ordered, right, left, provenance, budget)?;
@@ -8662,6 +8980,26 @@ fn push_clause(
     scalar_predicate_ids: &[u32],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
+    push_typed_clause(
+        clauses,
+        body_predicates,
+        head_predicates,
+        TermSort::Object,
+        provenance_id,
+        scalar_predicate_ids,
+        budget,
+    )
+}
+
+fn push_typed_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    body_predicates: &[u32],
+    head_predicates: &[u32],
+    sort: TermSort,
+    provenance_id: u32,
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
     let mut body_ids = body_predicates.to_vec();
     let mut head_ids = head_predicates.to_vec();
     budget.claim_owned(
@@ -8696,7 +9034,7 @@ fn push_clause(
         return Ok(());
     }
     let body_count = body_ids.len();
-    let key = rule_key(&body_ids, &head_ids);
+    let key = unary_rule_key(&body_ids, &head_ids, sort);
     budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>())?;
     budget.claim_owned(key.len())?;
     let atom_count = body_ids
@@ -8725,8 +9063,14 @@ fn push_clause(
         key,
         DecodedClause {
             clause_id: 0,
-            body: body_ids.into_iter().map(variable_atom).collect(),
-            head: head_ids.into_iter().map(variable_atom).collect(),
+            body: body_ids
+                .into_iter()
+                .map(|predicate_id| variable_atom_at(predicate_id, 0, sort))
+                .collect(),
+            head: head_ids
+                .into_iter()
+                .map(|predicate_id| variable_atom_at(predicate_id, 0, sort))
+                .collect(),
             provenance_ids: vec![provenance_id],
             join_order: (0..u32::try_from(body_count).map_err(|_| {
                 EncodedValidationError::resource("named-class join order exceeds u32")
@@ -9629,10 +9973,6 @@ fn push_data_functionality_clause(
     Ok(())
 }
 
-fn variable_atom(predicate_id: u32) -> DecodedAtom {
-    variable_atom_at(predicate_id, 0, TermSort::Object)
-}
-
 fn variable_atom_at(predicate_id: u32, index: u32, sort: TermSort) -> DecodedAtom {
     DecodedAtom {
         predicate_id,
@@ -9701,6 +10041,21 @@ fn class_literal_predicate_id(
             positive_index
         },
         class_id,
+    )
+}
+
+fn data_range_literal_predicate_id(
+    positive_index: &[(u32, u32)],
+    negative_index: &[(u32, u32)],
+    range: DataRangeLiteral,
+) -> EncodedResult<u32> {
+    predicate_id(
+        if range.negative {
+            negative_index
+        } else {
+            positive_index
+        },
+        range.range_id,
     )
 }
 
@@ -10099,6 +10454,20 @@ fn named_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
                     EncodedValidationError::invariant("data-range predicate lost its range symbol")
                 })
         }
+        PredicateKind::NegatedDataRange
+            if unary_data
+                && predicate.annotation.is_empty()
+                && predicate.internal_key.is_none() =>
+        {
+            predicate
+                .symbol_id
+                .map(negated_data_range_predicate_key)
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "negated data-range predicate lost its range symbol",
+                    )
+                })
+        }
         PredicateKind::Equality
             if equality_sort.is_some()
                 && predicate.symbol_id.is_none()
@@ -10173,6 +10542,13 @@ fn data_range_predicate_key(range_id: u32) -> Vec<u8> {
     .into_bytes()
 }
 
+fn negated_data_range_predicate_key(range_id: u32) -> Vec<u8> {
+    format!(
+        "{{\"annotation\":[],\"argument_sorts\":[\"data\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"negated_data_range\",\"role_id\":null,\"symbol_id\":{range_id}}}"
+    )
+    .into_bytes()
+}
+
 fn named_individual_predicate_key() -> Vec<u8> {
     b"{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":\"named-individual\",\"kind\":\"named_individual\",\"role_id\":null,\"symbol_id\":null}"
         .to_vec()
@@ -10206,17 +10582,17 @@ fn disjoint_guard_predicate_key(sequence: u32, internal_key: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-fn rule_key(body_predicates: &[u32], head_predicates: &[u32]) -> Vec<u8> {
+fn unary_rule_key(body_predicates: &[u32], head_predicates: &[u32], sort: TermSort) -> Vec<u8> {
     let body = body_predicates
         .iter()
         .copied()
-        .map(atom_json)
+        .map(|predicate_id| unary_atom_json(predicate_id, sort))
         .collect::<Vec<_>>()
         .join(",");
     let head = head_predicates
         .iter()
         .copied()
-        .map(atom_json)
+        .map(|predicate_id| unary_atom_json(predicate_id, sort))
         .collect::<Vec<_>>()
         .join(",");
     format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
@@ -10367,9 +10743,10 @@ fn variable_json(index: u32, sort: TermSort) -> String {
     format!("{{\"index\":{index},\"schema_version\":1,\"sort\":\"{sort}\",\"type\":\"Variable\"}}")
 }
 
-fn atom_json(predicate_id: u32) -> String {
+fn unary_atom_json(predicate_id: u32, sort: TermSort) -> String {
     format!(
-        "{{\"arguments\":[{{\"index\":0,\"schema_version\":1,\"sort\":\"object\",\"type\":\"Variable\"}}],\"predicate_id\":{predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}"
+        "{{\"arguments\":[{}],\"predicate_id\":{predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
+        variable_json(0, sort),
     )
 }
 
@@ -10686,6 +11063,7 @@ fn merge_named_class_phases_impl(
     )?;
     let thing = class_id_by_display(&class_domain, THING_DISPLAY)?;
     let nothing = class_id_by_display(&class_domain, NOTHING_DISPLAY)?;
+    let top_data_range = data_range_id_by_display(&data_range_domain, RDFS_LITERAL_DISPLAY)?;
     let (provenance, provenance_keys) = freeze_provenance(
         &edges,
         &disjoints,
@@ -10714,6 +11092,7 @@ fn merge_named_class_phases_impl(
         predicate_by_data_role,
         predicate_by_negative_data_role,
         predicate_by_data_range,
+        predicate_by_negative_data_range,
         guard_predicates,
         named_predicate,
         equality_predicate,
@@ -10740,6 +11119,7 @@ fn merge_named_class_phases_impl(
         &inequalities,
         thing,
         nothing,
+        top_data_range,
         !individual_domain.values.is_empty(),
         !named_individuals.is_empty(),
         &mut budget,
@@ -10764,11 +11144,13 @@ fn merge_named_class_phases_impl(
         &facts,
         thing,
         nothing,
+        top_data_range,
         &predicate_by_class,
         &predicate_by_negative_class,
         &predicate_by_object_role,
         &predicate_by_data_role,
         &predicate_by_data_range,
+        &predicate_by_negative_data_range,
         equality_predicate,
         data_equality_predicate,
         data_inequality_predicate,
@@ -11611,11 +11993,14 @@ fn merge_normalized_sources(
                     ));
                 }
                 let role_id = remap_data_role(source_roles, merged_roles, range.role_id, budget)?;
-                let range_id = mapped_id(
-                    data_range_map,
-                    range.range_id,
-                    "data-property range datatype",
-                )?;
+                let mapped_range = DataRangeLiteral {
+                    range_id: mapped_id(
+                        data_range_map,
+                        range.range.range_id,
+                        "data-property range datatype",
+                    )?,
+                    negative: range.range.negative,
+                };
                 for provenance in &range.provenance {
                     budget.claim_work(1)?;
                     budget.claim_owned(size_of::<RawDataRange>())?;
@@ -11626,7 +12011,7 @@ fn merge_normalized_sources(
                     })?;
                     raw_data_ranges.push(RawDataRange {
                         role_id,
-                        range_id,
+                        range: mapped_range,
                         provenance: *provenance,
                     });
                 }
@@ -11638,12 +12023,22 @@ fn merge_normalized_sources(
                     "merged datatype definition lost provenance",
                 ));
             }
-            let left_range = mapped_id(data_range_map, definition.left_range, "defined datatype")?;
-            let right_range = mapped_id(
-                data_range_map,
-                definition.right_range,
-                "datatype defining range",
-            )?;
+            let left_range = DataRangeLiteral {
+                range_id: mapped_id(
+                    data_range_map,
+                    definition.left_range.range_id,
+                    "defined datatype",
+                )?,
+                negative: definition.left_range.negative,
+            };
+            let right_range = DataRangeLiteral {
+                range_id: mapped_id(
+                    data_range_map,
+                    definition.right_range.range_id,
+                    "datatype defining range",
+                )?,
+                negative: definition.right_range.negative,
+            };
             let (left_range, right_range) = if left_range <= right_range {
                 (left_range, right_range)
             } else {

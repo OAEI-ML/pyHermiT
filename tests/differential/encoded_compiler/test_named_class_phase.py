@@ -253,11 +253,14 @@ def _expected_manifest(
     source_literal_domain = program.symbols.domain(SymbolKind.SOURCE_LITERAL)
     data_value_domain = program.symbols.domain(SymbolKind.DATA_VALUE)
     entity_domain = program.symbols.domain(SymbolKind.ENTITY)
-    named_data_ranges = [
-        value for value in data_range_domain.values if value.display.startswith("datatype:")
+    retained_data_ranges = [
+        value
+        for value in data_range_domain.values
+        if value.display.startswith(("datatype:", "DataComplementOf:"))
     ]
     data_range_remap = {
-        value.identifier: identifier for identifier, value in enumerate(named_data_ranges)
+        value.identifier: identifier
+        for identifier, value in enumerate(retained_data_ranges)
     }
     entity_id_by_key = {value.key_hex: value.identifier for value in entity_domain.values}
     declared_class_ids = {
@@ -449,16 +452,36 @@ def _expected_manifest(
         for clause in program.clauses
         if clause.clause_id in data_range_clauses
         for atom in clause.body + clause.head
-        if predicates_by_id[atom.predicate_id].kind is PredicateKind.DATA_RANGE
+        if predicates_by_id[atom.predicate_id].kind
+        in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
     }
     datatype_definition_predicates = {
         atom.predicate_id
         for clause in program.clauses
         if clause.clause_id in datatype_definition_clauses
         for atom in clause.body + clause.head
-        if predicates_by_id[atom.predicate_id].kind is PredicateKind.DATA_RANGE
+        if predicates_by_id[atom.predicate_id].kind
+        in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
     }
     selected_data_range_predicates = data_range_predicates | datatype_definition_predicates
+    complemented_data_range_symbols = {
+        predicates_by_id[predicate_id].symbol_id
+        for predicate_id in selected_data_range_predicates
+        if predicates_by_id[predicate_id].kind is PredicateKind.NEGATED_DATA_RANGE
+    }
+    if complemented_data_range_symbols:
+        universal_data_range_id = next(
+            value.identifier
+            for value in retained_data_ranges
+            if value.display == "datatype:http://www.w3.org/2000/01/rdf-schema#Literal"
+        )
+        selected_data_range_predicates.update(
+            value.predicate_id
+            for value in program.predicates.predicates
+            if value.kind is PredicateKind.DATA_RANGE
+            and value.symbol_id
+            in complemented_data_range_symbols | {universal_data_range_id}
+        )
     key_role_predicates = {
         atom.predicate_id
         for clause in program.clauses
@@ -527,7 +550,9 @@ def _expected_manifest(
             "argument_sorts": [sort.value for sort in value.argument_sorts],
             "symbol_id": (
                 data_range_remap[value.symbol_id]
-                if value.kind is PredicateKind.DATA_RANGE and value.symbol_id is not None
+                if value.kind
+                in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
+                and value.symbol_id is not None
                 else value.symbol_id
             ),
             "role_id": value.role_id,
@@ -539,11 +564,14 @@ def _expected_manifest(
         for identifier, value in enumerate(fragment_predicates)
     ]
 
-    expected_variable = Variable(0, TermSort.OBJECT)
+    expected_variables = {
+        (Variable(0, TermSort.OBJECT),),
+        (Variable(0, TermSort.DATA),),
+    }
     projected: list[tuple[bytes, DLClause]] = []
     for clause in program.clauses:
         unary_named_clause = bool(clause.body) and not any(
-            atom.arguments != (expected_variable,) for atom in clause.body + clause.head
+            atom.arguments not in expected_variables for atom in clause.body + clause.head
         )
         if (
             not unary_named_clause
@@ -598,7 +626,7 @@ def _expected_manifest(
         ],
         "data_range_symbols": [
             {**_symbol_payload(value), "identifier": identifier}
-            for identifier, value in enumerate(named_data_ranges)
+            for identifier, value in enumerate(retained_data_ranges)
         ],
         "individual_symbols": [_symbol_payload(value) for value in individual_domain.values],
         "source_literal_symbols": [
@@ -1560,6 +1588,43 @@ def test_annotated_named_data_property_ranges_match_scalar_exactly() -> None:
         include_data_ranges=True,
     )
     assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_atomic_data_complement_ranges_and_definitions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(Datatype(:D))",
+            "Declaration(Datatype(:E))",
+            "Declaration(AnnotationProperty(:note))",
+            "DataPropertyRange(:p DataComplementOf(xsd:string))",
+            'DataPropertyRange(Annotation(:note "duplicate") :p '
+            "DataComplementOf(xsd:string))",
+            "DataPropertyRange(:q DataComplementOf(xsd:integer))",
+            "DatatypeDefinition(:D DataComplementOf(xsd:string))",
+            "DatatypeDefinition(:E DataComplementOf(xsd:integer))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=5,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
+    )
+    assert sum(
+        str(value["display"]).startswith("DataComplementOf:")
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ) == 2
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    ) == 2
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
@@ -2990,6 +3055,39 @@ def test_composite_data_ranges_remap_distinct_local_role_and_datatype_domains() 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_composite_atomic_data_complements_remap_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:z))",
+            "Declaration(Datatype(:Z))",
+            "DataPropertyRange(:z DataComplementOf(xsd:string))",
+            "DatatypeDefinition(:Z DataComplementOf(xsd:string))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:a))",
+            "Declaration(Datatype(:A))",
+            "DataPropertyRange(:a DataComplementOf(xsd:integer))",
+            "DatatypeDefinition(:A DataComplementOf(xsd:integer))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_composite_datatype_definitions_remap_distinct_local_domains_exactly() -> None:
     left = pyowl_core.load_snapshot(
         functional(
@@ -3192,6 +3290,32 @@ def test_complex_data_property_range_still_defers_the_whole_root() -> None:
             PredicateKind.DATA_ROLE.value,
             PredicateKind.DATA_RANGE.value,
         }
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_nested_data_complements_defer_without_leaking_symbols() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(Datatype(:D))",
+            "DataPropertyRange(:p DataComplementOf(DataUnionOf(xsd:string xsd:integer)))",
+            "DatatypeDefinition(:D DataComplementOf(DataUnionOf(xsd:string xsd:integer)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 2
+    assert all(
+        not str(value["display"]).startswith("DataComplementOf:")
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.NEGATED_DATA_RANGE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
