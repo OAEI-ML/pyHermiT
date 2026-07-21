@@ -614,6 +614,7 @@ struct ClassBooleanDefinition {
     expression_symbols: Vec<ClassExpressionSymbolSeed>,
     intersection: bool,
     operands: Vec<ClassBooleanOperand>,
+    object_self_role_id: Option<u32>,
     polarity: DefinitionPolarity,
     generated_key: Vec<u8>,
     generated_display: String,
@@ -757,6 +758,8 @@ struct NormalizedDisjoint {
 enum ObjectConstraintKind {
     Domain,
     Range,
+    SelfAntecedent,
+    SelfConsequent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -765,6 +768,7 @@ struct RawObjectConstraint {
     role_id: u32,
     class: ClassLiteral,
     provenance: [u8; 32],
+    generated: bool,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -773,6 +777,7 @@ struct NormalizedObjectConstraint {
     role_id: u32,
     class: ClassLiteral,
     provenance: Vec<[u8; 32]>,
+    generated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1303,6 +1308,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         scope_maps,
         &mut raw_edges,
         &mut raw_boolean_clauses,
+        &mut raw_object_constraints,
         &mut budget,
     )?;
     emit_data_boolean_definitions(
@@ -2368,6 +2374,7 @@ fn class_boolean_definitions<B: ByteSource>(
             RootHandler::SubClassOf => retain_subclass_boolean_definitions(
                 model,
                 symbols,
+                object_roles,
                 root.node,
                 namespace,
                 scope_maps,
@@ -2377,6 +2384,7 @@ fn class_boolean_definitions<B: ByteSource>(
             RootHandler::EquivalentClasses => retain_equivalent_boolean_definitions(
                 model,
                 symbols,
+                object_roles,
                 root.node,
                 namespace,
                 scope_maps,
@@ -2386,6 +2394,7 @@ fn class_boolean_definitions<B: ByteSource>(
             RootHandler::ClassAssertion => retain_class_assertion_boolean_definition(
                 model,
                 symbols,
+                object_roles,
                 root.node,
                 namespace,
                 scope_maps,
@@ -2413,7 +2422,7 @@ fn class_boolean_definitions<B: ByteSource>(
                     retain_class_constraint_boolean_definition(
                         model,
                         symbols,
-                        None,
+                        object_roles,
                         Some(roles),
                         root.handler,
                         root.node,
@@ -2438,6 +2447,7 @@ fn class_boolean_definitions<B: ByteSource>(
             RootHandler::DisjointClasses => retain_disjoint_boolean_definitions(
                 model,
                 symbols,
+                object_roles,
                 root.node,
                 namespace,
                 scope_maps,
@@ -2447,6 +2457,7 @@ fn class_boolean_definitions<B: ByteSource>(
             RootHandler::DisjointUnion => retain_disjoint_union_boolean_definition(
                 model,
                 symbols,
+                object_roles,
                 root.node,
                 namespace,
                 scope_maps,
@@ -3433,6 +3444,7 @@ fn retain_data_boolean_definition(
 fn retain_subclass_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    object_roles: Option<&ObjectRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -3455,6 +3467,7 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
         class_boolean_definition_candidates(
             model,
             symbols,
+            object_roles,
             sub_class,
             DefinitionPolarity::Negative,
             namespace,
@@ -3468,6 +3481,7 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
         class_boolean_definition_candidates(
             model,
             symbols,
+            object_roles,
             super_class,
             DefinitionPolarity::Positive,
             namespace,
@@ -3497,6 +3511,7 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
 fn retain_class_assertion_boolean_definition<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    object_roles: Option<&ObjectRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -3516,6 +3531,7 @@ fn retain_class_assertion_boolean_definition<B: ByteSource>(
     let Some(candidates) = class_boolean_definition_candidates(
         model,
         symbols,
+        object_roles,
         expression,
         DefinitionPolarity::Positive,
         namespace,
@@ -3611,6 +3627,7 @@ fn retain_class_constraint_boolean_definition<B: ByteSource>(
     let Some(candidates) = class_boolean_definition_candidates(
         model,
         symbols,
+        object_roles,
         expression,
         DefinitionPolarity::Positive,
         namespace,
@@ -3706,6 +3723,7 @@ fn retain_key_boolean_definition<B: ByteSource>(
     let Some(candidates) = class_boolean_definition_candidates(
         model,
         symbols,
+        object_roles,
         expression,
         DefinitionPolarity::Negative,
         namespace,
@@ -3726,6 +3744,7 @@ fn retain_key_boolean_definition<B: ByteSource>(
 fn retain_disjoint_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    object_roles: Option<&ObjectRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -3762,6 +3781,7 @@ fn retain_disjoint_boolean_definitions<B: ByteSource>(
         let Some(candidates) = class_boolean_definition_candidates(
             model,
             symbols,
+            object_roles,
             identifier,
             DefinitionPolarity::Negative,
             namespace,
@@ -3800,6 +3820,7 @@ fn retain_disjoint_boolean_definitions<B: ByteSource>(
 fn retain_disjoint_union_boolean_definition<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    _object_roles: Option<&ObjectRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -3940,6 +3961,7 @@ fn synthetic_boolean_key<'a>(
 fn retain_equivalent_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    object_roles: Option<&ObjectRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -3976,6 +3998,7 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
         let Some(negative) = class_boolean_definition_candidates(
             model,
             symbols,
+            object_roles,
             identifier,
             DefinitionPolarity::Negative,
             namespace,
@@ -3988,6 +4011,7 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
         let Some(positive) = class_boolean_definition_candidates(
             model,
             symbols,
+            object_roles,
             identifier,
             DefinitionPolarity::Positive,
             namespace,
@@ -4029,12 +4053,47 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
 fn class_boolean_definition_candidates<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    object_roles: Option<&ObjectRolePhase>,
     expression: NodeId,
     polarity: DefinitionPolarity,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<Vec<ClassBooleanDefinition>>> {
+    let node = model.node(expression)?;
+    if node.tag() == OBJECT_HAS_SELF_TAG {
+        if node.field_count() != 1 {
+            return Err(EncodedValidationError::invariant(
+                "object-self definition no longer has schema-1 shape",
+            ));
+        }
+        let Some(object_roles) = object_roles else {
+            return Ok(None);
+        };
+        let property = node_field(model, node, 0, "object-self definition role")?;
+        let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
+        let expression_key = canonical::canonical_node_key(model, expression, scope_maps, budget)?;
+        let expression_seed =
+            class_expression_symbol_seed(&expression_key, OBJECT_HAS_SELF_TAG, budget)?;
+        let mut expression_symbols = Vec::new();
+        push_class_expression_symbol_seed(&mut expression_symbols, expression_seed, budget)?;
+        let (generated_key, generated_display) =
+            generated_class_symbol(namespace, &expression_key, polarity, budget)?;
+        budget.claim_owned(size_of::<ClassBooleanDefinition>() + size_of::<NodeId>())?;
+        return Ok(Some(vec![ClassBooleanDefinition {
+            expressions: vec![expression],
+            roots: Vec::new(),
+            expression_key,
+            expression_symbols,
+            intersection: false,
+            operands: Vec::new(),
+            object_self_role_id: Some(role_id),
+            polarity,
+            generated_key,
+            generated_display,
+            provenance: Vec::new(),
+        }]));
+    }
     let Some(term) =
         normalized_class_term(model, symbols, expression, false, 0, scope_maps, budget)?
     else {
@@ -4468,6 +4527,7 @@ fn atomize_normalized_class_boolean(
         expression_symbols,
         intersection: term.intersection,
         operands,
+        object_self_role_id: None,
         polarity,
         generated_key,
         generated_display,
@@ -4487,6 +4547,7 @@ fn retain_class_boolean_definition(
     }) {
         if known.intersection != definition.intersection
             || known.operands != definition.operands
+            || known.object_self_role_id != definition.object_self_role_id
             || known.expression_symbols != definition.expression_symbols
             || known.generated_key != definition.generated_key
             || known.generated_display != definition.generated_display
@@ -5556,6 +5617,7 @@ fn class_expression_prefix(tag: u16) -> EncodedResult<&'static str> {
         OBJECT_UNION_OF_TAG => Ok("ObjectUnionOf:"),
         OBJECT_ONE_OF_TAG => Ok("ObjectOneOf:"),
         OBJECT_COMPLEMENT_OF_TAG => Ok("ObjectComplementOf:"),
+        OBJECT_HAS_SELF_TAG => Ok("ObjectHasSelf:"),
         _ => Err(EncodedValidationError::invariant(
             "selected class expression has an unsupported constructor",
         )),
@@ -9927,6 +9989,7 @@ fn named_object_constraint<B: ByteSource>(
         role_id,
         class: ClassLiteral { class_id, negative },
         provenance,
+        generated: false,
     }))
 }
 
@@ -11324,6 +11387,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
     scope_maps: &[AnonymousScopeMap],
     edges: &mut Vec<RawEdge>,
     boolean_clauses: &mut Vec<RawBooleanClause>,
+    object_constraints: &mut Vec<RawObjectConstraint>,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
     for definition in definitions {
@@ -11340,6 +11404,32 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             })?,
             negative: false,
         };
+        if let Some(role_id) = definition.object_self_role_id {
+            if !definition.operands.is_empty() || definition.provenance.is_empty() {
+                return Err(EncodedValidationError::invariant(
+                    "generated object-self definition changed before emission",
+                ));
+            }
+            for provenance in &definition.provenance {
+                budget.claim_owned(size_of::<RawObjectConstraint>())?;
+                object_constraints.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "generated object-self clause allocation failed",
+                    )
+                })?;
+                object_constraints.push(RawObjectConstraint {
+                    kind: match definition.polarity {
+                        DefinitionPolarity::Positive => ObjectConstraintKind::SelfConsequent,
+                        DefinitionPolarity::Negative => ObjectConstraintKind::SelfAntecedent,
+                    },
+                    role_id,
+                    class: generated,
+                    provenance: *provenance,
+                    generated: true,
+                });
+            }
+            continue;
+        }
         let mut operands = Vec::new();
         budget.claim_owned(
             definition
@@ -11972,6 +12062,7 @@ fn normalize_object_constraints(
             if previous.kind == constraint.kind
                 && previous.role_id == constraint.role_id
                 && previous.class == constraint.class
+                && previous.generated == constraint.generated
             {
                 if previous.provenance.last() != Some(&constraint.provenance) {
                     budget.claim_owned(size_of::<[u8; 32]>())?;
@@ -12003,6 +12094,7 @@ fn normalize_object_constraints(
             role_id: constraint.role_id,
             class: constraint.class,
             provenance,
+            generated: constraint.generated,
         });
     }
     Ok(normalized)
@@ -12518,7 +12610,7 @@ fn freeze_provenance(
             &mut keys,
             ProvenanceKey {
                 source_sha256: constraint.provenance.clone(),
-                generated: false,
+                generated: constraint.generated,
             },
             budget,
         )?;
@@ -14210,7 +14302,11 @@ fn freeze_clauses(
             constraint.class.class_id,
             constraint.class.negative,
         )?;
-        let provenance = provenance_id(provenance_keys, &constraint.provenance, false)?;
+        let provenance = provenance_id(
+            provenance_keys,
+            &constraint.provenance,
+            constraint.generated,
+        )?;
         push_object_constraint_clause(
             &mut ordered,
             role,
@@ -15444,13 +15540,25 @@ fn push_object_constraint_clause(
     provenance_id: u32,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
-    let class_variable = match kind {
-        ObjectConstraintKind::Domain => 0,
-        ObjectConstraintKind::Range => 1,
+    let (body, head) = match kind {
+        ObjectConstraintKind::Domain => (
+            vec![object_variable_atom(role_predicate_id, 0, 1)],
+            vec![variable_atom_at(class_predicate_id, 0, TermSort::Object)],
+        ),
+        ObjectConstraintKind::Range => (
+            vec![object_variable_atom(role_predicate_id, 0, 1)],
+            vec![variable_atom_at(class_predicate_id, 1, TermSort::Object)],
+        ),
+        ObjectConstraintKind::SelfAntecedent => (
+            vec![object_variable_atom(role_predicate_id, 0, 0)],
+            vec![variable_atom_at(class_predicate_id, 0, TermSort::Object)],
+        ),
+        ObjectConstraintKind::SelfConsequent => (
+            vec![variable_atom_at(class_predicate_id, 0, TermSort::Object)],
+            vec![object_variable_atom(role_predicate_id, 0, 0)],
+        ),
     };
-    let body = object_variable_atom(role_predicate_id, 0, 1);
-    let head = variable_atom_at(class_predicate_id, class_variable, TermSort::Object);
-    let key = object_constraint_rule_key(role_predicate_id, class_predicate_id, class_variable);
+    let key = variable_rule_key(&body, &head)?;
     budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>() + key.len())?;
     budget.claim_owned(
         2_usize
@@ -15470,8 +15578,8 @@ fn push_object_constraint_clause(
         key,
         DecodedClause {
             clause_id: 0,
-            body: vec![body],
-            head: vec![head],
+            body,
+            head,
             provenance_ids: vec![provenance_id],
             join_order: vec![0],
         },
@@ -16963,23 +17071,6 @@ fn unary_rule_key(body_predicates: &[u32], head_predicates: &[u32], sort: TermSo
     format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
 }
 
-fn object_constraint_rule_key(
-    role_predicate_id: u32,
-    class_predicate_id: u32,
-    class_variable: u32,
-) -> Vec<u8> {
-    let body = format!(
-        "{{\"arguments\":[{},{}],\"predicate_id\":{role_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
-        variable_json(0, TermSort::Object),
-        variable_json(1, TermSort::Object),
-    );
-    let head = format!(
-        "{{\"arguments\":[{}],\"predicate_id\":{class_predicate_id},\"schema_version\":1,\"type\":\"Atom\"}}",
-        variable_json(class_variable, TermSort::Object),
-    );
-    format!("{{\"body\":[{body}],\"head\":[{head}]}}").into_bytes()
-}
-
 fn object_characteristic_rule_key(
     role_predicate_id: u32,
     equality_predicate_id: Option<u32>,
@@ -18427,6 +18518,7 @@ fn merge_normalized_sources(
                         role_id,
                         class,
                         provenance: *provenance,
+                        generated: constraint.generated,
                     });
                 }
             }
