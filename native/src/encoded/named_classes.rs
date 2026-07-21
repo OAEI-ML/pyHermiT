@@ -54,6 +54,19 @@ const OBJECT_INTERSECTION_OF_TAG: u16 = 30;
 const OBJECT_UNION_OF_TAG: u16 = 31;
 const OBJECT_COMPLEMENT_OF_TAG: u16 = 32;
 const OBJECT_ONE_OF_TAG: u16 = 33;
+const OBJECT_SOME_VALUES_FROM_TAG: u16 = 34;
+const OBJECT_ALL_VALUES_FROM_TAG: u16 = 35;
+const OBJECT_HAS_VALUE_TAG: u16 = 36;
+const OBJECT_HAS_SELF_TAG: u16 = 37;
+const OBJECT_MIN_CARDINALITY_TAG: u16 = 38;
+const OBJECT_MAX_CARDINALITY_TAG: u16 = 39;
+const OBJECT_EXACT_CARDINALITY_TAG: u16 = 40;
+const DATA_SOME_VALUES_FROM_TAG: u16 = 41;
+const DATA_ALL_VALUES_FROM_TAG: u16 = 42;
+const DATA_HAS_VALUE_TAG: u16 = 43;
+const DATA_MIN_CARDINALITY_TAG: u16 = 44;
+const DATA_MAX_CARDINALITY_TAG: u16 = 45;
+const DATA_EXACT_CARDINALITY_TAG: u16 = 46;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
 const DISJOINT_CLASSES_TAG: u16 = 63;
@@ -102,6 +115,7 @@ const XSD_DATE_TIME_STAMP_IRI: &str = "http://www.w3.org/2001/XMLSchema#dateTime
 const RDF_XML_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral";
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
+const BOTTOM_DATA_IRI: &str = "http://www.w3.org/2002/07/owl#bottomDataProperty";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NamedClassPhaseLimits {
@@ -2492,6 +2506,27 @@ fn positive_atomic_class_selection<B: ByteSource>(
             negative: false,
         }));
     }
+    match node.tag() {
+        OBJECT_SOME_VALUES_FROM_TAG | OBJECT_ALL_VALUES_FROM_TAG => {
+            return reducible_object_quantifier_selection(model, symbols, node, depth, budget);
+        }
+        OBJECT_HAS_VALUE_TAG | OBJECT_HAS_SELF_TAG => {
+            return reducible_object_value_selection(model, symbols, node, depth, budget);
+        }
+        OBJECT_MIN_CARDINALITY_TAG | OBJECT_MAX_CARDINALITY_TAG | OBJECT_EXACT_CARDINALITY_TAG => {
+            return reducible_object_cardinality_selection(model, symbols, node, depth, budget);
+        }
+        DATA_SOME_VALUES_FROM_TAG | DATA_ALL_VALUES_FROM_TAG => {
+            return reducible_data_quantifier_selection(model, symbols, node, depth, budget);
+        }
+        DATA_HAS_VALUE_TAG => {
+            return reducible_data_has_value_selection(model, symbols, node, depth, budget);
+        }
+        DATA_MIN_CARDINALITY_TAG | DATA_MAX_CARDINALITY_TAG | DATA_EXACT_CARDINALITY_TAG => {
+            return reducible_data_cardinality_selection(model, symbols, node, depth, budget);
+        }
+        _ => {}
+    }
     if !matches!(node.tag(), OBJECT_INTERSECTION_OF_TAG | OBJECT_UNION_OF_TAG) {
         return Ok(None);
     }
@@ -2549,6 +2584,489 @@ fn positive_atomic_class_selection<B: ByteSource>(
         retained = Some(selection);
     }
     Ok(retained.or(identity))
+}
+
+fn reducible_object_quantifier_selection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    node: NodeRef,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassSelection>> {
+    if node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "object quantifier no longer has schema-1 shape",
+        ));
+    }
+    if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
+        return Ok(None);
+    }
+    let some = node.tag() == OBJECT_SOME_VALUES_FROM_TAG;
+    let property = node_field(model, node, 0, "object quantifier property")?;
+    if object_property_has_iri(model, symbols, property, BOTTOM_OBJECT_IRI)? {
+        return builtin_atomic_class_selection(
+            symbols,
+            node.id(),
+            if some { NOTHING_DISPLAY } else { THING_DISPLAY },
+        )
+        .map(Some);
+    }
+    let filler = node_field(model, node, 1, "object quantifier filler")?;
+    let filler_depth = child_expression_depth(depth, "object quantifier filler depth overflowed")?;
+    let Some(selection) =
+        atomic_class_selection_at_depth(model, symbols, filler, filler_depth, budget)?
+    else {
+        return Ok(None);
+    };
+    if (some && atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?)
+        || (!some && atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?)
+    {
+        return Ok(Some(selection));
+    }
+    Ok(None)
+}
+
+fn reducible_object_value_selection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    node: NodeRef,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassSelection>> {
+    let expected_fields = if node.tag() == OBJECT_HAS_VALUE_TAG {
+        2
+    } else {
+        1
+    };
+    if node.field_count() != expected_fields {
+        return Err(EncodedValidationError::invariant(
+            "object value restriction no longer has schema-1 shape",
+        ));
+    }
+    if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
+        return Ok(None);
+    }
+    let property = node_field(model, node, 0, "object value-restriction property")?;
+    if object_property_has_iri(model, symbols, property, BOTTOM_OBJECT_IRI)? {
+        return builtin_atomic_class_selection(symbols, node.id(), NOTHING_DISPLAY).map(Some);
+    }
+    if node.tag() == OBJECT_HAS_SELF_TAG
+        && object_property_has_iri(model, symbols, property, TOP_OBJECT_IRI)?
+    {
+        return builtin_atomic_class_selection(symbols, node.id(), THING_DISPLAY).map(Some);
+    }
+    budget.claim_work(1)?;
+    Ok(None)
+}
+
+fn reducible_object_cardinality_selection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    node: NodeRef,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassSelection>> {
+    if node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "object cardinality no longer has schema-1 shape",
+        ));
+    }
+    if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
+        return Ok(None);
+    }
+    let zero = integer_field_is_zero(model, node, 0, "object cardinality value")?;
+    let property = node_field(model, node, 1, "object cardinality property")?;
+    let bottom_property = object_property_has_iri(model, symbols, property, BOTTOM_OBJECT_IRI)?;
+    if node.tag() == OBJECT_MIN_CARDINALITY_TAG && zero {
+        return builtin_atomic_class_selection(symbols, node.id(), THING_DISPLAY).map(Some);
+    }
+    if bottom_property {
+        let display = if node.tag() == OBJECT_MIN_CARDINALITY_TAG
+            || (node.tag() == OBJECT_EXACT_CARDINALITY_TAG && !zero)
+        {
+            NOTHING_DISPLAY
+        } else {
+            THING_DISPLAY
+        };
+        return builtin_atomic_class_selection(symbols, node.id(), display).map(Some);
+    }
+    let filler = node_field(model, node, 2, "object cardinality filler")?;
+    let filler_depth = child_expression_depth(depth, "object cardinality depth overflowed")?;
+    let Some(selection) =
+        atomic_class_selection_at_depth(model, symbols, filler, filler_depth, budget)?
+    else {
+        return Ok(None);
+    };
+    if !atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)? {
+        return Ok(None);
+    }
+    let display = if node.tag() == OBJECT_MAX_CARDINALITY_TAG
+        || (node.tag() == OBJECT_EXACT_CARDINALITY_TAG && zero)
+    {
+        THING_DISPLAY
+    } else {
+        NOTHING_DISPLAY
+    };
+    builtin_atomic_class_selection(symbols, node.id(), display).map(Some)
+}
+
+fn reducible_data_quantifier_selection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    node: NodeRef,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassSelection>> {
+    if node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "data quantifier no longer has schema-1 shape",
+        ));
+    }
+    if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
+        return Ok(None);
+    }
+    let some = node.tag() == DATA_SOME_VALUES_FROM_TAG;
+    if data_property_collection_has_iri(model, symbols, node, 0, BOTTOM_DATA_IRI, budget)? {
+        return builtin_atomic_class_selection(
+            symbols,
+            node.id(),
+            if some { NOTHING_DISPLAY } else { THING_DISPLAY },
+        )
+        .map(Some);
+    }
+    let filler = node_field(model, node, 1, "data quantifier filler")?;
+    let filler_depth = child_expression_depth(depth, "data quantifier filler depth overflowed")?;
+    let Some(selection) =
+        atomic_data_range_selection_at_depth(model, symbols, filler, filler_depth, budget)?
+    else {
+        return Ok(None);
+    };
+    if (some && atomic_data_range_selection_is_bottom(model, symbols, selection)?)
+        || (!some && atomic_data_range_selection_is_top(model, symbols, selection)?)
+    {
+        return builtin_atomic_class_selection(
+            symbols,
+            node.id(),
+            if some { NOTHING_DISPLAY } else { THING_DISPLAY },
+        )
+        .map(Some);
+    }
+    Ok(None)
+}
+
+fn reducible_data_has_value_selection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    node: NodeRef,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassSelection>> {
+    if node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "data has-value restriction no longer has schema-1 shape",
+        ));
+    }
+    if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
+        return Ok(None);
+    }
+    let property = node_field(model, node, 0, "data has-value property")?;
+    if data_property_has_iri(model, symbols, property, BOTTOM_DATA_IRI)? {
+        return builtin_atomic_class_selection(symbols, node.id(), NOTHING_DISPLAY).map(Some);
+    }
+    budget.claim_work(1)?;
+    Ok(None)
+}
+
+fn reducible_data_cardinality_selection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    node: NodeRef,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassSelection>> {
+    if node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "data cardinality no longer has schema-1 shape",
+        ));
+    }
+    if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
+        return Ok(None);
+    }
+    let zero = integer_field_is_zero(model, node, 0, "data cardinality value")?;
+    let property = node_field(model, node, 1, "data cardinality property")?;
+    let bottom_property = data_property_has_iri(model, symbols, property, BOTTOM_DATA_IRI)?;
+    if node.tag() == DATA_MIN_CARDINALITY_TAG && zero {
+        return builtin_atomic_class_selection(symbols, node.id(), THING_DISPLAY).map(Some);
+    }
+    if bottom_property {
+        let display = if node.tag() == DATA_MIN_CARDINALITY_TAG
+            || (node.tag() == DATA_EXACT_CARDINALITY_TAG && !zero)
+        {
+            NOTHING_DISPLAY
+        } else {
+            THING_DISPLAY
+        };
+        return builtin_atomic_class_selection(symbols, node.id(), display).map(Some);
+    }
+    let filler = node_field(model, node, 2, "data cardinality filler")?;
+    let filler_depth = child_expression_depth(depth, "data cardinality depth overflowed")?;
+    let Some(selection) =
+        atomic_data_range_selection_at_depth(model, symbols, filler, filler_depth, budget)?
+    else {
+        return Ok(None);
+    };
+    if !atomic_data_range_selection_is_bottom(model, symbols, selection)? {
+        return Ok(None);
+    }
+    let display = if node.tag() == DATA_MAX_CARDINALITY_TAG
+        || (node.tag() == DATA_EXACT_CARDINALITY_TAG && zero)
+    {
+        THING_DISPLAY
+    } else {
+        NOTHING_DISPLAY
+    };
+    builtin_atomic_class_selection(symbols, node.id(), display).map(Some)
+}
+
+fn reduction_inputs_are_retained<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<bool> {
+    PhaseBudget::count(
+        depth,
+        budget.limits.max_canonical_depth,
+        "reducible-expression depth",
+    )?;
+    budget.claim_work(1)?;
+    let node = model.node(identifier)?;
+    if node.tag() == ENTITY_TAG {
+        let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "reducible expression entity is absent from the reachable mapping",
+            )
+        })?;
+        return reduction_entity_is_retained(symbols, entity_id);
+    }
+    if matches!(node.tag(), ANONYMOUS_INDIVIDUAL_TAG | LITERAL_TAG) {
+        return Ok(false);
+    }
+    let child_depth = child_expression_depth(depth, "reducible-expression depth overflowed")?;
+    for field_index in node.fields() {
+        budget.claim_work(1)?;
+        let component =
+            required_component(model.field(field_index)?, "reducible-expression field")?;
+        match model.resolve(component)? {
+            ComponentValue::None | ComponentValue::Scalar(_) => {}
+            ComponentValue::Node(child) => {
+                if !reduction_inputs_are_retained(model, symbols, child, child_depth, budget)? {
+                    return Ok(false);
+                }
+            }
+            ComponentValue::Collection(values) => {
+                for item_index in values.items() {
+                    budget.claim_work(1)?;
+                    let item = required_component(
+                        model.item(item_index)?,
+                        "reducible-expression collection item",
+                    )?;
+                    match model.resolve(item)? {
+                        ComponentValue::None | ComponentValue::Scalar(_) => {}
+                        ComponentValue::Node(child) => {
+                            if !reduction_inputs_are_retained(
+                                model,
+                                symbols,
+                                child,
+                                child_depth,
+                                budget,
+                            )? {
+                                return Ok(false);
+                            }
+                        }
+                        ComponentValue::Collection(_) => {
+                            return Err(EncodedValidationError::invariant(
+                                "reducible expression contains a nested collection item",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn reduction_entity_is_retained(symbols: &SymbolPhase, entity_id: u32) -> EncodedResult<bool> {
+    let entity = symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("reducible expression entity ID is dangling")
+        })?;
+    let builtin = entity.display == THING_DISPLAY
+        || entity.display == NOTHING_DISPLAY
+        || entity.display == RDFS_LITERAL_DISPLAY;
+    if builtin {
+        return Ok(true);
+    }
+    Ok(symbols
+        .declared_entities
+        .iter()
+        .any(|declared| declared.entity_id == entity_id))
+}
+
+fn builtin_atomic_class_selection(
+    symbols: &SymbolPhase,
+    expression: NodeId,
+    display: &str,
+) -> EncodedResult<AtomicClassSelection> {
+    Ok(AtomicClassSelection {
+        source: AtomicClassSource::Entity(class_id_by_display(&symbols.entity_domain, display)?),
+        expression,
+        negative: false,
+    })
+}
+
+fn child_expression_depth(depth: usize, message: &'static str) -> EncodedResult<usize> {
+    depth
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource(message))
+}
+
+fn object_property_has_iri<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    iri: &str,
+) -> EncodedResult<bool> {
+    let node = model.node(identifier)?;
+    let named = if node.tag() == OBJECT_INVERSE_OF_TAG {
+        if node.field_count() != 1 {
+            return Err(EncodedValidationError::invariant(
+                "inverse object property no longer has schema-1 shape",
+            ));
+        }
+        node_field(model, node, 0, "inverse object-property operand")?
+    } else {
+        identifier
+    };
+    if model.node(named)?.tag() != ENTITY_TAG {
+        return Err(EncodedValidationError::invariant(
+            "object-property restriction has an unsupported property expression",
+        ));
+    }
+    let entity_id = symbols.entity_symbol_for_node(named).ok_or_else(|| {
+        EncodedValidationError::invariant(
+            "object-property restriction is absent from the reachable entity mapping",
+        )
+    })?;
+    let display = symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+        .ok_or_else(|| EncodedValidationError::invariant("object-property entity ID is dangling"))?
+        .display
+        .strip_prefix(OBJECT_PROPERTY_PREFIX)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "object-property restriction resolved to a different entity kind",
+            )
+        })?;
+    Ok(display == iri)
+}
+
+fn data_property_has_iri<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    iri: &str,
+) -> EncodedResult<bool> {
+    if model.node(identifier)?.tag() != ENTITY_TAG {
+        return Err(EncodedValidationError::invariant(
+            "data-property restriction has an unsupported property expression",
+        ));
+    }
+    let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
+        EncodedValidationError::invariant(
+            "data-property restriction is absent from the reachable entity mapping",
+        )
+    })?;
+    let display = symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+        .ok_or_else(|| EncodedValidationError::invariant("data-property entity ID is dangling"))?
+        .display
+        .strip_prefix(DATA_PROPERTY_PREFIX)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "data-property restriction resolved to a different entity kind",
+            )
+        })?;
+    Ok(display == iri)
+}
+
+fn data_property_collection_has_iri<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    node: NodeRef,
+    offset: usize,
+    iri: &str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<bool> {
+    let field_index = node.fields().start.checked_add(offset).ok_or_else(|| {
+        EncodedValidationError::invariant("data-property collection index overflowed")
+    })?;
+    let component = required_component(
+        model.field(field_index)?,
+        "data quantifier property collection",
+    )?;
+    let ComponentValue::Collection(properties) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(
+            "data quantifier properties did not resolve to a collection",
+        ));
+    };
+    for item_index in properties.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "data quantifier property")?;
+        let ComponentValue::Node(property) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "data quantifier property did not resolve to a node",
+            ));
+        };
+        if data_property_has_iri(model, symbols, property, iri)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn integer_field_is_zero<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    node: NodeRef,
+    offset: usize,
+    name: &'static str,
+) -> EncodedResult<bool> {
+    let field_index = node
+        .fields()
+        .start
+        .checked_add(offset)
+        .ok_or_else(|| EncodedValidationError::invariant(format!("{name} index overflowed")))?;
+    let component = required_component(model.field(field_index)?, name)?;
+    let ComponentValue::Scalar(value) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(format!(
+            "{name} is not an integer scalar"
+        )));
+    };
+    if value.kind() != ComponentKind::Integer {
+        return Err(EncodedValidationError::invariant(format!(
+            "{name} changed component kind"
+        )));
+    }
+    Ok(value.len() == 1 && value.byte(0) == Some(0))
 }
 
 fn atomic_class_selection_has_display(

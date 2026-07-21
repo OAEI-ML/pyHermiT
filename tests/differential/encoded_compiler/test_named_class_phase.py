@@ -1604,6 +1604,125 @@ def test_reducible_class_booleans_collapse_to_atomic_literals_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_builtin_restrictions_and_cardinalities_reduce_exactly() -> None:
+    string_datatype = "<http://www.w3.org/2001/XMLSchema#string>"
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            f"Declaration(Datatype({string_datatype}))",
+            "SubClassOf(ObjectSomeValuesFrom(:p owl:Nothing) :B)",
+            "SubClassOf(:A ObjectAllValuesFrom(:p owl:Thing))",
+            "SubClassOf(ObjectMinCardinality(0 :p :A) :B)",
+            "SubClassOf(ObjectMinCardinality(2 :p owl:Nothing) :B)",
+            "SubClassOf(:A ObjectMaxCardinality(2 :p owl:Nothing))",
+            "SubClassOf(ObjectExactCardinality(0 :p owl:Nothing) :B)",
+            "SubClassOf(ObjectExactCardinality(2 :p owl:Nothing) :B)",
+            "SubClassOf(DataSomeValuesFrom(:d DataComplementOf(rdfs:Literal)) :B)",
+            "SubClassOf(:A DataAllValuesFrom(:d rdfs:Literal))",
+            f"SubClassOf(DataMinCardinality(0 :d {string_datatype}) :B)",
+            "SubClassOf(DataMinCardinality(2 :d DataComplementOf(rdfs:Literal)) :B)",
+            "SubClassOf(:A DataMaxCardinality(2 :d DataComplementOf(rdfs:Literal)))",
+            "SubClassOf(DataExactCardinality(0 :d DataComplementOf(rdfs:Literal)) :B)",
+            "SubClassOf(DataExactCardinality(2 :d DataComplementOf(rdfs:Literal)) :B)",
+            "SubClassOf(ObjectComplementOf(ObjectSomeValuesFrom(:p owl:Nothing)) :B)",
+            "SubClassOf(ObjectComplementOf(DataSomeValuesFrom("
+            ":d DataComplementOf(rdfs:Literal))) :B)",
+            "SubClassOf(ObjectIntersectionOf(ObjectMinCardinality(0 :p :A) :A) :B)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=17)
+    class_symbols = cast(list[dict[str, object]], manifest["class_expression_symbols"])
+    assert not any(
+        str(value["display"]).startswith(
+            (
+                "ObjectSomeValuesFrom:",
+                "ObjectAllValuesFrom:",
+                "ObjectHasValue:",
+                "ObjectMinCardinality:",
+                "ObjectMaxCardinality:",
+                "ObjectExactCardinality:",
+                "DataSomeValuesFrom:",
+                "DataAllValuesFrom:",
+                "DataMinCardinality:",
+                "DataMaxCardinality:",
+                "DataExactCardinality:",
+            )
+        )
+        for value in class_symbols
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_reducible_restrictions_require_retained_inputs() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(NamedIndividual(:a))",
+            "SubClassOf(ObjectSomeValuesFrom(owl:bottomObjectProperty :undeclared) :B)",
+            "SubClassOf(ObjectHasValue(owl:bottomObjectProperty :a) :B)",
+            "SubClassOf(ObjectMinCardinality(0 :p :undeclared) :B)",
+            'SubClassOf(DataHasValue(owl:bottomDataProperty "value") :B)',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 4
+    class_symbols = cast(list[dict[str, object]], manifest["class_expression_symbols"])
+    assert not any(
+        str(value["display"]).startswith(
+            (
+                "ObjectSomeValuesFrom:",
+                "ObjectHasValue:",
+                "ObjectMinCardinality:",
+                "DataHasValue:",
+            )
+        )
+        for value in class_symbols
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_reducible_restrictions_remap_composite_slices_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "SubClassOf(ObjectMinCardinality(0 :p :A) :B)",
+            "SubClassOf(ObjectSomeValuesFrom(:p owl:Nothing) :B)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "SubClassOf(DataSomeValuesFrom(:d DataComplementOf(rdfs:Literal)) :B)",
+            "SubClassOf(DataExactCardinality(0 :d DataComplementOf(rdfs:Literal)) :B)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert manifest == _expected_manifest(composite, compiled_roots=4)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 @pytest.mark.parametrize(
     "axiom",
     [
