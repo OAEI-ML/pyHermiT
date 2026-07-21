@@ -611,12 +611,54 @@ struct ClassBooleanDefinition {
     expressions: Vec<NodeId>,
     roots: Vec<NodeId>,
     expression_key: Vec<u8>,
+    expression_symbols: Vec<ClassExpressionSymbolSeed>,
     intersection: bool,
-    operands: Vec<AtomicClassSelection>,
+    operands: Vec<ClassBooleanOperand>,
     polarity: DefinitionPolarity,
     generated_key: Vec<u8>,
     generated_display: String,
     provenance: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClassExpressionSymbolSeed {
+    key: Vec<u8>,
+    display: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ClassBooleanOperand {
+    Atomic(AtomicClassSelection),
+    Generated { key: Vec<u8> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedAtomicClassTerm {
+    selection: AtomicClassSelection,
+    key: Vec<u8>,
+    symbols: Vec<ClassExpressionSymbolSeed>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedClassBooleanTerm {
+    intersection: bool,
+    key: Vec<u8>,
+    operands: Vec<NormalizedClassTerm>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NormalizedClassTerm {
+    Atomic(NormalizedAtomicClassTerm),
+    Boolean(NormalizedClassBooleanTerm),
+}
+
+impl NormalizedClassTerm {
+    fn key(&self) -> &[u8] {
+        match self {
+            Self::Atomic(term) => &term.key,
+            Self::Boolean(term) => &term.key,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3407,10 +3449,10 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
     let super_class = node_field(model, node, 1, "subclass consequent")?;
     let sub_atomic = atomic_class_selection(model, symbols, sub_class, budget)?.is_some();
     let super_atomic = atomic_class_selection(model, symbols, super_class, budget)?.is_some();
-    let sub_definition = if sub_atomic {
+    let sub_definitions = if sub_atomic {
         None
     } else {
-        class_boolean_definition_candidate(
+        class_boolean_definition_candidates(
             model,
             symbols,
             sub_class,
@@ -3420,10 +3462,10 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
             budget,
         )?
     };
-    let super_definition = if super_atomic {
+    let super_definitions = if super_atomic {
         None
     } else {
-        class_boolean_definition_candidate(
+        class_boolean_definition_candidates(
             model,
             symbols,
             super_class,
@@ -3433,15 +3475,20 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
             budget,
         )?
     };
-    if (!sub_atomic && sub_definition.is_none()) || (!super_atomic && super_definition.is_none()) {
+    if (!sub_atomic && sub_definitions.is_none()) || (!super_atomic && super_definitions.is_none())
+    {
         return Ok(());
     }
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
-    if let Some(definition) = sub_definition {
-        retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+    if let Some(candidates) = sub_definitions {
+        for definition in candidates {
+            retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+        }
     }
-    if let Some(definition) = super_definition {
-        retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+    if let Some(candidates) = super_definitions {
+        for definition in candidates {
+            retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+        }
     }
     Ok(())
 }
@@ -3466,7 +3513,7 @@ fn retain_class_assertion_boolean_definition<B: ByteSource>(
     if atomic_class_selection(model, symbols, expression, budget)?.is_some() {
         return Ok(());
     }
-    let Some(definition) = class_boolean_definition_candidate(
+    let Some(candidates) = class_boolean_definition_candidates(
         model,
         symbols,
         expression,
@@ -3483,7 +3530,10 @@ fn retain_class_assertion_boolean_definition<B: ByteSource>(
         return Ok(());
     }
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
-    retain_class_boolean_definition(definitions, definition, provenance, budget)
+    for definition in candidates {
+        retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+    }
+    Ok(())
 }
 
 fn supported_class_assertion_individual<B: ByteSource>(
@@ -3558,7 +3608,7 @@ fn retain_class_constraint_boolean_definition<B: ByteSource>(
     if atomic_class_selection(model, symbols, expression, budget)?.is_some() {
         return Ok(());
     }
-    let Some(definition) = class_boolean_definition_candidate(
+    let Some(candidates) = class_boolean_definition_candidates(
         model,
         symbols,
         expression,
@@ -3571,7 +3621,10 @@ fn retain_class_constraint_boolean_definition<B: ByteSource>(
         return Ok(());
     };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
-    retain_class_boolean_definition(definitions, definition, provenance, budget)
+    for definition in candidates {
+        retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3650,7 +3703,7 @@ fn retain_key_boolean_definition<B: ByteSource>(
     if atomic_class_selection(model, symbols, expression, budget)?.is_some() {
         return Ok(());
     }
-    let Some(definition) = class_boolean_definition_candidate(
+    let Some(candidates) = class_boolean_definition_candidates(
         model,
         symbols,
         expression,
@@ -3663,7 +3716,10 @@ fn retain_key_boolean_definition<B: ByteSource>(
         return Ok(());
     };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
-    retain_class_boolean_definition(definitions, definition, provenance, budget)
+    for definition in candidates {
+        retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3703,7 +3759,7 @@ fn retain_disjoint_boolean_definitions<B: ByteSource>(
         if atomic_class_selection(model, symbols, identifier, budget)?.is_some() {
             continue;
         }
-        let Some(definition) = class_boolean_definition_candidate(
+        let Some(candidates) = class_boolean_definition_candidates(
             model,
             symbols,
             identifier,
@@ -3715,11 +3771,20 @@ fn retain_disjoint_boolean_definitions<B: ByteSource>(
         else {
             return Ok(());
         };
-        budget.claim_owned(size_of::<ClassBooleanDefinition>())?;
-        pending.try_reserve(1).map_err(|_| {
+        budget.claim_owned(
+            candidates
+                .len()
+                .checked_mul(size_of::<ClassBooleanDefinition>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "disjoint Boolean definition allocation overflowed",
+                    )
+                })?,
+        )?;
+        pending.try_reserve(candidates.len()).map_err(|_| {
             EncodedValidationError::resource("disjoint Boolean definition allocation failed")
         })?;
-        pending.push(definition);
+        pending.extend(candidates);
     }
     if pending.is_empty() {
         return Ok(());
@@ -3820,6 +3885,10 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
         keyed.len(),
         budget,
     )?;
+    let mut expression_symbols = Vec::new();
+    let expression_seed =
+        class_expression_symbol_seed(&expression_key, OBJECT_UNION_OF_TAG, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, expression_seed, budget)?;
     let (generated_key, generated_display) = generated_class_symbol(
         namespace,
         &expression_key,
@@ -3831,7 +3900,7 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
             .checked_add(
                 keyed
                     .len()
-                    .checked_mul(size_of::<AtomicClassSelection>())
+                    .checked_mul(size_of::<ClassBooleanOperand>())
                     .ok_or_else(|| {
                         EncodedValidationError::resource(
                             "synthetic class Boolean operands overflowed",
@@ -3846,11 +3915,16 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
     operands.try_reserve_exact(keyed.len()).map_err(|_| {
         EncodedValidationError::resource("synthetic class Boolean operand allocation failed")
     })?;
-    operands.extend(keyed.iter().map(|(_, selection)| *selection));
+    operands.extend(
+        keyed
+            .iter()
+            .map(|(_, selection)| ClassBooleanOperand::Atomic(*selection)),
+    );
     let definition = ClassBooleanDefinition {
         expressions: Vec::new(),
         roots: vec![root],
         expression_key,
+        expression_symbols,
         intersection: false,
         operands,
         polarity: DefinitionPolarity::Positive,
@@ -3922,7 +3996,7 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
         if atomic_class_selection(model, symbols, identifier, budget)?.is_some() {
             continue;
         }
-        let Some(negative) = class_boolean_definition_candidate(
+        let Some(negative) = class_boolean_definition_candidates(
             model,
             symbols,
             identifier,
@@ -3934,7 +4008,7 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
         else {
             return Ok(());
         };
-        let Some(positive) = class_boolean_definition_candidate(
+        let Some(positive) = class_boolean_definition_candidates(
             model,
             symbols,
             identifier,
@@ -3946,20 +4020,23 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
         else {
             return Ok(());
         };
+        let count = negative.len().checked_add(positive.len()).ok_or_else(|| {
+            EncodedValidationError::resource("equivalent Boolean definition count overflowed")
+        })?;
         budget.claim_owned(
-            size_of::<ClassBooleanDefinition>()
-                .checked_mul(2)
+            count
+                .checked_mul(size_of::<ClassBooleanDefinition>())
                 .ok_or_else(|| {
                     EncodedValidationError::resource(
                         "equivalent Boolean definition allocation overflowed",
                     )
                 })?,
         )?;
-        pending.try_reserve(2).map_err(|_| {
+        pending.try_reserve(count).map_err(|_| {
             EncodedValidationError::resource("equivalent Boolean definition allocation failed")
         })?;
-        pending.push(negative);
-        pending.push(positive);
+        pending.extend(negative);
+        pending.extend(positive);
     }
     if pending.is_empty() {
         return Ok(());
@@ -3972,7 +4049,7 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn class_boolean_definition_candidate<B: ByteSource>(
+fn class_boolean_definition_candidates<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     expression: NodeId,
@@ -3980,81 +4057,433 @@ fn class_boolean_definition_candidate<B: ByteSource>(
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
-) -> EncodedResult<Option<ClassBooleanDefinition>> {
-    let node = model.node(expression)?;
-    if !matches!(node.tag(), OBJECT_INTERSECTION_OF_TAG | OBJECT_UNION_OF_TAG) {
+) -> EncodedResult<Option<Vec<ClassBooleanDefinition>>> {
+    let Some(term) =
+        normalized_class_term(model, symbols, expression, false, 0, scope_maps, budget)?
+    else {
         return Ok(None);
+    };
+    let NormalizedClassTerm::Boolean(term) = term else {
+        return Ok(None);
+    };
+    let mut definitions = Vec::new();
+    let _generated_key = atomize_normalized_class_boolean(
+        term,
+        Some(expression),
+        polarity,
+        namespace,
+        &mut definitions,
+        budget,
+    )?;
+    Ok(Some(definitions))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalized_class_term<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    inherited_complement: bool,
+    initial_depth: usize,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<NormalizedClassTerm>> {
+    let mut base = identifier;
+    let mut complemented = inherited_complement;
+    let mut depth = initial_depth;
+    loop {
+        let node = model.node(base)?;
+        if node.tag() != OBJECT_COMPLEMENT_OF_TAG {
+            break;
+        }
+        if node.field_count() != 1 {
+            return Err(EncodedValidationError::invariant(
+                "recursive class complement no longer has schema-1 shape",
+            ));
+        }
+        depth = child_expression_depth(depth, "class-expression depth overflowed")?;
+        PhaseBudget::count(
+            depth,
+            budget.limits.max_canonical_depth,
+            "class-expression depth",
+        )?;
+        budget.claim_work(1)?;
+        base = node_field(model, node, 0, "recursive class-complement operand")?;
+        complemented = !complemented;
     }
+
+    let node = model.node(base)?;
+    if !matches!(node.tag(), OBJECT_INTERSECTION_OF_TAG | OBJECT_UNION_OF_TAG) {
+        let Some(mut selection) =
+            positive_atomic_class_selection(model, symbols, base, depth, budget)?
+        else {
+            return Ok(None);
+        };
+        if complemented {
+            if atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)? {
+                selection.source = AtomicClassSource::Entity(class_id_by_display(
+                    &symbols.entity_domain,
+                    NOTHING_DISPLAY,
+                )?);
+            } else if atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)? {
+                selection.source = AtomicClassSource::Entity(class_id_by_display(
+                    &symbols.entity_domain,
+                    THING_DISPLAY,
+                )?);
+            } else if matches!(node.tag(), ENTITY_TAG | OBJECT_ONE_OF_TAG) {
+                selection.negative = true;
+                selection.expression = base;
+            } else {
+                return Ok(None);
+            }
+        }
+        let base_key = match selection.source {
+            AtomicClassSource::Entity(entity_id) => {
+                let entity = symbols
+                    .entity_domain
+                    .values
+                    .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "normalized class literal entity ID is dangling",
+                        )
+                    })?;
+                budget.claim_owned(entity.key.len())?;
+                entity.key.clone()
+            }
+            AtomicClassSource::Nominal(nominal) => {
+                canonical::canonical_node_key(model, nominal, scope_maps, budget)?
+            }
+        };
+        let mut expression_symbols = Vec::new();
+        if matches!(selection.source, AtomicClassSource::Nominal(_)) {
+            let seed = class_expression_symbol_seed(&base_key, OBJECT_ONE_OF_TAG, budget)?;
+            push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
+        }
+        let key = if selection.negative {
+            let key = synthetic_class_complement_key(&base_key, budget)?;
+            let seed = class_expression_symbol_seed(&key, OBJECT_COMPLEMENT_OF_TAG, budget)?;
+            push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
+            key
+        } else {
+            base_key
+        };
+        budget.claim_owned(size_of::<NormalizedAtomicClassTerm>())?;
+        return Ok(Some(NormalizedClassTerm::Atomic(
+            NormalizedAtomicClassTerm {
+                selection,
+                key,
+                symbols: expression_symbols,
+            },
+        )));
+    }
+
     if node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "class Boolean expression no longer has schema-1 shape",
+            "recursive class Boolean expression no longer has schema-1 shape",
         ));
     }
-    let component =
-        required_component(model.field(node.fields().start)?, "class Boolean operands")?;
-    let ComponentValue::Collection(operands) = model.resolve(component)? else {
+    let component = required_component(
+        model.field(node.fields().start)?,
+        "recursive class Boolean operands",
+    )?;
+    let ComponentValue::Collection(source_operands) = model.resolve(component)? else {
         return Err(EncodedValidationError::invariant(
-            "class Boolean operands did not resolve to a collection",
+            "recursive class Boolean operands did not resolve to a collection",
         ));
     };
-    let mut selections = Vec::new();
-    budget.claim_owned(
-        operands
-            .len()
-            .checked_mul(size_of::<AtomicClassSelection>())
-            .ok_or_else(|| {
-                EncodedValidationError::resource("class Boolean operand allocation overflowed")
-            })?,
+    if source_operands.len() < 2 {
+        return Err(EncodedValidationError::invariant(
+            "recursive class Boolean expression has fewer than two operands",
+        ));
+    }
+    let intersection = (node.tag() == OBJECT_INTERSECTION_OF_TAG) != complemented;
+    let operand_depth = child_expression_depth(depth, "class-expression depth overflowed")?;
+    PhaseBudget::count(
+        operand_depth,
+        budget.limits.max_canonical_depth,
+        "class-expression depth",
     )?;
-    selections
-        .try_reserve_exact(operands.len())
-        .map_err(|_| EncodedValidationError::resource("class Boolean operand allocation failed"))?;
-    for item_index in operands.items() {
+    let mut operands = Vec::<NormalizedClassTerm>::new();
+    let mut absorbing = None;
+    let mut identity = None;
+    for item_index in source_operands.items() {
         budget.claim_work(1)?;
-        let item = required_component(model.item(item_index)?, "class Boolean operand")?;
+        let item = required_component(model.item(item_index)?, "recursive class Boolean operand")?;
         let ComponentValue::Node(operand) = model.resolve(item)? else {
             return Err(EncodedValidationError::invariant(
-                "class Boolean operand did not resolve to a node",
+                "recursive class Boolean operand did not resolve to a node",
             ));
         };
-        if !stable_class_literal_expression(model, symbols, operand, budget)? {
+        let Some(term) = normalized_class_term(
+            model,
+            symbols,
+            operand,
+            complemented,
+            operand_depth,
+            scope_maps,
+            budget,
+        )?
+        else {
             return Ok(None);
+        };
+        if let NormalizedClassTerm::Atomic(atomic) = &term {
+            let is_thing =
+                atomic_class_selection_has_display(symbols, atomic.selection, THING_DISPLAY)?;
+            let is_nothing =
+                atomic_class_selection_has_display(symbols, atomic.selection, NOTHING_DISPLAY)?;
+            if (intersection && is_nothing) || (!intersection && is_thing) {
+                absorbing.get_or_insert(term);
+                continue;
+            }
+            if (intersection && is_thing) || (!intersection && is_nothing) {
+                identity.get_or_insert(term);
+                continue;
+            }
         }
-        let selection =
-            atomic_class_selection(model, symbols, operand, budget)?.ok_or_else(|| {
-                EncodedValidationError::invariant(
-                    "validated stable class literal became unsupported",
+        match term {
+            NormalizedClassTerm::Boolean(term) if term.intersection == intersection => {
+                for nested in term.operands {
+                    push_normalized_class_term(&mut operands, nested, budget)?;
+                }
+            }
+            term => push_normalized_class_term(&mut operands, term, budget)?,
+        }
+    }
+    if let Some(term) = absorbing {
+        return Ok(Some(term));
+    }
+    budget.claim_work(sort_work(operands.len()))?;
+    operands.sort_by(|left, right| left.key().cmp(right.key()));
+    operands.dedup_by(|left, right| left.key() == right.key());
+    match operands.len() {
+        0 => return Ok(identity),
+        1 => return Ok(operands.pop()),
+        _ => {}
+    }
+    let expression_tag = if intersection {
+        OBJECT_INTERSECTION_OF_TAG
+    } else {
+        OBJECT_UNION_OF_TAG
+    };
+    let key = synthetic_boolean_key(
+        expression_tag,
+        operands.iter().map(NormalizedClassTerm::key),
+        operands.len(),
+        budget,
+    )?;
+    budget.claim_owned(size_of::<NormalizedClassBooleanTerm>())?;
+    Ok(Some(NormalizedClassTerm::Boolean(
+        NormalizedClassBooleanTerm {
+            intersection,
+            key,
+            operands,
+        },
+    )))
+}
+
+fn push_normalized_class_term(
+    target: &mut Vec<NormalizedClassTerm>,
+    term: NormalizedClassTerm,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let following = target.len().checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("normalized class term count overflowed")
+    })?;
+    PhaseBudget::count(
+        following,
+        budget.limits.max_class_symbols,
+        "normalized class term count",
+    )?;
+    budget.claim_owned(size_of::<NormalizedClassTerm>())?;
+    target
+        .try_reserve(1)
+        .map_err(|_| EncodedValidationError::resource("normalized class term allocation failed"))?;
+    target.push(term);
+    Ok(())
+}
+
+fn synthetic_class_complement_key(
+    operand_key: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let mut key = Vec::new();
+    push_generated_varint(&mut key, u64::from(OBJECT_COMPLEMENT_OF_TAG), budget)?;
+    push_generated_byte(&mut key, 1, budget)?;
+    push_generated_frame(&mut key, operand_key, budget)?;
+    Ok(key)
+}
+
+fn class_expression_symbol_seed(
+    key: &[u8],
+    tag: u16,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<ClassExpressionSymbolSeed> {
+    budget.claim_work(key.len())?;
+    let digest = crate::model::hex(&Sha256::digest(key));
+    let prefix = class_expression_prefix(tag)?;
+    let display_len = prefix
+        .len()
+        .checked_add(digest.len())
+        .ok_or_else(|| EncodedValidationError::resource("class-expression display overflowed"))?;
+    budget.claim_owned(
+        size_of::<ClassExpressionSymbolSeed>()
+            .checked_add(key.len())
+            .and_then(|value| value.checked_add(display_len))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("class-expression seed ownership overflowed")
+            })?,
+    )?;
+    let mut stored_key = Vec::new();
+    stored_key.try_reserve_exact(key.len()).map_err(|_| {
+        EncodedValidationError::resource("class-expression seed key allocation failed")
+    })?;
+    stored_key.extend_from_slice(key);
+    let mut display = String::new();
+    display.try_reserve_exact(display_len).map_err(|_| {
+        EncodedValidationError::resource("class-expression seed display allocation failed")
+    })?;
+    display.push_str(prefix);
+    display.push_str(&digest);
+    Ok(ClassExpressionSymbolSeed {
+        key: stored_key,
+        display,
+    })
+}
+
+fn push_class_expression_symbol_seed(
+    target: &mut Vec<ClassExpressionSymbolSeed>,
+    seed: ClassExpressionSymbolSeed,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    budget.claim_work(1)?;
+    target.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("class-expression seed collection allocation failed")
+    })?;
+    target.push(seed);
+    Ok(())
+}
+
+fn atomize_normalized_class_boolean(
+    term: NormalizedClassBooleanTerm,
+    source_expression: Option<NodeId>,
+    polarity: DefinitionPolarity,
+    namespace: [u8; 32],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let expression_tag = if term.intersection {
+        OBJECT_INTERSECTION_OF_TAG
+    } else {
+        OBJECT_UNION_OF_TAG
+    };
+    let mut expression_symbols = Vec::<ClassExpressionSymbolSeed>::new();
+    let source_seed = class_expression_symbol_seed(&term.key, expression_tag, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, source_seed, budget)?;
+    let mut keyed = Vec::<(Vec<u8>, ClassBooleanOperand)>::new();
+    budget.claim_owned(
+        term.operands
+            .len()
+            .checked_mul(size_of::<(Vec<u8>, ClassBooleanOperand)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "recursive class definition operand allocation overflowed",
                 )
-            })?;
-        if atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?
-            || atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?
-            || selections
-                .iter()
-                .copied()
-                .any(|known| atomic_class_selections_match(known, selection))
-        {
-            return Ok(None);
+            })?,
+    )?;
+    keyed.try_reserve_exact(term.operands.len()).map_err(|_| {
+        EncodedValidationError::resource("recursive class definition operand allocation failed")
+    })?;
+    for operand in term.operands {
+        match operand {
+            NormalizedClassTerm::Atomic(operand) => {
+                for seed in operand.symbols {
+                    push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
+                }
+                keyed.push((operand.key, ClassBooleanOperand::Atomic(operand.selection)));
+            }
+            NormalizedClassTerm::Boolean(operand) => {
+                let generated_key = atomize_normalized_class_boolean(
+                    operand,
+                    None,
+                    polarity,
+                    namespace,
+                    definitions,
+                    budget,
+                )?;
+                budget.claim_owned(generated_key.len())?;
+                keyed.push((
+                    generated_key.clone(),
+                    ClassBooleanOperand::Generated { key: generated_key },
+                ));
+            }
         }
-        selections.push(selection);
     }
-    if selections.len() < 2 {
-        return Ok(None);
+    budget.claim_work(sort_work(keyed.len()))?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    if keyed.len() < 2 || keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(EncodedValidationError::invariant(
+            "recursive class definition lost distinct operands",
+        ));
     }
-    let expression_key = canonical::canonical_node_key(model, expression, scope_maps, budget)?;
+    let rewritten_expression_key = synthetic_boolean_key(
+        expression_tag,
+        keyed.iter().map(|(key, _)| key.as_slice()),
+        keyed.len(),
+        budget,
+    )?;
+    let rewritten_seed =
+        class_expression_symbol_seed(&rewritten_expression_key, expression_tag, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, rewritten_seed, budget)?;
+    budget.claim_work(sort_work(expression_symbols.len()))?;
+    expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
+    expression_symbols.dedup_by(|left, right| left.key == right.key);
+    budget.claim_owned(
+        keyed
+            .len()
+            .checked_mul(size_of::<ClassBooleanOperand>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "recursive generated class operand allocation overflowed",
+                )
+            })?,
+    )?;
+    let mut operands = Vec::new();
+    operands.try_reserve_exact(keyed.len()).map_err(|_| {
+        EncodedValidationError::resource("recursive generated class operand allocation failed")
+    })?;
+    operands.extend(keyed.into_iter().map(|(_, operand)| operand));
     let (generated_key, generated_display) =
-        generated_class_symbol(namespace, &expression_key, polarity, budget)?;
-    budget.claim_owned(size_of::<NodeId>())?;
-    Ok(Some(ClassBooleanDefinition {
-        expressions: vec![expression],
+        generated_class_symbol(namespace, &term.key, polarity, budget)?;
+    budget.claim_owned(generated_key.len())?;
+    let returned_key = generated_key.clone();
+    let mut expressions = Vec::new();
+    if let Some(expression) = source_expression {
+        budget.claim_owned(size_of::<NodeId>())?;
+        expressions.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "recursive class definition expression allocation failed",
+            )
+        })?;
+        expressions.push(expression);
+    }
+    budget.claim_owned(size_of::<ClassBooleanDefinition>())?;
+    definitions.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("recursive class definition allocation failed")
+    })?;
+    definitions.push(ClassBooleanDefinition {
+        expressions,
         roots: Vec::new(),
-        expression_key,
-        intersection: node.tag() == OBJECT_INTERSECTION_OF_TAG,
-        operands: selections,
+        expression_key: term.key,
+        expression_symbols,
+        intersection: term.intersection,
+        operands,
         polarity,
         generated_key,
         generated_display,
         provenance: Vec::new(),
-    }))
+    });
+    Ok(returned_key)
 }
 
 fn stable_class_literal_expression<B: ByteSource>(
@@ -4096,6 +4525,7 @@ fn retain_class_boolean_definition(
     }) {
         if known.intersection != definition.intersection
             || known.operands != definition.operands
+            || known.expression_symbols != definition.expression_symbols
             || known.generated_key != definition.generated_key
             || known.generated_display != definition.generated_display
         {
@@ -4522,12 +4952,55 @@ fn push_class_boolean_definition_selections(
     definition: &ClassBooleanDefinition,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
-    if let Some(expression) = definition.expressions.first().copied() {
-        push_class_expression_selection(expressions, expression, budget)?;
+    for operand in &definition.operands {
+        if let ClassBooleanOperand::Atomic(AtomicClassSelection {
+            source: AtomicClassSource::Nominal(base),
+            ..
+        }) = operand
+        {
+            push_class_expression_selection(expressions, *base, budget)?;
+        }
     }
-    for selection in definition.operands.iter().copied() {
-        push_atomic_class_selection(expressions, selection, budget)?;
-    }
+    Ok(())
+}
+
+fn push_seeded_class_expression_symbol(
+    target: &mut Vec<PendingClassSymbol>,
+    seed: &ClassExpressionSymbolSeed,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let following = target.len().checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("seeded class-expression symbol count overflowed")
+    })?;
+    PhaseBudget::count(
+        following,
+        budget.limits.max_class_symbols,
+        "class-expression symbol count",
+    )?;
+    budget.claim_owned(
+        size_of::<PendingClassSymbol>()
+            .checked_add(size_of::<DecodedSymbolValue>())
+            .and_then(|value| value.checked_add(seed.key.len()))
+            .and_then(|value| value.checked_add(seed.display.len()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "seeded class-expression symbol ownership overflowed",
+                )
+            })?,
+    )?;
+    target.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("seeded class-expression symbol allocation failed")
+    })?;
+    target.push(PendingClassSymbol {
+        value: DecodedSymbolValue {
+            identifier: 0,
+            key: seed.key.clone(),
+            display: seed.display.clone(),
+            generated: false,
+            query_local: false,
+        },
+        entity: None,
+    });
     Ok(())
 }
 
@@ -4572,6 +5045,12 @@ fn class_signature<B: ByteSource>(
                 declared_class_ids.binary_search(&entity.identifier).is_ok(),
             )),
         });
+    }
+
+    for definition in definitions {
+        for seed in &definition.expression_symbols {
+            push_seeded_class_expression_symbol(&mut pending, seed, budget)?;
+        }
     }
 
     let mut selected_expressions = Vec::<NodeId>::new();
@@ -4973,7 +5452,7 @@ fn class_signature<B: ByteSource>(
     }
 
     for definition in definitions {
-        if definition.expressions.is_empty() {
+        if definition.expressions.is_empty() && definition.expression_symbols.is_empty() {
             if definition.roots.is_empty() {
                 return Err(EncodedValidationError::invariant(
                     "synthetic class definition lost its owning root",
@@ -10913,12 +11392,12 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             .map_err(|_| {
                 EncodedValidationError::resource("generated definition literal allocation failed")
             })?;
-        for selection in definition.operands.iter().copied() {
-            let (class_id, negative) = atomic_class_selection_literal(
+        for operand in &definition.operands {
+            let (class_id, negative) = class_boolean_operand_literal(
                 model,
                 class_domain,
                 signature,
-                selection,
+                operand,
                 scope_maps,
                 budget,
             )?;
@@ -10985,6 +11464,45 @@ fn emit_class_boolean_definitions<B: ByteSource>(
         }
     }
     Ok(())
+}
+
+fn class_boolean_operand_literal<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    class_domain: &DecodedSymbolDomain,
+    signature: &[ClassSignatureBinding],
+    operand: &ClassBooleanOperand,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(u32, bool)> {
+    match operand {
+        ClassBooleanOperand::Atomic(selection) => atomic_class_selection_literal(
+            model,
+            class_domain,
+            signature,
+            *selection,
+            scope_maps,
+            budget,
+        ),
+        ClassBooleanOperand::Generated { key } => {
+            budget.claim_work(binary_search_work(class_domain.values.len()))?;
+            let index = class_domain
+                .values
+                .binary_search_by(|candidate| candidate.key.cmp(key))
+                .map_err(|_| {
+                    EncodedValidationError::invariant(
+                        "recursive generated class operand disappeared",
+                    )
+                })?;
+            Ok((
+                u32::try_from(index).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "recursive generated class operand ID exceeds u32",
+                    )
+                })?,
+                false,
+            ))
+        }
+    }
 }
 
 fn push_raw_boolean_clause(

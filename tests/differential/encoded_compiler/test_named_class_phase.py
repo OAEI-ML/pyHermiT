@@ -1711,6 +1711,65 @@ def test_flat_boolean_subclass_definitions_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_recursive_class_boolean_definitions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(Class(:E))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A ObjectUnionOf(:B ObjectIntersectionOf(:C :D)))",
+            'SubClassOf(Annotation(:note "same recursive definition") :A '
+            "ObjectUnionOf(:B ObjectIntersectionOf(:C :D)))",
+            "ClassAssertion(ObjectComplementOf(ObjectIntersectionOf("
+            "ObjectComplementOf(:B) ObjectComplementOf("
+            "ObjectIntersectionOf(:C :D)))) :i)",
+            "SubClassOf(ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) :D)",
+            "EquivalentClasses(:E ObjectIntersectionOf(:A "
+            "ObjectUnionOf(:B :C)))",
+            "ObjectPropertyDomain(:p ObjectIntersectionOf(:A "
+            "ObjectUnionOf(:B :C)))",
+            "DataPropertyDomain(:d ObjectUnionOf(:B "
+            "ObjectIntersectionOf(:C :D)))",
+            "HasKey(ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) (:p) (:d))",
+            "DisjointClasses(ObjectIntersectionOf(:A "
+            "ObjectUnionOf(:B :C)) :D)",
+            "ObjectPropertyRange(:p ObjectUnionOf("
+            "ObjectIntersectionOf(:A :B) ObjectIntersectionOf("
+            ":C ObjectUnionOf(:D :E))))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=10,
+        include_object_constraints=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    generated = [
+        value
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ]
+    assert len(generated) == 10
+    assert {
+        str(value["display"]).split(":")[-2] for value in generated
+    } == {"negative", "positive"}
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_flat_boolean_equivalent_class_definitions_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -2012,6 +2071,51 @@ def test_composite_boolean_definitions_use_the_global_logical_namespace() -> Non
         )
         if value["generated"]
     )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_recursive_class_booleans_reuse_normalized_definitions() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(Class(:D))",
+        "Declaration(NamedIndividual(:i))",
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "SubClassOf(:A ObjectUnionOf(:B ObjectIntersectionOf(:C :D)))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "ClassAssertion(ObjectComplementOf(ObjectIntersectionOf("
+            "ObjectComplementOf(:B) ObjectComplementOf("
+            "ObjectIntersectionOf(:C :D)))) :i)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(composite, compiled_roots=2)
+    generated = [
+        value
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ]
+    assert len(generated) == 2
+    namespace = f":class:{composite.logical_fingerprint.hex}:positive:"
+    assert all(namespace in str(value["display"]) for value in generated)
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
