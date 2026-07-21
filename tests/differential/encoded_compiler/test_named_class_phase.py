@@ -1780,6 +1780,47 @@ def test_flat_boolean_class_assertion_definitions_match_scalar_exactly() -> None
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_flat_boolean_property_constraint_definitions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:data))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(AnnotationProperty(:note))",
+            "ObjectPropertyDomain(:p ObjectIntersectionOf(:A :B))",
+            'ObjectPropertyDomain(Annotation(:note "same definition") :p '
+            "ObjectIntersectionOf(:A :B))",
+            "ObjectPropertyRange(ObjectInverseOf(:q) "
+            "ObjectUnionOf(ObjectComplementOf(:B) :C))",
+            "DataPropertyDomain(:data "
+            "ObjectIntersectionOf(ObjectOneOf(:i) :D))",
+            "SubClassOf(:C ObjectIntersectionOf(:A :B))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=5,
+        include_object_constraints=True,
+        include_data_domains=True,
+    )
+    assert sum(
+        bool(value["generated"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    ) == 3
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_generated_class_entity_remapping_matches_scalar_exactly() -> None:
     long_iri = "<urn:test:long:" + ("z" * 240) + ">"
     snapshot = pyowl_core.load_snapshot(
@@ -1837,6 +1878,52 @@ def test_composite_boolean_definitions_use_the_global_logical_namespace() -> Non
     )
 
     assert manifest == _expected_manifest(composite, compiled_roots=3)
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert all(
+        namespace in str(value["display"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(DataProperty(:data))",
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "ObjectPropertyDomain(:p ObjectIntersectionOf(:A :B))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "DataPropertyDomain(:data ObjectUnionOf(:B :C))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_object_constraints=True,
+        include_data_domains=True,
+    )
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(
         namespace in str(value["display"])
@@ -4384,16 +4471,14 @@ def test_composite_functional_data_properties_remap_distinct_local_role_domains(
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_complex_object_domain_and_range_still_defer_whole_roots() -> None:
+def test_complex_object_domain_still_defers_the_whole_root() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
-            "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(AnnotationProperty(:note))",
             'ObjectPropertyDomain(Annotation(:note "source") :p ObjectSomeValuesFrom(:q :A))',
-            "ObjectPropertyRange(:p ObjectUnionOf(:A :B))",
         ),
         options=OPTIONS,
     )
@@ -4401,7 +4486,7 @@ def test_complex_object_domain_and_range_still_defer_whole_roots() -> None:
     manifest = _native_manifest(snapshot)
 
     assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 2
+    assert manifest["deferred_roots"] == 1
     assert all(
         predicate["kind"] != "object_role"
         for predicate in cast(list[dict[str, object]], manifest["predicates"])

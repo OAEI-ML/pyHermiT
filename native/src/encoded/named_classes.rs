@@ -1048,6 +1048,8 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let definitions = class_boolean_definitions(
         model,
         symbols,
+        object_roles,
+        data_roles,
         scope_maps,
         definition_namespace,
         &mut budget,
@@ -1328,6 +1330,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     object_roles,
                     &class_domain,
                     &class_signature,
+                    &definitions,
                     root.handler,
                     root.node,
                     scope_maps,
@@ -1406,6 +1409,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     data_roles,
                     &class_domain,
                     &class_signature,
+                    &definitions,
                     root.node,
                     scope_maps,
                     &mut budget,
@@ -2164,6 +2168,8 @@ fn declared_class_ids(symbols: &SymbolPhase, budget: &mut PhaseBudget) -> Encode
 fn class_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
     scope_maps: &[AnonymousScopeMap],
     namespace: Option<[u8; 32]>,
     budget: &mut PhaseBudget,
@@ -2202,6 +2208,38 @@ fn class_boolean_definitions<B: ByteSource>(
                 &mut definitions,
                 budget,
             )?,
+            RootHandler::ObjectPropertyDomain | RootHandler::ObjectPropertyRange => {
+                if let Some(roles) = object_roles {
+                    retain_class_constraint_boolean_definition(
+                        model,
+                        symbols,
+                        Some(roles),
+                        None,
+                        root.handler,
+                        root.node,
+                        namespace,
+                        scope_maps,
+                        &mut definitions,
+                        budget,
+                    )?;
+                }
+            }
+            RootHandler::DataPropertyDomain => {
+                if let Some(roles) = data_roles {
+                    retain_class_constraint_boolean_definition(
+                        model,
+                        symbols,
+                        None,
+                        Some(roles),
+                        root.handler,
+                        root.node,
+                        namespace,
+                        scope_maps,
+                        &mut definitions,
+                        budget,
+                    )?;
+                }
+            }
             _ => {}
         }
     }
@@ -2338,6 +2376,75 @@ fn supported_class_assertion_individual<B: ByteSource>(
         }
         _ => Ok(false),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_class_constraint_boolean_definition<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
+    handler: RootHandler,
+    root: NodeId,
+    namespace: [u8; 32],
+    scope_maps: &[AnonymousScopeMap],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let (tag, name) = match handler {
+        RootHandler::ObjectPropertyDomain => (OBJECT_PROPERTY_DOMAIN_TAG, "object-property domain"),
+        RootHandler::ObjectPropertyRange => (OBJECT_PROPERTY_RANGE_TAG, "object-property range"),
+        RootHandler::DataPropertyDomain => (DATA_PROPERTY_DOMAIN_TAG, "data-property domain"),
+        _ => {
+            return Err(EncodedValidationError::invariant(
+                "class constraint definition received a different root handler",
+            ));
+        }
+    };
+    let node = model.node(root)?;
+    if node.tag() != tag || node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(format!(
+            "{name} root no longer has schema-1 shape"
+        )));
+    }
+    let property = node_field(model, node, 0, "class constraint property")?;
+    match handler {
+        RootHandler::ObjectPropertyDomain | RootHandler::ObjectPropertyRange => {
+            let roles = object_roles.ok_or_else(|| {
+                EncodedValidationError::invariant("object class constraint lost its role domain")
+            })?;
+            let _role_id = named_object_role_id(model, symbols, roles, property, budget)?;
+        }
+        RootHandler::DataPropertyDomain => {
+            let roles = data_roles.ok_or_else(|| {
+                EncodedValidationError::invariant("data class constraint lost its role domain")
+            })?;
+            let _role_id = named_data_role_id(model, symbols, roles, property, budget)?;
+        }
+        _ => {
+            return Err(EncodedValidationError::invariant(
+                "class constraint definition handler changed during validation",
+            ));
+        }
+    }
+    let expression = node_field(model, node, 1, "class constraint expression")?;
+    if atomic_class_selection(model, symbols, expression, budget)?.is_some() {
+        return Ok(());
+    }
+    let Some(definition) = class_boolean_definition_candidate(
+        model,
+        symbols,
+        expression,
+        DefinitionPolarity::Positive,
+        namespace,
+        scope_maps,
+        budget,
+    )?
+    else {
+        return Ok(());
+    };
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    retain_class_boolean_definition(definitions, definition, provenance, budget)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3143,6 +3250,14 @@ fn class_signature<B: ByteSource>(
                 if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
                     push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                } else if let Some(definition) =
+                    class_boolean_definition(definitions, expression, DefinitionPolarity::Positive)
+                {
+                    push_class_boolean_definition_selections(
+                        &mut selected_expressions,
+                        definition,
+                        budget,
+                    )?;
                 }
             }
             RootHandler::DataPropertyDomain if has_data_roles => {
@@ -3151,6 +3266,14 @@ fn class_signature<B: ByteSource>(
                 if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
                     push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                } else if let Some(definition) =
+                    class_boolean_definition(definitions, expression, DefinitionPolarity::Positive)
+                {
+                    push_class_boolean_definition_selections(
+                        &mut selected_expressions,
+                        definition,
+                        budget,
+                    )?;
                 }
             }
             RootHandler::HasKey => {
@@ -7575,6 +7698,7 @@ fn named_object_constraint<B: ByteSource>(
     object_roles: &ObjectRolePhase,
     class_domain: &DecodedSymbolDomain,
     class_signature: &[ClassSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
     handler: RootHandler,
     root: NodeId,
     scope_maps: &[AnonymousScopeMap],
@@ -7605,13 +7729,15 @@ fn named_object_constraint<B: ByteSource>(
     }
     let property = node_field(model, node, 0, "object-property constraint role")?;
     let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
-    let Some(class) = atomic_class_field(
+    let expression = node_field(model, node, 1, "object-property constraint class")?;
+    let Some((class_id, negative)) = class_expression_literal_with_definitions(
         model,
         symbols,
         class_domain,
         class_signature,
-        node,
-        1,
+        expression,
+        DefinitionPolarity::Positive,
+        definitions,
         scope_maps,
         budget,
     )?
@@ -7622,7 +7748,7 @@ fn named_object_constraint<B: ByteSource>(
     Ok(Some(RawObjectConstraint {
         kind,
         role_id,
-        class,
+        class: ClassLiteral { class_id, negative },
         provenance,
     }))
 }
@@ -7682,6 +7808,7 @@ fn named_data_domain<B: ByteSource>(
     data_roles: &DataRolePhase,
     class_domain: &DecodedSymbolDomain,
     class_signature: &[ClassSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
     root: NodeId,
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
@@ -7694,13 +7821,15 @@ fn named_data_domain<B: ByteSource>(
     }
     let property = node_field(model, node, 0, "data-property domain role")?;
     let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
-    let Some(class) = atomic_class_field(
+    let expression = node_field(model, node, 1, "data-property domain class")?;
+    let Some((class_id, negative)) = class_expression_literal_with_definitions(
         model,
         symbols,
         class_domain,
         class_signature,
-        node,
-        1,
+        expression,
+        DefinitionPolarity::Positive,
+        definitions,
         scope_maps,
         budget,
     )?
@@ -7710,7 +7839,7 @@ fn named_data_domain<B: ByteSource>(
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
     Ok(Some(RawDataDomain {
         role_id,
-        class,
+        class: ClassLiteral { class_id, negative },
         provenance,
     }))
 }
