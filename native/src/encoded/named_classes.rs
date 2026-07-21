@@ -1920,7 +1920,7 @@ fn class_signature<B: ByteSource>(
     }
 
     let mut complements = Vec::<NodeId>::new();
-    for root in &symbols.roots {
+    'root_selection: for root in &symbols.roots {
         budget.claim_work(1)?;
         let root_node = model.node(root.node)?;
         match root.handler {
@@ -1956,6 +1956,47 @@ fn class_signature<B: ByteSource>(
                 }
                 if super_negative {
                     push_complement_selection(&mut complements, super_class, budget)?;
+                }
+            }
+            RootHandler::EquivalentClasses => {
+                let expressions_component = required_component(
+                    model.field(root_node.fields().start)?,
+                    "equivalent-classes expressions",
+                )?;
+                let ComponentValue::Collection(expressions) =
+                    model.resolve(expressions_component)?
+                else {
+                    return Err(EncodedValidationError::invariant(
+                        "equivalent-classes expressions did not resolve to a collection",
+                    ));
+                };
+                for item_index in expressions.items() {
+                    budget.claim_work(1)?;
+                    let item =
+                        required_component(model.item(item_index)?, "equivalent-classes member")?;
+                    let ComponentValue::Node(identifier) = model.resolve(item)? else {
+                        return Err(EncodedValidationError::invariant(
+                            "equivalent-classes member did not resolve to a node",
+                        ));
+                    };
+                    if atomic_class_entity(model, symbols, identifier)?.is_none() {
+                        continue 'root_selection;
+                    }
+                }
+                for item_index in expressions.items() {
+                    budget.claim_work(1)?;
+                    let item =
+                        required_component(model.item(item_index)?, "equivalent-classes member")?;
+                    let ComponentValue::Node(identifier) = model.resolve(item)? else {
+                        return Err(EncodedValidationError::invariant(
+                            "equivalent-classes member did not resolve to a node",
+                        ));
+                    };
+                    if atomic_class_entity(model, symbols, identifier)?
+                        .is_some_and(|(_, negative)| negative)
+                    {
+                        push_complement_selection(&mut complements, identifier, budget)?;
+                    }
                 }
             }
             _ => {}
@@ -4372,7 +4413,7 @@ fn named_equivalent_classes<B: ByteSource>(
     budget.claim_owned(
         expressions
             .len()
-            .checked_mul(size_of::<u32>())
+            .checked_mul(size_of::<(u32, bool)>())
             .ok_or_else(|| {
                 EncodedValidationError::resource("equivalent-classes member allocation overflowed")
             })?,
@@ -4388,10 +4429,11 @@ fn named_equivalent_classes<B: ByteSource>(
                 "equivalent-classes member did not resolve to a node",
             ));
         };
-        let Some(class_id) = named_class_id(model, symbols, signature, identifier)? else {
+        let Some(class_literal) = atomic_class_literal(model, symbols, signature, identifier)?
+        else {
             return Ok(None);
         };
-        classes.push(class_id);
+        classes.push(class_literal);
     }
     if classes.len() < 2 {
         return Err(EncodedValidationError::invariant(
@@ -4411,15 +4453,16 @@ fn named_equivalent_classes<B: ByteSource>(
     edges.try_reserve_exact(classes.len()).map_err(|_| {
         EncodedValidationError::resource("equivalent-classes edge allocation failed")
     })?;
-    for (index, sub_class) in classes.iter().copied().enumerate() {
+    for (index, (sub_class, sub_negative)) in classes.iter().copied().enumerate() {
         let following = index.checked_add(1).ok_or_else(|| {
             EncodedValidationError::resource("equivalent-classes edge index overflowed")
         })?;
+        let (super_class, super_negative) = classes[following % classes.len()];
         edges.push(RawEdge {
             sub_class,
-            sub_negative: false,
-            super_class: classes[following % classes.len()],
-            super_negative: false,
+            sub_negative,
+            super_class,
+            super_negative,
             provenance,
         });
     }
