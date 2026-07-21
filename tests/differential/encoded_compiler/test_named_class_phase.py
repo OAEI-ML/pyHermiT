@@ -1489,6 +1489,66 @@ def test_named_nominal_class_axioms_constraints_and_keys_match_scalar_exactly() 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_nested_atomic_class_complements_reduce_by_parity_exactly() -> None:
+    double_a = "ObjectComplementOf(ObjectComplementOf(:A))"
+    triple_a = f"ObjectComplementOf({double_a})"
+    double_b = "ObjectComplementOf(ObjectComplementOf(:B))"
+    triple_b = f"ObjectComplementOf({double_b})"
+    double_nominal = "ObjectComplementOf(ObjectComplementOf(ObjectOneOf(:a)))"
+    triple_nominal = f"ObjectComplementOf({double_nominal})"
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:data))",
+            "Declaration(NamedIndividual(:a))",
+            "Declaration(NamedIndividual(:i))",
+            f"ClassAssertion({double_a} :i)",
+            f"ClassAssertion({triple_a} :i)",
+            f"SubClassOf({double_a} {triple_b})",
+            f"EquivalentClasses({triple_a} {double_b})",
+            f"DisjointClasses({double_a} {triple_b})",
+            f"ObjectPropertyDomain(:p {double_nominal})",
+            f"ObjectPropertyRange(:p {triple_nominal})",
+            f"DataPropertyDomain(:data {triple_a})",
+            f"HasKey({double_nominal} (:p) (:data))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=9,
+        include_object_constraints=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    class_symbols = cast(
+        list[dict[str, object]], manifest["class_expression_symbols"]
+    )
+    assert sum(
+        str(value["display"]).startswith("ObjectComplementOf:")
+        for value in class_symbols
+    ) == 3
+    assert sum(
+        str(value["display"]).startswith("ObjectOneOf:")
+        for value in class_symbols
+    ) == 1
+    predicates = cast(list[dict[str, object]], manifest["predicates"])
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
+        for predicate in predicates
+    ) == 2
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value
+        for predicate in predicates
+    ) == 1
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 @pytest.mark.parametrize(
     "axiom",
     [
@@ -1616,6 +1676,50 @@ def test_composite_named_nominal_class_axioms_and_constraints_remap_exactly() ->
         compiled_roots=4,
         include_object_constraints=True,
         include_data_domains=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_nested_complements_remap_normalized_literals_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:Z))",
+            "Declaration(NamedIndividual(:z))",
+            "Declaration(DataProperty(:zd))",
+            "SubClassOf(ObjectComplementOf(ObjectComplementOf("
+            "ObjectComplementOf(:Z))) ObjectComplementOf("
+            "ObjectComplementOf(ObjectOneOf(:z))))",
+            'DataPropertyRange(:zd DataComplementOf(DataComplementOf('
+            'DataComplementOf(DataOneOf("z")))))',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(NamedIndividual(:a))",
+            "Declaration(ObjectProperty(:ap))",
+            "Declaration(Datatype(:A))",
+            "ObjectPropertyDomain(:ap ObjectComplementOf(ObjectComplementOf("
+            "ObjectComplementOf(ObjectOneOf(:a)))))",
+            "DatatypeDefinition(:A DataComplementOf(DataComplementOf("
+            "DatatypeRestriction(xsd:integer "
+            'xsd:minInclusive "2"^^xsd:integer))))',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right))
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
@@ -1943,6 +2047,55 @@ def test_complemented_enumerated_restricted_and_bottom_ranges_match_scalar() -> 
         predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 3
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_nested_atomic_data_complements_reduce_by_parity_exactly() -> None:
+    double_enumeration = (
+        'DataComplementOf(DataComplementOf(DataOneOf("alpha" "beta")))'
+    )
+    triple_restriction = (
+        "DataComplementOf(DataComplementOf(DataComplementOf("
+        "DatatypeRestriction(xsd:integer "
+        'xsd:minInclusive "1"^^xsd:integer))))'
+    )
+    double_string = "DataComplementOf(DataComplementOf(xsd:string))"
+    triple_enumeration = (
+        'DataComplementOf(DataComplementOf(DataComplementOf(DataOneOf("value"))))'
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(Datatype(:D))",
+            "Declaration(Datatype(:E))",
+            f"DataPropertyRange(:p {double_enumeration})",
+            f"DataPropertyRange(:q {triple_restriction})",
+            f"DatatypeDefinition(:D {double_string})",
+            f"DatatypeDefinition(:E {triple_enumeration})",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
+    )
+    data_range_symbols = cast(
+        list[dict[str, object]], manifest["data_range_symbols"]
+    )
+    assert sum(
+        str(value["display"]).startswith("DataComplementOf:")
+        for value in data_range_symbols
+    ) == 2
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    ) == 2
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
@@ -3823,11 +3976,13 @@ def test_nested_complement_class_assertion_defers_without_partial_symbols() -> N
 def test_unsupported_nominal_assertions_defer_without_partial_symbols() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:p))",
             "Declaration(NamedIndividual(:a))",
             "Declaration(NamedIndividual(:b))",
             "ClassAssertion(ObjectOneOf(_:anonymous) :a)",
             "ClassAssertion(ObjectComplementOf("
-            "ObjectComplementOf(ObjectOneOf(:a))) :b)",
+            "ObjectComplementOf(ObjectSomeValuesFrom(:p :A))) :b)",
         ),
         options=OPTIONS,
     )
@@ -3863,9 +4018,9 @@ def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
             "EquivalentClasses(ObjectOneOf(:a) ObjectSomeValuesFrom(:p :A))",
             "DisjointClasses(ObjectOneOf(:a) ObjectSomeValuesFrom(:p :A))",
             "ObjectPropertyDomain(:p ObjectComplementOf("
-            "ObjectComplementOf(ObjectOneOf(:a))))",
+            "ObjectComplementOf(ObjectSomeValuesFrom(:p :A))))",
             "DataPropertyDomain(:data ObjectComplementOf("
-            "ObjectComplementOf(ObjectOneOf(:a))))",
+            "ObjectComplementOf(ObjectSomeValuesFrom(:p :A))))",
             "HasKey(ObjectOneOf(_:anonymous) (:p) (:data))",
         ),
         options=OPTIONS,
