@@ -4431,7 +4431,8 @@ def test_composite_generated_data_range_definitions_use_global_namespace() -> No
     left = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:z))",
-            "DataPropertyRange(:z DataUnionOf(xsd:string xsd:integer xsd:boolean))",
+            "DataPropertyRange(:z DataUnionOf(xsd:string "
+            "DataIntersectionOf(xsd:integer xsd:boolean)))",
         ),
         options=OPTIONS,
     )
@@ -4439,7 +4440,7 @@ def test_composite_generated_data_range_definitions_use_global_namespace() -> No
         functional(
             "Declaration(DataProperty(:a))",
             "DataPropertyRange(:a DataUnionOf(xsd:string "
-            "DataComplementOf(DataIntersectionOf(DataComplementOf(xsd:integer) "
+            "DataComplementOf(DataUnionOf(DataComplementOf(xsd:integer) "
             "DataComplementOf(xsd:boolean)))))",
         ),
         options=OPTIONS,
@@ -4462,7 +4463,7 @@ def test_composite_generated_data_range_definitions_use_global_namespace() -> No
         namespace in str(value["display"])
         for value in cast(list[dict[str, object]], actual["data_range_symbols"])
         if value["generated"]
-    ) == 1
+    ) == 2
     assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
@@ -4784,24 +4785,38 @@ def test_generated_data_property_range_definitions_match_scalar_exactly() -> Non
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_partial_generated_data_range_defers_without_symbol_leaks() -> None:
+def test_recursive_generated_data_range_definitions_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
             "DataPropertyRange(:p DataUnionOf(xsd:string "
             "DataComplementOf(DataUnionOf(xsd:integer xsd:boolean))))",
+            'DataPropertyRange(Annotation(:note "same definitions") :p '
+            "DataUnionOf(xsd:string "
+            "DataComplementOf(DataUnionOf(xsd:integer xsd:boolean))))",
+            "DataPropertyRange(:q DataUnionOf("
+            "DataIntersectionOf(xsd:string xsd:integer) "
+            "DataComplementOf(DataUnionOf(xsd:boolean "
+            "DataComplementOf(xsd:decimal)))))",
         ),
         options=OPTIONS,
     )
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 1
-    assert not any(
-        value["generated"]
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=3,
+        include_data_ranges=True,
+        include_generated_data_definitions=True,
     )
+    assert sum(
+        bool(value["generated"])
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ) == 5
+    assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
@@ -4880,13 +4895,10 @@ def test_data_boolean_complements_normalize_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_unsupported_nested_data_boolean_still_defers_without_symbol_leaks() -> None:
+def test_mixed_nested_datatype_definition_still_defers_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
-            "Declaration(DataProperty(:p))",
             "Declaration(Datatype(:D))",
-            "DataPropertyRange(:p DataComplementOf(DataUnionOf(xsd:string "
-            "DataIntersectionOf(xsd:integer xsd:boolean))))",
             "DatatypeDefinition(:D DataComplementOf(DataUnionOf(xsd:string "
             "DataIntersectionOf(xsd:integer xsd:boolean))))",
         ),
@@ -4896,7 +4908,7 @@ def test_unsupported_nested_data_boolean_still_defers_without_symbol_leaks() -> 
     manifest = _native_manifest(snapshot)
 
     assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 2
+    assert manifest["deferred_roots"] == 1
     assert not any(
         value["generated"]
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])

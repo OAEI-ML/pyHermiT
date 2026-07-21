@@ -625,7 +625,7 @@ struct DataBooleanDefinition {
     expression_key: Vec<u8>,
     expression_symbols: Vec<DataRangeSymbolSeed>,
     intersection: bool,
-    operands: Vec<AtomicDataRangeSelection>,
+    operands: Vec<DataBooleanOperand>,
     polarity: DefinitionPolarity,
     generated_key: Vec<u8>,
     generated_display: String,
@@ -644,6 +644,41 @@ struct FlatDataBooleanExpression {
 struct DataRangeSymbolSeed {
     key: Vec<u8>,
     display: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DataBooleanOperand {
+    Atomic(AtomicDataRangeSelection),
+    Generated { key: Vec<u8> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedAtomicDataTerm {
+    selection: AtomicDataRangeSelection,
+    key: Vec<u8>,
+    symbols: Vec<DataRangeSymbolSeed>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedDataBooleanTerm {
+    intersection: bool,
+    key: Vec<u8>,
+    operands: Vec<NormalizedDataTerm>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NormalizedDataTerm {
+    Atomic(NormalizedAtomicDataTerm),
+    Boolean(NormalizedDataBooleanTerm),
+}
+
+impl NormalizedDataTerm {
+    fn key(&self) -> &[u8] {
+        match self {
+            Self::Atomic(term) => &term.key,
+            Self::Boolean(term) => &term.key,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2428,7 +2463,7 @@ fn data_boolean_definitions<B: ByteSource>(
         if atomic_data_range_selection(model, symbols, expression, budget)?.is_some() {
             continue;
         }
-        let Some(definition) = data_boolean_definition_candidate(
+        let definition = data_boolean_definition_candidate(
             model,
             symbols,
             expression,
@@ -2436,12 +2471,22 @@ fn data_boolean_definitions<B: ByteSource>(
             namespace,
             scope_maps,
             budget,
-        )?
-        else {
-            continue;
-        };
+        )?;
         let provenance = source_axiom_digest(model, root.node, scope_maps, budget)?;
-        retain_data_boolean_definition(&mut definitions, definition, provenance, budget)?;
+        if let Some(definition) = definition {
+            retain_data_boolean_definition(&mut definitions, definition, provenance, budget)?;
+            continue;
+        }
+        let _retained = retain_recursive_data_boolean_definitions(
+            model,
+            symbols,
+            expression,
+            namespace,
+            provenance,
+            scope_maps,
+            &mut definitions,
+            budget,
+        )?;
     }
     budget.claim_work(sort_work(definitions.len()))?;
     definitions.sort_by(|left, right| {
@@ -2477,13 +2522,36 @@ fn data_boolean_definition_candidate<B: ByteSource>(
     };
     let (generated_key, generated_display) =
         generated_data_symbol(namespace, &candidate.expression_key, polarity, budget)?;
+    budget.claim_owned(
+        candidate
+            .operands
+            .len()
+            .checked_mul(size_of::<DataBooleanOperand>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "generated data Boolean operand allocation overflowed",
+                )
+            })?,
+    )?;
+    let mut operands = Vec::new();
+    operands
+        .try_reserve_exact(candidate.operands.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("generated data Boolean operand allocation failed")
+        })?;
+    operands.extend(
+        candidate
+            .operands
+            .into_iter()
+            .map(DataBooleanOperand::Atomic),
+    );
     budget.claim_owned(size_of::<NodeId>())?;
     Ok(Some(DataBooleanDefinition {
         expressions: vec![expression],
         expression_key: candidate.expression_key,
         expression_symbols: candidate.expression_symbols,
         intersection: candidate.intersection,
-        operands: candidate.operands,
+        operands,
         polarity,
         generated_key,
         generated_display,
@@ -2765,6 +2833,185 @@ fn collect_flat_data_boolean_operand<B: ByteSource>(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn normalized_data_term<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    inherited_complement: bool,
+    initial_depth: usize,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<NormalizedDataTerm>> {
+    let mut base = identifier;
+    let mut complemented = inherited_complement;
+    let mut depth = initial_depth;
+    loop {
+        let node = model.node(base)?;
+        if node.tag() != DATA_COMPLEMENT_OF_TAG {
+            break;
+        }
+        if node.field_count() != 1 {
+            return Err(EncodedValidationError::invariant(
+                "recursive data complement no longer has schema-1 shape",
+            ));
+        }
+        depth = child_expression_depth(depth, "data-range depth overflowed")?;
+        PhaseBudget::count(depth, budget.limits.max_canonical_depth, "data-range depth")?;
+        budget.claim_work(1)?;
+        base = node_field(model, node, 0, "recursive data-complement operand")?;
+        complemented = !complemented;
+    }
+    let node = model.node(base)?;
+    if !matches!(node.tag(), DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG) {
+        let Some(mut selection) =
+            positive_atomic_data_range_selection(model, symbols, base, depth, budget)?
+        else {
+            return Ok(None);
+        };
+        selection.negative = complemented;
+        selection.expression = selection.base;
+        let base_key = canonical::canonical_node_key(model, selection.base, scope_maps, budget)?;
+        let mut expression_symbols = Vec::new();
+        if model.node(selection.base)?.tag() != ENTITY_TAG {
+            let seed =
+                data_range_symbol_seed(&base_key, model.node(selection.base)?.tag(), budget)?;
+            push_data_range_symbol_seed(&mut expression_symbols, seed, budget)?;
+        }
+        let key = if selection.negative {
+            let key = synthetic_data_complement_key(&base_key, budget)?;
+            let seed = data_range_symbol_seed(&key, DATA_COMPLEMENT_OF_TAG, budget)?;
+            push_data_range_symbol_seed(&mut expression_symbols, seed, budget)?;
+            key
+        } else {
+            base_key
+        };
+        budget.claim_owned(size_of::<NormalizedAtomicDataTerm>())?;
+        return Ok(Some(NormalizedDataTerm::Atomic(NormalizedAtomicDataTerm {
+            selection,
+            key,
+            symbols: expression_symbols,
+        })));
+    }
+    if node.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "recursive data Boolean expression no longer has schema-1 shape",
+        ));
+    }
+    let component = required_component(
+        model.field(node.fields().start)?,
+        "recursive data Boolean operands",
+    )?;
+    let ComponentValue::Collection(source_operands) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(
+            "recursive data Boolean operands did not resolve to a collection",
+        ));
+    };
+    if source_operands.len() < 2 {
+        return Err(EncodedValidationError::invariant(
+            "recursive data Boolean expression has fewer than two operands",
+        ));
+    }
+    let intersection = (node.tag() == DATA_INTERSECTION_OF_TAG) != complemented;
+    let operand_depth = child_expression_depth(depth, "data-range depth overflowed")?;
+    PhaseBudget::count(
+        operand_depth,
+        budget.limits.max_canonical_depth,
+        "data-range depth",
+    )?;
+    let mut operands = Vec::<NormalizedDataTerm>::new();
+    for item_index in source_operands.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "recursive data Boolean operand")?;
+        let ComponentValue::Node(operand) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "recursive data Boolean operand did not resolve to a node",
+            ));
+        };
+        let Some(term) = normalized_data_term(
+            model,
+            symbols,
+            operand,
+            complemented,
+            operand_depth,
+            scope_maps,
+            budget,
+        )?
+        else {
+            return Ok(None);
+        };
+        match term {
+            NormalizedDataTerm::Boolean(term) if term.intersection == intersection => {
+                for nested in term.operands {
+                    push_normalized_data_term(&mut operands, nested, budget)?;
+                }
+            }
+            term => push_normalized_data_term(&mut operands, term, budget)?,
+        }
+    }
+    if operands.len() < 2 {
+        return Ok(None);
+    }
+    for term in &operands {
+        if let NormalizedDataTerm::Atomic(term) = term {
+            if atomic_data_range_selection_is_top(model, symbols, term.selection)?
+                || atomic_data_range_selection_is_bottom(model, symbols, term.selection)?
+            {
+                return Ok(None);
+            }
+        }
+    }
+    budget.claim_work(sort_work(operands.len()))?;
+    operands.sort_by(|left, right| left.key().cmp(right.key()));
+    if operands
+        .windows(2)
+        .any(|pair| pair[0].key() == pair[1].key())
+    {
+        return Ok(None);
+    }
+    let expression_tag = if intersection {
+        DATA_INTERSECTION_OF_TAG
+    } else {
+        DATA_UNION_OF_TAG
+    };
+    let key = synthetic_boolean_key(
+        expression_tag,
+        operands.iter().map(NormalizedDataTerm::key),
+        operands.len(),
+        budget,
+    )?;
+    budget.claim_owned(size_of::<NormalizedDataBooleanTerm>())?;
+    Ok(Some(NormalizedDataTerm::Boolean(
+        NormalizedDataBooleanTerm {
+            intersection,
+            key,
+            operands,
+        },
+    )))
+}
+
+fn push_normalized_data_term(
+    target: &mut Vec<NormalizedDataTerm>,
+    term: NormalizedDataTerm,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let following = target
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("normalized data term count overflowed"))?;
+    PhaseBudget::count(
+        following,
+        budget.limits.max_data_range_symbols,
+        "normalized data term count",
+    )?;
+    budget.claim_owned(size_of::<NormalizedDataTerm>())?;
+    target
+        .try_reserve(1)
+        .map_err(|_| EncodedValidationError::resource("normalized data term allocation failed"))?;
+    target.push(term);
+    Ok(())
+}
+
 fn synthetic_data_complement_key(
     operand_key: &[u8],
     budget: &mut PhaseBudget,
@@ -2858,6 +3105,158 @@ fn push_seeded_data_range_symbol(
         query_local: false,
     });
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_recursive_data_boolean_definitions<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    expression: NodeId,
+    namespace: [u8; 32],
+    provenance: [u8; 32],
+    scope_maps: &[AnonymousScopeMap],
+    definitions: &mut Vec<DataBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<bool> {
+    let Some(term) =
+        normalized_data_term(model, symbols, expression, false, 0, scope_maps, budget)?
+    else {
+        return Ok(false);
+    };
+    let NormalizedDataTerm::Boolean(term) = term else {
+        return Ok(false);
+    };
+    let _generated_key = atomize_normalized_data_boolean(
+        term,
+        Some(expression),
+        namespace,
+        provenance,
+        definitions,
+        budget,
+    )?;
+    Ok(true)
+}
+
+fn atomize_normalized_data_boolean(
+    term: NormalizedDataBooleanTerm,
+    source_expression: Option<NodeId>,
+    namespace: [u8; 32],
+    provenance: [u8; 32],
+    definitions: &mut Vec<DataBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let expression_tag = if term.intersection {
+        DATA_INTERSECTION_OF_TAG
+    } else {
+        DATA_UNION_OF_TAG
+    };
+    let mut expression_symbols = Vec::<DataRangeSymbolSeed>::new();
+    let source_seed = data_range_symbol_seed(&term.key, expression_tag, budget)?;
+    push_data_range_symbol_seed(&mut expression_symbols, source_seed, budget)?;
+    let mut keyed = Vec::<(Vec<u8>, DataBooleanOperand)>::new();
+    budget.claim_owned(
+        term.operands
+            .len()
+            .checked_mul(size_of::<(Vec<u8>, DataBooleanOperand)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "recursive data definition operand allocation overflowed",
+                )
+            })?,
+    )?;
+    keyed.try_reserve_exact(term.operands.len()).map_err(|_| {
+        EncodedValidationError::resource("recursive data definition operand allocation failed")
+    })?;
+    for operand in term.operands {
+        match operand {
+            NormalizedDataTerm::Atomic(operand) => {
+                for seed in operand.symbols {
+                    push_data_range_symbol_seed(&mut expression_symbols, seed, budget)?;
+                }
+                keyed.push((operand.key, DataBooleanOperand::Atomic(operand.selection)));
+            }
+            NormalizedDataTerm::Boolean(operand) => {
+                let generated_key = atomize_normalized_data_boolean(
+                    operand,
+                    None,
+                    namespace,
+                    provenance,
+                    definitions,
+                    budget,
+                )?;
+                budget.claim_owned(generated_key.len())?;
+                keyed.push((
+                    generated_key.clone(),
+                    DataBooleanOperand::Generated { key: generated_key },
+                ));
+            }
+        }
+    }
+    budget.claim_work(sort_work(keyed.len()))?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    if keyed.len() < 2 || keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(EncodedValidationError::invariant(
+            "recursive data definition lost distinct operands",
+        ));
+    }
+    let normalized_expression_key = synthetic_boolean_key(
+        expression_tag,
+        keyed.iter().map(|(key, _)| key.as_slice()),
+        keyed.len(),
+        budget,
+    )?;
+    let normalized_seed =
+        data_range_symbol_seed(&normalized_expression_key, expression_tag, budget)?;
+    push_data_range_symbol_seed(&mut expression_symbols, normalized_seed, budget)?;
+    budget.claim_work(sort_work(expression_symbols.len()))?;
+    expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
+    expression_symbols.dedup_by(|left, right| left.key == right.key);
+    budget.claim_owned(
+        keyed
+            .len()
+            .checked_mul(size_of::<DataBooleanOperand>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "recursive generated operand allocation overflowed",
+                )
+            })?,
+    )?;
+    let mut operands = Vec::new();
+    operands.try_reserve_exact(keyed.len()).map_err(|_| {
+        EncodedValidationError::resource("recursive generated operand allocation failed")
+    })?;
+    operands.extend(keyed.into_iter().map(|(_, operand)| operand));
+    let (generated_key, generated_display) =
+        generated_data_symbol(namespace, &term.key, DefinitionPolarity::Positive, budget)?;
+    budget.claim_owned(generated_key.len())?;
+    let returned_key = generated_key.clone();
+    let mut expressions = Vec::new();
+    if let Some(expression) = source_expression {
+        budget.claim_owned(size_of::<NodeId>())?;
+        expressions.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "recursive data definition expression allocation failed",
+            )
+        })?;
+        expressions.push(expression);
+    }
+    retain_data_boolean_definition(
+        definitions,
+        DataBooleanDefinition {
+            expressions,
+            expression_key: term.key,
+            expression_symbols,
+            intersection: term.intersection,
+            operands,
+            polarity: DefinitionPolarity::Positive,
+            generated_key,
+            generated_display,
+            provenance: Vec::new(),
+        },
+        provenance,
+        budget,
+    )?;
+    Ok(returned_key)
 }
 
 fn datatype_boolean_definitions<B: ByteSource>(
@@ -10651,12 +11050,12 @@ fn emit_data_boolean_definitions<B: ByteSource>(
                     "generated data definition literal allocation failed",
                 )
             })?;
-        for selection in definition.operands.iter().copied() {
-            operands.push(atomic_data_range_selection_literal(
+        for operand in &definition.operands {
+            operands.push(data_boolean_operand_literal(
                 model,
                 symbols,
                 data_range_domain,
-                selection,
+                operand,
                 scope_maps,
                 budget,
             )?);
@@ -10712,6 +11111,46 @@ fn emit_data_boolean_definitions<B: ByteSource>(
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn data_boolean_operand_literal<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    data_range_domain: &DecodedSymbolDomain,
+    operand: &DataBooleanOperand,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<DataRangeLiteral> {
+    match operand {
+        DataBooleanOperand::Atomic(selection) => atomic_data_range_selection_literal(
+            model,
+            symbols,
+            data_range_domain,
+            *selection,
+            scope_maps,
+            budget,
+        ),
+        DataBooleanOperand::Generated { key } => {
+            budget.claim_work(binary_search_work(data_range_domain.values.len()))?;
+            let index = data_range_domain
+                .values
+                .binary_search_by(|candidate| candidate.key.cmp(key))
+                .map_err(|_| {
+                    EncodedValidationError::invariant(
+                        "nested generated data definition symbol disappeared",
+                    )
+                })?;
+            Ok(DataRangeLiteral {
+                range_id: u32::try_from(index).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "nested generated data definition range ID exceeds u32",
+                    )
+                })?,
+                negative: false,
+            })
+        }
+    }
 }
 
 fn push_raw_data_boolean_clause(
