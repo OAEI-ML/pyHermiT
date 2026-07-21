@@ -538,7 +538,7 @@ enum ObjectConstraintKind {
 struct RawObjectConstraint {
     kind: ObjectConstraintKind,
     role_id: u32,
-    class_id: u32,
+    class: ClassLiteral,
     provenance: [u8; 32],
 }
 
@@ -546,7 +546,7 @@ struct RawObjectConstraint {
 struct NormalizedObjectConstraint {
     kind: ObjectConstraintKind,
     role_id: u32,
-    class_id: u32,
+    class: ClassLiteral,
     provenance: Vec<[u8; 32]>,
 }
 
@@ -574,14 +574,14 @@ struct NormalizedObjectCharacteristic {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RawDataDomain {
     role_id: u32,
-    class_id: u32,
+    class: ClassLiteral,
     provenance: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct NormalizedDataDomain {
     role_id: u32,
-    class_id: u32,
+    class: ClassLiteral,
     provenance: Vec<[u8; 32]>,
 }
 
@@ -615,7 +615,7 @@ struct NormalizedDatatypeDefinition {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RawKey {
-    class_id: u32,
+    class: ClassLiteral,
     object_role_ids: Vec<u32>,
     data_role_ids: Vec<u32>,
     provenance: [u8; 32],
@@ -623,7 +623,7 @@ struct RawKey {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct NormalizedKey {
-    class_id: u32,
+    class: ClassLiteral,
     object_role_ids: Vec<u32>,
     data_role_ids: Vec<u32>,
     provenance: Vec<[u8; 32]>,
@@ -898,8 +898,15 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut budget = PhaseBudget::new(limits);
     canonical::validate_scope_maps(scope_maps, &mut budget)?;
     let declared_class_ids = declared_class_ids(symbols, &mut budget)?;
-    let (class_domain, class_signature) =
-        class_signature(model, symbols, &declared_class_ids, scope_maps, &mut budget)?;
+    let (class_domain, class_signature) = class_signature(
+        model,
+        symbols,
+        &declared_class_ids,
+        object_roles.is_some(),
+        data_roles.is_some(),
+        scope_maps,
+        &mut budget,
+    )?;
     let data_range_domain = named_data_range_domain(symbols, &mut budget)?;
     let declared_individual_ids = declared_individual_ids(symbols, &mut budget)?;
     let (individual_domain, individual_signature) = individual_signature(
@@ -1891,6 +1898,8 @@ fn class_signature<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     declared_class_ids: &[u32],
+    has_object_roles: bool,
+    has_data_roles: bool,
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(DecodedSymbolDomain, Vec<ClassSignatureBinding>)> {
@@ -2061,6 +2070,64 @@ fn class_signature<B: ByteSource>(
                     }
                 }
             }
+            RootHandler::ObjectPropertyDomain | RootHandler::ObjectPropertyRange
+                if has_object_roles =>
+            {
+                let expression = node_field(
+                    model,
+                    root_node,
+                    1,
+                    "object-property constraint class expression",
+                )?;
+                if atomic_class_entity(model, symbols, expression)?
+                    .is_some_and(|(_, negative)| negative)
+                {
+                    push_complement_selection(&mut complements, expression, budget)?;
+                }
+            }
+            RootHandler::DataPropertyDomain if has_data_roles => {
+                let expression =
+                    node_field(model, root_node, 1, "data-property domain class expression")?;
+                if atomic_class_entity(model, symbols, expression)?
+                    .is_some_and(|(_, negative)| negative)
+                {
+                    push_complement_selection(&mut complements, expression, budget)?;
+                }
+            }
+            RootHandler::HasKey => {
+                let object_component = required_component(
+                    model.field(root_node.fields().start + 1)?,
+                    "has-key object properties",
+                )?;
+                let ComponentValue::Collection(object_properties) =
+                    model.resolve(object_component)?
+                else {
+                    return Err(EncodedValidationError::invariant(
+                        "has-key object properties did not resolve to a collection",
+                    ));
+                };
+                let data_component = required_component(
+                    model.field(root_node.fields().start + 2)?,
+                    "has-key data properties",
+                )?;
+                let ComponentValue::Collection(data_properties) = model.resolve(data_component)?
+                else {
+                    return Err(EncodedValidationError::invariant(
+                        "has-key data properties did not resolve to a collection",
+                    ));
+                };
+                if (!object_properties.is_empty() && !has_object_roles)
+                    || (!data_properties.is_empty() && !has_data_roles)
+                {
+                    continue;
+                }
+                let expression = node_field(model, root_node, 0, "has-key class expression")?;
+                if atomic_class_entity(model, symbols, expression)?
+                    .is_some_and(|(_, negative)| negative)
+                {
+                    push_complement_selection(&mut complements, expression, budget)?;
+                }
+            }
             _ => {}
         }
     }
@@ -2193,7 +2260,20 @@ fn atomic_class_entity<B: ByteSource>(
             .starts_with("class:")
             .then_some((entity_id, false)));
     }
-    Ok(atomic_complement_operand(model, symbols, identifier)?.map(|entity_id| (entity_id, true)))
+    let Some(entity_id) = atomic_complement_operand(model, symbols, identifier)? else {
+        return Ok(None);
+    };
+    match class_entity_display(symbols, entity_id)? {
+        THING_DISPLAY => Ok(Some((
+            class_id_by_display(&symbols.entity_domain, NOTHING_DISPLAY)?,
+            false,
+        ))),
+        NOTHING_DISPLAY => Ok(Some((
+            class_id_by_display(&symbols.entity_domain, THING_DISPLAY)?,
+            false,
+        ))),
+        _ => Ok(Some((entity_id, true))),
+    }
 }
 
 fn atomic_class_edge_is_trivial(
@@ -2242,10 +2322,7 @@ fn atomic_complement_operand<B: ByteSource>(
         .ok_or_else(|| {
             EncodedValidationError::invariant("class-complement operand entity ID is dangling")
         })?;
-    Ok((entity.display.starts_with("class:")
-        && entity.display != THING_DISPLAY
-        && entity.display != NOTHING_DISPLAY)
-        .then_some(entity_id))
+    Ok(entity.display.starts_with("class:").then_some(entity_id))
 }
 
 fn named_data_range_domain(
@@ -4705,14 +4782,14 @@ fn named_object_constraint<B: ByteSource>(
     }
     let property = node_field(model, node, 0, "object-property constraint role")?;
     let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
-    let Some(class_id) = named_class_field(model, symbols, class_signature, node, 1)? else {
+    let Some(class) = atomic_class_field(model, symbols, class_signature, node, 1)? else {
         return Ok(None);
     };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
     Ok(Some(RawObjectConstraint {
         kind,
         role_id,
-        class_id,
+        class,
         provenance,
     }))
 }
@@ -4783,13 +4860,13 @@ fn named_data_domain<B: ByteSource>(
     }
     let property = node_field(model, node, 0, "data-property domain role")?;
     let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
-    let Some(class_id) = named_class_field(model, symbols, class_signature, node, 1)? else {
+    let Some(class) = atomic_class_field(model, symbols, class_signature, node, 1)? else {
         return Ok(None);
     };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
     Ok(Some(RawDataDomain {
         role_id,
-        class_id,
+        class,
         provenance,
     }))
 }
@@ -4926,7 +5003,7 @@ fn named_key<B: ByteSource>(
             "has-key root no longer has schema-1 shape",
         ));
     }
-    let Some(class_id) = named_class_field(model, symbols, class_signature, node, 0)? else {
+    let Some(class) = atomic_class_field(model, symbols, class_signature, node, 0)? else {
         return Ok(None);
     };
     let object_component = required_component(
@@ -5015,7 +5092,7 @@ fn named_key<B: ByteSource>(
     data_role_ids.dedup();
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
     Ok(Some(RawKey {
-        class_id,
+        class,
         object_role_ids,
         data_role_ids,
         provenance,
@@ -5640,13 +5717,13 @@ fn named_assertion_role<B: ByteSource>(
     Ok((role_id, !inverted))
 }
 
-fn named_class_field<B: ByteSource>(
+fn atomic_class_field<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     signature: &[ClassSignatureBinding],
     node: NodeRef,
     relative_field: usize,
-) -> EncodedResult<Option<u32>> {
+) -> EncodedResult<Option<ClassLiteral>> {
     let field_index = node
         .fields()
         .start
@@ -5658,27 +5735,8 @@ fn named_class_field<B: ByteSource>(
             "class-expression field did not resolve to a node",
         ));
     };
-    named_class_id(model, symbols, signature, identifier)
-}
-
-fn named_class_id<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    symbols: &SymbolPhase,
-    signature: &[ClassSignatureBinding],
-    identifier: NodeId,
-) -> EncodedResult<Option<u32>> {
-    if model.node(identifier)?.tag() != ENTITY_TAG {
-        return Ok(None);
-    }
-    let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
-        EncodedValidationError::invariant(
-            "named class is absent from the reachable entity-node mapping",
-        )
-    })?;
-    Ok(signature
-        .binary_search_by_key(&entity_id, |binding| binding.entity_id)
-        .ok()
-        .map(|index| signature[index].class_expression_id))
+    Ok(atomic_class_literal(model, symbols, signature, identifier)?
+        .map(|(class_id, negative)| ClassLiteral { class_id, negative }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5975,7 +6033,7 @@ fn normalize_object_constraints(
         if let Some(previous) = normalized.last_mut() {
             if previous.kind == constraint.kind
                 && previous.role_id == constraint.role_id
-                && previous.class_id == constraint.class_id
+                && previous.class == constraint.class
             {
                 if previous.provenance.last() != Some(&constraint.provenance) {
                     budget.claim_owned(size_of::<[u8; 32]>())?;
@@ -6005,7 +6063,7 @@ fn normalize_object_constraints(
         normalized.push(NormalizedObjectConstraint {
             kind: constraint.kind,
             role_id: constraint.role_id,
-            class_id: constraint.class_id,
+            class: constraint.class,
             provenance,
         });
     }
@@ -6067,7 +6125,7 @@ fn normalize_data_domains(
     for domain in raw {
         budget.claim_work(1)?;
         if let Some(previous) = normalized.last_mut() {
-            if previous.role_id == domain.role_id && previous.class_id == domain.class_id {
+            if previous.role_id == domain.role_id && previous.class == domain.class {
                 if previous.provenance.last() != Some(&domain.provenance) {
                     budget.claim_owned(size_of::<[u8; 32]>())?;
                     previous.provenance.try_reserve(1).map_err(|_| {
@@ -6091,7 +6149,7 @@ fn normalize_data_domains(
         provenance.push(domain.provenance);
         normalized.push(NormalizedDataDomain {
             role_id: domain.role_id,
-            class_id: domain.class_id,
+            class: domain.class,
             provenance,
         });
     }
@@ -6192,7 +6250,7 @@ fn normalize_keys(
     for key in raw {
         budget.claim_work(1)?;
         if let Some(previous) = normalized.last_mut() {
-            if previous.class_id == key.class_id
+            if previous.class == key.class
                 && previous.object_role_ids == key.object_role_ids
                 && previous.data_role_ids == key.data_role_ids
             {
@@ -6216,7 +6274,7 @@ fn normalize_keys(
         })?;
         provenance.push(key.provenance);
         normalized.push(NormalizedKey {
-            class_id: key.class_id,
+            class: key.class,
             object_role_ids: key.object_role_ids,
             data_role_ids: key.data_role_ids,
             provenance,
@@ -6823,16 +6881,50 @@ fn freeze_predicates(
     for constraint in object_constraints {
         push_u32(
             &mut class_ids,
-            constraint.class_id,
+            constraint.class.class_id,
             "predicate class",
             budget,
         )?;
+        if constraint.class.negative {
+            push_u32(
+                &mut negative_class_ids,
+                constraint.class.class_id,
+                "negated predicate class",
+                budget,
+            )?;
+        }
     }
     for domain in data_domains {
-        push_u32(&mut class_ids, domain.class_id, "predicate class", budget)?;
+        push_u32(
+            &mut class_ids,
+            domain.class.class_id,
+            "predicate class",
+            budget,
+        )?;
+        if domain.class.negative {
+            push_u32(
+                &mut negative_class_ids,
+                domain.class.class_id,
+                "negated predicate class",
+                budget,
+            )?;
+        }
     }
     for key in keys {
-        push_u32(&mut class_ids, key.class_id, "predicate key class", budget)?;
+        push_u32(
+            &mut class_ids,
+            key.class.class_id,
+            "predicate key class",
+            budget,
+        )?;
+        if key.class.negative {
+            push_u32(
+                &mut negative_class_ids,
+                key.class.class_id,
+                "negated predicate key class",
+                budget,
+            )?;
+        }
     }
     for fact in facts {
         push_u32(&mut class_ids, fact.class_id, "predicate class", budget)?;
@@ -7541,6 +7633,33 @@ fn freeze_clauses(
             )?;
         }
     }
+    for constraint in object_constraints
+        .iter()
+        .filter(|constraint| constraint.class.negative)
+    {
+        push_u32(
+            &mut negative_class_ids,
+            constraint.class.class_id,
+            "complement clause class",
+            budget,
+        )?;
+    }
+    for domain in data_domains.iter().filter(|domain| domain.class.negative) {
+        push_u32(
+            &mut negative_class_ids,
+            domain.class.class_id,
+            "complement clause class",
+            budget,
+        )?;
+    }
+    for key in keys.iter().filter(|key| key.class.negative) {
+        push_u32(
+            &mut negative_class_ids,
+            key.class.class_id,
+            "complement clause class",
+            budget,
+        )?;
+    }
     for fact in facts.iter().filter(|fact| fact.negative) {
         push_u32(
             &mut negative_class_ids,
@@ -7650,7 +7769,12 @@ fn freeze_clauses(
     }
     for constraint in object_constraints {
         let role = object_predicate_id(predicate_by_object_role, constraint.role_id)?;
-        let class = predicate_id(predicate_by_class, constraint.class_id)?;
+        let class = class_literal_predicate_id(
+            predicate_by_class,
+            predicate_by_negative_class,
+            constraint.class.class_id,
+            constraint.class.negative,
+        )?;
         let provenance = provenance_id(provenance_keys, &constraint.provenance, false)?;
         push_object_constraint_clause(
             &mut ordered,
@@ -7681,7 +7805,12 @@ fn freeze_clauses(
     }
     for domain in data_domains {
         let role = data_predicate_id(predicate_by_data_role, domain.role_id)?;
-        let class = predicate_id(predicate_by_class, domain.class_id)?;
+        let class = class_literal_predicate_id(
+            predicate_by_class,
+            predicate_by_negative_class,
+            domain.class.class_id,
+            domain.class.negative,
+        )?;
         let provenance = provenance_id(provenance_keys, &domain.provenance, false)?;
         push_data_domain_clause(&mut ordered, role, class, provenance, budget)?;
     }
@@ -7699,7 +7828,12 @@ fn freeze_clauses(
         push_datatype_definition_clause(&mut ordered, right, left, provenance, budget)?;
     }
     for key in keys {
-        let class = predicate_id(predicate_by_class, key.class_id)?;
+        let class = class_literal_predicate_id(
+            predicate_by_class,
+            predicate_by_negative_class,
+            key.class.class_id,
+            key.class.negative,
+        )?;
         let mut object_roles = Vec::new();
         budget.claim_owned(
             key.object_role_ids
@@ -11351,11 +11485,14 @@ fn merge_normalized_sources(
                 }
                 let role_id =
                     remap_object_role(source_roles, merged_roles, constraint.role_id, budget)?;
-                let class_id = mapped_id(
-                    class_map,
-                    constraint.class_id,
-                    "object-property constraint class",
-                )?;
+                let class = ClassLiteral {
+                    class_id: mapped_id(
+                        class_map,
+                        constraint.class.class_id,
+                        "object-property constraint class",
+                    )?,
+                    negative: constraint.class.negative,
+                };
                 for provenance in &constraint.provenance {
                     budget.claim_work(1)?;
                     budget.claim_owned(size_of::<RawObjectConstraint>())?;
@@ -11367,7 +11504,7 @@ fn merge_normalized_sources(
                     raw_object_constraints.push(RawObjectConstraint {
                         kind: constraint.kind,
                         role_id,
-                        class_id,
+                        class,
                         provenance: *provenance,
                     });
                 }
@@ -11430,7 +11567,14 @@ fn merge_normalized_sources(
                     ));
                 }
                 let role_id = remap_data_role(source_roles, merged_roles, domain.role_id, budget)?;
-                let class_id = mapped_id(class_map, domain.class_id, "data-property domain class")?;
+                let class = ClassLiteral {
+                    class_id: mapped_id(
+                        class_map,
+                        domain.class.class_id,
+                        "data-property domain class",
+                    )?,
+                    negative: domain.class.negative,
+                };
                 for provenance in &domain.provenance {
                     budget.claim_work(1)?;
                     budget.claim_owned(size_of::<RawDataDomain>())?;
@@ -11441,7 +11585,7 @@ fn merge_normalized_sources(
                     })?;
                     raw_data_domains.push(RawDataDomain {
                         role_id,
-                        class_id,
+                        class,
                         provenance: *provenance,
                     });
                 }
@@ -11524,7 +11668,10 @@ fn merge_normalized_sources(
                     "merged has-key source lost provenance",
                 ));
             }
-            let class_id = mapped_id(class_map, key.class_id, "has-key class")?;
+            let class = ClassLiteral {
+                class_id: mapped_id(class_map, key.class.class_id, "has-key class")?,
+                negative: key.class.negative,
+            };
             budget.claim_owned(
                 key.object_role_ids
                     .len()
@@ -11616,7 +11763,7 @@ fn merge_normalized_sources(
                     EncodedValidationError::resource("merged has-key allocation failed")
                 })?;
                 raw_keys.push(RawKey {
-                    class_id,
+                    class,
                     object_role_ids: object_role_ids.clone(),
                     data_role_ids: data_role_ids.clone(),
                     provenance: *provenance,

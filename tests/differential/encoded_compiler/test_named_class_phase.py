@@ -800,6 +800,89 @@ def test_trivial_complement_disjoint_with_bottom_drops_without_symbol_leaks() ->
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_atomic_complement_property_constraints_and_keys_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(AnnotationProperty(:note))",
+            "ObjectPropertyDomain(:p ObjectComplementOf(:A))",
+            'ObjectPropertyDomain(Annotation(:note "duplicate") :p '
+            "ObjectComplementOf(:A))",
+            "ObjectPropertyRange(ObjectInverseOf(:q) ObjectComplementOf(:B))",
+            "DataPropertyDomain(:d ObjectComplementOf(:C))",
+            "HasKey(ObjectComplementOf(:A) (:p) (:d))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=5,
+        include_object_constraints=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    assert sum(
+        str(value["display"]).startswith("ObjectComplementOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    ) == 3
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    ) == 3
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_builtin_complements_normalize_without_expression_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:i))",
+            "SubClassOf(ObjectComplementOf(owl:Thing) :A)",
+            "EquivalentClasses(ObjectComplementOf(owl:Nothing) :A)",
+            "DisjointClasses(ObjectComplementOf(owl:Thing) :A)",
+            "ClassAssertion(ObjectComplementOf(owl:Nothing) :i)",
+            "ObjectPropertyDomain(:p ObjectComplementOf(owl:Nothing))",
+            "ObjectPropertyRange(:p ObjectComplementOf(owl:Thing))",
+            "DataPropertyDomain(:d ObjectComplementOf(owl:Nothing))",
+            "HasKey(ObjectComplementOf(owl:Thing) (:p) (:d))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=8,
+        include_object_constraints=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    assert all(
+        not str(value["display"]).startswith("ObjectComplementOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_semantic_source_literal_symbols_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -1069,6 +1152,42 @@ def test_composite_atomic_complement_disjoints_remap_exactly() -> None:
     actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
 
     assert actual == _expected_manifest(composite, compiled_roots=2)
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_atomic_complement_constraints_and_keys_remap_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:Y))",
+            "Declaration(ObjectProperty(:z))",
+            "Declaration(DataProperty(:zd))",
+            "ObjectPropertyDomain(:z ObjectComplementOf(:Y))",
+            "HasKey(ObjectComplementOf(:Y) (:z) (:zd))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:a))",
+            "Declaration(DataProperty(:ad))",
+            "ObjectPropertyRange(:a ObjectComplementOf(:A))",
+            "DataPropertyDomain(:ad ObjectComplementOf(:A))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
     assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
@@ -3303,6 +3422,37 @@ def test_partial_atomic_complement_disjoint_defers_without_leaking_symbols() -> 
 
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 1
+    assert all(
+        not str(value["display"]).startswith("ObjectComplementOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_nested_complement_constraints_defer_without_leaking_symbols() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "ObjectPropertyDomain(:p ObjectComplementOf(ObjectSomeValuesFrom(:q :A)))",
+            "DataPropertyDomain(:d ObjectComplementOf(ObjectSomeValuesFrom(:q :A)))",
+            "HasKey(ObjectComplementOf(ObjectSomeValuesFrom(:q :A)) (:p) (:d))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 3
     assert all(
         not str(value["display"]).startswith("ObjectComplementOf:")
         for value in cast(
