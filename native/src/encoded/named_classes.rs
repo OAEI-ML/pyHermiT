@@ -21,8 +21,9 @@
 
 use std::mem::size_of;
 
-use num_bigint::{BigInt, Sign};
+use num_bigint::{BigInt, BigUint, Sign};
 use num_integer::Integer;
+use num_traits::{ToPrimitive, Zero};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -75,6 +76,8 @@ const OWL_RATIONAL_IRI: &str = "http://www.w3.org/2002/07/owl#rational";
 const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema#";
 const XSD_BOOLEAN_IRI: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 const XSD_DECIMAL_IRI: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const XSD_FLOAT_IRI: &str = "http://www.w3.org/2001/XMLSchema#float";
+const XSD_DOUBLE_IRI: &str = "http://www.w3.org/2001/XMLSchema#double";
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 
@@ -2193,6 +2196,14 @@ fn literal_data_identity_key(
     if datatype_iri == OWL_RATIONAL_IRI {
         return rational_literal_data_identity_key(lexical, budget).map(Some);
     }
+    let ieee_width = match datatype_iri {
+        XSD_FLOAT_IRI => Some(IEEEWidth::Float32),
+        XSD_DOUBLE_IRI => Some(IEEEWidth::Float64),
+        _ => None,
+    };
+    if let Some(width) = ieee_width {
+        return ieee_data_identity_key(lexical, width, budget).map(Some);
+    }
     string_data_identity_key(lexical, datatype_iri, language, budget)
 }
 
@@ -2435,6 +2446,343 @@ fn rational_literal_data_identity_key(
         numerator_magnitude
     };
     rational_bigint_data_identity_key(numerator, denominator, budget)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IEEEWidth {
+    Float32,
+    Float64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct IEEELayout {
+    width: u32,
+    exponent_bits: u32,
+    fraction_bits: u32,
+    bias: i64,
+}
+
+impl IEEEWidth {
+    const fn layout(self) -> IEEELayout {
+        match self {
+            Self::Float32 => IEEELayout {
+                width: 32,
+                exponent_bits: 8,
+                fraction_bits: 23,
+                bias: 127,
+            },
+            Self::Float64 => IEEELayout {
+                width: 64,
+                exponent_bits: 11,
+                fraction_bits: 52,
+                bias: 1023,
+            },
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Float32 => "float32",
+            Self::Float64 => "float64",
+        }
+    }
+}
+
+impl IEEELayout {
+    const fn precision(self) -> u32 {
+        self.fraction_bits + 1
+    }
+
+    const fn minimum_normal_exponent(self) -> i64 {
+        1 - self.bias
+    }
+
+    const fn maximum_normal_exponent(self) -> i64 {
+        self.bias
+    }
+
+    const fn minimum_subnormal_exponent(self) -> i64 {
+        self.minimum_normal_exponent() - self.fraction_bits as i64
+    }
+
+    const fn exponent_mask(self) -> u64 {
+        (1_u64 << self.exponent_bits) - 1
+    }
+
+    const fn sign_bit(self) -> u64 {
+        1_u64 << (self.width - 1)
+    }
+}
+
+fn ieee_data_identity_key(
+    lexical: &str,
+    width: IEEEWidth,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let character_count = lexical.chars().count();
+    PhaseBudget::count(
+        character_count,
+        budget.limits.max_literal_characters,
+        "literal character count",
+    )?;
+    let layout = width.layout();
+    let bits = match lexical {
+        "INF" | "+INF" => layout.exponent_mask() << layout.fraction_bits,
+        "-INF" => layout.sign_bit() | (layout.exponent_mask() << layout.fraction_bits),
+        "NaN" => {
+            (layout.exponent_mask() << layout.fraction_bits) | (1_u64 << (layout.fraction_bits - 1))
+        }
+        _ => {
+            let (negative, numerator, denominator) = ieee_decimal_ratio(lexical, budget)?;
+            ieee_ratio_to_bits(&numerator, &denominator, negative, layout)?
+        }
+    };
+    let digits = usize::try_from(layout.width / 4)
+        .map_err(|_| EncodedValidationError::resource("IEEE hexadecimal width exceeds usize"))?;
+    let payload = format!(
+        "[\"ieee-identity-v1\",\"{}\",\"{bits:0digits$x}\"]",
+        width.name()
+    );
+    prefixed_data_identity_key(payload.as_bytes(), budget)
+}
+
+fn ieee_decimal_ratio(
+    lexical: &str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(bool, BigUint, BigUint)> {
+    let bytes = lexical.as_bytes();
+    let (negative, unsigned) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        Some(_) | None => (false, bytes),
+    };
+    budget.claim_work(bytes.len())?;
+    let mut exponent_marker = None;
+    for (index, byte) in unsigned.iter().copied().enumerate() {
+        if matches!(byte, b'e' | b'E') && exponent_marker.replace(index).is_some() {
+            return Err(EncodedValidationError::invariant(
+                "floating-point literal is outside its datatype lexical space",
+            ));
+        }
+    }
+    let (mantissa, exponent_text) = exponent_marker.map_or((unsigned, None), |index| {
+        (&unsigned[..index], Some(&unsigned[index + 1..]))
+    });
+    let exponent = if let Some(value) = exponent_text {
+        let (exponent_negative, digits) = match value.first() {
+            Some(b'-') => (true, &value[1..]),
+            Some(b'+') => (false, &value[1..]),
+            Some(_) | None => (false, value),
+        };
+        if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+            return Err(EncodedValidationError::invariant(
+                "floating-point literal is outside its datatype lexical space",
+            ));
+        }
+        PhaseBudget::count(
+            digits.len(),
+            budget.limits.max_numeric_digits,
+            "floating-point exponent digit count",
+        )?;
+        let magnitude = BigUint::parse_bytes(digits, 10).ok_or_else(|| {
+            EncodedValidationError::invariant("floating-point exponent could not be decoded")
+        })?;
+        let maximum = BigUint::from(budget.limits.max_decimal_exponent);
+        if magnitude > maximum {
+            return Err(EncodedValidationError::resource(
+                "named-class floating-point exponent exceeds its limit",
+            ));
+        }
+        let magnitude = magnitude.to_i64().ok_or_else(|| {
+            EncodedValidationError::resource("floating-point exponent exceeds i64")
+        })?;
+        if exponent_negative {
+            -magnitude
+        } else {
+            magnitude
+        }
+    } else {
+        0
+    };
+    let mut point = None;
+    for (index, byte) in mantissa.iter().copied().enumerate() {
+        if byte == b'.' {
+            if point.replace(index).is_some() {
+                return Err(EncodedValidationError::invariant(
+                    "floating-point literal is outside its datatype lexical space",
+                ));
+            }
+        } else if !byte.is_ascii_digit() {
+            return Err(EncodedValidationError::invariant(
+                "floating-point literal is outside its datatype lexical space",
+            ));
+        }
+    }
+    let (whole, fraction) = point.map_or((mantissa, &b""[..]), |index| {
+        (&mantissa[..index], &mantissa[index + 1..])
+    });
+    if whole.is_empty() && fraction.is_empty() {
+        return Err(EncodedValidationError::invariant(
+            "floating-point literal is outside its datatype lexical space",
+        ));
+    }
+    let inserted_zero = usize::from(whole.is_empty());
+    let digit_count = whole
+        .len()
+        .checked_add(fraction.len())
+        .and_then(|value| value.checked_add(inserted_zero))
+        .ok_or_else(|| EncodedValidationError::resource("floating-point digit count overflowed"))?;
+    PhaseBudget::count(
+        digit_count,
+        budget.limits.max_numeric_digits,
+        "numeric digit count",
+    )?;
+    let fraction_length = i64::try_from(fraction.len())
+        .map_err(|_| EncodedValidationError::resource("floating-point scale exceeds i64"))?;
+    let scale = fraction_length.checked_sub(exponent).ok_or_else(|| {
+        EncodedValidationError::resource("floating-point decimal scale overflowed")
+    })?;
+    let absolute_scale = scale.unsigned_abs();
+    let maximum_scale = u64::try_from(budget.limits.max_decimal_exponent)
+        .map_err(|_| EncodedValidationError::resource("decimal scale limit exceeds u64"))?;
+    if absolute_scale > maximum_scale {
+        return Err(EncodedValidationError::resource(
+            "named-class floating-point decimal scale exceeds its limit",
+        ));
+    }
+    let scale_size = usize::try_from(absolute_scale)
+        .map_err(|_| EncodedValidationError::resource("decimal scale exceeds usize"))?;
+    let temporary_bytes = digit_count
+        .checked_add(scale_size)
+        .and_then(|value| value.checked_mul(4))
+        .and_then(|value| value.checked_add(2))
+        .ok_or_else(|| {
+            EncodedValidationError::resource("floating-point temporary size overflowed")
+        })?;
+    budget.claim_owned(temporary_bytes)?;
+    budget.claim_work(scale_size)?;
+    let mut digits = Vec::new();
+    digits
+        .try_reserve_exact(digit_count)
+        .map_err(|_| EncodedValidationError::resource("floating-point digit allocation failed"))?;
+    if whole.is_empty() {
+        digits.push(b'0');
+    } else {
+        digits.extend_from_slice(whole);
+    }
+    digits.extend_from_slice(fraction);
+    let mut numerator = BigUint::parse_bytes(&digits, 10).ok_or_else(|| {
+        EncodedValidationError::invariant("floating-point magnitude could not be decoded")
+    })?;
+    let exponent = u32::try_from(scale_size)
+        .map_err(|_| EncodedValidationError::resource("decimal scale exceeds u32"))?;
+    let denominator = if scale > 0 {
+        BigUint::from(10_u8).pow(exponent)
+    } else {
+        if scale < 0 {
+            numerator *= BigUint::from(10_u8).pow(exponent);
+        }
+        BigUint::from(1_u8)
+    };
+    Ok((negative, numerator, denominator))
+}
+
+fn ieee_ratio_to_bits(
+    numerator: &BigUint,
+    denominator: &BigUint,
+    negative: bool,
+    layout: IEEELayout,
+) -> EncodedResult<u64> {
+    if numerator.is_zero() {
+        return Ok(if negative { layout.sign_bit() } else { 0 });
+    }
+    let mut exponent = floor_log2_ratio(numerator, denominator)?;
+    let bits = if exponent < layout.minimum_normal_exponent() {
+        let shift = -layout.minimum_subnormal_exponent();
+        let significand = round_scaled_ratio(numerator, denominator, shift)?;
+        if significand.is_zero() {
+            return Ok(if negative { layout.sign_bit() } else { 0 });
+        }
+        let normal_boundary = BigUint::from(1_u8) << layout.fraction_bits;
+        if significand < normal_boundary {
+            significand
+                .to_u64()
+                .ok_or_else(|| EncodedValidationError::resource("IEEE significand exceeds u64"))?
+        } else {
+            1_u64 << layout.fraction_bits
+        }
+    } else {
+        let shift = i64::from(layout.fraction_bits) - exponent;
+        let mut significand = round_scaled_ratio(numerator, denominator, shift)?;
+        let precision_boundary = BigUint::from(1_u8) << layout.precision();
+        if significand == precision_boundary {
+            significand >>= 1_u32;
+            exponent = exponent
+                .checked_add(1)
+                .ok_or_else(|| EncodedValidationError::resource("IEEE exponent overflowed"))?;
+        }
+        if exponent > layout.maximum_normal_exponent() {
+            layout.exponent_mask() << layout.fraction_bits
+        } else {
+            let exponent_field = u64::try_from(exponent + layout.bias)
+                .map_err(|_| EncodedValidationError::resource("IEEE exponent is negative"))?;
+            let hidden_bit = BigUint::from(1_u8) << layout.fraction_bits;
+            let fraction = (significand - hidden_bit)
+                .to_u64()
+                .ok_or_else(|| EncodedValidationError::resource("IEEE fraction exceeds u64"))?;
+            (exponent_field << layout.fraction_bits) | fraction
+        }
+    };
+    Ok(bits | if negative { layout.sign_bit() } else { 0 })
+}
+
+fn floor_log2_ratio(numerator: &BigUint, denominator: &BigUint) -> EncodedResult<i64> {
+    let numerator_bits = i64::try_from(numerator.bits())
+        .map_err(|_| EncodedValidationError::resource("numeric bit length exceeds i64"))?;
+    let denominator_bits = i64::try_from(denominator.bits())
+        .map_err(|_| EncodedValidationError::resource("numeric bit length exceeds i64"))?;
+    let estimate = numerator_bits
+        .checked_sub(denominator_bits)
+        .ok_or_else(|| EncodedValidationError::resource("numeric exponent overflowed"))?;
+    if estimate >= 0 {
+        let shift = usize::try_from(estimate)
+            .map_err(|_| EncodedValidationError::resource("numeric shift exceeds usize"))?;
+        Ok(if numerator < &(denominator << shift) {
+            estimate - 1
+        } else {
+            estimate
+        })
+    } else {
+        let shift = usize::try_from(-estimate)
+            .map_err(|_| EncodedValidationError::resource("numeric shift exceeds usize"))?;
+        Ok(if &(numerator << shift) < denominator {
+            estimate - 1
+        } else {
+            estimate
+        })
+    }
+}
+
+fn round_scaled_ratio(
+    numerator: &BigUint,
+    denominator: &BigUint,
+    shift: i64,
+) -> EncodedResult<BigUint> {
+    let (scaled_numerator, scaled_denominator) = if shift >= 0 {
+        let amount = usize::try_from(shift)
+            .map_err(|_| EncodedValidationError::resource("numeric shift exceeds usize"))?;
+        (numerator << amount, denominator.clone())
+    } else {
+        let amount = usize::try_from(-shift)
+            .map_err(|_| EncodedValidationError::resource("numeric shift exceeds usize"))?;
+        (numerator.clone(), denominator << amount)
+    };
+    let (mut quotient, remainder) = scaled_numerator.div_rem(&scaled_denominator);
+    let doubled = &remainder << 1_u32;
+    if doubled > scaled_denominator || (doubled == scaled_denominator && quotient.bit(0)) {
+        quotient += BigUint::from(1_u8);
+    }
+    Ok(quotient)
 }
 
 fn rational_bigint_data_identity_key(
@@ -10084,6 +10432,38 @@ mod tests {
         assert!(resource.is_some_and(|error| {
             error.code == "NATIVE_ENCODED_RESOURCE_LIMIT"
                 && error.message.contains("denominator digit count")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn ieee_identities_are_bit_exact_and_preserve_signed_zero() -> EncodedResult<()> {
+        let mut budget = PhaseBudget::new(NamedClassPhaseLimits::default());
+        assert_eq!(
+            ieee_data_identity_key("-0", IEEEWidth::Float32, &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"ieee-identity-v1\",\"float32\",\"80000000\"]"
+        );
+        assert_eq!(
+            ieee_data_identity_key("NaN", IEEEWidth::Float32, &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"ieee-identity-v1\",\"float32\",\"7fc00000\"]"
+        );
+        assert_eq!(
+            ieee_data_identity_key("1.401298464324817e-45", IEEEWidth::Float32, &mut budget,)?,
+            b"pyhermit:data-identity:v1\0[\"ieee-identity-v1\",\"float32\",\"00000001\"]"
+        );
+        assert_eq!(
+            ieee_data_identity_key("1.0", IEEEWidth::Float64, &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"ieee-identity-v1\",\"float64\",\"3ff0000000000000\"]"
+        );
+        assert_eq!(
+            ieee_data_identity_key("-INF", IEEEWidth::Float64, &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"ieee-identity-v1\",\"float64\",\"fff0000000000000\"]"
+        );
+
+        let invalid = ieee_data_identity_key("Infinity", IEEEWidth::Float32, &mut budget).err();
+        assert!(invalid.is_some_and(|error| {
+            error.code == "NATIVE_ENCODED_INVARIANT"
+                && error.message.contains("datatype lexical space")
         }));
         Ok(())
     }
