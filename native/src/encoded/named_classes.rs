@@ -508,15 +508,22 @@ struct NormalizedEdge {
     provenance: Vec<[u8; 32]>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ClassLiteral {
+    class_id: u32,
+    negative: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RawDisjoint {
-    classes: Vec<u32>,
+    classes: Vec<ClassLiteral>,
+    guard_digest: [u8; 32],
     provenance: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NormalizedDisjoint {
-    classes: Vec<u32>,
+    classes: Vec<ClassLiteral>,
     provenance: Vec<[u8; 32]>,
     guard_digest: [u8; 32],
 }
@@ -1668,7 +1675,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     }
 
     let edges = normalize_edges(raw_edges, &mut budget)?;
-    let disjoints = normalize_disjoints(raw_disjoints, &class_domain, &mut budget)?;
+    let disjoints = normalize_disjoints(raw_disjoints, &mut budget)?;
     let object_constraints = normalize_object_constraints(raw_object_constraints, &mut budget)?;
     let object_characteristics =
         normalize_object_characteristics(raw_object_characteristics, &mut budget)?;
@@ -1999,6 +2006,61 @@ fn class_signature<B: ByteSource>(
                     }
                 }
             }
+            RootHandler::DisjointClasses => {
+                let expressions_component = required_component(
+                    model.field(root_node.fields().start)?,
+                    "disjoint-classes expressions",
+                )?;
+                let ComponentValue::Collection(expressions) =
+                    model.resolve(expressions_component)?
+                else {
+                    return Err(EncodedValidationError::invariant(
+                        "disjoint-classes expressions did not resolve to a collection",
+                    ));
+                };
+                let mut live_count = 0_usize;
+                for item_index in expressions.items() {
+                    budget.claim_work(1)?;
+                    let item =
+                        required_component(model.item(item_index)?, "disjoint-classes member")?;
+                    let ComponentValue::Node(identifier) = model.resolve(item)? else {
+                        return Err(EncodedValidationError::invariant(
+                            "disjoint-classes member did not resolve to a node",
+                        ));
+                    };
+                    let Some((entity_id, negative)) =
+                        atomic_class_entity(model, symbols, identifier)?
+                    else {
+                        continue 'root_selection;
+                    };
+                    if !negative && class_entity_display(symbols, entity_id)? == NOTHING_DISPLAY {
+                        continue;
+                    }
+                    live_count = live_count.checked_add(1).ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "disjoint-class live-member count overflowed",
+                        )
+                    })?;
+                }
+                if live_count < 2 {
+                    continue;
+                }
+                for item_index in expressions.items() {
+                    budget.claim_work(1)?;
+                    let item =
+                        required_component(model.item(item_index)?, "disjoint-classes member")?;
+                    let ComponentValue::Node(identifier) = model.resolve(item)? else {
+                        return Err(EncodedValidationError::invariant(
+                            "disjoint-classes member did not resolve to a node",
+                        ));
+                    };
+                    if atomic_class_entity(model, symbols, identifier)?
+                        .is_some_and(|(_, negative)| negative)
+                    {
+                        push_complement_selection(&mut complements, identifier, budget)?;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2139,23 +2201,20 @@ fn atomic_class_edge_is_trivial(
     sub_literal: (u32, bool),
     super_literal: (u32, bool),
 ) -> EncodedResult<bool> {
-    let sub_entity = symbols
-        .entity_domain
-        .values
-        .get(usize::try_from(sub_literal.0).unwrap_or(usize::MAX))
-        .ok_or_else(|| {
-            EncodedValidationError::invariant("atomic subclass entity ID is dangling")
-        })?;
-    let super_entity = symbols
-        .entity_domain
-        .values
-        .get(usize::try_from(super_literal.0).unwrap_or(usize::MAX))
-        .ok_or_else(|| {
-            EncodedValidationError::invariant("atomic superclass entity ID is dangling")
-        })?;
+    let sub_display = class_entity_display(symbols, sub_literal.0)?;
+    let super_display = class_entity_display(symbols, super_literal.0)?;
     Ok((sub_literal == super_literal)
-        || (!sub_literal.1 && sub_entity.display == NOTHING_DISPLAY)
-        || (!super_literal.1 && super_entity.display == THING_DISPLAY))
+        || (!sub_literal.1 && sub_display == NOTHING_DISPLAY)
+        || (!super_literal.1 && super_display == THING_DISPLAY))
+}
+
+fn class_entity_display(symbols: &SymbolPhase, entity_id: u32) -> EncodedResult<&str> {
+    symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+        .map(|entity| entity.display.as_str())
+        .ok_or_else(|| EncodedValidationError::invariant("atomic class entity ID is dangling"))
 }
 
 fn atomic_complement_operand<B: ByteSource>(
@@ -4499,7 +4558,7 @@ fn named_disjoint_classes<B: ByteSource>(
     budget.claim_owned(
         expressions
             .len()
-            .checked_mul(size_of::<u32>())
+            .checked_mul(size_of::<(ClassLiteral, NodeId)>())
             .ok_or_else(|| {
                 EncodedValidationError::resource("disjoint-classes member allocation overflowed")
             })?,
@@ -4515,10 +4574,12 @@ fn named_disjoint_classes<B: ByteSource>(
                 "disjoint-classes member did not resolve to a node",
             ));
         };
-        let Some(class_id) = named_class_id(model, symbols, signature, identifier)? else {
+        let Some((class_id, negative)) =
+            atomic_class_literal(model, symbols, signature, identifier)?
+        else {
             return Ok(None);
         };
-        classes.push(class_id);
+        classes.push((ClassLiteral { class_id, negative }, identifier));
     }
     if classes.len() < 2 {
         return Err(EncodedValidationError::invariant(
@@ -4527,14 +4588,26 @@ fn named_disjoint_classes<B: ByteSource>(
     }
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
     let mut live = Vec::new();
-    budget.claim_owned(classes.len().checked_mul(size_of::<u32>()).ok_or_else(|| {
-        EncodedValidationError::resource("live disjoint-class allocation overflowed")
-    })?)?;
+    budget.claim_owned(
+        classes
+            .len()
+            .checked_mul(size_of::<(ClassLiteral, NodeId)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("live disjoint-class allocation overflowed")
+            })?,
+    )?;
     live.try_reserve_exact(classes.len())
         .map_err(|_| EncodedValidationError::resource("live disjoint-class allocation failed"))?;
-    live.extend(classes.into_iter().filter(|class_id| *class_id != nothing));
+    live.extend(
+        classes
+            .into_iter()
+            .filter(|(literal, _)| literal.negative || literal.class_id != nothing),
+    );
 
-    if live.contains(&thing) {
+    if live
+        .iter()
+        .any(|(literal, _)| !literal.negative && literal.class_id == thing)
+    {
         let mut edges = Vec::new();
         let edge_count = live.len().saturating_sub(1);
         budget.claim_owned(
@@ -4549,11 +4622,11 @@ fn named_disjoint_classes<B: ByteSource>(
         edges.try_reserve_exact(edge_count).map_err(|_| {
             EncodedValidationError::resource("top disjoint-class edge allocation failed")
         })?;
-        for class_id in live {
-            if class_id != thing {
+        for (literal, _) in live {
+            if literal.negative || literal.class_id != thing {
                 edges.push(RawEdge {
-                    sub_class: class_id,
-                    sub_negative: false,
+                    sub_class: literal.class_id,
+                    sub_negative: literal.negative,
                     super_class: nothing,
                     super_negative: false,
                     provenance,
@@ -4567,12 +4640,31 @@ fn named_disjoint_classes<B: ByteSource>(
         }));
     }
 
+    let disjoint = if live.len() >= 2 {
+        let guard_digest = disjoint_guard_digest_nodes(model, &live, scope_maps, budget)?;
+        let mut literals = Vec::new();
+        budget.claim_owned(
+            live.len()
+                .checked_mul(size_of::<ClassLiteral>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("disjoint-class literal allocation overflowed")
+                })?,
+        )?;
+        literals.try_reserve_exact(live.len()).map_err(|_| {
+            EncodedValidationError::resource("disjoint-class literal allocation failed")
+        })?;
+        literals.extend(live.into_iter().map(|(literal, _)| literal));
+        Some(RawDisjoint {
+            classes: literals,
+            guard_digest,
+            provenance,
+        })
+    } else {
+        None
+    };
     Ok(Some(NamedDisjointOutput {
         edges: Vec::new(),
-        disjoint: (live.len() >= 2).then_some(RawDisjoint {
-            classes: live,
-            provenance,
-        }),
+        disjoint,
         provenance,
     }))
 }
@@ -5771,7 +5863,6 @@ fn normalize_edges(
 
 fn normalize_disjoints(
     mut raw: Vec<RawDisjoint>,
-    domain: &DecodedSymbolDomain,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<NormalizedDisjoint>> {
     budget.claim_work(sort_work(raw.len()))?;
@@ -5785,6 +5876,11 @@ fn normalize_disjoints(
         budget.claim_work(1)?;
         if let Some(previous) = normalized.last_mut() {
             if previous.classes == value.classes {
+                if previous.guard_digest != value.guard_digest {
+                    return Err(EncodedValidationError::invariant(
+                        "equivalent disjoint classes disagree on their guard identity",
+                    ));
+                }
                 if previous.provenance.last() != Some(&value.provenance) {
                     budget.claim_owned(size_of::<[u8; 32]>())?;
                     previous.provenance.try_reserve(1).map_err(|_| {
@@ -5797,7 +5893,6 @@ fn normalize_disjoints(
                 continue;
             }
         }
-        let guard_digest = disjoint_guard_digest(domain, &value.classes, budget)?;
         budget.claim_owned(size_of::<NormalizedDisjoint>() + size_of::<[u8; 32]>())?;
         normalized.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("normalized disjoint-class allocation failed")
@@ -5810,7 +5905,7 @@ fn normalize_disjoints(
         normalized.push(NormalizedDisjoint {
             classes: value.classes,
             provenance,
-            guard_digest,
+            guard_digest: value.guard_digest,
         });
     }
     Ok(normalized)
@@ -6713,8 +6808,16 @@ fn freeze_predicates(
         }
     }
     for disjoint in disjoints {
-        for class_id in &disjoint.classes {
-            push_u32(&mut class_ids, *class_id, "predicate class", budget)?;
+        for literal in &disjoint.classes {
+            push_u32(&mut class_ids, literal.class_id, "predicate class", budget)?;
+            if literal.negative {
+                push_u32(
+                    &mut negative_class_ids,
+                    literal.class_id,
+                    "negated predicate class",
+                    budget,
+                )?;
+            }
         }
     }
     for constraint in object_constraints {
@@ -7428,6 +7531,16 @@ fn freeze_clauses(
             )?;
         }
     }
+    for disjoint in disjoints {
+        for literal in disjoint.classes.iter().filter(|literal| literal.negative) {
+            push_u32(
+                &mut negative_class_ids,
+                literal.class_id,
+                "complement clause class",
+                budget,
+            )?;
+        }
+    }
     for fact in facts.iter().filter(|fact| fact.negative) {
         push_u32(
             &mut negative_class_ids,
@@ -7649,12 +7762,17 @@ fn freeze_clauses(
     for disjoint in disjoints {
         let provenance = provenance_id(provenance_keys, &disjoint.provenance, false)?;
         let mut previous = None;
-        for (index, class_id) in disjoint.classes.iter().copied().enumerate() {
+        for (index, literal) in disjoint.classes.iter().copied().enumerate() {
             let sequence = u32::try_from(index).map_err(|_| {
                 EncodedValidationError::resource("disjoint-guard sequence exceeds u32")
             })?;
             let current = guard_predicate_id(guard_predicates, disjoint.guard_digest, sequence)?;
-            let member = predicate_id(predicate_by_class, class_id)?;
+            let member = class_literal_predicate_id(
+                predicate_by_class,
+                predicate_by_negative_class,
+                literal.class_id,
+                literal.negative,
+            )?;
             if let Some(previous_id) = previous {
                 push_clause(
                     &mut ordered,
@@ -9527,32 +9645,21 @@ fn push_u32(
     Ok(())
 }
 
-fn disjoint_guard_digest(
-    domain: &DecodedSymbolDomain,
-    classes: &[u32],
+fn disjoint_guard_digest_nodes<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    classes: &[(ClassLiteral, NodeId)],
+    scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<[u8; 32]> {
     let mut digest = Sha256::new();
     digest.update(DISJOINT_GUARD_DOMAIN);
     budget.claim_work(DISJOINT_GUARD_DOMAIN.len())?;
-    for class_id in classes {
-        let key = class_key(domain, *class_id)?;
+    for (_, identifier) in classes {
+        let key = canonical::canonical_node_key(model, *identifier, scope_maps, budget)?;
         budget.claim_work(key.len())?;
-        digest.update(key);
+        digest.update(&key);
     }
     Ok(digest.finalize().into())
-}
-
-fn class_key(domain: &DecodedSymbolDomain, identifier: u32) -> EncodedResult<&[u8]> {
-    domain
-        .values
-        .get(
-            usize::try_from(identifier).map_err(|_| {
-                EncodedValidationError::invariant("class-expression ID exceeds usize")
-            })?,
-        )
-        .map(|value| value.key.as_slice())
-        .ok_or_else(|| EncodedValidationError::invariant("class-expression ID is dangling"))
 }
 
 fn scalar_object_role_count(entity_domain: &DecodedSymbolDomain) -> EncodedResult<usize> {
@@ -10437,7 +10544,6 @@ fn merge_named_class_phases_impl(
         &individual_maps,
         &source_literal_maps,
         &data_value_maps,
-        &class_domain,
         source_object_roles,
         merged_object_roles,
         source_data_roles,
@@ -11119,7 +11225,6 @@ fn merge_normalized_sources(
     individual_maps: &[Vec<u32>],
     source_literal_maps: &[Vec<u32>],
     data_value_maps: &[Vec<u32>],
-    class_domain: &DecodedSymbolDomain,
     source_object_roles: Option<&[ObjectRolePhase]>,
     merged_object_roles: Option<&ObjectRolePhase>,
     source_data_roles: Option<&[DataRolePhase]>,
@@ -11192,7 +11297,7 @@ fn merge_normalized_sources(
                 let class_bytes = disjoint
                     .classes
                     .len()
-                    .checked_mul(size_of::<u32>())
+                    .checked_mul(size_of::<ClassLiteral>())
                     .ok_or_else(|| {
                         EncodedValidationError::resource(
                             "merged disjoint-class member allocation overflowed",
@@ -11207,8 +11312,11 @@ fn merge_normalized_sources(
                             "merged disjoint-class member allocation failed",
                         )
                     })?;
-                for class_id in &disjoint.classes {
-                    classes.push(mapped_id(class_map, *class_id, "disjoint class")?);
+                for literal in &disjoint.classes {
+                    classes.push(ClassLiteral {
+                        class_id: mapped_id(class_map, literal.class_id, "disjoint class")?,
+                        negative: literal.negative,
+                    });
                 }
                 raw_disjoints.try_reserve(1).map_err(|_| {
                     EncodedValidationError::resource(
@@ -11217,6 +11325,7 @@ fn merge_normalized_sources(
                 })?;
                 raw_disjoints.push(RawDisjoint {
                     classes,
+                    guard_digest: disjoint.guard_digest,
                     provenance: *provenance,
                 });
             }
@@ -11845,7 +11954,7 @@ fn merge_normalized_sources(
     }
     Ok((
         normalize_edges(raw_edges, budget)?,
-        normalize_disjoints(raw_disjoints, class_domain, budget)?,
+        normalize_disjoints(raw_disjoints, budget)?,
         normalize_object_constraints(raw_object_constraints, budget)?,
         normalize_object_characteristics(raw_object_characteristics, budget)?,
         normalize_data_domains(raw_data_domains, budget)?,

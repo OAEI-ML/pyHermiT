@@ -746,6 +746,60 @@ def test_atomic_complement_equivalent_classes_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_atomic_complement_disjoint_classes_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(AnnotationProperty(:note))",
+            "DisjointClasses(:A ObjectComplementOf(:B) :C)",
+            'DisjointClasses(Annotation(:note "duplicate") :A '
+            "ObjectComplementOf(:B) :C)",
+            "DisjointClasses(ObjectComplementOf(:A) ObjectComplementOf(:C))",
+            "DisjointClasses(:A ObjectComplementOf(:A))",
+            "DisjointClasses(owl:Thing ObjectComplementOf(:B))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=5)
+    assert sum(
+        str(value["display"]).startswith("ObjectComplementOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    ) == 3
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    ) == 3
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_trivial_complement_disjoint_with_bottom_drops_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "DisjointClasses(owl:Nothing ObjectComplementOf(:A))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=1)
+    assert all(
+        not str(value["display"]).startswith("ObjectComplementOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_semantic_source_literal_symbols_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -981,6 +1035,32 @@ def test_composite_atomic_complement_equivalences_remap_exactly() -> None:
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "EquivalentClasses(:A ObjectComplementOf(:B))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(composite, compiled_roots=2)
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_atomic_complement_disjoints_remap_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:Y))",
+            "Declaration(Class(:Z))",
+            "DisjointClasses(ObjectComplementOf(:Z) :Y)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "DisjointClasses(:A ObjectComplementOf(:B))",
         ),
         options=OPTIONS,
     )
@@ -3187,6 +3267,34 @@ def test_partial_atomic_complement_equivalence_defers_without_leaking_symbols() 
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
             "EquivalentClasses(ObjectComplementOf(:A) ObjectSomeValuesFrom(:p :B))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
+    assert all(
+        not str(value["display"]).startswith("ObjectComplementOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_partial_atomic_complement_disjoint_defers_without_leaking_symbols() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "DisjointClasses(ObjectComplementOf(:A) ObjectSomeValuesFrom(:p :B))",
         ),
         options=OPTIONS,
     )
