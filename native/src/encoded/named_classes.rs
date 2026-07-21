@@ -44,6 +44,7 @@ const NAMED_CLASS_PHASE_SCHEMA_VERSION: u16 = 1;
 const ENTITY_TAG: u16 = 2;
 const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
 const LITERAL_TAG: u16 = 4;
+const OBJECT_COMPLEMENT_OF_TAG: u16 = 32;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
 const DISJOINT_CLASSES_TAG: u16 = 63;
@@ -632,6 +633,7 @@ struct NormalizedDataFunctionality {
 struct RawFact {
     class_id: u32,
     individual_id: u32,
+    negative: bool,
     provenance: [u8; 32],
 }
 
@@ -639,6 +641,7 @@ struct RawFact {
 struct NormalizedFact {
     class_id: u32,
     individual_id: u32,
+    negative: bool,
     provenance: Vec<[u8; 32]>,
 }
 
@@ -724,6 +727,12 @@ struct NamedDisjointOutput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingIndividualSymbol {
+    value: DecodedSymbolValue,
+    entity: Option<(u32, bool)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingClassSymbol {
     value: DecodedSymbolValue,
     entity: Option<(u32, bool)>,
 }
@@ -878,7 +887,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     canonical::validate_scope_maps(scope_maps, &mut budget)?;
     let declared_class_ids = declared_class_ids(symbols, &mut budget)?;
     let (class_domain, class_signature) =
-        class_signature(symbols, &declared_class_ids, &mut budget)?;
+        class_signature(model, symbols, &declared_class_ids, scope_maps, &mut budget)?;
     let data_range_domain = named_data_range_domain(symbols, &mut budget)?;
     let declared_individual_ids = declared_individual_ids(symbols, &mut budget)?;
     let (individual_domain, individual_signature) = individual_signature(
@@ -1694,6 +1703,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let (
         predicates,
         predicate_by_class,
+        predicate_by_negative_class,
         predicate_by_object_role,
         predicate_by_negative_object_role,
         predicate_by_data_role,
@@ -1746,9 +1756,11 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &datatype_definitions,
         &keys,
         &data_functionalities,
+        &facts,
         thing,
         nothing,
         &predicate_by_class,
+        &predicate_by_negative_class,
         &predicate_by_object_role,
         &predicate_by_data_role,
         &predicate_by_data_range,
@@ -1789,9 +1801,11 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &mut budget,
     )?;
     let negative_facts = freeze_negative_facts(
+        &facts,
         &negative_object_facts,
         &negative_data_facts,
         &individual_domain,
+        &predicate_by_negative_class,
         &predicate_by_negative_object_role,
         &predicate_by_negative_data_role,
         &source_literal_domain,
@@ -1861,46 +1875,150 @@ fn declared_class_ids(symbols: &SymbolPhase, budget: &mut PhaseBudget) -> Encode
     Ok(identifiers)
 }
 
-fn class_signature(
+fn class_signature<B: ByteSource>(
+    model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     declared_class_ids: &[u32],
+    scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(DecodedSymbolDomain, Vec<ClassSignatureBinding>)> {
-    let mut values = Vec::new();
-    let mut bindings = Vec::new();
+    let mut pending = Vec::<PendingClassSymbol>::new();
     for entity in &symbols.entity_domain.values {
         budget.claim_work(1)?;
         if !entity.display.starts_with("class:") {
             continue;
         }
-        let following = values.len().checked_add(1).ok_or_else(|| {
+        let following = pending.len().checked_add(1).ok_or_else(|| {
             EncodedValidationError::resource("named-class symbol count overflowed")
         })?;
         PhaseBudget::count(following, budget.limits.max_class_symbols, "symbol count")?;
+        budget.claim_owned(size_of::<PendingClassSymbol>())?;
         budget.claim_owned(size_of::<DecodedSymbolValue>())?;
-        budget.claim_owned(size_of::<ClassSignatureBinding>())?;
         budget.claim_owned(entity.key.len())?;
         budget.claim_owned(entity.display.len())?;
-        values.try_reserve(1).map_err(|_| {
+        pending.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("named-class symbol allocation failed")
         })?;
-        bindings.try_reserve(1).map_err(|_| {
-            EncodedValidationError::resource("named-class signature allocation failed")
+        pending.push(PendingClassSymbol {
+            value: DecodedSymbolValue {
+                identifier: 0,
+                key: entity.key.clone(),
+                display: entity.display.clone(),
+                generated: entity.generated,
+                query_local: entity.query_local,
+            },
+            entity: Some((
+                entity.identifier,
+                declared_class_ids.binary_search(&entity.identifier).is_ok(),
+            )),
+        });
+    }
+
+    let mut complements = Vec::<NodeId>::new();
+    for root in &symbols.roots {
+        budget.claim_work(1)?;
+        if root.handler != RootHandler::ClassAssertion {
+            continue;
+        }
+        let root_node = model.node(root.node)?;
+        let expression = node_field(
+            model,
+            root_node,
+            0,
+            "class-assertion class-expression operand",
+        )?;
+        if atomic_complement_operand(model, symbols, expression)?.is_none() {
+            continue;
+        }
+        budget.claim_owned(size_of::<NodeId>())?;
+        complements.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("class-complement selection allocation failed")
         })?;
-        let class_expression_id = u32::try_from(values.len())
-            .map_err(|_| EncodedValidationError::resource("named-class symbol ID exceeds u32"))?;
-        values.push(DecodedSymbolValue {
-            identifier: class_expression_id,
-            key: entity.key.clone(),
-            display: entity.display.clone(),
-            generated: entity.generated,
-            query_local: entity.query_local,
+        complements.push(expression);
+    }
+    budget.claim_work(sort_work(complements.len()))?;
+    complements.sort_unstable();
+    complements.dedup();
+    for identifier in complements {
+        let following = pending.len().checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("class-expression symbol count overflowed")
+        })?;
+        PhaseBudget::count(
+            following,
+            budget.limits.max_class_symbols,
+            "class-expression",
+        )?;
+        let key = canonical::canonical_node_key(model, identifier, scope_maps, budget)?;
+        budget.claim_work(key.len())?;
+        let digest = crate::model::hex(&Sha256::digest(&key));
+        let display_len = "ObjectComplementOf:"
+            .len()
+            .checked_add(digest.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("class-complement display length overflowed")
+            })?;
+        budget.claim_owned(display_len)?;
+        let mut display = String::new();
+        display.try_reserve_exact(display_len).map_err(|_| {
+            EncodedValidationError::resource("class-complement display allocation failed")
+        })?;
+        display.push_str("ObjectComplementOf:");
+        display.push_str(&digest);
+        budget.claim_owned(size_of::<PendingClassSymbol>())?;
+        budget.claim_owned(size_of::<DecodedSymbolValue>())?;
+        pending.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("class-expression symbol allocation failed")
+        })?;
+        pending.push(PendingClassSymbol {
+            value: DecodedSymbolValue {
+                identifier: 0,
+                key,
+                display,
+                generated: false,
+                query_local: false,
+            },
+            entity: None,
         });
-        bindings.push(ClassSignatureBinding {
-            class_expression_id,
-            entity_id: entity.identifier,
-            declared: declared_class_ids.binary_search(&entity.identifier).is_ok(),
-        });
+    }
+
+    budget.claim_work(sort_work(pending.len()))?;
+    pending.sort_by(|left, right| left.value.key.cmp(&right.value.key));
+    let mut values = Vec::<DecodedSymbolValue>::new();
+    let mut bindings = Vec::<ClassSignatureBinding>::new();
+    values.try_reserve_exact(pending.len()).map_err(|_| {
+        EncodedValidationError::resource("class-expression symbol result allocation failed")
+    })?;
+    bindings
+        .try_reserve_exact(pending.len())
+        .map_err(|_| EncodedValidationError::resource("class signature allocation failed"))?;
+    for mut candidate in pending {
+        if let Some(previous) = values.last() {
+            if previous.key == candidate.value.key {
+                if previous.display != candidate.value.display
+                    || previous.generated != candidate.value.generated
+                    || previous.query_local != candidate.value.query_local
+                    || candidate.entity.is_some()
+                {
+                    return Err(EncodedValidationError::invariant(
+                        "class-expression symbol key has conflicting metadata",
+                    ));
+                }
+                continue;
+            }
+        }
+        let class_expression_id = u32::try_from(values.len()).map_err(|_| {
+            EncodedValidationError::resource("class-expression symbol ID exceeds u32")
+        })?;
+        candidate.value.identifier = class_expression_id;
+        if let Some((entity_id, declared)) = candidate.entity {
+            budget.claim_owned(size_of::<ClassSignatureBinding>())?;
+            bindings.push(ClassSignatureBinding {
+                class_expression_id,
+                entity_id,
+                declared,
+            });
+        }
+        values.push(candidate.value);
     }
     Ok((
         DecodedSymbolDomain {
@@ -1909,6 +2027,37 @@ fn class_signature(
         },
         bindings,
     ))
+}
+
+fn atomic_complement_operand<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+) -> EncodedResult<Option<u32>> {
+    let node = model.node(identifier)?;
+    if node.tag() != OBJECT_COMPLEMENT_OF_TAG || node.field_count() != 1 {
+        return Ok(None);
+    }
+    let operand = node_field(model, node, 0, "class-complement operand")?;
+    if model.node(operand)?.tag() != ENTITY_TAG {
+        return Ok(None);
+    }
+    let entity_id = symbols.entity_symbol_for_node(operand).ok_or_else(|| {
+        EncodedValidationError::invariant(
+            "class-complement operand is absent from the reachable entity mapping",
+        )
+    })?;
+    let entity = symbols
+        .entity_domain
+        .values
+        .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("class-complement operand entity ID is dangling")
+        })?;
+    Ok((entity.display.starts_with("class:")
+        && entity.display != THING_DISPLAY
+        && entity.display != NOTHING_DISPLAY)
+        .then_some(entity_id))
 }
 
 fn named_data_range_domain(
@@ -5016,7 +5165,9 @@ fn named_class_assertion<B: ByteSource>(
             "class-assertion root no longer has schema-1 shape",
         ));
     }
-    let Some(class_id) = named_class_field(model, symbols, class_signature, node, 0)? else {
+    let Some((class_id, negative)) =
+        class_assertion_literal(model, symbols, class_signature, node)?
+    else {
         return Ok(None);
     };
     let Some(individual_id) = individual_field(
@@ -5037,8 +5188,39 @@ fn named_class_assertion<B: ByteSource>(
     Ok(Some(RawFact {
         class_id,
         individual_id,
+        negative,
         provenance,
     }))
+}
+
+fn class_assertion_literal<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    signature: &[ClassSignatureBinding],
+    assertion: NodeRef,
+) -> EncodedResult<Option<(u32, bool)>> {
+    let identifier = node_field(
+        model,
+        assertion,
+        0,
+        "class-assertion class-expression operand",
+    )?;
+    if let Some(class_id) = named_class_id(model, symbols, signature, identifier)? {
+        return Ok(Some((class_id, false)));
+    }
+    let Some(entity_id) = atomic_complement_operand(model, symbols, identifier)? else {
+        return Ok(None);
+    };
+    let class_id = signature
+        .binary_search_by_key(&entity_id, |binding| binding.entity_id)
+        .ok()
+        .map(|index| signature[index].class_expression_id)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "class-complement operand is absent from the class signature",
+            )
+        })?;
+    Ok(Some((class_id, true)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5474,12 +5656,22 @@ fn normalize_facts(
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<NormalizedFact>> {
     budget.claim_work(sort_work(raw.len()))?;
-    raw.sort_by_key(|fact| (fact.class_id, fact.individual_id, fact.provenance));
+    raw.sort_by_key(|fact| {
+        (
+            fact.class_id,
+            fact.individual_id,
+            fact.negative,
+            fact.provenance,
+        )
+    });
     let mut normalized = Vec::<NormalizedFact>::new();
     for fact in raw {
         budget.claim_work(1)?;
         if let Some(previous) = normalized.last_mut() {
-            if previous.class_id == fact.class_id && previous.individual_id == fact.individual_id {
+            if previous.class_id == fact.class_id
+                && previous.individual_id == fact.individual_id
+                && previous.negative == fact.negative
+            {
                 if previous.provenance.last() != Some(&fact.provenance) {
                     budget.claim_owned(size_of::<[u8; 32]>())?;
                     previous.provenance.try_reserve(1).map_err(|_| {
@@ -5504,6 +5696,7 @@ fn normalize_facts(
         normalized.push(NormalizedFact {
             class_id: fact.class_id,
             individual_id: fact.individual_id,
+            negative: fact.negative,
             provenance,
         });
     }
@@ -6256,6 +6449,7 @@ fn push_provenance_key(
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PredicateOwner {
     Concept(u32),
+    NegatedConcept(u32),
     ObjectRole(u32),
     NegatedObjectRole(u32),
     DataRole(u32),
@@ -6283,6 +6477,7 @@ type ObjectPredicateIndex = Vec<(u32, u32)>;
 type GuardPredicateIndex = Vec<([u8; 32], u32, u32)>;
 type FrozenPredicates = (
     Vec<DecodedPredicate>,
+    PredicateIndex,
     PredicateIndex,
     ObjectPredicateIndex,
     ObjectPredicateIndex,
@@ -6323,6 +6518,7 @@ fn freeze_predicates(
     budget: &mut PhaseBudget,
 ) -> EncodedResult<FrozenPredicates> {
     let mut class_ids = Vec::new();
+    let mut negative_class_ids = Vec::new();
     push_u32(&mut class_ids, nothing, "predicate class", budget)?;
     if has_individuals
         || object_characteristics
@@ -6356,10 +6552,24 @@ fn freeze_predicates(
     }
     for fact in facts {
         push_u32(&mut class_ids, fact.class_id, "predicate class", budget)?;
+        if fact.negative {
+            push_u32(
+                &mut negative_class_ids,
+                fact.class_id,
+                "negated predicate class",
+                budget,
+            )?;
+        }
+    }
+    if !negative_class_ids.is_empty() {
+        push_u32(&mut class_ids, thing, "predicate class", budget)?;
     }
     budget.claim_work(sort_work(class_ids.len()))?;
     class_ids.sort_unstable();
     class_ids.dedup();
+    budget.claim_work(sort_work(negative_class_ids.len()))?;
+    negative_class_ids.sort_unstable();
+    negative_class_ids.dedup();
 
     let mut ordered = Vec::<PendingPredicate>::new();
     if !equalities.is_empty()
@@ -6449,6 +6659,20 @@ fn freeze_predicates(
         ordered.push(PendingPredicate {
             key,
             owner: PredicateOwner::Concept(class_id),
+        });
+    }
+    for class_id in negative_class_ids {
+        let key = negated_concept_predicate_key(class_id);
+        budget.claim_owned(size_of::<PendingPredicate>())?;
+        budget.claim_owned(key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "negated named-class predicate ordering allocation failed",
+            )
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::NegatedConcept(class_id),
         });
     }
     let mut object_role_ids = Vec::new();
@@ -6681,6 +6905,7 @@ fn freeze_predicates(
 
     let mut predicates = Vec::new();
     let mut predicate_by_class = Vec::new();
+    let mut predicate_by_negative_class = Vec::new();
     let mut predicate_by_object_role = Vec::new();
     let mut predicate_by_negative_object_role = Vec::new();
     let mut predicate_by_data_role = Vec::new();
@@ -6698,7 +6923,7 @@ fn freeze_predicates(
             .len()
             .checked_mul(
                 size_of::<DecodedPredicate>()
-                    + 6 * size_of::<(u32, u32)>()
+                    + 7 * size_of::<(u32, u32)>()
                     + size_of::<([u8; 32], u32, u32)>()
                     + size_of::<TermSort>(),
             )
@@ -6713,6 +6938,13 @@ fn freeze_predicates(
         .try_reserve_exact(ordered.len())
         .map_err(|_| {
             EncodedValidationError::resource("named-class predicate index allocation failed")
+        })?;
+    predicate_by_negative_class
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| {
+            EncodedValidationError::resource(
+                "negated named-class predicate index allocation failed",
+            )
         })?;
     predicate_by_object_role
         .try_reserve_exact(ordered.len())
@@ -6764,6 +6996,20 @@ fn freeze_predicates(
                     internal_key: None,
                 });
                 predicate_by_class.push((class_id, predicate_id));
+            }
+            PredicateOwner::NegatedConcept(class_id) => {
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::NegatedConcept,
+                    argument_sorts: vec![TermSort::Object],
+                    symbol_id: Some(class_id),
+                    role_id: None,
+                    cardinality: None,
+                    filler_predicate_id: None,
+                    annotation: Vec::new(),
+                    internal_key: None,
+                });
+                predicate_by_negative_class.push((class_id, predicate_id));
             }
             PredicateOwner::ObjectRole(role_id) => {
                 budget.claim_owned(size_of::<TermSort>())?;
@@ -6927,6 +7173,7 @@ fn freeze_predicates(
         }
     }
     predicate_by_class.sort_unstable_by_key(|(class_id, _)| *class_id);
+    predicate_by_negative_class.sort_unstable_by_key(|(class_id, _)| *class_id);
     predicate_by_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_negative_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_data_role.sort_unstable_by_key(|(role_id, _)| *role_id);
@@ -6936,6 +7183,7 @@ fn freeze_predicates(
     Ok((
         predicates,
         predicate_by_class,
+        predicate_by_negative_class,
         predicate_by_object_role,
         predicate_by_negative_object_role,
         predicate_by_data_role,
@@ -6962,9 +7210,11 @@ fn freeze_clauses(
     datatype_definitions: &[NormalizedDatatypeDefinition],
     keys: &[NormalizedKey],
     data_functionalities: &[NormalizedDataFunctionality],
+    facts: &[NormalizedFact],
     thing: u32,
     nothing: u32,
     predicate_by_class: &[(u32, u32)],
+    predicate_by_negative_class: &[(u32, u32)],
     predicate_by_object_role: &[(u32, u32)],
     predicate_by_data_role: &[(u32, u32)],
     predicate_by_data_range: &[(u32, u32)],
@@ -6978,6 +7228,18 @@ fn freeze_clauses(
     provenance_keys: &[ProvenanceKey],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<DecodedClause>> {
+    let mut negative_class_ids = Vec::new();
+    for fact in facts.iter().filter(|fact| fact.negative) {
+        push_u32(
+            &mut negative_class_ids,
+            fact.class_id,
+            "complement clause class",
+            budget,
+        )?;
+    }
+    budget.claim_work(sort_work(negative_class_ids.len()))?;
+    negative_class_ids.sort_unstable();
+    negative_class_ids.dedup();
     let datatype_definition_clauses =
         datatype_definitions
             .iter()
@@ -7000,6 +7262,7 @@ fn freeze_clauses(
         .and_then(|value| value.checked_add(datatype_definition_clauses))
         .and_then(|value| value.checked_add(keys.len()))
         .and_then(|value| value.checked_add(data_functionalities.len()))
+        .and_then(|value| value.checked_add(negative_class_ids.len().checked_mul(2)?))
         .ok_or_else(|| EncodedValidationError::resource("named-class clause count overflowed"))?;
     for disjoint in disjoints {
         let count = disjoint
@@ -7026,6 +7289,27 @@ fn freeze_clauses(
         bottom_provenance,
         budget,
     )?;
+    if !negative_class_ids.is_empty() {
+        let thing_predicate = predicate_id(predicate_by_class, thing)?;
+        for class_id in negative_class_ids {
+            let positive = predicate_id(predicate_by_class, class_id)?;
+            let negative = predicate_id(predicate_by_negative_class, class_id)?;
+            push_clause(
+                &mut ordered,
+                &[positive, negative],
+                &[],
+                bottom_provenance,
+                budget,
+            )?;
+            push_clause(
+                &mut ordered,
+                &[thing_predicate],
+                &[positive, negative],
+                bottom_provenance,
+                budget,
+            )?;
+        }
+    }
     for edge in edges {
         let body = predicate_id(predicate_by_class, edge.sub_class)?;
         let head = predicate_id(predicate_by_class, edge.super_class)?;
@@ -7272,29 +7556,34 @@ fn freeze_positive_facts(
             ));
         }
     };
+    let positive_class_facts = facts.iter().filter(|fact| !fact.negative).count();
     let expected = individual_domain
         .values
         .len()
         .checked_add(named_individuals.len())
-        .and_then(|value| value.checked_add(facts.len()))
+        .and_then(|value| value.checked_add(positive_class_facts))
         .and_then(|value| value.checked_add(object_facts.len()))
         .and_then(|value| value.checked_add(data_facts.len()))
         .and_then(|value| value.checked_add(equalities.len()))
         .and_then(|value| value.checked_add(inequalities.len()))
         .ok_or_else(|| EncodedValidationError::resource("positive-fact count overflowed"))?;
     budget.claim_work(
-        facts
-            .len()
+        positive_class_facts
             .checked_add(object_facts.len())
             .and_then(|value| value.checked_add(data_facts.len()))
             .and_then(|value| value.checked_add(equalities.len()))
             .and_then(|value| value.checked_add(inequalities.len()))
             .ok_or_else(|| EncodedValidationError::resource("positive-fact work overflowed"))?,
     )?;
-    let top_fact_count = facts.iter().filter(|fact| fact.class_id == thing).count();
-    let class_fact_count = facts.len().checked_sub(top_fact_count).ok_or_else(|| {
-        EncodedValidationError::invariant("positive class-fact merge count underflowed")
-    })?;
+    let top_fact_count = facts
+        .iter()
+        .filter(|fact| !fact.negative && fact.class_id == thing)
+        .count();
+    let class_fact_count = positive_class_facts
+        .checked_sub(top_fact_count)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("positive class-fact merge count underflowed")
+        })?;
     let equality_fact_count = equalities
         .iter()
         .enumerate()
@@ -7355,6 +7644,9 @@ fn freeze_positive_facts(
         }
     }
     for fact in facts {
+        if fact.negative {
+            continue;
+        }
         budget.claim_work(1)?;
         if usize::try_from(fact.individual_id)
             .ok()
@@ -7635,9 +7927,11 @@ fn freeze_positive_facts(
 
 #[allow(clippy::too_many_arguments)]
 fn freeze_negative_facts(
+    facts: &[NormalizedFact],
     object_facts: &[NormalizedObjectFact],
     data_facts: &[NormalizedDataFact],
     individual_domain: &DecodedSymbolDomain,
+    predicate_by_negative_class: &[(u32, u32)],
     predicate_by_negative_object_role: &[(u32, u32)],
     predicate_by_negative_data_role: &[(u32, u32)],
     source_literal_domain: &DecodedSymbolDomain,
@@ -7656,9 +7950,10 @@ fn freeze_negative_facts(
             "negative data-fact symbol domains are inconsistent",
         ));
     }
-    let negative_fact_count = object_facts
-        .len()
-        .checked_add(data_facts.len())
+    let negative_class_fact_count = facts.iter().filter(|fact| fact.negative).count();
+    let negative_fact_count = negative_class_fact_count
+        .checked_add(object_facts.len())
+        .and_then(|value| value.checked_add(data_facts.len()))
         .ok_or_else(|| EncodedValidationError::resource("negative-fact count overflowed"))?;
     let total_fact_count = positive_fact_count
         .checked_add(negative_fact_count)
@@ -7682,6 +7977,49 @@ fn freeze_negative_facts(
     ordered
         .try_reserve_exact(negative_fact_count)
         .map_err(|_| EncodedValidationError::resource("negative-fact input allocation failed"))?;
+    for fact in facts.iter().filter(|fact| fact.negative) {
+        if usize::try_from(fact.individual_id)
+            .ok()
+            .is_none_or(|identifier| identifier >= individual_domain.values.len())
+        {
+            return Err(EncodedValidationError::invariant(
+                "negated class-assertion individual ID is dangling",
+            ));
+        }
+        let predicate_id = predicate_id(predicate_by_negative_class, fact.class_id)?;
+        let scalar_predicate_id = scalar_predicate_ids
+            .get(usize::try_from(predicate_id).map_err(|_| {
+                EncodedValidationError::invariant("negated class-fact predicate ID exceeds usize")
+            })?)
+            .copied()
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "scalar negated class-fact predicate mapping is incomplete",
+                )
+            })?;
+        let provenance_id = provenance_id(provenance_keys, &fact.provenance, false)?;
+        let provenance_ids = vec![provenance_id];
+        let arguments = GroundArguments::Unary(fact.individual_id);
+        let key = ground_fact_key(scalar_predicate_id, arguments, &provenance_ids);
+        budget.claim_owned(
+            key.len()
+                .checked_add(size_of::<u32>())
+                .and_then(|value| value.checked_add(size_of::<DecodedTerm>()))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("negated class-fact payload overflowed")
+                })?,
+        )?;
+        ordered.push((
+            key,
+            DecodedGroundAtom {
+                predicate_id,
+                arguments: vec![DecodedTerm::Individual {
+                    individual_id: fact.individual_id,
+                }],
+                provenance_ids,
+            },
+        ));
+    }
     for fact in object_facts {
         if [fact.source_individual, fact.target_individual]
             .into_iter()
@@ -7813,7 +8151,7 @@ fn freeze_negative_facts(
     ordered.sort_by(|left, right| left.0.cmp(&right.0));
     if ordered.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
         return Err(EncodedValidationError::invariant(
-            "negative property facts contain duplicate identities",
+            "negative facts contain duplicate identities",
         ));
     }
     let mut output = Vec::new();
@@ -9208,6 +9546,20 @@ fn named_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
                     EncodedValidationError::invariant("concept predicate lost its class symbol")
                 })
         }
+        PredicateKind::NegatedConcept
+            if unary_object
+                && predicate.annotation.is_empty()
+                && predicate.internal_key.is_none() =>
+        {
+            predicate
+                .symbol_id
+                .map(negated_concept_predicate_key)
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "negated concept predicate lost its class symbol",
+                    )
+                })
+        }
         PredicateKind::DataRange
             if unary_data
                 && predicate.annotation.is_empty()
@@ -9276,6 +9628,13 @@ fn named_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
 fn concept_predicate_key(class_id: u32) -> Vec<u8> {
     format!(
         "{{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"concept\",\"role_id\":null,\"symbol_id\":{class_id}}}"
+    )
+    .into_bytes()
+}
+
+fn negated_concept_predicate_key(class_id: u32) -> Vec<u8> {
+    format!(
+        "{{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"negated_concept\",\"role_id\":null,\"symbol_id\":{class_id}}}"
     )
     .into_bytes()
 }
@@ -9724,7 +10083,7 @@ fn merge_named_class_phases_impl(
         phases,
         &entity_maps,
         &class_maps,
-        class_domain.values.len(),
+        &class_domain,
         &mut budget,
     )?;
     let individual_signature = merge_individual_signatures(
@@ -9823,6 +10182,7 @@ fn merge_named_class_phases_impl(
     let (
         predicates,
         predicate_by_class,
+        predicate_by_negative_class,
         predicate_by_object_role,
         predicate_by_negative_object_role,
         predicate_by_data_role,
@@ -9875,9 +10235,11 @@ fn merge_named_class_phases_impl(
         &datatype_definitions,
         &keys,
         &data_functionalities,
+        &facts,
         thing,
         nothing,
         &predicate_by_class,
+        &predicate_by_negative_class,
         &predicate_by_object_role,
         &predicate_by_data_role,
         &predicate_by_data_range,
@@ -9918,9 +10280,11 @@ fn merge_named_class_phases_impl(
         &mut budget,
     )?;
     let negative_facts = freeze_negative_facts(
+        &facts,
         &negative_object_facts,
         &negative_data_facts,
         &individual_domain,
+        &predicate_by_negative_class,
         &predicate_by_negative_object_role,
         &predicate_by_negative_data_role,
         &source_literal_domain,
@@ -10243,23 +10607,58 @@ fn merge_class_signatures(
     phases: &[(SymbolPhase, NamedClassPhase)],
     entity_maps: &[Vec<u32>],
     class_maps: &[Vec<u32>],
-    class_count: usize,
+    class_domain: &DecodedSymbolDomain,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<ClassSignatureBinding>> {
+    if class_domain.kind != SymbolKind::ClassExpression {
+        return Err(EncodedValidationError::invariant(
+            "merged class signature domain changed kind",
+        ));
+    }
+    let class_count = class_domain.values.len();
     let mut merged = vec![None::<(u32, bool)>; class_count];
     budget.claim_owned(
         class_count
             .checked_mul(size_of::<Option<(u32, bool)>>())
             .ok_or_else(|| EncodedValidationError::resource("merged class signature overflowed"))?,
     )?;
-    for (phase_index, (_, phase)) in phases.iter().enumerate() {
-        if phase.class_signature.len() != phase.class_domain.values.len() {
+    for (phase_index, (symbols, phase)) in phases.iter().enumerate() {
+        let named_count = symbols
+            .entity_domain
+            .values
+            .iter()
+            .filter(|value| value.display.starts_with("class:"))
+            .count();
+        if phase.class_signature.len() != named_count {
             return Err(EncodedValidationError::invariant(
-                "merged class signature no longer covers its domain",
+                "merged class signature no longer covers its entity domain",
             ));
         }
         for binding in &phase.class_signature {
             budget.claim_work(1)?;
+            let local_value = phase
+                .class_domain
+                .values
+                .get(usize::try_from(binding.class_expression_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged class signature has a dangling local ID",
+                    )
+                })?;
+            let entity = symbols
+                .entity_domain
+                .values
+                .get(usize::try_from(binding.entity_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged class signature has a dangling entity ID",
+                    )
+                })?;
+            if !entity.display.starts_with("class:") || local_value.key != entity.key {
+                return Err(EncodedValidationError::invariant(
+                    "merged class signature binds a non-entity expression",
+                ));
+            }
             let class_id = mapped_id(
                 &class_maps[phase_index],
                 binding.class_expression_id,
@@ -10285,16 +10684,17 @@ fn merge_class_signatures(
     merged
         .into_iter()
         .enumerate()
-        .map(|(index, value)| {
-            let (entity_id, declared) = value.ok_or_else(|| {
-                EncodedValidationError::invariant("merged class signature is incomplete")
-            })?;
-            Ok(ClassSignatureBinding {
-                class_expression_id: u32::try_from(index).map_err(|_| {
-                    EncodedValidationError::resource("merged class signature ID exceeds u32")
-                })?,
-                entity_id,
-                declared,
+        .filter_map(|(index, value)| {
+            value.map(|(entity_id, declared)| {
+                u32::try_from(index)
+                    .map(|class_expression_id| ClassSignatureBinding {
+                        class_expression_id,
+                        entity_id,
+                        declared,
+                    })
+                    .map_err(|_| {
+                        EncodedValidationError::resource("merged class signature ID exceeds u32")
+                    })
             })
         })
         .collect()
@@ -10885,6 +11285,7 @@ fn merge_normalized_sources(
                 raw_facts.push(RawFact {
                     class_id,
                     individual_id,
+                    negative: fact.negative,
                     provenance: *provenance,
                 });
             }

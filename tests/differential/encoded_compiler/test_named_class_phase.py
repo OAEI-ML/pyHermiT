@@ -269,6 +269,7 @@ def _expected_manifest(
 
     fragment_kinds = {
         PredicateKind.CONCEPT,
+        PredicateKind.NEGATED_CONCEPT,
         PredicateKind.DISJOINT_GUARD,
         PredicateKind.EQUALITY,
         PredicateKind.INEQUALITY,
@@ -593,6 +594,7 @@ def _expected_manifest(
                 "declared": entity_id_by_key[value.key_hex] in declared_class_ids,
             }
             for value in class_domain.values
+            if value.key_hex in entity_id_by_key
         ],
         "data_range_symbols": [
             {**_symbol_payload(value), "identifier": identifier}
@@ -945,6 +947,70 @@ def test_named_class_assertions_and_individual_signature_match_scalar() -> None:
     )
 
     assert _native_manifest(snapshot) == _expected_manifest(snapshot, compiled_roots=3)
+
+
+def test_atomic_complement_class_assertions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(AnnotationProperty(:note))",
+            "Declaration(NamedIndividual(:i))",
+            'ClassAssertion(Annotation(:note "first") ObjectComplementOf(:A) :i)',
+            'ClassAssertion(Annotation(:note "second") ObjectComplementOf(:A) :i)',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=2)
+    class_symbols = cast(
+        list[dict[str, object]], manifest["class_expression_symbols"]
+    )
+    assert len(cast(list[object], manifest["class_signature"])) == len(class_symbols) - 1
+    assert sum(
+        str(value["display"]).startswith("ObjectComplementOf:")
+        for value in class_symbols
+    ) == 1
+    predicates = cast(list[dict[str, object]], manifest["predicates"])
+    negative_facts = cast(list[dict[str, object]], manifest["negative_facts"])
+    assert len(negative_facts) == 1
+    assert predicates[cast(int, negative_facts[0]["predicate_id"])]["kind"] == (
+        PredicateKind.NEGATED_CONCEPT.value
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_atomic_complements_remap_local_class_domains_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:Z))",
+            "Declaration(NamedIndividual(:z))",
+            "ClassAssertion(ObjectComplementOf(:Z) :z)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(NamedIndividual(:a))",
+            "ClassAssertion(ObjectComplementOf(:A) :a)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert manifest == _expected_manifest(composite, compiled_roots=2)
+    assert manifest["deferred_roots"] == 0
+    assert sum(
+        str(value["display"]).startswith("ObjectComplementOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    ) == 2
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
 def test_named_same_individual_facts_and_overlapping_provenance_match_scalar() -> None:
@@ -2896,6 +2962,35 @@ def test_complex_named_class_assertion_still_defers_the_whole_root() -> None:
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 1
     assert manifest["named_individuals"] == [0]
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_nested_complement_class_assertion_defers_without_partial_symbols() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            "ClassAssertion(ObjectComplementOf(ObjectSomeValuesFrom(:p :A)) :i)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
+    assert all(
+        not str(value["display"]).startswith("ObjectComplementOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert manifest["negative_facts"] == []
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
