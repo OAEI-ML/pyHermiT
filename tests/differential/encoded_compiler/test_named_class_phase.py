@@ -4438,7 +4438,8 @@ def test_composite_generated_data_range_definitions_use_global_namespace() -> No
     right = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:a))",
-            "DataPropertyRange(:a DataUnionOf(xsd:string xsd:integer))",
+            "DataPropertyRange(:a DataComplementOf(DataIntersectionOf("
+            "DataComplementOf(xsd:string) DataComplementOf(xsd:integer))))",
         ),
         options=OPTIONS,
     )
@@ -4803,13 +4804,53 @@ def test_partial_generated_data_range_defers_without_symbol_leaks() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_nested_data_complements_defer_without_leaking_symbols() -> None:
+def test_data_boolean_complements_normalize_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(Datatype(:D))",
+            "Declaration(Datatype(:E))",
+            "DataPropertyRange(:p DataComplementOf(DataUnionOf(xsd:string xsd:integer)))",
+            "DataPropertyRange(:q DataComplementOf(DataComplementOf(DataComplementOf("
+            "DataIntersectionOf(xsd:string xsd:integer)))))",
+            "DatatypeDefinition(:D DataComplementOf(DataUnionOf(xsd:string xsd:integer)))",
+            "DatatypeDefinition(:E DataComplementOf(DataComplementOf("
+            "DataIntersectionOf(xsd:string xsd:integer))))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_data_ranges=True,
+        include_generated_data_definitions=True,
+        include_datatype_definitions=True,
+    )
+    assert sum(
+        bool(value["generated"])
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ) == 2
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    ) == 2
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_unsupported_nested_data_boolean_still_defers_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:p))",
             "Declaration(Datatype(:D))",
-            "DataPropertyRange(:p DataComplementOf(DataUnionOf(xsd:string xsd:integer)))",
-            "DatatypeDefinition(:D DataComplementOf(DataUnionOf(xsd:string xsd:integer)))",
+            "DataPropertyRange(:p DataComplementOf(DataUnionOf(xsd:string "
+            "DataIntersectionOf(xsd:integer xsd:boolean))))",
+            "DatatypeDefinition(:D DataComplementOf(DataUnionOf(xsd:string "
+            "DataIntersectionOf(xsd:integer xsd:boolean))))",
         ),
         options=OPTIONS,
     )
@@ -4818,13 +4859,9 @@ def test_nested_data_complements_defer_without_leaking_symbols() -> None:
 
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 2
-    assert all(
-        not str(value["display"]).startswith("DataComplementOf:")
+    assert not any(
+        value["generated"]
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-    )
-    assert all(
-        predicate["kind"] != PredicateKind.NEGATED_DATA_RANGE.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
