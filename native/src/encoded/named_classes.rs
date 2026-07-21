@@ -533,6 +533,19 @@ enum NominalUsage {
     Negative,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AtomicClassSource {
+    Entity(u32),
+    Nominal(NodeId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AtomicClassSelection {
+    source: AtomicClassSource,
+    expression: NodeId,
+    negative: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RawDisjoint {
     classes: Vec<ClassLiteral>,
@@ -1027,6 +1040,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                 match named_subclass(
                     model,
                     symbols,
+                    &class_domain,
                     &class_signature,
                     root.node,
                     scope_maps,
@@ -1054,6 +1068,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                 match named_equivalent_classes(
                     model,
                     symbols,
+                    &class_domain,
                     &class_signature,
                     root.node,
                     scope_maps,
@@ -1089,6 +1104,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                 match named_disjoint_classes(
                     model,
                     symbols,
+                    &class_domain,
                     &class_signature,
                     root.node,
                     thing,
@@ -1138,6 +1154,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     model,
                     symbols,
                     object_roles,
+                    &class_domain,
                     &class_signature,
                     root.handler,
                     root.node,
@@ -1215,6 +1232,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     model,
                     symbols,
                     data_roles,
+                    &class_domain,
                     &class_signature,
                     root.node,
                     scope_maps,
@@ -1325,6 +1343,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     symbols,
                     object_roles,
                     data_roles,
+                    &class_domain,
                     &class_signature,
                     root.node,
                     scope_maps,
@@ -1858,7 +1877,15 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &named_individuals,
         named_predicate,
         equality_predicate,
-        nominal_usage(&nominal_bindings, &facts),
+        nominal_usage(
+            &nominal_bindings,
+            &edges,
+            &disjoints,
+            &object_constraints,
+            &data_domains,
+            &keys,
+            &facts,
+        ),
         object_characteristics
             .iter()
             .any(|value| value.kind != ObjectCharacteristicKind::Reflexive),
@@ -1997,47 +2024,36 @@ fn class_signature<B: ByteSource>(
                     0,
                     "class-assertion class-expression operand",
                 )?;
-                if let Some((base, negative)) =
-                    atomic_named_nominal(model, symbols, expression, budget)?
+                if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
-                    push_class_expression_selection(&mut selected_expressions, base, budget)?;
-                    if negative {
-                        push_class_expression_selection(
-                            &mut selected_expressions,
-                            expression,
-                            budget,
-                        )?;
-                    }
-                } else if atomic_class_entity(model, symbols, expression)?
-                    .is_some_and(|(_, negative)| negative)
-                {
-                    push_class_expression_selection(&mut selected_expressions, expression, budget)?;
+                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
                 }
             }
             RootHandler::SubClassOf => {
                 let sub_class = node_field(model, root_node, 0, "subclass antecedent")?;
                 let super_class = node_field(model, root_node, 1, "subclass consequent")?;
-                let Some(sub_literal) = atomic_class_entity(model, symbols, sub_class)? else {
+                let Some(sub_selection) =
+                    atomic_class_selection(model, symbols, sub_class, budget)?
+                else {
                     continue;
                 };
-                let Some(super_literal) = atomic_class_entity(model, symbols, super_class)? else {
+                let Some(super_selection) =
+                    atomic_class_selection(model, symbols, super_class, budget)?
+                else {
                     continue;
                 };
-                if atomic_class_edge_is_trivial(symbols, sub_literal, super_literal)? {
+                if atomic_class_selection_is_trivial(
+                    model,
+                    symbols,
+                    sub_selection,
+                    super_selection,
+                    scope_maps,
+                    budget,
+                )? {
                     continue;
                 }
-                let sub_negative = sub_literal.1;
-                let super_negative = super_literal.1;
-                if sub_negative {
-                    push_class_expression_selection(&mut selected_expressions, sub_class, budget)?;
-                }
-                if super_negative {
-                    push_class_expression_selection(
-                        &mut selected_expressions,
-                        super_class,
-                        budget,
-                    )?;
-                }
+                push_atomic_class_selection(&mut selected_expressions, sub_selection, budget)?;
+                push_atomic_class_selection(&mut selected_expressions, super_selection, budget)?;
             }
             RootHandler::EquivalentClasses => {
                 let expressions_component = required_component(
@@ -2060,7 +2076,7 @@ fn class_signature<B: ByteSource>(
                             "equivalent-classes member did not resolve to a node",
                         ));
                     };
-                    if atomic_class_entity(model, symbols, identifier)?.is_none() {
+                    if atomic_class_selection(model, symbols, identifier, budget)?.is_none() {
                         continue 'root_selection;
                     }
                 }
@@ -2073,14 +2089,10 @@ fn class_signature<B: ByteSource>(
                             "equivalent-classes member did not resolve to a node",
                         ));
                     };
-                    if atomic_class_entity(model, symbols, identifier)?
-                        .is_some_and(|(_, negative)| negative)
+                    if let Some(selection) =
+                        atomic_class_selection(model, symbols, identifier, budget)?
                     {
-                        push_class_expression_selection(
-                            &mut selected_expressions,
-                            identifier,
-                            budget,
-                        )?;
+                        push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
                     }
                 }
             }
@@ -2106,12 +2118,15 @@ fn class_signature<B: ByteSource>(
                             "disjoint-classes member did not resolve to a node",
                         ));
                     };
-                    let Some((entity_id, negative)) =
-                        atomic_class_entity(model, symbols, identifier)?
+                    let Some(selection) =
+                        atomic_class_selection(model, symbols, identifier, budget)?
                     else {
                         continue 'root_selection;
                     };
-                    if !negative && class_entity_display(symbols, entity_id)? == NOTHING_DISPLAY {
+                    if matches!(selection.source, AtomicClassSource::Entity(entity_id)
+                        if !selection.negative
+                            && class_entity_display(symbols, entity_id)? == NOTHING_DISPLAY)
+                    {
                         continue;
                     }
                     live_count = live_count.checked_add(1).ok_or_else(|| {
@@ -2132,14 +2147,10 @@ fn class_signature<B: ByteSource>(
                             "disjoint-classes member did not resolve to a node",
                         ));
                     };
-                    if atomic_class_entity(model, symbols, identifier)?
-                        .is_some_and(|(_, negative)| negative)
+                    if let Some(selection) =
+                        atomic_class_selection(model, symbols, identifier, budget)?
                     {
-                        push_class_expression_selection(
-                            &mut selected_expressions,
-                            identifier,
-                            budget,
-                        )?;
+                        push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
                     }
                 }
             }
@@ -2152,19 +2163,17 @@ fn class_signature<B: ByteSource>(
                     1,
                     "object-property constraint class expression",
                 )?;
-                if atomic_class_entity(model, symbols, expression)?
-                    .is_some_and(|(_, negative)| negative)
+                if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
-                    push_class_expression_selection(&mut selected_expressions, expression, budget)?;
+                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
                 }
             }
             RootHandler::DataPropertyDomain if has_data_roles => {
                 let expression =
                     node_field(model, root_node, 1, "data-property domain class expression")?;
-                if atomic_class_entity(model, symbols, expression)?
-                    .is_some_and(|(_, negative)| negative)
+                if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
-                    push_class_expression_selection(&mut selected_expressions, expression, budget)?;
+                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
                 }
             }
             RootHandler::HasKey => {
@@ -2195,10 +2204,9 @@ fn class_signature<B: ByteSource>(
                     continue;
                 }
                 let expression = node_field(model, root_node, 0, "has-key class expression")?;
-                if atomic_class_entity(model, symbols, expression)?
-                    .is_some_and(|(_, negative)| negative)
+                if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
-                    push_class_expression_selection(&mut selected_expressions, expression, budget)?;
+                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
                 }
             }
             _ => {}
@@ -2394,6 +2402,82 @@ fn atomic_named_nominal<B: ByteSource>(
     Ok(is_named_nominal(model, symbols, operand, budget)?.then_some((operand, true)))
 }
 
+fn atomic_class_selection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassSelection>> {
+    if let Some((entity_id, negative)) = atomic_class_entity(model, symbols, identifier)? {
+        return Ok(Some(AtomicClassSelection {
+            source: AtomicClassSource::Entity(entity_id),
+            expression: identifier,
+            negative,
+        }));
+    }
+    Ok(
+        atomic_named_nominal(model, symbols, identifier, budget)?.map(|(base, negative)| {
+            AtomicClassSelection {
+                source: AtomicClassSource::Nominal(base),
+                expression: identifier,
+                negative,
+            }
+        }),
+    )
+}
+
+fn push_atomic_class_selection(
+    expressions: &mut Vec<NodeId>,
+    selection: AtomicClassSelection,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    if let AtomicClassSource::Nominal(base) = selection.source {
+        push_class_expression_selection(expressions, base, budget)?;
+    }
+    if selection.negative {
+        push_class_expression_selection(expressions, selection.expression, budget)?;
+    }
+    Ok(())
+}
+
+fn atomic_class_selection_is_trivial<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    sub: AtomicClassSelection,
+    super_class: AtomicClassSelection,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<bool> {
+    let same_base = match (sub.source, super_class.source) {
+        (AtomicClassSource::Entity(left), AtomicClassSource::Entity(right)) => left == right,
+        (AtomicClassSource::Nominal(left), AtomicClassSource::Nominal(right)) => {
+            if left == right {
+                true
+            } else {
+                canonical::canonical_node_key(model, left, scope_maps, budget)?
+                    == canonical::canonical_node_key(model, right, scope_maps, budget)?
+            }
+        }
+        _ => false,
+    };
+    if sub.negative == super_class.negative && same_base {
+        return Ok(true);
+    }
+    let sub_is_bottom = match sub.source {
+        AtomicClassSource::Entity(entity_id) if !sub.negative => {
+            class_entity_display(symbols, entity_id)? == NOTHING_DISPLAY
+        }
+        _ => false,
+    };
+    let super_is_top = match super_class.source {
+        AtomicClassSource::Entity(entity_id) if !super_class.negative => {
+            class_entity_display(symbols, entity_id)? == THING_DISPLAY
+        }
+        _ => false,
+    };
+    Ok(sub_is_bottom || super_is_top)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn nominal_bindings<B: ByteSource>(
     model: &ValidatedModel<B>,
@@ -2531,18 +2615,6 @@ fn atomic_class_entity<B: ByteSource>(
         ))),
         _ => Ok(Some((entity_id, true))),
     }
-}
-
-fn atomic_class_edge_is_trivial(
-    symbols: &SymbolPhase,
-    sub_literal: (u32, bool),
-    super_literal: (u32, bool),
-) -> EncodedResult<bool> {
-    let sub_display = class_entity_display(symbols, sub_literal.0)?;
-    let super_display = class_entity_display(symbols, super_literal.0)?;
-    Ok((sub_literal == super_literal)
-        || (!sub_literal.1 && sub_display == NOTHING_DISPLAY)
-        || (!super_literal.1 && super_display == THING_DISPLAY))
 }
 
 fn class_entity_display(symbols: &SymbolPhase, entity_id: u32) -> EncodedResult<&str> {
@@ -4912,6 +4984,7 @@ fn data_range_id_by_display(domain: &DecodedSymbolDomain, display: &str) -> Enco
 fn named_subclass<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
     root: NodeId,
     scope_maps: &[AnonymousScopeMap],
@@ -4924,14 +4997,52 @@ fn named_subclass<B: ByteSource>(
         ));
     }
     let sub_class_node = node_field(model, node, 0, "subclass antecedent")?;
-    let Some((sub_class, sub_negative)) =
-        atomic_class_literal(model, symbols, signature, sub_class_node)?
+    let Some(sub_selection) = atomic_class_selection(model, symbols, sub_class_node, budget)?
     else {
         return Ok(None);
     };
     let super_class_node = node_field(model, node, 1, "subclass consequent")?;
-    let Some((super_class, super_negative)) =
-        atomic_class_literal(model, symbols, signature, super_class_node)?
+    let Some(super_selection) = atomic_class_selection(model, symbols, super_class_node, budget)?
+    else {
+        return Ok(None);
+    };
+    if atomic_class_selection_is_trivial(
+        model,
+        symbols,
+        sub_selection,
+        super_selection,
+        scope_maps,
+        budget,
+    )? {
+        return Ok(Some(RawEdge {
+            sub_class: class_id_by_display(class_domain, NOTHING_DISPLAY)?,
+            sub_negative: false,
+            super_class: class_id_by_display(class_domain, THING_DISPLAY)?,
+            super_negative: false,
+            provenance: source_axiom_digest(model, root, scope_maps, budget)?,
+        }));
+    }
+    let Some((sub_class, sub_negative)) = atomic_class_expression_literal(
+        model,
+        symbols,
+        class_domain,
+        signature,
+        sub_class_node,
+        scope_maps,
+        budget,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some((super_class, super_negative)) = atomic_class_expression_literal(
+        model,
+        symbols,
+        class_domain,
+        signature,
+        super_class_node,
+        scope_maps,
+        budget,
+    )?
     else {
         return Ok(None);
     };
@@ -4948,6 +5059,7 @@ fn named_subclass<B: ByteSource>(
 fn named_equivalent_classes<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
     root: NodeId,
     scope_maps: &[AnonymousScopeMap],
@@ -4968,6 +5080,18 @@ fn named_equivalent_classes<B: ByteSource>(
             "equivalent-classes expressions did not resolve to a collection",
         ));
     };
+    for item_index in expressions.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "equivalent-classes member")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "equivalent-classes member did not resolve to a node",
+            ));
+        };
+        if atomic_class_selection(model, symbols, identifier, budget)?.is_none() {
+            return Ok(None);
+        }
+    }
     let mut classes = Vec::new();
     budget.claim_owned(
         expressions
@@ -4988,7 +5112,15 @@ fn named_equivalent_classes<B: ByteSource>(
                 "equivalent-classes member did not resolve to a node",
             ));
         };
-        let Some(class_literal) = atomic_class_literal(model, symbols, signature, identifier)?
+        let Some(class_literal) = atomic_class_expression_literal(
+            model,
+            symbols,
+            class_domain,
+            signature,
+            identifier,
+            scope_maps,
+            budget,
+        )?
         else {
             return Ok(None);
         };
@@ -5032,6 +5164,7 @@ fn named_equivalent_classes<B: ByteSource>(
 fn named_disjoint_classes<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
     root: NodeId,
     thing: u32,
@@ -5054,6 +5187,35 @@ fn named_disjoint_classes<B: ByteSource>(
             "disjoint-classes expressions did not resolve to a collection",
         ));
     };
+    let mut live_count = 0_usize;
+    for item_index in expressions.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "disjoint-classes member")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "disjoint-classes member did not resolve to a node",
+            ));
+        };
+        let Some(selection) = atomic_class_selection(model, symbols, identifier, budget)? else {
+            return Ok(None);
+        };
+        if matches!(selection.source, AtomicClassSource::Entity(entity_id)
+            if !selection.negative
+                && class_entity_display(symbols, entity_id)? == NOTHING_DISPLAY)
+        {
+            continue;
+        }
+        live_count = live_count.checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("disjoint-class live-member count overflowed")
+        })?;
+    }
+    if live_count < 2 {
+        return Ok(Some(NamedDisjointOutput {
+            edges: Vec::new(),
+            disjoint: None,
+            provenance: source_axiom_digest(model, root, scope_maps, budget)?,
+        }));
+    }
     let mut classes = Vec::new();
     budget.claim_owned(
         expressions
@@ -5074,8 +5236,15 @@ fn named_disjoint_classes<B: ByteSource>(
                 "disjoint-classes member did not resolve to a node",
             ));
         };
-        let Some((class_id, negative)) =
-            atomic_class_literal(model, symbols, signature, identifier)?
+        let Some((class_id, negative)) = atomic_class_expression_literal(
+            model,
+            symbols,
+            class_domain,
+            signature,
+            identifier,
+            scope_maps,
+            budget,
+        )?
         else {
             return Ok(None);
         };
@@ -5174,6 +5343,7 @@ fn named_object_constraint<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: &ObjectRolePhase,
+    class_domain: &DecodedSymbolDomain,
     class_signature: &[ClassSignatureBinding],
     handler: RootHandler,
     root: NodeId,
@@ -5205,7 +5375,17 @@ fn named_object_constraint<B: ByteSource>(
     }
     let property = node_field(model, node, 0, "object-property constraint role")?;
     let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
-    let Some(class) = atomic_class_field(model, symbols, class_signature, node, 1)? else {
+    let Some(class) = atomic_class_field(
+        model,
+        symbols,
+        class_domain,
+        class_signature,
+        node,
+        1,
+        scope_maps,
+        budget,
+    )?
+    else {
         return Ok(None);
     };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
@@ -5270,6 +5450,7 @@ fn named_data_domain<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     data_roles: &DataRolePhase,
+    class_domain: &DecodedSymbolDomain,
     class_signature: &[ClassSignatureBinding],
     root: NodeId,
     scope_maps: &[AnonymousScopeMap],
@@ -5283,7 +5464,17 @@ fn named_data_domain<B: ByteSource>(
     }
     let property = node_field(model, node, 0, "data-property domain role")?;
     let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
-    let Some(class) = atomic_class_field(model, symbols, class_signature, node, 1)? else {
+    let Some(class) = atomic_class_field(
+        model,
+        symbols,
+        class_domain,
+        class_signature,
+        node,
+        1,
+        scope_maps,
+        budget,
+    )?
+    else {
         return Ok(None);
     };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
@@ -5467,6 +5658,7 @@ fn named_key<B: ByteSource>(
     symbols: &SymbolPhase,
     object_roles: Option<&ObjectRolePhase>,
     data_roles: Option<&DataRolePhase>,
+    class_domain: &DecodedSymbolDomain,
     class_signature: &[ClassSignatureBinding],
     root: NodeId,
     scope_maps: &[AnonymousScopeMap],
@@ -5478,7 +5670,17 @@ fn named_key<B: ByteSource>(
             "has-key root no longer has schema-1 shape",
         ));
     }
-    let Some(class) = atomic_class_field(model, symbols, class_signature, node, 0)? else {
+    let Some(class) = atomic_class_field(
+        model,
+        symbols,
+        class_domain,
+        class_signature,
+        node,
+        0,
+        scope_maps,
+        budget,
+    )?
+    else {
         return Ok(None);
     };
     let object_component = required_component(
@@ -6003,48 +6205,56 @@ fn class_assertion_literal<B: ByteSource>(
         0,
         "class-assertion class-expression operand",
     )?;
-    if let Some(literal) = atomic_class_literal(model, symbols, signature, identifier)? {
-        return Ok(Some(literal));
-    }
-    let Some((base, negative)) = atomic_named_nominal(model, symbols, identifier, budget)? else {
-        return Ok(None);
-    };
-    let key = canonical::canonical_node_key(model, base, scope_maps, budget)?;
-    budget.claim_work(binary_search_work(class_domain.values.len()))?;
-    let class_index = class_domain
-        .values
-        .binary_search_by(|candidate| candidate.key.cmp(&key))
-        .map_err(|_| {
-            EncodedValidationError::invariant(
-                "object nominal is absent from the class-expression domain",
-            )
-        })?;
-    Ok(Some((
-        u32::try_from(class_index)
-            .map_err(|_| EncodedValidationError::resource("object nominal ID exceeds u32"))?,
-        negative,
-    )))
+    atomic_class_expression_literal(
+        model,
+        symbols,
+        class_domain,
+        signature,
+        identifier,
+        scope_maps,
+        budget,
+    )
 }
 
-fn atomic_class_literal<B: ByteSource>(
+#[allow(clippy::too_many_arguments)]
+fn atomic_class_expression_literal<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
     identifier: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<(u32, bool)>> {
-    let Some((entity_id, negative)) = atomic_class_entity(model, symbols, identifier)? else {
+    let Some(selection) = atomic_class_selection(model, symbols, identifier, budget)? else {
         return Ok(None);
     };
-    let class_id = signature
-        .binary_search_by_key(&entity_id, |binding| binding.entity_id)
-        .ok()
-        .map(|index| signature[index].class_expression_id)
-        .ok_or_else(|| {
-            EncodedValidationError::invariant(
-                "atomic class operand is absent from the class signature",
-            )
-        })?;
-    Ok(Some((class_id, negative)))
+    let class_id = match selection.source {
+        AtomicClassSource::Entity(entity_id) => signature
+            .binary_search_by_key(&entity_id, |binding| binding.entity_id)
+            .ok()
+            .map(|index| signature[index].class_expression_id)
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "atomic class operand is absent from the class signature",
+                )
+            })?,
+        AtomicClassSource::Nominal(base) => {
+            let key = canonical::canonical_node_key(model, base, scope_maps, budget)?;
+            budget.claim_work(binary_search_work(class_domain.values.len()))?;
+            let class_index = class_domain
+                .values
+                .binary_search_by(|candidate| candidate.key.cmp(&key))
+                .map_err(|_| {
+                    EncodedValidationError::invariant(
+                        "object nominal is absent from the class-expression domain",
+                    )
+                })?;
+            u32::try_from(class_index)
+                .map_err(|_| EncodedValidationError::resource("object nominal ID exceeds u32"))?
+        }
+    };
+    Ok(Some((class_id, selection.negative)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6223,12 +6433,16 @@ fn named_assertion_role<B: ByteSource>(
     Ok((role_id, !inverted))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn atomic_class_field<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
     node: NodeRef,
     relative_field: usize,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<ClassLiteral>> {
     let field_index = node
         .fields()
@@ -6241,8 +6455,16 @@ fn atomic_class_field<B: ByteSource>(
             "class-expression field did not resolve to a node",
         ));
     };
-    Ok(atomic_class_literal(model, symbols, signature, identifier)?
-        .map(|(class_id, negative)| ClassLiteral { class_id, negative }))
+    Ok(atomic_class_expression_literal(
+        model,
+        symbols,
+        class_domain,
+        signature,
+        identifier,
+        scope_maps,
+        budget,
+    )?
+    .map(|(class_id, negative)| ClassLiteral { class_id, negative }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7316,12 +7538,35 @@ fn nominal_binding(bindings: &[NominalBinding], class_id: u32) -> Option<&Nomina
         .map(|index| &bindings[index])
 }
 
-fn nominal_usage(bindings: &[NominalBinding], facts: &[NormalizedFact]) -> NominalUsage {
+#[allow(clippy::too_many_arguments)]
+fn nominal_usage(
+    bindings: &[NominalBinding],
+    edges: &[NormalizedEdge],
+    disjoints: &[NormalizedDisjoint],
+    object_constraints: &[NormalizedObjectConstraint],
+    data_domains: &[NormalizedDataDomain],
+    keys: &[NormalizedKey],
+    facts: &[NormalizedFact],
+) -> NominalUsage {
     if bindings.is_empty() {
         NominalUsage::None
-    } else if facts
+    } else if edges.iter().any(|edge| {
+        (edge.sub_negative && nominal_binding(bindings, edge.sub_class).is_some())
+            || (edge.super_negative && nominal_binding(bindings, edge.super_class).is_some())
+    }) || disjoints.iter().any(|disjoint| {
+        disjoint.classes.iter().any(|literal| {
+            literal.negative && nominal_binding(bindings, literal.class_id).is_some()
+        })
+    }) || object_constraints.iter().any(|constraint| {
+        constraint.class.negative && nominal_binding(bindings, constraint.class.class_id).is_some()
+    }) || data_domains.iter().any(|domain| {
+        domain.class.negative && nominal_binding(bindings, domain.class.class_id).is_some()
+    }) || keys
         .iter()
-        .any(|fact| fact.negative && nominal_binding(bindings, fact.class_id).is_some())
+        .any(|key| key.class.negative && nominal_binding(bindings, key.class.class_id).is_some())
+        || facts
+            .iter()
+            .any(|fact| fact.negative && nominal_binding(bindings, fact.class_id).is_some())
     {
         NominalUsage::Negative
     } else {
@@ -11908,7 +12153,15 @@ fn merge_named_class_phases_impl(
         &named_individuals,
         named_predicate,
         equality_predicate,
-        nominal_usage(&nominal_bindings, &facts),
+        nominal_usage(
+            &nominal_bindings,
+            &edges,
+            &disjoints,
+            &object_constraints,
+            &data_domains,
+            &keys,
+            &facts,
+        ),
         object_characteristics
             .iter()
             .any(|value| value.kind != ObjectCharacteristicKind::Reflexive),

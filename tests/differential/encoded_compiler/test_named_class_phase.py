@@ -1431,6 +1431,98 @@ def test_named_nominal_class_assertions_match_scalar_semantics_exactly() -> None
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_named_nominal_class_axioms_constraints_and_keys_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(NamedIndividual(:a))",
+            "Declaration(NamedIndividual(:b))",
+            "Declaration(NamedIndividual(:c))",
+            "Declaration(NamedIndividual(:member))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:data))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(ObjectOneOf(:a :b) :A)",
+            'SubClassOf(Annotation(:note "duplicate") ObjectOneOf(:a :b) :A)',
+            "SubClassOf(:A ObjectComplementOf(ObjectOneOf(:c)))",
+            "EquivalentClasses(:A ObjectOneOf(:member))",
+            "DisjointClasses(:A ObjectOneOf(:a) "
+            "ObjectComplementOf(ObjectOneOf(:b)))",
+            "ObjectPropertyDomain(:p ObjectOneOf(:a :b))",
+            "ObjectPropertyRange(ObjectInverseOf(:p) "
+            "ObjectComplementOf(ObjectOneOf(:c)))",
+            "DataPropertyDomain(:data ObjectOneOf(:member))",
+            "HasKey(ObjectComplementOf(ObjectOneOf(:a :b)) (:p) (:data))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=9,
+        include_object_constraints=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    class_symbols = cast(
+        list[dict[str, object]], manifest["class_expression_symbols"]
+    )
+    assert sum(
+        str(value["display"]).startswith("ObjectOneOf:")
+        for value in class_symbols
+    ) == 5
+    assert sum(
+        str(value["display"]).startswith("ObjectComplementOf:")
+        for value in class_symbols
+    ) == 3
+    predicates = cast(list[dict[str, object]], manifest["predicates"])
+    assert sum(
+        predicate["kind"] == PredicateKind.NOMINAL.value
+        for predicate in predicates
+    ) == 5
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value
+        for predicate in predicates
+    ) == 3
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+@pytest.mark.parametrize(
+    "axiom",
+    [
+        "SubClassOf(ObjectOneOf(:a) ObjectOneOf(:a))",
+        "SubClassOf(ObjectOneOf(:a) owl:Thing)",
+        "SubClassOf(owl:Nothing ObjectComplementOf(ObjectOneOf(:a)))",
+        "DisjointClasses(owl:Nothing ObjectOneOf(:a))",
+    ],
+)
+def test_trivial_nominal_axioms_normalize_without_symbol_leaks(axiom: str) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional("Declaration(NamedIndividual(:a))", axiom),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=1)
+    assert all(
+        not str(value["display"]).startswith(
+            ("ObjectOneOf:", "ObjectComplementOf:")
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"]
+        not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_composite_atomic_complements_remap_local_class_domains_exactly() -> None:
     left = pyowl_core.load_snapshot(
         functional(
@@ -1486,6 +1578,45 @@ def test_composite_named_nominal_assertions_remap_exactly() -> None:
     manifest = _native_slices_manifest(*_composite_records(composite, (left, right)))
 
     assert manifest == _expected_manifest(composite, compiled_roots=2)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_named_nominal_class_axioms_and_constraints_remap_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:Z))",
+            "Declaration(NamedIndividual(:z1))",
+            "Declaration(NamedIndividual(:z2))",
+            "Declaration(ObjectProperty(:zp))",
+            "SubClassOf(ObjectOneOf(:z1 :z2) :Z)",
+            "ObjectPropertyDomain(:zp ObjectComplementOf(ObjectOneOf(:z1)))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(NamedIndividual(:a1))",
+            "Declaration(NamedIndividual(:a2))",
+            "Declaration(DataProperty(:ad))",
+            "EquivalentClasses(:A ObjectOneOf(:a1 :a2))",
+            "DataPropertyDomain(:ad ObjectComplementOf(ObjectOneOf(:a2)))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right))
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_data_domains=True,
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
@@ -3705,6 +3836,45 @@ def test_unsupported_nominal_assertions_defer_without_partial_symbols() -> None:
 
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 2
+    assert all(
+        not str(value["display"]).startswith(
+            ("ObjectOneOf:", "ObjectComplementOf:")
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"]
+        not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(NamedIndividual(:a))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:data))",
+            "SubClassOf(ObjectOneOf(:a) ObjectSomeValuesFrom(:p :A))",
+            "EquivalentClasses(ObjectOneOf(:a) ObjectSomeValuesFrom(:p :A))",
+            "DisjointClasses(ObjectOneOf(:a) ObjectSomeValuesFrom(:p :A))",
+            "ObjectPropertyDomain(:p ObjectComplementOf("
+            "ObjectComplementOf(ObjectOneOf(:a))))",
+            "DataPropertyDomain(:data ObjectComplementOf("
+            "ObjectComplementOf(ObjectOneOf(:a))))",
+            "HasKey(ObjectOneOf(_:anonymous) (:p) (:data))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 6
     assert all(
         not str(value["display"]).startswith(
             ("ObjectOneOf:", "ObjectComplementOf:")
