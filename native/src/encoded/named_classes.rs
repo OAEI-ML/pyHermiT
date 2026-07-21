@@ -2,16 +2,17 @@
 //!
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
 //! a scalar-compatible named `individual` domain and the exact semantic
-//! `source_literal` domain plus scalar-compatible string and Boolean `data_value`
+//! `source_literal` domain plus scalar-compatible string, Boolean, and integer
+//! `data_value`
 //! identities needed by later datatype/ABox phases. It compiles named-only
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
-//! plus named data-property domains, ranges, functionality, string/Boolean positive
-//! and negative assertions, named datatype definitions, and named-class keys into the
-//! existing native predicate, clause, fact, and provenance records. Exact nested
-//! annotations participate in source provenance, with segmented anonymous scopes
-//! remapped before hashing.
+//! plus named data-property domains, ranges, functionality, string/Boolean/integer
+//! positive and negative assertions, named datatype definitions, and named-class keys
+//! into the existing native predicate, clause, fact, and provenance records. Exact
+//! nested annotations participate in source provenance, with segmented anonymous
+//! scopes remapped before hashing.
 //! Predicate and clause identifiers are dense within this fragment and must be
 //! remapped when a later phase assembles the complete program; no fragment is
 //! publishable on its own.
@@ -21,6 +22,7 @@
 
 use std::mem::size_of;
 
+use num_bigint::{BigInt, Sign};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -84,6 +86,7 @@ pub struct NamedClassPhaseLimits {
     pub max_source_literal_symbols: usize,
     pub max_data_value_symbols: usize,
     pub max_literal_characters: usize,
+    pub max_numeric_digits: usize,
     pub max_compiled_roots: usize,
     pub max_predicates: usize,
     pub max_clauses: usize,
@@ -107,6 +110,7 @@ impl Default for NamedClassPhaseLimits {
             max_source_literal_symbols: 16_000_000,
             max_data_value_symbols: 16_000_000,
             max_literal_characters: 1_000_000,
+            max_numeric_digits: 100_000,
             max_compiled_roots: 100_000_000,
             max_predicates: 100_000_000,
             max_clauses: 100_000_000,
@@ -2176,6 +2180,9 @@ fn literal_data_identity_key(
     if datatype_iri == XSD_BOOLEAN_IRI {
         return boolean_data_identity_key(lexical, budget).map(Some);
     }
+    if let Some(bounds) = integer_datatype_bounds(datatype_iri) {
+        return integer_data_identity_key(lexical, bounds, budget).map(Some);
+    }
     string_data_identity_key(lexical, datatype_iri, language, budget)
 }
 
@@ -2197,6 +2204,129 @@ fn boolean_data_identity_key(lexical: &str, budget: &mut PhaseBudget) -> Encoded
         }
     };
     prefixed_data_identity_key(payload, budget)
+}
+
+type IntegerBounds = (Option<i128>, Option<i128>);
+
+fn integer_datatype_bounds(datatype_iri: &str) -> Option<IntegerBounds> {
+    let local = datatype_iri.strip_prefix(XSD_NAMESPACE)?;
+    match local {
+        "integer" => Some((None, None)),
+        "nonNegativeInteger" => Some((Some(0), None)),
+        "positiveInteger" => Some((Some(1), None)),
+        "nonPositiveInteger" => Some((None, Some(0))),
+        "negativeInteger" => Some((None, Some(-1))),
+        "long" => Some((
+            Some(-9_223_372_036_854_775_808),
+            Some(9_223_372_036_854_775_807),
+        )),
+        "int" => Some((Some(-2_147_483_648), Some(2_147_483_647))),
+        "short" => Some((Some(-32_768), Some(32_767))),
+        "byte" => Some((Some(-128), Some(127))),
+        "unsignedLong" => Some((Some(0), Some(18_446_744_073_709_551_615))),
+        "unsignedInt" => Some((Some(0), Some(4_294_967_295))),
+        "unsignedShort" => Some((Some(0), Some(65_535))),
+        "unsignedByte" => Some((Some(0), Some(255))),
+        _ => None,
+    }
+}
+
+fn integer_data_identity_key(
+    lexical: &str,
+    (lower, upper): IntegerBounds,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let character_count = lexical.chars().count();
+    PhaseBudget::count(
+        character_count,
+        budget.limits.max_literal_characters,
+        "literal character count",
+    )?;
+    let bytes = lexical.as_bytes();
+    let (negative, digits) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        Some(_) | None => (false, bytes),
+    };
+    PhaseBudget::count(
+        digits.len(),
+        budget.limits.max_numeric_digits,
+        "numeric digit count",
+    )?;
+    budget.claim_work(bytes.len())?;
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return Err(EncodedValidationError::invariant(
+            "integer literal is outside its datatype lexical space",
+        ));
+    }
+    let temporary_bytes = digits
+        .len()
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| EncodedValidationError::resource("integer temporary size overflowed"))?;
+    budget.claim_owned(temporary_bytes)?;
+    let magnitude = BigInt::parse_bytes(digits, 10).ok_or_else(|| {
+        EncodedValidationError::invariant("integer literal magnitude could not be decoded")
+    })?;
+    let value = if negative { -magnitude } else { magnitude };
+    if lower.is_some_and(|bound| value < BigInt::from(bound))
+        || upper.is_some_and(|bound| value > BigInt::from(bound))
+    {
+        return Err(EncodedValidationError::invariant(
+            "integer literal is outside its datatype value space",
+        ));
+    }
+    let sign = if value.sign() == Sign::Minus {
+        '-'
+    } else {
+        '+'
+    };
+    let magnitude = value.magnitude().to_str_radix(16);
+    let token_len = magnitude
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("integer token length overflowed"))?;
+    budget.claim_owned(token_len)?;
+    let mut numerator = String::new();
+    numerator
+        .try_reserve_exact(token_len)
+        .map_err(|_| EncodedValidationError::resource("integer token allocation failed"))?;
+    numerator.push(sign);
+    numerator.push_str(&magnitude);
+    rational_data_identity_key(&numerator, "+1", budget)
+}
+
+fn rational_data_identity_key(
+    numerator: &str,
+    denominator: &str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    const PREFIX: &[u8] = b"[\"numeric-rational-hex-v1\",\"";
+    const SEPARATOR: &[u8] = b"\",\"";
+    const SUFFIX: &[u8] = b"\"]";
+    let payload_len = PREFIX
+        .len()
+        .checked_add(numerator.len())
+        .and_then(|value| value.checked_add(SEPARATOR.len()))
+        .and_then(|value| value.checked_add(denominator.len()))
+        .and_then(|value| value.checked_add(SUFFIX.len()))
+        .ok_or_else(|| EncodedValidationError::resource("numeric identity length overflowed"))?;
+    let key_len = DATA_IDENTITY_PREFIX
+        .len()
+        .checked_add(payload_len)
+        .ok_or_else(|| EncodedValidationError::resource("data identity key length overflowed"))?;
+    budget.claim_work(payload_len)?;
+    budget.claim_owned(key_len)?;
+    let mut key = Vec::new();
+    key.try_reserve_exact(key_len)
+        .map_err(|_| EncodedValidationError::resource("data identity key allocation failed"))?;
+    key.extend_from_slice(DATA_IDENTITY_PREFIX);
+    key.extend_from_slice(PREFIX);
+    key.extend_from_slice(numerator.as_bytes());
+    key.extend_from_slice(SEPARATOR);
+    key.extend_from_slice(denominator.as_bytes());
+    key.extend_from_slice(SUFFIX);
+    Ok(key)
 }
 
 fn string_data_identity_key(
@@ -9674,6 +9804,41 @@ mod tests {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect()
+    }
+
+    #[test]
+    fn integer_identities_are_exact_bounded_and_resource_limited() -> EncodedResult<()> {
+        let mut budget = PhaseBudget::new(NamedClassPhaseLimits::default());
+        assert_eq!(
+            integer_data_identity_key("+0001", (None, None), &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"numeric-rational-hex-v1\",\"+1\",\"+1\"]"
+        );
+        assert_eq!(
+            integer_data_identity_key("-0", (None, None), &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"numeric-rational-hex-v1\",\"+0\",\"+1\"]"
+        );
+
+        let unsigned_byte = integer_datatype_bounds(
+            "http://www.w3.org/2001/XMLSchema#unsignedByte",
+        )
+        .ok_or_else(|| EncodedValidationError::invariant("unsigned-byte bounds disappeared"))?;
+        let out_of_range = integer_data_identity_key("256", unsigned_byte, &mut budget).err();
+        assert!(out_of_range.is_some_and(|error| {
+            error.code == "NATIVE_ENCODED_INVARIANT"
+                && error.message.contains("datatype value space")
+        }));
+
+        let limits = NamedClassPhaseLimits {
+            max_numeric_digits: 2,
+            ..NamedClassPhaseLimits::default()
+        };
+        let mut limited = PhaseBudget::new(limits);
+        let resource = integer_data_identity_key("100", (None, None), &mut limited).err();
+        assert!(resource.is_some_and(|error| {
+            error.code == "NATIVE_ENCODED_RESOURCE_LIMIT"
+                && error.message.contains("numeric digit count")
+        }));
+        Ok(())
     }
 
     fn equivalent_classes() -> OwnedColumns {

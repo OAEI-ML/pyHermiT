@@ -669,8 +669,8 @@ def test_semantic_source_literal_symbols_match_scalar_exactly() -> None:
         "annotation-only" not in cast(str, value["display"])
         for value in cast(list[dict[str, object]], actual["source_literal_symbols"])
     )
-    assert actual["compiled_roots"] == 6
-    assert actual["deferred_roots"] == 1
+    assert actual["compiled_roots"] == 7
+    assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
@@ -1429,6 +1429,80 @@ def test_composite_boolean_data_assertions_remap_one_shared_identity_exactly() -
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_integer_family_data_assertions_match_scalar_boundaries_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "+0001"^^xsd:integer)',
+            'NegativeDataPropertyAssertion(:q :i "0"^^xsd:nonNegativeInteger)',
+            'DataPropertyAssertion(:p :i "1"^^xsd:positiveInteger)',
+            'NegativeDataPropertyAssertion(:q :i "-0"^^xsd:nonPositiveInteger)',
+            'DataPropertyAssertion(:p :i "-1"^^xsd:negativeInteger)',
+            'NegativeDataPropertyAssertion(:q :i "-9223372036854775808"^^xsd:long)',
+            'DataPropertyAssertion(:p :i "2147483647"^^xsd:int)',
+            'NegativeDataPropertyAssertion(:q :i "-32768"^^xsd:short)',
+            'DataPropertyAssertion(:p :i "127"^^xsd:byte)',
+            (
+                'NegativeDataPropertyAssertion(:q :i "18446744073709551615"'
+                "^^xsd:unsignedLong)"
+            ),
+            'DataPropertyAssertion(:p :i "4294967295"^^xsd:unsignedInt)',
+            'NegativeDataPropertyAssertion(:q :i "65535"^^xsd:unsignedShort)',
+            'DataPropertyAssertion(:p :i "255"^^xsd:unsignedByte)',
+            'DataPropertyAssertion(:p :i "999999999999999999999999"^^xsd:integer)',
+            'NegativeDataPropertyAssertion(:q :i "-999999999999999999999999"^^xsd:integer)',
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=15,
+        include_data_assertions=True,
+        include_negative_data_assertions=True,
+    )
+    assert actual["data_value_symbols"] == _expected_data_value_symbols(snapshot)
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_integer_aliases_remap_one_shared_identity_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:z))",
+            "Declaration(NamedIndividual(:zSource))",
+            'DataPropertyAssertion(:z :zSource "01"^^xsd:integer)',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:a))",
+            "Declaration(NamedIndividual(:aSource))",
+            'NegativeDataPropertyAssertion(:a :aSource "+1"^^xsd:positiveInteger)',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_data_assertions=True,
+        include_negative_data_assertions=True,
+    )
+    assert len(cast(list[object], actual["source_literal_symbols"])) == 2
+    assert len(cast(list[object], actual["data_value_symbols"])) == 1
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 @pytest.mark.parametrize(
     ("constructor", "predicate_kind"),
     [
@@ -1436,7 +1510,7 @@ def test_composite_boolean_data_assertions_remap_one_shared_identity_exactly() -
         ("NegativeDataPropertyAssertion", PredicateKind.NEGATED_DATA_ROLE),
     ],
 )
-def test_numeric_data_assertion_defers_without_a_partial_data_fact(
+def test_decimal_data_assertion_defers_without_a_partial_data_fact(
     constructor: str,
     predicate_kind: PredicateKind,
 ) -> None:
@@ -1444,7 +1518,7 @@ def test_numeric_data_assertion_defers_without_a_partial_data_fact(
         functional(
             "Declaration(DataProperty(:p))",
             "Declaration(NamedIndividual(:i))",
-            f'{constructor}(:p :i "01"^^xsd:integer)',
+            f'{constructor}(:p :i "1.0"^^xsd:decimal)',
         ),
         options=OPTIONS,
     )
