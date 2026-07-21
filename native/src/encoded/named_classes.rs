@@ -83,6 +83,8 @@ const XSD_DOUBLE_IRI: &str = "http://www.w3.org/2001/XMLSchema#double";
 const XSD_HEX_BINARY_IRI: &str = "http://www.w3.org/2001/XMLSchema#hexBinary";
 const XSD_BASE64_BINARY_IRI: &str = "http://www.w3.org/2001/XMLSchema#base64Binary";
 const XSD_ANY_URI_IRI: &str = "http://www.w3.org/2001/XMLSchema#anyURI";
+const XSD_DATE_TIME_IRI: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
+const XSD_DATE_TIME_STAMP_IRI: &str = "http://www.w3.org/2001/XMLSchema#dateTimeStamp";
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 
@@ -2222,6 +2224,14 @@ fn literal_data_identity_key(
     if datatype_iri == XSD_ANY_URI_IRI {
         return uri_data_identity_key(lexical, budget).map(Some);
     }
+    let require_timezone = match datatype_iri {
+        XSD_DATE_TIME_IRI => Some(false),
+        XSD_DATE_TIME_STAMP_IRI => Some(true),
+        _ => None,
+    };
+    if let Some(require_timezone) = require_timezone {
+        return date_time_data_identity_key(lexical, require_timezone, budget).map(Some);
+    }
     string_data_identity_key(lexical, datatype_iri, language, budget)
 }
 
@@ -3046,6 +3056,249 @@ fn uri_data_identity_key(lexical: &str, budget: &mut PhaseBudget) -> EncodedResu
         ));
     }
     prefixed_data_identity_key(&payload, budget)
+}
+
+fn date_time_data_identity_key(
+    lexical: &str,
+    require_timezone: bool,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let character_count = lexical.chars().count();
+    PhaseBudget::count(
+        character_count,
+        budget.limits.max_literal_characters,
+        "literal character count",
+    )?;
+    budget.claim_work(character_count)?;
+    let selected = collapse_xml_whitespace(lexical, budget)?;
+    let Some((date, time_and_zone)) = selected.split_once('T') else {
+        return invalid_date_time();
+    };
+    if time_and_zone.contains('T') {
+        return invalid_date_time();
+    }
+    let mut date_parts = date.rsplitn(3, '-');
+    let Some(day_text) = date_parts.next() else {
+        return invalid_date_time();
+    };
+    let Some(month_text) = date_parts.next() else {
+        return invalid_date_time();
+    };
+    let Some(year_text) = date_parts.next() else {
+        return invalid_date_time();
+    };
+    let year = parse_date_time_year(year_text, budget)?;
+    let Some(month) = fixed_decimal_u8(month_text) else {
+        return invalid_date_time();
+    };
+    let Some(day) = fixed_decimal_u8(day_text) else {
+        return invalid_date_time();
+    };
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(&year, month) {
+        return invalid_date_time();
+    }
+    let (time, offset) = parse_date_time_zone(time_and_zone, require_timezone)?;
+    let mut time_parts = time.split(':');
+    let Some(hour_text) = time_parts.next() else {
+        return invalid_date_time();
+    };
+    let Some(minute_text) = time_parts.next() else {
+        return invalid_date_time();
+    };
+    let Some(second_and_fraction) = time_parts.next() else {
+        return invalid_date_time();
+    };
+    if time_parts.next().is_some() {
+        return invalid_date_time();
+    }
+    let Some(hour) = fixed_decimal_u8(hour_text) else {
+        return invalid_date_time();
+    };
+    let Some(minute) = fixed_decimal_u8(minute_text) else {
+        return invalid_date_time();
+    };
+    let (second_text, fraction_text) = second_and_fraction
+        .split_once('.')
+        .map_or((second_and_fraction, None), |(second, fraction)| {
+            (second, Some(fraction))
+        });
+    if fraction_text.is_some_and(|fraction| fraction.is_empty() || fraction.contains('.')) {
+        return invalid_date_time();
+    }
+    let Some(second) = fixed_decimal_u8(second_text) else {
+        return invalid_date_time();
+    };
+    if minute > 59
+        || second > 59
+        || hour > 24
+        || (hour == 24
+            && (minute != 0
+                || second != 0
+                || fraction_text.is_some_and(|value| !value.bytes().all(|byte| byte == b'0'))))
+    {
+        return invalid_date_time();
+    }
+    let (fraction_numerator, fraction_denominator) = if let Some(fraction) = fraction_text {
+        if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+            return invalid_date_time();
+        }
+        PhaseBudget::count(
+            fraction.len(),
+            budget.limits.max_numeric_digits,
+            "date/time fraction digit count",
+        )?;
+        let temporary_bytes = fraction.len().checked_mul(4).ok_or_else(|| {
+            EncodedValidationError::resource("date/time fraction size overflowed")
+        })?;
+        budget.claim_owned(temporary_bytes)?;
+        let numerator = BigInt::parse_bytes(fraction.as_bytes(), 10).ok_or_else(|| {
+            EncodedValidationError::invariant("date/time fraction could not be decoded")
+        })?;
+        let exponent = u32::try_from(fraction.len())
+            .map_err(|_| EncodedValidationError::resource("date/time fraction exceeds u32"))?;
+        (numerator, BigInt::from(10_u8).pow(exponent))
+    } else {
+        (BigInt::from(0_u8), BigInt::from(1_u8))
+    };
+    let days = days_before_year(&year) + days_before_month(&year, month) + BigInt::from(day - 1);
+    let whole_seconds = days * BigInt::from(86_400_u32)
+        + BigInt::from(hour) * BigInt::from(3_600_u16)
+        + BigInt::from(minute) * BigInt::from(60_u8)
+        + BigInt::from(second);
+    let local_numerator = whole_seconds * &fraction_denominator + fraction_numerator;
+    date_time_identity_key(local_numerator, fraction_denominator, offset, budget)
+}
+
+fn parse_date_time_year(value: &str, budget: &mut PhaseBudget) -> EncodedResult<BigInt> {
+    let (negative, digits) = value
+        .strip_prefix('-')
+        .map_or((false, value), |digits| (true, digits));
+    if digits.len() < 4
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || (digits.starts_with('0') && digits.len() != 4)
+    {
+        return invalid_date_time();
+    }
+    PhaseBudget::count(
+        digits.len(),
+        budget.limits.max_numeric_digits,
+        "date/time year digit count",
+    )?;
+    let temporary_bytes = digits
+        .len()
+        .checked_mul(4)
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| EncodedValidationError::resource("date/time year size overflowed"))?;
+    budget.claim_owned(temporary_bytes)?;
+    let magnitude = BigInt::parse_bytes(digits.as_bytes(), 10)
+        .ok_or_else(|| EncodedValidationError::invariant("date/time year could not be decoded"))?;
+    if negative && magnitude.sign() == Sign::NoSign {
+        return invalid_date_time();
+    }
+    Ok(if negative { -magnitude } else { magnitude })
+}
+
+fn parse_date_time_zone(value: &str, require_timezone: bool) -> EncodedResult<(&str, Option<i16>)> {
+    if let Some(time) = value.strip_suffix('Z') {
+        return Ok((time, Some(0)));
+    }
+    if value.len() >= 6 {
+        let split = value.len() - 6;
+        let zone = &value.as_bytes()[split..];
+        if value.is_char_boundary(split) && matches!(zone[0], b'+' | b'-') && zone[3] == b':' {
+            let Some(hour) = fixed_decimal_u8_bytes(&zone[1..3]) else {
+                return invalid_date_time();
+            };
+            let Some(minute) = fixed_decimal_u8_bytes(&zone[4..6]) else {
+                return invalid_date_time();
+            };
+            if hour > 14 || minute > 59 || (hour == 14 && minute != 0) {
+                return invalid_date_time();
+            }
+            let magnitude = i16::from(hour) * 60 + i16::from(minute);
+            let offset = if zone[0] == b'-' {
+                -magnitude
+            } else {
+                magnitude
+            };
+            return Ok((&value[..split], Some(offset)));
+        }
+    }
+    if require_timezone {
+        invalid_date_time()
+    } else {
+        Ok((value, None))
+    }
+}
+
+fn fixed_decimal_u8(value: &str) -> Option<u8> {
+    fixed_decimal_u8_bytes(value.as_bytes())
+}
+
+fn fixed_decimal_u8_bytes(value: &[u8]) -> Option<u8> {
+    if value.len() != 2 || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some((value[0] - b'0') * 10 + value[1] - b'0')
+}
+
+fn days_before_year(year: &BigInt) -> BigInt {
+    let prior = year - BigInt::from(1_u8);
+    BigInt::from(365_u16) * &prior + prior.div_floor(&BigInt::from(4_u8))
+        - prior.div_floor(&BigInt::from(100_u8))
+        + prior.div_floor(&BigInt::from(400_u16))
+}
+
+fn days_before_month(year: &BigInt, month: u8) -> BigInt {
+    (1..month)
+        .map(|selected| BigInt::from(days_in_month(year, selected)))
+        .sum()
+}
+
+fn days_in_month(year: &BigInt, month: u8) -> u8 {
+    if month == 2 {
+        if year.mod_floor(&BigInt::from(4_u8)).is_zero()
+            && (!year.mod_floor(&BigInt::from(100_u8)).is_zero()
+                || year.mod_floor(&BigInt::from(400_u16)).is_zero())
+        {
+            29
+        } else {
+            28
+        }
+    } else if matches!(month, 4 | 6 | 9 | 11) {
+        30
+    } else {
+        31
+    }
+}
+
+fn date_time_identity_key(
+    numerator: BigInt,
+    denominator: BigInt,
+    offset: Option<i16>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let divisor = numerator.gcd(&denominator);
+    let reduced_numerator = numerator / &divisor;
+    let reduced_denominator = denominator / divisor;
+    let numerator_token = bigint_token(&reduced_numerator, budget)?;
+    let denominator_token = bigint_token(&reduced_denominator, budget)?;
+    let payload = serde_json::to_vec(&(
+        "date-time-identity-v1",
+        numerator_token.as_str(),
+        denominator_token.as_str(),
+        offset,
+        false,
+    ))
+    .map_err(|_| EncodedValidationError::invariant("date/time identity encoding failed"))?;
+    budget.claim_owned(payload.len())?;
+    prefixed_data_identity_key(&payload, budget)
+}
+
+fn invalid_date_time<T>() -> EncodedResult<T> {
+    Err(EncodedValidationError::invariant(
+        "date/time literal is outside its datatype lexical space",
+    ))
 }
 
 fn rational_bigint_data_identity_key(
@@ -10775,6 +11028,37 @@ mod tests {
             uri_data_identity_key("", &mut budget)?,
             b"pyhermit:data-identity:v1\0[\"any-uri-v1\",\"\"]"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn date_time_identities_cover_arbitrary_years_offsets_and_end_of_day() -> EncodedResult<()> {
+        let mut budget = PhaseBudget::new(NamedClassPhaseLimits::default());
+        assert_eq!(
+            date_time_data_identity_key(" 1970-01-01T00:00:00Z ", false, &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"date-time-identity-v1\",\"+e7791f700\",\"+1\",0,false]"
+        );
+        assert_eq!(
+            date_time_data_identity_key("2000-02-29T24:00:00+00:00", false, &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"date-time-identity-v1\",\"+eb04e5480\",\"+1\",0,false]"
+        );
+        assert_eq!(
+            date_time_data_identity_key("-0001-01-01T00:00:00.25-14:00", false, &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"date-time-identity-v1\",\"-f0ee1ff\",\"+4\",-840,false]"
+        );
+
+        for (lexical, require_timezone) in [
+            ("2024-01-01T00:00:00", true),
+            ("2023-02-29T00:00:00Z", false),
+            ("-0000-01-01T00:00:00Z", false),
+            ("2024-01-01T24:00:00.1Z", false),
+        ] {
+            let invalid = date_time_data_identity_key(lexical, require_timezone, &mut budget).err();
+            assert!(invalid.is_some_and(|error| {
+                error.code == "NATIVE_ENCODED_INVARIANT"
+                    && error.message.contains("datatype lexical space")
+            }));
+        }
         Ok(())
     }
 
