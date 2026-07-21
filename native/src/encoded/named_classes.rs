@@ -3668,6 +3668,7 @@ fn positive_atomic_data_range_selection<B: ByteSource>(
         "data-range depth",
     )?;
     let intersection = node.tag() == DATA_INTERSECTION_OF_TAG;
+    let mut absorbing = None;
     let mut retained = None;
     let mut identity = None;
     for item_index in operands.items() {
@@ -3686,7 +3687,11 @@ fn positive_atomic_data_range_selection<B: ByteSource>(
         let is_top = atomic_data_range_selection_is_top(model, symbols, selection)?;
         let is_bottom = atomic_data_range_selection_is_bottom(model, symbols, selection)?;
         if (intersection && is_bottom) || (!intersection && is_top) {
-            return Ok(Some(selection));
+            absorbing.get_or_insert(selection);
+            continue;
+        }
+        if absorbing.is_some() {
+            continue;
         }
         if (intersection && is_top) || (!intersection && is_bottom) {
             identity.get_or_insert(selection);
@@ -3700,7 +3705,7 @@ fn positive_atomic_data_range_selection<B: ByteSource>(
         }
         retained = Some(selection);
     }
-    Ok(retained.or(identity))
+    Ok(absorbing.or(retained).or(identity))
 }
 
 fn atomic_data_range_selection_is_top<B: ByteSource>(

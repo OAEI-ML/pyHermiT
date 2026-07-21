@@ -1604,6 +1604,38 @@ def test_reducible_class_booleans_collapse_to_atomic_literals_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_absorbing_booleans_validate_every_operand_before_publication() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "SubClassOf(ObjectUnionOf(owl:Thing "
+            "ObjectSomeValuesFrom(:p :A)) :B)",
+            "DataPropertyRange(:d DataUnionOf(rdfs:Literal "
+            "DataIntersectionOf(xsd:string xsd:integer)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 2
+    assert not any(
+        value["generated"]
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.DATA_ROLE.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_builtin_restrictions_and_cardinalities_reduce_exactly() -> None:
     string_datatype = "<http://www.w3.org/2001/XMLSchema#string>"
     snapshot = pyowl_core.load_snapshot(
@@ -1657,6 +1689,42 @@ def test_builtin_restrictions_and_cardinalities_reduce_exactly() -> None:
         )
         for value in class_symbols
     )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
+    string_datatype = "<http://www.w3.org/2001/XMLSchema#string>"
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(owl:bottomObjectProperty))",
+            "Declaration(DataProperty(owl:bottomDataProperty))",
+            f"Declaration(Datatype({string_datatype}))",
+            "Declaration(NamedIndividual(:a))",
+            "SubClassOf(ObjectSomeValuesFrom(owl:bottomObjectProperty :A) :B)",
+            "SubClassOf(:A ObjectAllValuesFrom(owl:bottomObjectProperty :B))",
+            "SubClassOf(ObjectHasValue(owl:bottomObjectProperty :a) :B)",
+            "SubClassOf(DataSomeValuesFrom(owl:bottomDataProperty "
+            f"{string_datatype}) :B)",
+            "SubClassOf(:A DataAllValuesFrom(owl:bottomDataProperty "
+            f"{string_datatype}))",
+            "SubClassOf(DataMinCardinality(2 owl:bottomDataProperty "
+            f"{string_datatype}) :B)",
+            "SubClassOf(:A DataMaxCardinality(2 owl:bottomDataProperty "
+            f"{string_datatype}))",
+            "SubClassOf(DataExactCardinality(0 owl:bottomDataProperty "
+            f"{string_datatype}) :B)",
+            "SubClassOf(DataExactCardinality(2 owl:bottomDataProperty "
+            f"{string_datatype}) :B)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=9)
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
