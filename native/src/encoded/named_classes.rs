@@ -32,7 +32,9 @@ use super::canonical::{
     self, annotation_stripped_axiom_digest, source_axiom_digest, AnonymousScopeMap, CanonicalBudget,
 };
 use super::data_roles::DataRolePhase;
-use super::model::{ComponentKind, ComponentValue, NodeId, NodeRef, ScalarRef, ValidatedModel};
+use super::model::{
+    CollectionRef, ComponentKind, ComponentValue, NodeId, NodeRef, ScalarRef, ValidatedModel,
+};
 use super::object_roles::ObjectRolePhase;
 use super::symbols::{RootHandler, SymbolPhase};
 use super::{ByteSource, EncodedResult, EncodedValidationError};
@@ -70,6 +72,7 @@ const DATA_EXACT_CARDINALITY_TAG: u16 = 46;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
 const DISJOINT_CLASSES_TAG: u16 = 63;
+const DISJOINT_UNION_TAG: u16 = 64;
 const OBJECT_PROPERTY_DOMAIN_TAG: u16 = 74;
 const OBJECT_PROPERTY_RANGE_TAG: u16 = 75;
 const FUNCTIONAL_OBJECT_PROPERTY_TAG: u16 = 76;
@@ -1166,6 +1169,45 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     }
                 }
             }
+            RootHandler::DisjointUnion => {
+                match named_reducible_disjoint_union(
+                    model,
+                    symbols,
+                    &class_domain,
+                    &class_signature,
+                    root.node,
+                    thing,
+                    nothing,
+                    scope_maps,
+                    &mut budget,
+                )? {
+                    Some(output) => {
+                        retain_compiled_root(
+                            &mut compiled_root_digests,
+                            &mut compiled_roots,
+                            output.provenance,
+                            &mut budget,
+                        )?;
+                        for edge in output.edges {
+                            retain_edge(&mut raw_edges, edge, thing, nothing, &mut budget)?;
+                        }
+                        if let Some(disjoint) = output.disjoint {
+                            budget.claim_owned(size_of::<RawDisjoint>())?;
+                            raw_disjoints.try_reserve(1).map_err(|_| {
+                                EncodedValidationError::resource("disjoint-union allocation failed")
+                            })?;
+                            raw_disjoints.push(disjoint);
+                        }
+                    }
+                    None => {
+                        deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "named-class deferred-root count overflowed",
+                            )
+                        })?;
+                    }
+                }
+            }
             RootHandler::ObjectPropertyDomain | RootHandler::ObjectPropertyRange => {
                 let Some(object_roles) = object_roles else {
                     deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
@@ -2179,6 +2221,53 @@ fn class_signature<B: ByteSource>(
                     }
                 }
             }
+            RootHandler::DisjointUnion => {
+                if root_node.field_count() != 3 {
+                    return Err(EncodedValidationError::invariant(
+                        "disjoint-union root no longer has schema-1 shape",
+                    ));
+                }
+                let defined = node_field(model, root_node, 0, "disjoint-union defined class")?;
+                let Some(defined_selection) =
+                    atomic_class_selection(model, symbols, defined, budget)?
+                else {
+                    continue;
+                };
+                let expressions_component = required_component(
+                    model.field(root_node.fields().start + 1)?,
+                    "disjoint-union expressions",
+                )?;
+                let ComponentValue::Collection(expressions) =
+                    model.resolve(expressions_component)?
+                else {
+                    return Err(EncodedValidationError::invariant(
+                        "disjoint-union expressions did not resolve to a collection",
+                    ));
+                };
+                if reducible_class_boolean_operands(model, symbols, expressions, false, 0, budget)?
+                    .is_none()
+                {
+                    continue;
+                }
+                push_atomic_class_selection(&mut selected_expressions, defined_selection, budget)?;
+                for item_index in expressions.items() {
+                    budget.claim_work(1)?;
+                    let item =
+                        required_component(model.item(item_index)?, "disjoint-union member")?;
+                    let ComponentValue::Node(identifier) = model.resolve(item)? else {
+                        return Err(EncodedValidationError::invariant(
+                            "disjoint-union member did not resolve to a node",
+                        ));
+                    };
+                    let selection = atomic_class_selection(model, symbols, identifier, budget)?
+                        .ok_or_else(|| {
+                            EncodedValidationError::invariant(
+                                "validated disjoint-union member became unsupported",
+                            )
+                        })?;
+                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                }
+            }
             RootHandler::ObjectPropertyDomain | RootHandler::ObjectPropertyRange
                 if has_object_roles =>
             {
@@ -2542,15 +2631,31 @@ fn positive_atomic_class_selection<B: ByteSource>(
             "class Boolean operands did not resolve to a collection",
         ));
     };
-    let operand_depth = depth
-        .checked_add(1)
-        .ok_or_else(|| EncodedValidationError::resource("class-expression depth overflowed"))?;
+    reducible_class_boolean_operands(
+        model,
+        symbols,
+        operands,
+        node.tag() == OBJECT_INTERSECTION_OF_TAG,
+        depth,
+        budget,
+    )
+}
+
+fn reducible_class_boolean_operands<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    operands: CollectionRef,
+    intersection: bool,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassSelection>> {
+    let operand_depth = child_expression_depth(depth, "class-expression depth overflowed")?;
     PhaseBudget::count(
         operand_depth,
         budget.limits.max_canonical_depth,
         "class-expression depth",
     )?;
-    let intersection = node.tag() == OBJECT_INTERSECTION_OF_TAG;
+    let mut absorbing = None;
     let mut retained = None;
     let mut identity = None;
     for item_index in operands.items() {
@@ -2569,7 +2674,11 @@ fn positive_atomic_class_selection<B: ByteSource>(
         let is_thing = atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?;
         let is_nothing = atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?;
         if (intersection && is_nothing) || (!intersection && is_thing) {
-            return Ok(Some(selection));
+            absorbing.get_or_insert(selection);
+            continue;
+        }
+        if absorbing.is_some() {
+            continue;
         }
         if (intersection && is_thing) || (!intersection && is_nothing) {
             identity.get_or_insert(selection);
@@ -2583,7 +2692,7 @@ fn positive_atomic_class_selection<B: ByteSource>(
         }
         retained = Some(selection);
     }
-    Ok(retained.or(identity))
+    Ok(absorbing.or(retained).or(identity))
 }
 
 fn reducible_object_quantifier_selection<B: ByteSource>(
@@ -6076,6 +6185,30 @@ fn named_disjoint_classes<B: ByteSource>(
         ));
     }
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    normalize_disjoint_class_literals(
+        model,
+        class_domain,
+        classes,
+        thing,
+        nothing,
+        provenance,
+        scope_maps,
+        budget,
+    )
+    .map(Some)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalize_disjoint_class_literals<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    class_domain: &DecodedSymbolDomain,
+    classes: Vec<(ClassLiteral, NodeId)>,
+    thing: u32,
+    nothing: u32,
+    provenance: [u8; 32],
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<NamedDisjointOutput> {
     let mut keyed = Vec::new();
     budget.claim_owned(
         classes
@@ -6179,11 +6312,11 @@ fn named_disjoint_classes<B: ByteSource>(
                 });
             }
         }
-        return Ok(Some(NamedDisjointOutput {
+        return Ok(NamedDisjointOutput {
             edges,
             disjoint: None,
             provenance,
-        }));
+        });
     }
 
     let disjoint = if live.len() >= 2 {
@@ -6208,13 +6341,12 @@ fn named_disjoint_classes<B: ByteSource>(
     } else {
         None
     };
-    Ok(Some(NamedDisjointOutput {
+    Ok(NamedDisjointOutput {
         edges,
         disjoint,
         provenance,
-    }))
+    })
 }
-
 #[allow(clippy::too_many_arguments)]
 fn normalized_class_literal_key<B: ByteSource>(
     model: &ValidatedModel<B>,
@@ -6243,6 +6375,164 @@ fn normalized_class_literal_key<B: ByteSource>(
     })?;
     key.extend_from_slice(source);
     Ok(key)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn named_reducible_disjoint_union<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    class_domain: &DecodedSymbolDomain,
+    signature: &[ClassSignatureBinding],
+    root: NodeId,
+    thing: u32,
+    nothing: u32,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<NamedDisjointOutput>> {
+    let node = model.node(root)?;
+    if node.tag() != DISJOINT_UNION_TAG || node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-union root no longer has schema-1 shape",
+        ));
+    }
+    let defined = node_field(model, node, 0, "disjoint-union defined class")?;
+    if atomic_class_selection(model, symbols, defined, budget)?.is_none() {
+        return Ok(None);
+    }
+    let expressions_component = required_component(
+        model.field(node.fields().start + 1)?,
+        "disjoint-union expressions",
+    )?;
+    let ComponentValue::Collection(expressions) = model.resolve(expressions_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-union expressions did not resolve to a collection",
+        ));
+    };
+    if expressions.len() < 2 {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-union root has fewer than two members",
+        ));
+    }
+    let Some(union_selection) =
+        reducible_class_boolean_operands(model, symbols, expressions, false, 0, budget)?
+    else {
+        return Ok(None);
+    };
+    let Some((defined_class, defined_negative)) = atomic_class_expression_literal(
+        model,
+        symbols,
+        class_domain,
+        signature,
+        defined,
+        scope_maps,
+        budget,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some((union_class, union_negative)) = atomic_class_expression_literal(
+        model,
+        symbols,
+        class_domain,
+        signature,
+        union_selection.expression,
+        scope_maps,
+        budget,
+    )?
+    else {
+        return Ok(None);
+    };
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    let definition_edge_count = expressions.len().checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("disjoint-union definition edge count overflowed")
+    })?;
+    budget.claim_owned(
+        definition_edge_count
+            .checked_mul(size_of::<RawEdge>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "disjoint-union definition edge allocation overflowed",
+                )
+            })?,
+    )?;
+    let mut definition_edges = Vec::new();
+    definition_edges
+        .try_reserve_exact(definition_edge_count)
+        .map_err(|_| {
+            EncodedValidationError::resource("disjoint-union definition edge allocation failed")
+        })?;
+    definition_edges.push(RawEdge {
+        sub_class: defined_class,
+        sub_negative: defined_negative,
+        super_class: union_class,
+        super_negative: union_negative,
+        provenance,
+    });
+    let mut members = Vec::new();
+    budget.claim_owned(
+        expressions
+            .len()
+            .checked_mul(size_of::<(ClassLiteral, NodeId)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("disjoint-union member allocation overflowed")
+            })?,
+    )?;
+    members
+        .try_reserve_exact(expressions.len())
+        .map_err(|_| EncodedValidationError::resource("disjoint-union member allocation failed"))?;
+    for item_index in expressions.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "disjoint-union member")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "disjoint-union member did not resolve to a node",
+            ));
+        };
+        let selection =
+            atomic_class_selection(model, symbols, identifier, budget)?.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "validated disjoint-union member became unsupported",
+                )
+            })?;
+        let Some((class_id, negative)) = atomic_class_expression_literal(
+            model,
+            symbols,
+            class_domain,
+            signature,
+            identifier,
+            scope_maps,
+            budget,
+        )?
+        else {
+            return Ok(None);
+        };
+        definition_edges.push(RawEdge {
+            sub_class: class_id,
+            sub_negative: negative,
+            super_class: defined_class,
+            super_negative: defined_negative,
+            provenance,
+        });
+        members.push((ClassLiteral { class_id, negative }, selection.expression));
+    }
+    let mut output = normalize_disjoint_class_literals(
+        model,
+        class_domain,
+        members,
+        thing,
+        nothing,
+        provenance,
+        scope_maps,
+        budget,
+    )?;
+    output
+        .edges
+        .try_reserve(definition_edges.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("disjoint-union edge merge allocation failed")
+        })?;
+    output.edges.extend(definition_edges);
+    Ok(Some(output))
 }
 
 #[allow(clippy::too_many_arguments)]

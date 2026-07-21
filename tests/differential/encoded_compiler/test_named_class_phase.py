@@ -1741,6 +1741,96 @@ def test_reducible_restrictions_remap_composite_slices_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_reducible_disjoint_unions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(Class(:E))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(AnnotationProperty(:note))",
+            'DisjointUnion(Annotation(:note "source") :A :B owl:Nothing)',
+            "DisjointUnion(:C :B owl:Thing)",
+            "DisjointUnion(:D :B ObjectUnionOf(:B owl:Nothing))",
+            "DisjointUnion(:E :B ObjectSomeValuesFrom(:p owl:Nothing))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=4)
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith("ObjectUnionOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_disjoint_unions_requiring_generated_definitions_defer_atomically() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(ObjectProperty(:p))",
+            "DisjointUnion(:A :B :C)",
+            "DisjointUnion(:D :B ObjectSomeValuesFrom(:p :C))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 2
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            ("ObjectUnionOf:", "ObjectSomeValuesFrom:")
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_reducible_disjoint_unions_remap_composite_slices_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "DisjointUnion(:A :B owl:Nothing)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "DisjointUnion(:C :B ObjectUnionOf(:B owl:Nothing))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right))
+    )
+
+    assert manifest == _expected_manifest(composite, compiled_roots=2)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 @pytest.mark.parametrize(
     "axiom",
     [
