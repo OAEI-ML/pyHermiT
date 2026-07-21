@@ -317,6 +317,7 @@ def _encoded_object_role_slices_accepts_v1(
 ) -> bool: ...
 def _encoded_named_class_manifest_v1(
     *,
+    logical_fingerprint: memoryview,
     root_kinds: memoryview,
     root_ids: memoryview,
     node_tags: memoryview,
@@ -329,7 +330,11 @@ def _encoded_named_class_manifest_v1(
     item_lengths: memoryview,
     scalar_bytes: memoryview,
 ) -> bytes: ...
-def _encoded_named_class_slices_manifest_v1(*, slices: tuple[tuple[object, ...], ...]) -> bytes: ...
+def _encoded_named_class_slices_manifest_v1(
+    *,
+    slices: tuple[tuple[object, ...], ...],
+    logical_fingerprint: memoryview | None = None,
+) -> bytes: ...
 def self_test() -> None: ...
 def create_session(
     ir: bytes,

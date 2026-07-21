@@ -93,6 +93,8 @@ const DATA_PROPERTY_ASSERTION_TAG: u16 = 115;
 const NEGATIVE_DATA_PROPERTY_ASSERTION_TAG: u16 = 116;
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
 const DISJOINT_GUARD_DOMAIN: &[u8] = b"pyhermit:linear-disjoint-classes:v1\0";
+const DEFINITION_DIGEST_DOMAIN: &[u8] = b"pyhermit:normalization-definition:v1\0";
+const GENERATED_CLASS_IRI_PREFIX: &str = "urn:pyhermit:generated:v1:class:";
 const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
 const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
 const RDFS_LITERAL_DISPLAY: &str = "datatype:http://www.w3.org/2000/01/rdf-schema#Literal";
@@ -196,6 +198,7 @@ pub struct IndividualSignatureBinding {
 /// Owned output of the named-class compiler transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamedClassPhase {
+    entity_domain: DecodedSymbolDomain,
     pub class_domain: DecodedSymbolDomain,
     pub class_signature: Vec<ClassSignatureBinding>,
     pub data_range_domain: DecodedSymbolDomain,
@@ -216,6 +219,7 @@ pub struct NamedClassPhase {
     compiled_root_digests: Vec<[u8; 32]>,
     nominal_bindings: Vec<NominalBinding>,
     normalized_edges: Vec<NormalizedEdge>,
+    normalized_boolean_clauses: Vec<NormalizedBooleanClause>,
     normalized_disjoints: Vec<NormalizedDisjoint>,
     normalized_object_constraints: Vec<NormalizedObjectConstraint>,
     normalized_object_characteristics: Vec<NormalizedObjectCharacteristic>,
@@ -524,6 +528,7 @@ struct RawEdge {
     super_class: u32,
     super_negative: bool,
     provenance: [u8; 32],
+    generated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -533,6 +538,23 @@ struct NormalizedEdge {
     super_class: u32,
     super_negative: bool,
     provenance: Vec<[u8; 32]>,
+    generated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RawBooleanClause {
+    body: Vec<ClassLiteral>,
+    head: Vec<ClassLiteral>,
+    provenance: [u8; 32],
+    generated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedBooleanClause {
+    body: Vec<ClassLiteral>,
+    head: Vec<ClassLiteral>,
+    provenance: Vec<[u8; 32]>,
+    generated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -565,6 +587,33 @@ struct AtomicClassSelection {
     source: AtomicClassSource,
     expression: NodeId,
     negative: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum DefinitionPolarity {
+    Positive,
+    Negative,
+}
+
+impl DefinitionPolarity {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Positive => "positive",
+            Self::Negative => "negative",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClassBooleanDefinition {
+    expressions: Vec<NodeId>,
+    expression_key: Vec<u8>,
+    intersection: bool,
+    operands: Vec<AtomicClassSelection>,
+    polarity: DefinitionPolarity,
+    generated_key: Vec<u8>,
+    generated_display: String,
+    provenance: Vec<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -908,7 +957,7 @@ pub fn compile_named_class_phase<B: ByteSource>(
     symbols: &SymbolPhase,
     limits: NamedClassPhaseLimits,
 ) -> EncodedResult<NamedClassPhase> {
-    compile_named_class_phase_impl(model, symbols, None, None, &[], limits)
+    compile_named_class_phase_impl(model, symbols, None, None, &[], None, limits)
 }
 
 /// Compile the named fragment with an inner-to-outer anonymous-scope map
@@ -919,7 +968,7 @@ pub fn compile_named_class_phase_scoped<B: ByteSource>(
     scope_maps: &[AnonymousScopeMap],
     limits: NamedClassPhaseLimits,
 ) -> EncodedResult<NamedClassPhase> {
-    compile_named_class_phase_impl(model, symbols, None, None, scope_maps, limits)
+    compile_named_class_phase_impl(model, symbols, None, None, scope_maps, None, limits)
 }
 
 /// Compile the named fragment with the source-local object-role domain needed
@@ -931,7 +980,15 @@ pub fn compile_named_class_phase_with_object_roles_scoped<B: ByteSource>(
     scope_maps: &[AnonymousScopeMap],
     limits: NamedClassPhaseLimits,
 ) -> EncodedResult<NamedClassPhase> {
-    compile_named_class_phase_impl(model, symbols, Some(object_roles), None, scope_maps, limits)
+    compile_named_class_phase_impl(
+        model,
+        symbols,
+        Some(object_roles),
+        None,
+        scope_maps,
+        None,
+        limits,
+    )
 }
 
 /// Compile the named fragment with source-local object- and data-role domains.
@@ -949,6 +1006,30 @@ pub fn compile_named_class_phase_with_role_domains_scoped<B: ByteSource>(
         Some(object_roles),
         Some(data_roles),
         scope_maps,
+        None,
+        limits,
+    )
+}
+
+/// Compile the named fragment with the ontology logical fingerprint as the
+/// deterministic namespace for scalar-compatible generated definitions.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_named_class_phase_with_role_domains_scoped_and_namespace<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    object_roles: &ObjectRolePhase,
+    data_roles: &DataRolePhase,
+    scope_maps: &[AnonymousScopeMap],
+    definition_namespace: [u8; 32],
+    limits: NamedClassPhaseLimits,
+) -> EncodedResult<NamedClassPhase> {
+    compile_named_class_phase_impl(
+        model,
+        symbols,
+        Some(object_roles),
+        Some(data_roles),
+        scope_maps,
+        Some(definition_namespace),
         limits,
     )
 }
@@ -959,10 +1040,20 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     object_roles: Option<&ObjectRolePhase>,
     data_roles: Option<&DataRolePhase>,
     scope_maps: &[AnonymousScopeMap],
+    definition_namespace: Option<[u8; 32]>,
     limits: NamedClassPhaseLimits,
 ) -> EncodedResult<NamedClassPhase> {
     let mut budget = PhaseBudget::new(limits);
     canonical::validate_scope_maps(scope_maps, &mut budget)?;
+    let definitions = class_boolean_definitions(
+        model,
+        symbols,
+        scope_maps,
+        definition_namespace,
+        &mut budget,
+    )?;
+    let (entity_domain, source_entity_map) =
+        phase_entity_domain(symbols, &definitions, &mut budget)?;
     let declared_class_ids = declared_class_ids(symbols, &mut budget)?;
     let (class_domain, class_signature) = class_signature(
         model,
@@ -971,6 +1062,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         object_roles.is_some(),
         data_roles.is_some(),
         scope_maps,
+        &definitions,
         &mut budget,
     )?;
     let data_range_domain = named_data_range_domain(
@@ -1037,6 +1129,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     )?;
 
     let mut raw_edges = Vec::<RawEdge>::new();
+    let mut raw_boolean_clauses = Vec::<RawBooleanClause>::new();
     let mut raw_disjoints = Vec::<RawDisjoint>::new();
     let mut raw_object_constraints = Vec::<RawObjectConstraint>::new();
     let mut raw_object_characteristics = Vec::<RawObjectCharacteristic>::new();
@@ -1055,6 +1148,16 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut compiled_root_digests = Vec::<[u8; 32]>::new();
     let mut compiled_roots = 0_usize;
     let mut deferred_roots = 0_usize;
+    emit_class_boolean_definitions(
+        model,
+        &class_domain,
+        &class_signature,
+        &definitions,
+        scope_maps,
+        &mut raw_edges,
+        &mut raw_boolean_clauses,
+        &mut budget,
+    )?;
     for root in &symbols.roots {
         budget.claim_work(1)?;
         match root.handler {
@@ -1070,6 +1173,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     symbols,
                     &class_domain,
                     &class_signature,
+                    &definitions,
                     root.node,
                     scope_maps,
                     &mut budget,
@@ -1809,6 +1913,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     }
 
     let edges = normalize_edges(raw_edges, &mut budget)?;
+    let boolean_clauses = normalize_boolean_clauses(raw_boolean_clauses, &mut budget)?;
     let disjoints = normalize_disjoints(raw_disjoints, &mut budget)?;
     let object_constraints = normalize_object_constraints(raw_object_constraints, &mut budget)?;
     let object_characteristics =
@@ -1829,6 +1934,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let inequalities = normalize_inequalities(raw_inequalities, &mut budget)?;
     let (provenance, provenance_keys) = freeze_provenance(
         &edges,
+        &boolean_clauses,
         &disjoints,
         &object_constraints,
         &object_characteristics,
@@ -1866,6 +1972,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     ) = freeze_predicates(
         &nominal_bindings,
         &edges,
+        &boolean_clauses,
         &disjoints,
         &object_constraints,
         &object_characteristics,
@@ -1898,6 +2005,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let clauses = freeze_clauses(
         &nominal_bindings,
         &edges,
+        &boolean_clauses,
         &disjoints,
         &object_constraints,
         &object_characteristics,
@@ -1947,6 +2055,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         nominal_usage(
             &nominal_bindings,
             &edges,
+            &boolean_clauses,
             &disjoints,
             &object_constraints,
             &data_domains,
@@ -1978,7 +2087,18 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         positive_facts.len(),
         &mut budget,
     )?;
+    let class_signature = published_class_signature(
+        &class_signature,
+        &class_domain,
+        &entity_domain,
+        &source_entity_map,
+        &definitions,
+        &mut budget,
+    )?;
+    let individual_signature =
+        published_individual_signature(&individual_signature, &source_entity_map, &mut budget)?;
     Ok(NamedClassPhase {
+        entity_domain,
         class_domain,
         class_signature,
         data_range_domain,
@@ -1999,6 +2119,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         compiled_root_digests,
         nominal_bindings,
         normalized_edges: edges,
+        normalized_boolean_clauses: boolean_clauses,
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
         normalized_object_characteristics: object_characteristics,
@@ -2038,6 +2159,501 @@ fn declared_class_ids(symbols: &SymbolPhase, budget: &mut PhaseBudget) -> Encode
     Ok(identifiers)
 }
 
+fn class_boolean_definitions<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    scope_maps: &[AnonymousScopeMap],
+    namespace: Option<[u8; 32]>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<ClassBooleanDefinition>> {
+    let Some(namespace) = namespace else {
+        return Ok(Vec::new());
+    };
+    let mut definitions = Vec::<ClassBooleanDefinition>::new();
+    for root in &symbols.roots {
+        budget.claim_work(1)?;
+        if root.handler != RootHandler::SubClassOf {
+            continue;
+        }
+        let node = model.node(root.node)?;
+        if node.tag() != SUBCLASS_TAG || node.field_count() != 3 {
+            return Err(EncodedValidationError::invariant(
+                "subclass root no longer has schema-1 shape",
+            ));
+        }
+        let sub_class = node_field(model, node, 0, "subclass antecedent")?;
+        let super_class = node_field(model, node, 1, "subclass consequent")?;
+        let sub_atomic = atomic_class_selection(model, symbols, sub_class, budget)?.is_some();
+        let super_atomic = atomic_class_selection(model, symbols, super_class, budget)?.is_some();
+        let sub_definition = if sub_atomic {
+            None
+        } else {
+            class_boolean_definition_candidate(
+                model,
+                symbols,
+                sub_class,
+                DefinitionPolarity::Negative,
+                namespace,
+                scope_maps,
+                budget,
+            )?
+        };
+        let super_definition = if super_atomic {
+            None
+        } else {
+            class_boolean_definition_candidate(
+                model,
+                symbols,
+                super_class,
+                DefinitionPolarity::Positive,
+                namespace,
+                scope_maps,
+                budget,
+            )?
+        };
+        if (!sub_atomic && sub_definition.is_none())
+            || (!super_atomic && super_definition.is_none())
+        {
+            continue;
+        }
+        let provenance = source_axiom_digest(model, root.node, scope_maps, budget)?;
+        if let Some(definition) = sub_definition {
+            retain_class_boolean_definition(&mut definitions, definition, provenance, budget)?;
+        }
+        if let Some(definition) = super_definition {
+            retain_class_boolean_definition(&mut definitions, definition, provenance, budget)?;
+        }
+    }
+    budget.claim_work(sort_work(definitions.len()))?;
+    definitions.sort_by(|left, right| {
+        left.expression_key
+            .cmp(&right.expression_key)
+            .then_with(|| left.polarity.cmp(&right.polarity))
+    });
+    for definition in &mut definitions {
+        budget.claim_work(sort_work(definition.expressions.len()))?;
+        definition.expressions.sort_unstable();
+        definition.expressions.dedup();
+        budget.claim_work(sort_work(definition.provenance.len()))?;
+        definition.provenance.sort_unstable();
+        definition.provenance.dedup();
+    }
+    Ok(definitions)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn class_boolean_definition_candidate<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    expression: NodeId,
+    polarity: DefinitionPolarity,
+    namespace: [u8; 32],
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<ClassBooleanDefinition>> {
+    let node = model.node(expression)?;
+    if !matches!(node.tag(), OBJECT_INTERSECTION_OF_TAG | OBJECT_UNION_OF_TAG) {
+        return Ok(None);
+    }
+    if node.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "class Boolean expression no longer has schema-1 shape",
+        ));
+    }
+    let component =
+        required_component(model.field(node.fields().start)?, "class Boolean operands")?;
+    let ComponentValue::Collection(operands) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(
+            "class Boolean operands did not resolve to a collection",
+        ));
+    };
+    let mut selections = Vec::new();
+    budget.claim_owned(
+        operands
+            .len()
+            .checked_mul(size_of::<AtomicClassSelection>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("class Boolean operand allocation overflowed")
+            })?,
+    )?;
+    selections
+        .try_reserve_exact(operands.len())
+        .map_err(|_| EncodedValidationError::resource("class Boolean operand allocation failed"))?;
+    for item_index in operands.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "class Boolean operand")?;
+        let ComponentValue::Node(operand) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "class Boolean operand did not resolve to a node",
+            ));
+        };
+        if !stable_class_literal_expression(model, symbols, operand, budget)? {
+            return Ok(None);
+        }
+        let selection =
+            atomic_class_selection(model, symbols, operand, budget)?.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "validated stable class literal became unsupported",
+                )
+            })?;
+        if atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?
+            || atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?
+            || selections
+                .iter()
+                .copied()
+                .any(|known| atomic_class_selections_match(known, selection))
+        {
+            return Ok(None);
+        }
+        selections.push(selection);
+    }
+    if selections.len() < 2 {
+        return Ok(None);
+    }
+    let expression_key = canonical::canonical_node_key(model, expression, scope_maps, budget)?;
+    let (generated_key, generated_display) =
+        generated_class_symbol(namespace, &expression_key, polarity, budget)?;
+    budget.claim_owned(size_of::<NodeId>())?;
+    Ok(Some(ClassBooleanDefinition {
+        expressions: vec![expression],
+        expression_key,
+        intersection: node.tag() == OBJECT_INTERSECTION_OF_TAG,
+        operands: selections,
+        polarity,
+        generated_key,
+        generated_display,
+        provenance: Vec::new(),
+    }))
+}
+
+fn stable_class_literal_expression<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<bool> {
+    let node = model.node(identifier)?;
+    match node.tag() {
+        ENTITY_TAG => Ok(true),
+        OBJECT_ONE_OF_TAG => is_named_nominal(model, symbols, identifier, budget),
+        OBJECT_COMPLEMENT_OF_TAG => {
+            if node.field_count() != 1 {
+                return Err(EncodedValidationError::invariant(
+                    "class complement no longer has schema-1 shape",
+                ));
+            }
+            let operand = node_field(model, node, 0, "class-complement operand")?;
+            let operand_node = model.node(operand)?;
+            match operand_node.tag() {
+                ENTITY_TAG => Ok(true),
+                OBJECT_ONE_OF_TAG => is_named_nominal(model, symbols, operand, budget),
+                _ => Ok(false),
+            }
+        }
+        _ => Ok(false),
+    }
+}
+
+fn retain_class_boolean_definition(
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    mut definition: ClassBooleanDefinition,
+    provenance: [u8; 32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    if let Some(known) = definitions.iter_mut().find(|known| {
+        known.expression_key == definition.expression_key && known.polarity == definition.polarity
+    }) {
+        if known.intersection != definition.intersection
+            || known.operands != definition.operands
+            || known.generated_key != definition.generated_key
+            || known.generated_display != definition.generated_display
+        {
+            return Err(EncodedValidationError::invariant(
+                "equivalent generated class definitions disagree",
+            ));
+        }
+        budget.claim_owned(size_of::<NodeId>() + size_of::<[u8; 32]>())?;
+        known.expressions.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("generated definition expression allocation failed")
+        })?;
+        known.expressions.append(&mut definition.expressions);
+        known.provenance.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("generated definition provenance allocation failed")
+        })?;
+        known.provenance.push(provenance);
+        return Ok(());
+    }
+    let following = definitions.len().checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("generated class definition count overflowed")
+    })?;
+    PhaseBudget::count(
+        following,
+        budget.limits.max_class_symbols,
+        "generated class definition count",
+    )?;
+    budget.claim_owned(size_of::<ClassBooleanDefinition>() + size_of::<[u8; 32]>())?;
+    definition.provenance.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("generated definition provenance allocation failed")
+    })?;
+    definition.provenance.push(provenance);
+    definitions.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("generated class definition allocation failed")
+    })?;
+    definitions.push(definition);
+    Ok(())
+}
+
+fn generated_class_symbol(
+    namespace: [u8; 32],
+    expression_key: &[u8],
+    polarity: DefinitionPolarity,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(Vec<u8>, String)> {
+    let namespace_hex = crate::model::hex(&namespace);
+    let mut digest = Sha256::new();
+    digest.update(DEFINITION_DIGEST_DOMAIN);
+    digest.update(namespace_hex.as_bytes());
+    digest.update(b"\0class\0");
+    digest.update(polarity.as_str().as_bytes());
+    digest.update(b"\0");
+    digest.update(expression_key);
+    budget.claim_work(
+        DEFINITION_DIGEST_DOMAIN
+            .len()
+            .checked_add(namespace_hex.len())
+            .and_then(|value| value.checked_add(b"\0class\0".len()))
+            .and_then(|value| value.checked_add(polarity.as_str().len()))
+            .and_then(|value| value.checked_add(1))
+            .and_then(|value| value.checked_add(expression_key.len()))
+            .ok_or_else(|| EncodedValidationError::resource("definition digest work overflowed"))?,
+    )?;
+    let digest_hex = crate::model::hex(&digest.finalize());
+    let iri_len = GENERATED_CLASS_IRI_PREFIX
+        .len()
+        .checked_add(namespace_hex.len())
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_add(polarity.as_str().len()))
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_add(digest_hex.len()))
+        .ok_or_else(|| EncodedValidationError::resource("generated class IRI overflowed"))?;
+    budget.claim_owned(iri_len)?;
+    let mut iri = String::new();
+    iri.try_reserve_exact(iri_len)
+        .map_err(|_| EncodedValidationError::resource("generated class IRI allocation failed"))?;
+    iri.push_str(GENERATED_CLASS_IRI_PREFIX);
+    iri.push_str(&namespace_hex);
+    iri.push(':');
+    iri.push_str(polarity.as_str());
+    iri.push(':');
+    iri.push_str(&digest_hex);
+    let key = generated_class_entity_key(iri.as_bytes(), budget)?;
+    let display_len = "class:"
+        .len()
+        .checked_add(iri.len())
+        .ok_or_else(|| EncodedValidationError::resource("generated class display overflowed"))?;
+    budget.claim_owned(display_len)?;
+    let mut display = String::new();
+    display.try_reserve_exact(display_len).map_err(|_| {
+        EncodedValidationError::resource("generated class display allocation failed")
+    })?;
+    display.push_str("class:");
+    display.push_str(&iri);
+    Ok((key, display))
+}
+
+fn generated_class_entity_key(iri: &[u8], budget: &mut PhaseBudget) -> EncodedResult<Vec<u8>> {
+    let mut iri_key = Vec::new();
+    push_generated_varint(&mut iri_key, 1, budget)?;
+    push_generated_byte(&mut iri_key, 2, budget)?;
+    push_generated_frame(&mut iri_key, iri, budget)?;
+
+    let mut key = Vec::new();
+    push_generated_varint(&mut key, u64::from(ENTITY_TAG), budget)?;
+    push_generated_byte(&mut key, 5, budget)?;
+    push_generated_frame(&mut key, b"class", budget)?;
+    push_generated_byte(&mut key, 1, budget)?;
+    push_generated_frame(&mut key, &iri_key, budget)?;
+    Ok(key)
+}
+
+fn push_generated_frame(
+    target: &mut Vec<u8>,
+    value: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    push_generated_varint(
+        target,
+        u64::try_from(value.len())
+            .map_err(|_| EncodedValidationError::resource("generated frame exceeds u64"))?,
+        budget,
+    )?;
+    budget.claim_owned(value.len())?;
+    target.try_reserve(value.len()).map_err(|_| {
+        EncodedValidationError::resource("generated canonical frame allocation failed")
+    })?;
+    target.extend_from_slice(value);
+    Ok(())
+}
+
+fn push_generated_varint(
+    target: &mut Vec<u8>,
+    mut value: u64,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    loop {
+        let mut byte = u8::try_from(value & 0x7f)
+            .map_err(|_| EncodedValidationError::invariant("generated varint chunk exceeds u8"))?;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        push_generated_byte(target, byte, budget)?;
+        if value == 0 {
+            return Ok(());
+        }
+    }
+}
+
+fn push_generated_byte(
+    target: &mut Vec<u8>,
+    value: u8,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    budget.claim_owned(1)?;
+    target.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("generated canonical byte allocation failed")
+    })?;
+    target.push(value);
+    Ok(())
+}
+
+fn phase_entity_domain(
+    symbols: &SymbolPhase,
+    definitions: &[ClassBooleanDefinition],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(DecodedSymbolDomain, Vec<u32>)> {
+    if symbols.entity_domain.kind != SymbolKind::Entity {
+        return Err(EncodedValidationError::invariant(
+            "generated definitions received a non-entity source domain",
+        ));
+    }
+    let total = symbols
+        .entity_domain
+        .values
+        .len()
+        .checked_add(definitions.len())
+        .ok_or_else(|| EncodedValidationError::resource("generated entity count overflowed"))?;
+    PhaseBudget::count(
+        total,
+        budget.limits.max_entity_symbols,
+        "entity symbol count",
+    )?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(total).map_err(|_| {
+        EncodedValidationError::resource("generated entity domain allocation failed")
+    })?;
+    for value in &symbols.entity_domain.values {
+        budget.claim_work(1)?;
+        budget
+            .claim_owned(size_of::<DecodedSymbolValue>() + value.key.len() + value.display.len())?;
+        values.push(value.clone());
+    }
+    for definition in definitions {
+        budget.claim_work(1)?;
+        budget.claim_owned(
+            size_of::<DecodedSymbolValue>()
+                + definition.generated_key.len()
+                + definition.generated_display.len(),
+        )?;
+        values.push(DecodedSymbolValue {
+            identifier: 0,
+            key: definition.generated_key.clone(),
+            display: definition.generated_display.clone(),
+            generated: true,
+            query_local: false,
+        });
+    }
+    budget.claim_work(sort_work(values.len()))?;
+    values.sort_by(|left, right| left.key.cmp(&right.key));
+    let mut frozen = Vec::<DecodedSymbolValue>::new();
+    frozen.try_reserve_exact(values.len()).map_err(|_| {
+        EncodedValidationError::resource("generated entity result allocation failed")
+    })?;
+    for mut candidate in values {
+        if let Some(previous) = frozen.last() {
+            if previous.key == candidate.key {
+                if previous.display != candidate.display
+                    || previous.generated != candidate.generated
+                    || previous.query_local != candidate.query_local
+                {
+                    return Err(EncodedValidationError::invariant(
+                        "generated entity collides with the source signature",
+                    ));
+                }
+                continue;
+            }
+        }
+        candidate.identifier = u32::try_from(frozen.len())
+            .map_err(|_| EncodedValidationError::resource("generated entity ID exceeds u32"))?;
+        frozen.push(candidate);
+    }
+    let mut source_map = Vec::new();
+    budget.claim_owned(
+        symbols
+            .entity_domain
+            .values
+            .len()
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| EncodedValidationError::resource("source entity map overflowed"))?,
+    )?;
+    source_map
+        .try_reserve_exact(symbols.entity_domain.values.len())
+        .map_err(|_| EncodedValidationError::resource("source entity map allocation failed"))?;
+    for value in &symbols.entity_domain.values {
+        budget.claim_work(binary_search_work(frozen.len()))?;
+        let index = frozen
+            .binary_search_by(|candidate| candidate.key.cmp(&value.key))
+            .map_err(|_| EncodedValidationError::invariant("source entity disappeared"))?;
+        source_map.push(
+            u32::try_from(index)
+                .map_err(|_| EncodedValidationError::resource("source entity map exceeds u32"))?,
+        );
+    }
+    Ok((
+        DecodedSymbolDomain {
+            kind: SymbolKind::Entity,
+            values: frozen,
+        },
+        source_map,
+    ))
+}
+
+fn class_boolean_definition(
+    definitions: &[ClassBooleanDefinition],
+    expression: NodeId,
+    polarity: DefinitionPolarity,
+) -> Option<&ClassBooleanDefinition> {
+    definitions.iter().find(|definition| {
+        definition.polarity == polarity && definition.expressions.binary_search(&expression).is_ok()
+    })
+}
+
+fn push_class_boolean_definition_selections(
+    expressions: &mut Vec<NodeId>,
+    definition: &ClassBooleanDefinition,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let expression = *definition.expressions.first().ok_or_else(|| {
+        EncodedValidationError::invariant("generated definition lost its source expression")
+    })?;
+    push_class_expression_selection(expressions, expression, budget)?;
+    for selection in definition.operands.iter().copied() {
+        push_atomic_class_selection(expressions, selection, budget)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn class_signature<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
@@ -2045,6 +2661,7 @@ fn class_signature<B: ByteSource>(
     has_object_roles: bool,
     has_data_roles: bool,
     scope_maps: &[AnonymousScopeMap],
+    definitions: &[ClassBooleanDefinition],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(DecodedSymbolDomain, Vec<ClassSignatureBinding>)> {
     let mut pending = Vec::<PendingClassSymbol>::new();
@@ -2099,28 +2716,54 @@ fn class_signature<B: ByteSource>(
             RootHandler::SubClassOf => {
                 let sub_class = node_field(model, root_node, 0, "subclass antecedent")?;
                 let super_class = node_field(model, root_node, 1, "subclass consequent")?;
-                let Some(sub_selection) =
-                    atomic_class_selection(model, symbols, sub_class, budget)?
-                else {
-                    continue;
-                };
-                let Some(super_selection) =
-                    atomic_class_selection(model, symbols, super_class, budget)?
-                else {
-                    continue;
-                };
-                if atomic_class_selection_is_trivial(
-                    model,
-                    symbols,
-                    sub_selection,
-                    super_selection,
-                    scope_maps,
-                    budget,
-                )? {
+                let sub_selection = atomic_class_selection(model, symbols, sub_class, budget)?;
+                let super_selection = atomic_class_selection(model, symbols, super_class, budget)?;
+                let sub_definition =
+                    class_boolean_definition(definitions, sub_class, DefinitionPolarity::Negative);
+                let super_definition = class_boolean_definition(
+                    definitions,
+                    super_class,
+                    DefinitionPolarity::Positive,
+                );
+                if (sub_selection.is_none() && sub_definition.is_none())
+                    || (super_selection.is_none() && super_definition.is_none())
+                {
                     continue;
                 }
-                push_atomic_class_selection(&mut selected_expressions, sub_selection, budget)?;
-                push_atomic_class_selection(&mut selected_expressions, super_selection, budget)?;
+                if let (Some(sub_selection), Some(super_selection)) =
+                    (sub_selection, super_selection)
+                {
+                    if atomic_class_selection_is_trivial(
+                        model,
+                        symbols,
+                        sub_selection,
+                        super_selection,
+                        scope_maps,
+                        budget,
+                    )? {
+                        continue;
+                    }
+                }
+                if let Some(selection) = sub_selection {
+                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                }
+                if let Some(definition) = sub_definition {
+                    push_class_boolean_definition_selections(
+                        &mut selected_expressions,
+                        definition,
+                        budget,
+                    )?;
+                }
+                if let Some(selection) = super_selection {
+                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                }
+                if let Some(definition) = super_definition {
+                    push_class_boolean_definition_selections(
+                        &mut selected_expressions,
+                        definition,
+                        budget,
+                    )?;
+                }
             }
             RootHandler::EquivalentClasses => {
                 let expressions_component = required_component(
@@ -2369,6 +3012,34 @@ fn class_signature<B: ByteSource>(
         });
     }
 
+    for definition in definitions {
+        let following = pending.len().checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("generated class symbol count overflowed")
+        })?;
+        PhaseBudget::count(
+            following,
+            budget.limits.max_class_symbols,
+            "generated class symbol count",
+        )?;
+        budget.claim_owned(size_of::<PendingClassSymbol>())?;
+        budget.claim_owned(size_of::<DecodedSymbolValue>())?;
+        budget.claim_owned(definition.generated_key.len())?;
+        budget.claim_owned(definition.generated_display.len())?;
+        pending.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("generated class symbol allocation failed")
+        })?;
+        pending.push(PendingClassSymbol {
+            value: DecodedSymbolValue {
+                identifier: 0,
+                key: definition.generated_key.clone(),
+                display: definition.generated_display.clone(),
+                generated: true,
+                query_local: false,
+            },
+            entity: None,
+        });
+    }
+
     budget.claim_work(sort_work(pending.len()))?;
     pending.sort_by(|left, right| left.value.key.cmp(&right.value.key));
     let mut values = Vec::<DecodedSymbolValue>::new();
@@ -2419,12 +3090,109 @@ fn class_signature<B: ByteSource>(
 
 fn class_expression_prefix(tag: u16) -> EncodedResult<&'static str> {
     match tag {
+        OBJECT_INTERSECTION_OF_TAG => Ok("ObjectIntersectionOf:"),
+        OBJECT_UNION_OF_TAG => Ok("ObjectUnionOf:"),
         OBJECT_ONE_OF_TAG => Ok("ObjectOneOf:"),
         OBJECT_COMPLEMENT_OF_TAG => Ok("ObjectComplementOf:"),
         _ => Err(EncodedValidationError::invariant(
             "selected class expression has an unsupported constructor",
         )),
     }
+}
+
+fn published_class_signature(
+    source: &[ClassSignatureBinding],
+    class_domain: &DecodedSymbolDomain,
+    entity_domain: &DecodedSymbolDomain,
+    source_entity_map: &[u32],
+    definitions: &[ClassBooleanDefinition],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<ClassSignatureBinding>> {
+    let following = source
+        .len()
+        .checked_add(definitions.len())
+        .ok_or_else(|| EncodedValidationError::resource("published class signature overflowed"))?;
+    budget.claim_owned(
+        following
+            .checked_mul(size_of::<ClassSignatureBinding>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("published class signature bytes overflowed")
+            })?,
+    )?;
+    let mut published = Vec::new();
+    published.try_reserve_exact(following).map_err(|_| {
+        EncodedValidationError::resource("published class signature allocation failed")
+    })?;
+    for binding in source {
+        published.push(ClassSignatureBinding {
+            class_expression_id: binding.class_expression_id,
+            entity_id: mapped_id(source_entity_map, binding.entity_id, "source class entity")?,
+            declared: binding.declared,
+        });
+    }
+    for definition in definitions {
+        budget.claim_work(binary_search_work(class_domain.values.len()))?;
+        let class_index = class_domain
+            .values
+            .binary_search_by(|candidate| candidate.key.cmp(&definition.generated_key))
+            .map_err(|_| EncodedValidationError::invariant("generated class symbol disappeared"))?;
+        budget.claim_work(binary_search_work(entity_domain.values.len()))?;
+        let entity_index = entity_domain
+            .values
+            .binary_search_by(|candidate| candidate.key.cmp(&definition.generated_key))
+            .map_err(|_| EncodedValidationError::invariant("generated class entity disappeared"))?;
+        published.push(ClassSignatureBinding {
+            class_expression_id: u32::try_from(class_index).map_err(|_| {
+                EncodedValidationError::resource("generated class symbol ID exceeds u32")
+            })?,
+            entity_id: u32::try_from(entity_index).map_err(|_| {
+                EncodedValidationError::resource("generated class entity ID exceeds u32")
+            })?,
+            declared: false,
+        });
+    }
+    budget.claim_work(sort_work(published.len()))?;
+    published.sort_by_key(|binding| binding.class_expression_id);
+    if published
+        .windows(2)
+        .any(|pair| pair[0].class_expression_id == pair[1].class_expression_id)
+    {
+        return Err(EncodedValidationError::invariant(
+            "published class signature contains duplicate symbols",
+        ));
+    }
+    Ok(published)
+}
+
+fn published_individual_signature(
+    source: &[IndividualSignatureBinding],
+    source_entity_map: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<IndividualSignatureBinding>> {
+    budget.claim_owned(
+        source
+            .len()
+            .checked_mul(size_of::<IndividualSignatureBinding>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("published individual signature overflowed")
+            })?,
+    )?;
+    let mut published = Vec::new();
+    published.try_reserve_exact(source.len()).map_err(|_| {
+        EncodedValidationError::resource("published individual signature allocation failed")
+    })?;
+    for binding in source {
+        published.push(IndividualSignatureBinding {
+            individual_id: binding.individual_id,
+            entity_id: mapped_id(
+                source_entity_map,
+                binding.entity_id,
+                "source individual entity",
+            )?,
+            declared: binding.declared,
+        });
+    }
+    Ok(published)
 }
 
 fn push_class_expression_selection(
@@ -5909,11 +6677,13 @@ fn data_range_id_by_display(domain: &DecodedSymbolDomain, display: &str) -> Enco
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn named_subclass<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
     root: NodeId,
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
@@ -5925,49 +6695,63 @@ fn named_subclass<B: ByteSource>(
         ));
     }
     let sub_class_node = node_field(model, node, 0, "subclass antecedent")?;
-    let Some(sub_selection) = atomic_class_selection(model, symbols, sub_class_node, budget)?
-    else {
-        return Ok(None);
-    };
+    let sub_selection = atomic_class_selection(model, symbols, sub_class_node, budget)?;
     let super_class_node = node_field(model, node, 1, "subclass consequent")?;
-    let Some(super_selection) = atomic_class_selection(model, symbols, super_class_node, budget)?
-    else {
+    let super_selection = atomic_class_selection(model, symbols, super_class_node, budget)?;
+    if (sub_selection.is_none()
+        && class_boolean_definition(definitions, sub_class_node, DefinitionPolarity::Negative)
+            .is_none())
+        || (super_selection.is_none()
+            && class_boolean_definition(
+                definitions,
+                super_class_node,
+                DefinitionPolarity::Positive,
+            )
+            .is_none())
+    {
         return Ok(None);
-    };
-    if atomic_class_selection_is_trivial(
-        model,
-        symbols,
-        sub_selection,
-        super_selection,
-        scope_maps,
-        budget,
-    )? {
-        return Ok(Some(RawEdge {
-            sub_class: class_id_by_display(class_domain, NOTHING_DISPLAY)?,
-            sub_negative: false,
-            super_class: class_id_by_display(class_domain, THING_DISPLAY)?,
-            super_negative: false,
-            provenance: source_axiom_digest(model, root, scope_maps, budget)?,
-        }));
     }
-    let Some((sub_class, sub_negative)) = atomic_class_expression_literal(
+    if let (Some(sub_selection), Some(super_selection)) = (sub_selection, super_selection) {
+        if atomic_class_selection_is_trivial(
+            model,
+            symbols,
+            sub_selection,
+            super_selection,
+            scope_maps,
+            budget,
+        )? {
+            return Ok(Some(RawEdge {
+                sub_class: class_id_by_display(class_domain, NOTHING_DISPLAY)?,
+                sub_negative: false,
+                super_class: class_id_by_display(class_domain, THING_DISPLAY)?,
+                super_negative: false,
+                provenance: source_axiom_digest(model, root, scope_maps, budget)?,
+                generated: false,
+            }));
+        }
+    }
+    let Some((sub_class, sub_negative)) = class_expression_literal_with_definitions(
         model,
         symbols,
         class_domain,
         signature,
         sub_class_node,
+        DefinitionPolarity::Negative,
+        definitions,
         scope_maps,
         budget,
     )?
     else {
         return Ok(None);
     };
-    let Some((super_class, super_negative)) = atomic_class_expression_literal(
+    let Some((super_class, super_negative)) = class_expression_literal_with_definitions(
         model,
         symbols,
         class_domain,
         signature,
         super_class_node,
+        DefinitionPolarity::Positive,
+        definitions,
         scope_maps,
         budget,
     )?
@@ -5981,6 +6765,7 @@ fn named_subclass<B: ByteSource>(
         super_class,
         super_negative,
         provenance,
+        generated: false,
     }))
 }
 
@@ -6083,6 +6868,7 @@ fn named_equivalent_classes<B: ByteSource>(
             super_class,
             super_negative,
             provenance,
+            generated: false,
         });
     }
     Ok(Some(edges))
@@ -6281,6 +7067,7 @@ fn normalize_disjoint_class_literals<B: ByteSource>(
                     super_class: nothing,
                     super_negative: false,
                     provenance,
+                    generated: false,
                 });
             }
         } else if literal.negative || literal.class_id != nothing {
@@ -6314,6 +7101,7 @@ fn normalize_disjoint_class_literals<B: ByteSource>(
                     super_class: nothing,
                     super_negative: false,
                     provenance,
+                    generated: false,
                 });
             }
         }
@@ -6472,6 +7260,7 @@ fn named_reducible_disjoint_union<B: ByteSource>(
         super_class: union_class,
         super_negative: union_negative,
         provenance,
+        generated: false,
     });
     let mut members = Vec::new();
     budget.claim_owned(
@@ -6517,6 +7306,7 @@ fn named_reducible_disjoint_union<B: ByteSource>(
             super_class: defined_class,
             super_negative: defined_negative,
             provenance,
+            generated: false,
         });
         members.push((ClassLiteral { class_id, negative }, selection.expression));
     }
@@ -7436,6 +8226,25 @@ fn atomic_class_expression_literal<B: ByteSource>(
     let Some(selection) = atomic_class_selection(model, symbols, identifier, budget)? else {
         return Ok(None);
     };
+    atomic_class_selection_literal(
+        model,
+        class_domain,
+        signature,
+        selection,
+        scope_maps,
+        budget,
+    )
+    .map(Some)
+}
+
+fn atomic_class_selection_literal<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    class_domain: &DecodedSymbolDomain,
+    signature: &[ClassSignatureBinding],
+    selection: AtomicClassSelection,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(u32, bool)> {
     let class_id = match selection.source {
         AtomicClassSource::Entity(entity_id) => signature
             .binary_search_by_key(&entity_id, |binding| binding.entity_id)
@@ -7461,7 +8270,45 @@ fn atomic_class_expression_literal<B: ByteSource>(
                 .map_err(|_| EncodedValidationError::resource("object nominal ID exceeds u32"))?
         }
     };
-    Ok(Some((class_id, selection.negative)))
+    Ok((class_id, selection.negative))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn class_expression_literal_with_definitions<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    class_domain: &DecodedSymbolDomain,
+    signature: &[ClassSignatureBinding],
+    identifier: NodeId,
+    polarity: DefinitionPolarity,
+    definitions: &[ClassBooleanDefinition],
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<(u32, bool)>> {
+    if let Some(literal) = atomic_class_expression_literal(
+        model,
+        symbols,
+        class_domain,
+        signature,
+        identifier,
+        scope_maps,
+        budget,
+    )? {
+        return Ok(Some(literal));
+    }
+    let Some(definition) = class_boolean_definition(definitions, identifier, polarity) else {
+        return Ok(None);
+    };
+    budget.claim_work(binary_search_work(class_domain.values.len()))?;
+    let class_index = class_domain
+        .values
+        .binary_search_by(|candidate| candidate.key.cmp(&definition.generated_key))
+        .map_err(|_| EncodedValidationError::invariant("generated class symbol disappeared"))?;
+    Ok(Some((
+        u32::try_from(class_index)
+            .map_err(|_| EncodedValidationError::resource("generated class ID exceeds u32"))?,
+        false,
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7799,6 +8646,142 @@ fn retain_edge(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_class_boolean_definitions<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    class_domain: &DecodedSymbolDomain,
+    signature: &[ClassSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
+    scope_maps: &[AnonymousScopeMap],
+    edges: &mut Vec<RawEdge>,
+    boolean_clauses: &mut Vec<RawBooleanClause>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    for definition in definitions {
+        budget.claim_work(binary_search_work(class_domain.values.len()))?;
+        let generated_index = class_domain
+            .values
+            .binary_search_by(|candidate| candidate.key.cmp(&definition.generated_key))
+            .map_err(|_| {
+                EncodedValidationError::invariant("generated definition symbol disappeared")
+            })?;
+        let generated = ClassLiteral {
+            class_id: u32::try_from(generated_index).map_err(|_| {
+                EncodedValidationError::resource("generated definition class ID exceeds u32")
+            })?,
+            negative: false,
+        };
+        let mut operands = Vec::new();
+        budget.claim_owned(
+            definition
+                .operands
+                .len()
+                .checked_mul(size_of::<ClassLiteral>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "generated definition literal allocation overflowed",
+                    )
+                })?,
+        )?;
+        operands
+            .try_reserve_exact(definition.operands.len())
+            .map_err(|_| {
+                EncodedValidationError::resource("generated definition literal allocation failed")
+            })?;
+        for selection in definition.operands.iter().copied() {
+            let (class_id, negative) = atomic_class_selection_literal(
+                model,
+                class_domain,
+                signature,
+                selection,
+                scope_maps,
+                budget,
+            )?;
+            operands.push(ClassLiteral { class_id, negative });
+        }
+        if operands.len() < 2 || definition.provenance.is_empty() {
+            return Err(EncodedValidationError::invariant(
+                "generated Boolean definition lost operands or provenance",
+            ));
+        }
+        for provenance in &definition.provenance {
+            match (definition.polarity, definition.intersection) {
+                (DefinitionPolarity::Positive, true) => {
+                    for operand in &operands {
+                        budget.claim_owned(size_of::<RawEdge>())?;
+                        edges.try_reserve(1).map_err(|_| {
+                            EncodedValidationError::resource(
+                                "generated intersection edge allocation failed",
+                            )
+                        })?;
+                        edges.push(RawEdge {
+                            sub_class: generated.class_id,
+                            sub_negative: false,
+                            super_class: operand.class_id,
+                            super_negative: operand.negative,
+                            provenance: *provenance,
+                            generated: true,
+                        });
+                    }
+                }
+                (DefinitionPolarity::Negative, false) => {
+                    for operand in &operands {
+                        budget.claim_owned(size_of::<RawEdge>())?;
+                        edges.try_reserve(1).map_err(|_| {
+                            EncodedValidationError::resource(
+                                "generated union edge allocation failed",
+                            )
+                        })?;
+                        edges.push(RawEdge {
+                            sub_class: operand.class_id,
+                            sub_negative: operand.negative,
+                            super_class: generated.class_id,
+                            super_negative: false,
+                            provenance: *provenance,
+                            generated: true,
+                        });
+                    }
+                }
+                (DefinitionPolarity::Positive, false) => push_raw_boolean_clause(
+                    boolean_clauses,
+                    vec![generated],
+                    operands.clone(),
+                    *provenance,
+                    budget,
+                )?,
+                (DefinitionPolarity::Negative, true) => push_raw_boolean_clause(
+                    boolean_clauses,
+                    operands.clone(),
+                    vec![generated],
+                    *provenance,
+                    budget,
+                )?,
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_raw_boolean_clause(
+    target: &mut Vec<RawBooleanClause>,
+    body: Vec<ClassLiteral>,
+    head: Vec<ClassLiteral>,
+    provenance: [u8; 32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    budget.claim_owned(size_of::<RawBooleanClause>())?;
+    target.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("generated Boolean clause allocation failed")
+    })?;
+    target.push(RawBooleanClause {
+        body,
+        head,
+        provenance,
+        generated: true,
+    });
+    Ok(())
+}
+
 fn normalize_edges(
     mut raw: Vec<RawEdge>,
     budget: &mut PhaseBudget,
@@ -7811,6 +8794,7 @@ fn normalize_edges(
             edge.super_class,
             edge.super_negative,
             edge.provenance,
+            edge.generated,
         )
     });
     let mut normalized = Vec::<NormalizedEdge>::new();
@@ -7822,6 +8806,7 @@ fn normalize_edges(
                 && previous.super_class == edge.super_class
                 && previous.super_negative == edge.super_negative
             {
+                previous.generated |= edge.generated;
                 if previous.provenance.last() != Some(&edge.provenance) {
                     budget.claim_owned(size_of::<[u8; 32]>())?;
                     previous.provenance.try_reserve(1).map_err(|_| {
@@ -7849,6 +8834,74 @@ fn normalize_edges(
             super_class: edge.super_class,
             super_negative: edge.super_negative,
             provenance,
+            generated: edge.generated,
+        });
+    }
+    Ok(normalized)
+}
+
+fn normalize_boolean_clauses(
+    mut raw: Vec<RawBooleanClause>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedBooleanClause>> {
+    for clause in &mut raw {
+        budget.claim_work(
+            sort_work(clause.body.len())
+                .checked_add(sort_work(clause.head.len()))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("generated Boolean sort work overflowed")
+                })?,
+        )?;
+        clause.body.sort_unstable();
+        clause.body.dedup();
+        clause.head.sort_unstable();
+        clause.head.dedup();
+        if clause.body.is_empty() || clause.head.is_empty() {
+            return Err(EncodedValidationError::invariant(
+                "generated Boolean clause lost one of its sides",
+            ));
+        }
+    }
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_by(|left, right| {
+        left.body
+            .cmp(&right.body)
+            .then_with(|| left.head.cmp(&right.head))
+            .then_with(|| left.provenance.cmp(&right.provenance))
+            .then_with(|| left.generated.cmp(&right.generated))
+    });
+    let mut normalized = Vec::<NormalizedBooleanClause>::new();
+    for clause in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.body == clause.body && previous.head == clause.head {
+                previous.generated |= clause.generated;
+                if previous.provenance.last() != Some(&clause.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "generated Boolean provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(clause.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedBooleanClause>() + size_of::<[u8; 32]>())?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("generated Boolean provenance allocation failed")
+        })?;
+        provenance.push(clause.provenance);
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("normalized Boolean clause allocation failed")
+        })?;
+        normalized.push(NormalizedBooleanClause {
+            body: clause.body,
+            head: clause.head,
+            provenance,
+            generated: clause.generated,
         });
     }
     Ok(normalized)
@@ -8451,6 +9504,7 @@ fn normalize_inequalities(
 #[allow(clippy::too_many_arguments)]
 fn freeze_provenance(
     edges: &[NormalizedEdge],
+    boolean_clauses: &[NormalizedBooleanClause],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
     object_characteristics: &[NormalizedObjectCharacteristic],
@@ -8483,7 +9537,17 @@ fn freeze_provenance(
             &mut keys,
             ProvenanceKey {
                 source_sha256: edge.provenance.clone(),
-                generated: false,
+                generated: edge.generated,
+            },
+            budget,
+        )?;
+    }
+    for clause in boolean_clauses {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: clause.provenance.clone(),
+                generated: clause.generated,
             },
             budget,
         )?;
@@ -8749,6 +9813,7 @@ fn nominal_binding(bindings: &[NominalBinding], class_id: u32) -> Option<&Nomina
 fn nominal_usage(
     bindings: &[NominalBinding],
     edges: &[NormalizedEdge],
+    boolean_clauses: &[NormalizedBooleanClause],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
     data_domains: &[NormalizedDataDomain],
@@ -8760,6 +9825,10 @@ fn nominal_usage(
     } else if edges.iter().any(|edge| {
         (edge.sub_negative && nominal_binding(bindings, edge.sub_class).is_some())
             || (edge.super_negative && nominal_binding(bindings, edge.super_class).is_some())
+    }) || boolean_clauses.iter().any(|clause| {
+        clause.body.iter().chain(&clause.head).any(|literal| {
+            literal.negative && nominal_binding(bindings, literal.class_id).is_some()
+        })
     }) || disjoints.iter().any(|disjoint| {
         disjoint.classes.iter().any(|literal| {
             literal.negative && nominal_binding(bindings, literal.class_id).is_some()
@@ -8804,6 +9873,7 @@ type FrozenPredicates = (
 fn freeze_predicates(
     nominal_bindings: &[NominalBinding],
     edges: &[NormalizedEdge],
+    boolean_clauses: &[NormalizedBooleanClause],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
     object_characteristics: &[NormalizedObjectCharacteristic],
@@ -8869,6 +9939,24 @@ fn freeze_predicates(
                 "negated predicate class",
                 budget,
             )?;
+        }
+    }
+    for clause in boolean_clauses {
+        for literal in clause.body.iter().chain(&clause.head) {
+            push_u32(
+                &mut class_ids,
+                literal.class_id,
+                "Boolean clause class",
+                budget,
+            )?;
+            if literal.negative {
+                push_u32(
+                    &mut negative_class_ids,
+                    literal.class_id,
+                    "negated Boolean clause class",
+                    budget,
+                )?;
+            }
         }
     }
     for disjoint in disjoints {
@@ -9725,6 +10813,7 @@ fn freeze_predicates(
 fn freeze_clauses(
     nominal_bindings: &[NominalBinding],
     edges: &[NormalizedEdge],
+    boolean_clauses: &[NormalizedBooleanClause],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
     object_characteristics: &[NormalizedObjectCharacteristic],
@@ -9768,6 +10857,21 @@ fn freeze_clauses(
             push_u32(
                 &mut negative_class_ids,
                 edge.super_class,
+                "complement clause class",
+                budget,
+            )?;
+        }
+    }
+    for clause in boolean_clauses {
+        for literal in clause
+            .body
+            .iter()
+            .chain(&clause.head)
+            .filter(|literal| literal.negative)
+        {
+            push_u32(
+                &mut negative_class_ids,
+                literal.class_id,
                 "complement clause class",
                 budget,
             )?;
@@ -9878,7 +10982,8 @@ fn freeze_clauses(
             })?;
     let mut following = edges
         .len()
-        .checked_add(1)
+        .checked_add(boolean_clauses.len())
+        .and_then(|value| value.checked_add(1))
         .and_then(|value| value.checked_add(object_constraints.len()))
         .and_then(|value| value.checked_add(object_characteristics.len()))
         .and_then(|value| value.checked_add(data_domains.len()))
@@ -10001,11 +11106,58 @@ fn freeze_clauses(
             edge.super_class,
             edge.super_negative,
         )?;
-        let provenance = provenance_id(provenance_keys, &edge.provenance, false)?;
+        let provenance = provenance_id(provenance_keys, &edge.provenance, edge.generated)?;
         push_clause(
             &mut ordered,
             &[body],
             &[head],
+            provenance,
+            scalar_predicate_ids,
+            budget,
+        )?;
+    }
+    for clause in boolean_clauses {
+        let mut body = Vec::new();
+        let mut head = Vec::new();
+        budget.claim_owned(
+            clause
+                .body
+                .len()
+                .checked_add(clause.head.len())
+                .and_then(|value| value.checked_mul(size_of::<u32>()))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "generated Boolean predicate allocation overflowed",
+                    )
+                })?,
+        )?;
+        body.try_reserve_exact(clause.body.len()).map_err(|_| {
+            EncodedValidationError::resource("generated Boolean body allocation failed")
+        })?;
+        head.try_reserve_exact(clause.head.len()).map_err(|_| {
+            EncodedValidationError::resource("generated Boolean head allocation failed")
+        })?;
+        for literal in &clause.body {
+            body.push(class_literal_predicate_id(
+                predicate_by_class,
+                predicate_by_negative_class,
+                literal.class_id,
+                literal.negative,
+            )?);
+        }
+        for literal in &clause.head {
+            head.push(class_literal_predicate_id(
+                predicate_by_class,
+                predicate_by_negative_class,
+                literal.class_id,
+                literal.negative,
+            )?);
+        }
+        let provenance = provenance_id(provenance_keys, &clause.provenance, clause.generated)?;
+        push_clause(
+            &mut ordered,
+            &body,
+            &head,
             provenance,
             scalar_predicate_ids,
             budget,
@@ -13086,7 +14238,7 @@ fn merge_named_class_phases_impl(
 
     let entity_domains = phases
         .iter()
-        .map(|(symbols, _)| &symbols.entity_domain)
+        .map(|(_, phase)| &phase.entity_domain)
         .collect::<Vec<_>>();
     let class_domains = phases
         .iter()
@@ -13205,10 +14357,9 @@ fn merge_named_class_phases_impl(
             ))
         },
     )?;
-    drop(entity_domain);
-
     let (
         edges,
+        boolean_clauses,
         disjoints,
         object_constraints,
         object_characteristics,
@@ -13242,6 +14393,7 @@ fn merge_named_class_phases_impl(
     let top_data_range = data_range_id_by_display(&data_range_domain, RDFS_LITERAL_DISPLAY)?;
     let (provenance, provenance_keys) = freeze_provenance(
         &edges,
+        &boolean_clauses,
         &disjoints,
         &object_constraints,
         &object_characteristics,
@@ -13279,6 +14431,7 @@ fn merge_named_class_phases_impl(
     ) = freeze_predicates(
         &nominal_bindings,
         &edges,
+        &boolean_clauses,
         &disjoints,
         &object_constraints,
         &object_characteristics,
@@ -13311,6 +14464,7 @@ fn merge_named_class_phases_impl(
     let clauses = freeze_clauses(
         &nominal_bindings,
         &edges,
+        &boolean_clauses,
         &disjoints,
         &object_constraints,
         &object_characteristics,
@@ -13360,6 +14514,7 @@ fn merge_named_class_phases_impl(
         nominal_usage(
             &nominal_bindings,
             &edges,
+            &boolean_clauses,
             &disjoints,
             &object_constraints,
             &data_domains,
@@ -13432,6 +14587,7 @@ fn merge_named_class_phases_impl(
         "compiled root count",
     )?;
     Ok(NamedClassPhase {
+        entity_domain,
         class_domain,
         class_signature,
         data_range_domain,
@@ -13452,6 +14608,7 @@ fn merge_named_class_phases_impl(
         compiled_root_digests,
         nominal_bindings,
         normalized_edges: edges,
+        normalized_boolean_clauses: boolean_clauses,
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
         normalized_object_characteristics: object_characteristics,
@@ -13719,8 +14876,8 @@ fn merge_class_signatures(
             .checked_mul(size_of::<Option<(u32, bool)>>())
             .ok_or_else(|| EncodedValidationError::resource("merged class signature overflowed"))?,
     )?;
-    for (phase_index, (symbols, phase)) in phases.iter().enumerate() {
-        let named_count = symbols
+    for (phase_index, (_, phase)) in phases.iter().enumerate() {
+        let named_count = phase
             .entity_domain
             .values
             .iter()
@@ -13742,7 +14899,7 @@ fn merge_class_signatures(
                         "merged class signature has a dangling local ID",
                     )
                 })?;
-            let entity = symbols
+            let entity = phase
                 .entity_domain
                 .values
                 .get(usize::try_from(binding.entity_id).unwrap_or(usize::MAX))
@@ -13997,6 +15154,7 @@ fn merge_nominal_bindings(
 
 type NormalizedSources = (
     Vec<NormalizedEdge>,
+    Vec<NormalizedBooleanClause>,
     Vec<NormalizedDisjoint>,
     Vec<NormalizedObjectConstraint>,
     Vec<NormalizedObjectCharacteristic>,
@@ -14029,6 +15187,7 @@ fn merge_normalized_sources(
     budget: &mut PhaseBudget,
 ) -> EncodedResult<NormalizedSources> {
     let mut raw_edges = Vec::new();
+    let mut raw_boolean_clauses = Vec::new();
     let mut raw_disjoints = Vec::new();
     let mut raw_object_constraints = Vec::new();
     let mut raw_object_characteristics = Vec::new();
@@ -14080,6 +15239,59 @@ fn merge_normalized_sources(
                     super_class,
                     super_negative: edge.super_negative,
                     provenance: *provenance,
+                    generated: edge.generated,
+                });
+            }
+        }
+        for clause in &phase.normalized_boolean_clauses {
+            if clause.provenance.is_empty() {
+                return Err(EncodedValidationError::invariant(
+                    "merged generated Boolean clause lost provenance",
+                ));
+            }
+            let mut body = Vec::new();
+            let mut head = Vec::new();
+            budget.claim_owned(
+                clause
+                    .body
+                    .len()
+                    .checked_add(clause.head.len())
+                    .and_then(|value| value.checked_mul(size_of::<ClassLiteral>()))
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "merged Boolean literal allocation overflowed",
+                        )
+                    })?,
+            )?;
+            body.try_reserve_exact(clause.body.len()).map_err(|_| {
+                EncodedValidationError::resource("merged Boolean body allocation failed")
+            })?;
+            head.try_reserve_exact(clause.head.len()).map_err(|_| {
+                EncodedValidationError::resource("merged Boolean head allocation failed")
+            })?;
+            for literal in &clause.body {
+                body.push(ClassLiteral {
+                    class_id: mapped_id(class_map, literal.class_id, "Boolean body class")?,
+                    negative: literal.negative,
+                });
+            }
+            for literal in &clause.head {
+                head.push(ClassLiteral {
+                    class_id: mapped_id(class_map, literal.class_id, "Boolean head class")?,
+                    negative: literal.negative,
+                });
+            }
+            for provenance in &clause.provenance {
+                budget.claim_work(1)?;
+                budget.claim_owned(size_of::<RawBooleanClause>())?;
+                raw_boolean_clauses.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource("merged Boolean clause allocation failed")
+                })?;
+                raw_boolean_clauses.push(RawBooleanClause {
+                    body: body.clone(),
+                    head: head.clone(),
+                    provenance: *provenance,
+                    generated: clause.generated,
                 });
             }
         }
@@ -14777,6 +15989,7 @@ fn merge_normalized_sources(
     }
     Ok((
         normalize_edges(raw_edges, budget)?,
+        normalize_boolean_clauses(raw_boolean_clauses, budget)?,
         normalize_disjoints(raw_disjoints, budget)?,
         normalize_object_constraints(raw_object_constraints, budget)?,
         normalize_object_characteristics(raw_object_characteristics, budget)?,

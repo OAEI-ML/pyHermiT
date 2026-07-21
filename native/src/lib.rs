@@ -537,6 +537,21 @@ fn borrowed_py_bytes<'a, 'py>(
     Ok(BorrowedPyBytes { view: buffer, len })
 }
 
+fn encoded_logical_fingerprint(value: &Bound<'_, PyAny>) -> NativeResult<[u8; 32]> {
+    let borrowed = borrowed_py_bytes(value, "logical fingerprint")?;
+    if borrowed.len != 32 {
+        return Err(encoded_slice_invalid(
+            "encoded logical fingerprint must contain exactly 32 bytes",
+        ));
+    }
+    let mut fingerprint = [0_u8; 32];
+    for (index, byte) in fingerprint.iter_mut().enumerate() {
+        *byte = encoded::ByteSource::byte(borrowed, index)
+            .ok_or_else(|| encoded_slice_invalid("encoded logical fingerprint byte disappeared"))?;
+    }
+    Ok(fingerprint)
+}
+
 fn encoded_validation_error(error: encoded::EncodedValidationError) -> NativeError {
     let kind = match error.code {
         "NATIVE_ENCODED_VIEW_INVALID" => ErrorKind::Wire,
@@ -1107,6 +1122,13 @@ struct EncodedSliceProgram {
 }
 
 fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<EncodedSliceProgram> {
+    compile_encoded_slice_program_with_namespace(slices, None)
+}
+
+fn compile_encoded_slice_program_with_namespace(
+    slices: &Bound<'_, PyAny>,
+    definition_namespace: Option<[u8; 32]>,
+) -> NativeResult<EncodedSliceProgram> {
     if !slices.is_exact_instance_of::<PyTuple>() {
         return Err(encoded_slice_invalid(
             "encoded slice program is not an exact tuple",
@@ -1589,18 +1611,30 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
                 })?,
             ..limits
         };
-        let named = encoded::named_classes::compile_named_class_phase_with_role_domains_scoped(
-            &model,
-            &symbols,
-            &object_roles,
-            &data_roles,
-            if has_named_axiom_provenance {
-                &scope_maps
-            } else {
-                &[]
-            },
-            named_limits,
-        )
+        let named_scope_maps = if has_named_axiom_provenance {
+            scope_maps.as_slice()
+        } else {
+            &[]
+        };
+        let named = match definition_namespace {
+            Some(namespace) => encoded::named_classes::compile_named_class_phase_with_role_domains_scoped_and_namespace(
+                &model,
+                &symbols,
+                &object_roles,
+                &data_roles,
+                named_scope_maps,
+                namespace,
+                named_limits,
+            ),
+            None => encoded::named_classes::compile_named_class_phase_with_role_domains_scoped(
+                &model,
+                &symbols,
+                &object_roles,
+                &data_roles,
+                named_scope_maps,
+                named_limits,
+            ),
+        }
         .map_err(encoded_validation_error)?;
         drop(scope_maps);
         source_work = after_role_characteristic_work
@@ -2144,13 +2178,17 @@ fn validate_encoded_slices_v1(py: Python<'_>, slices: &Bound<'_, PyAny>) -> PyRe
 }
 
 #[pyfunction(name = "_encoded_named_class_slices_manifest_v1")]
-#[pyo3(signature = (*, slices))]
+#[pyo3(signature = (*, slices, logical_fingerprint=None))]
 fn encoded_named_class_slices_manifest_v1(
     py: Python<'_>,
     slices: &Bound<'_, PyAny>,
+    logical_fingerprint: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Vec<u8>> {
     contain_encoded_selection(py, || {
-        compile_encoded_slice_program(slices)?
+        let namespace = logical_fingerprint
+            .map(encoded_logical_fingerprint)
+            .transpose()?;
+        compile_encoded_slice_program_with_namespace(slices, namespace)?
             .named_classes
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
@@ -3324,10 +3362,11 @@ fn encoded_object_role_accepts_v1(
 }
 
 #[pyfunction(name = "_encoded_named_class_manifest_v1")]
-#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
+#[pyo3(signature = (*, logical_fingerprint, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes))]
 #[allow(clippy::too_many_arguments)]
 fn encoded_named_class_manifest_v1(
     py: Python<'_>,
+    logical_fingerprint: &Bound<'_, PyAny>,
     root_kinds: &Bound<'_, PyAny>,
     root_ids: &Bound<'_, PyAny>,
     node_tags: &Bound<'_, PyAny>,
@@ -3341,6 +3380,7 @@ fn encoded_named_class_manifest_v1(
     scalar_bytes: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<u8>> {
     let result = catch_unwind(AssertUnwindSafe(|| {
+        let definition_namespace = encoded_logical_fingerprint(logical_fingerprint)?;
         let columns = borrowed_encoded_columns(
             root_kinds,
             root_ids,
@@ -3371,12 +3411,13 @@ fn encoded_named_class_manifest_v1(
             encoded::data_roles::DataRolePhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;
-        let phase = encoded::named_classes::compile_named_class_phase_with_role_domains_scoped(
+        let phase = encoded::named_classes::compile_named_class_phase_with_role_domains_scoped_and_namespace(
             &model,
             &symbols,
             &object_roles,
             &data_roles,
             &[],
+            definition_namespace,
             encoded::named_classes::NamedClassPhaseLimits::default(),
         )
         .map_err(encoded_validation_error)?;

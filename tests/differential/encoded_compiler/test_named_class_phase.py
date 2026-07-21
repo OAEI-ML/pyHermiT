@@ -50,6 +50,7 @@ def functional(*body: str) -> bytes:
 def _native_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
     buffers = produce_encoded_structural_view_v1(snapshot).buffers
     encoded = native._encoded_named_class_manifest_v1(
+        logical_fingerprint=memoryview(snapshot.logical_fingerprint.digest),
         root_kinds=buffers["root_kinds"],
         root_ids=buffers["root_ids"],
         node_tags=buffers["node_tags"],
@@ -93,8 +94,16 @@ def _slice_record(
     )
 
 
-def _native_slices_manifest(*records: tuple[object, ...]) -> dict[str, object]:
-    encoded = native._encoded_named_class_slices_manifest_v1(slices=records)
+def _native_slices_manifest(
+    *records: tuple[object, ...],
+    logical_fingerprint: bytes | None = None,
+) -> dict[str, object]:
+    encoded = native._encoded_named_class_slices_manifest_v1(
+        slices=records,
+        logical_fingerprint=(
+            None if logical_fingerprint is None else memoryview(logical_fingerprint)
+        ),
+    )
     return cast(dict[str, object], json.loads(encoded))
 
 
@@ -1632,6 +1641,108 @@ def test_absorbing_booleans_validate_every_operand_before_publication() -> None:
     assert all(
         predicate["kind"] != PredicateKind.DATA_ROLE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_flat_boolean_subclass_definitions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A ObjectIntersectionOf(:B :C))",
+            'SubClassOf(Annotation(:note "same definition") :A '
+            "ObjectIntersectionOf(:B :C))",
+            "SubClassOf(ObjectIntersectionOf(ObjectComplementOf(:A) :B) :C)",
+            "SubClassOf(:A ObjectUnionOf(ObjectComplementOf(:B) :C))",
+            "SubClassOf(ObjectUnionOf(ObjectOneOf(:i) :B) :C)",
+            "SubClassOf(ObjectIntersectionOf(:A :B) ObjectUnionOf(:C :D))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=6)
+    generated = [
+        value
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ]
+    assert len(generated) == 6
+    namespace = f":class:{snapshot.logical_fingerprint.hex}:"
+    assert all(namespace in str(value["display"]) for value in generated)
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_generated_class_entity_remapping_matches_scalar_exactly() -> None:
+    long_iri = "<urn:test:long:" + ("z" * 240) + ">"
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            f"Declaration(Class({long_iri}))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(NamedIndividual(:i))",
+            f"ClassAssertion({long_iri} :i)",
+            f"SubClassOf({long_iri} ObjectIntersectionOf(:B :C))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=2)
+    assert any(
+        value["generated"]
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_boolean_definitions_use_the_global_logical_namespace() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(Class(:D))",
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "SubClassOf(:A ObjectIntersectionOf(:B :C))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "SubClassOf(ObjectUnionOf(:A :B) :D)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(composite, compiled_roots=2)
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert all(
+        namespace in str(value["display"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
     )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
@@ -4669,10 +4780,11 @@ def test_hostile_class_kind_rolls_back_and_valid_retry_is_byte_exact() -> None:
     )
     encoded = produce_encoded_structural_view_v1(snapshot)
     buffers = dict(encoded.buffers)
+    buffers["logical_fingerprint"] = memoryview(snapshot.logical_fingerprint.digest)
     baseline = native._encoded_named_class_manifest_v1(**buffers)
     scalar_bytes = bytes(buffers["scalar_bytes"])
     assert b"class" in scalar_bytes
-    hostile = dict(buffers)
+    hostile = dict(encoded.buffers)
     hostile["scalar_bytes"] = memoryview(scalar_bytes.replace(b"class", b"xxxxx", 1))
 
     with pytest.raises(BackendMismatchError) as caught:
@@ -4682,6 +4794,40 @@ def test_hostile_class_kind_rolls_back_and_valid_retry_is_byte_exact() -> None:
     # No partially compiled domain, predicate, clause, or provenance table is
     # retained across the failed transaction.
     assert native._encoded_named_class_manifest_v1(**buffers) == baseline
+
+
+def test_generated_definition_namespace_rejects_malformed_fingerprints() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "SubClassOf(:A ObjectIntersectionOf(:B :C))",
+        ),
+        options=OPTIONS,
+    )
+    buffers = dict(produce_encoded_structural_view_v1(snapshot).buffers)
+    valid = {
+        **buffers,
+        "logical_fingerprint": memoryview(snapshot.logical_fingerprint.digest),
+    }
+    baseline = native._encoded_named_class_manifest_v1(**valid)
+
+    with pytest.raises(BackendMismatchError) as caught:
+        native._encoded_named_class_manifest_v1(
+            **buffers,
+            logical_fingerprint=memoryview(b"x" * 31),
+        )
+    assert caught.value.code == "NATIVE_ENCODED_VIEW_INVALID"
+
+    with pytest.raises(BackendMismatchError) as caught:
+        native._encoded_named_class_manifest_v1(
+            **buffers,
+            logical_fingerprint=memoryview(bytearray(32)),
+        )
+    assert caught.value.code == "NATIVE_ENCODED_VIEW_INVALID"
+
+    assert native._encoded_named_class_manifest_v1(**valid) == baseline
 
 
 def test_hostile_individual_kind_rolls_back_and_valid_retry_is_byte_exact() -> None:
@@ -4695,10 +4841,11 @@ def test_hostile_individual_kind_rolls_back_and_valid_retry_is_byte_exact() -> N
     )
     encoded = produce_encoded_structural_view_v1(snapshot)
     buffers = dict(encoded.buffers)
+    buffers["logical_fingerprint"] = memoryview(snapshot.logical_fingerprint.digest)
     baseline = native._encoded_named_class_manifest_v1(**buffers)
     scalar_bytes = bytes(buffers["scalar_bytes"])
     assert b"named_individual" in scalar_bytes
-    hostile = dict(buffers)
+    hostile = dict(encoded.buffers)
     hostile["scalar_bytes"] = memoryview(
         scalar_bytes.replace(b"named_individual", b"xxxxxxxxxxxxxxxx", 1)
     )
