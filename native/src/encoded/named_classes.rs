@@ -46,6 +46,8 @@ const ENTITY_TAG: u16 = 2;
 const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
 const LITERAL_TAG: u16 = 4;
 const DATA_COMPLEMENT_OF_TAG: u16 = 23;
+const DATA_ONE_OF_TAG: u16 = 24;
+const DATATYPE_RESTRICTION_TAG: u16 = 25;
 const OBJECT_COMPLEMENT_OF_TAG: u16 = 32;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
@@ -2380,7 +2382,7 @@ fn named_data_range_domain<B: ByteSource>(
         });
     }
 
-    let mut complements = Vec::new();
+    let mut expressions = Vec::new();
     for root in &symbols.roots {
         budget.claim_work(1)?;
         let range = match root.handler {
@@ -2395,18 +2397,28 @@ fn named_data_range_domain<B: ByteSource>(
             }
             _ => continue,
         };
-        if atomic_data_complement_operand(model, symbols, range)?.is_some() {
+        let Some((base, negative)) = atomic_data_range_base(model, symbols, range)? else {
+            continue;
+        };
+        if model.node(base)?.tag() != ENTITY_TAG {
             budget.claim_owned(size_of::<NodeId>())?;
-            complements.try_reserve(1).map_err(|_| {
-                EncodedValidationError::resource("data-complement selection allocation failed")
+            expressions.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource("data-range selection allocation failed")
             })?;
-            complements.push(range);
+            expressions.push(base);
+        }
+        if negative {
+            budget.claim_owned(size_of::<NodeId>())?;
+            expressions.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource("data-range selection allocation failed")
+            })?;
+            expressions.push(range);
         }
     }
-    budget.claim_work(sort_work(complements.len()))?;
-    complements.sort_unstable();
-    complements.dedup();
-    for identifier in complements {
+    budget.claim_work(sort_work(expressions.len()))?;
+    expressions.sort_unstable();
+    expressions.dedup();
+    for identifier in expressions {
         let following = pending.len().checked_add(1).ok_or_else(|| {
             EncodedValidationError::resource("data-range symbol count overflowed")
         })?;
@@ -2418,23 +2430,21 @@ fn named_data_range_domain<B: ByteSource>(
         let key = canonical::canonical_node_key(model, identifier, scope_maps, budget)?;
         budget.claim_work(key.len())?;
         let digest = crate::model::hex(&Sha256::digest(&key));
-        let display_len = "DataComplementOf:"
-            .len()
-            .checked_add(digest.len())
-            .ok_or_else(|| {
-                EncodedValidationError::resource("data-complement display length overflowed")
-            })?;
+        let prefix = data_range_expression_prefix(model.node(identifier)?.tag())?;
+        let display_len = prefix.len().checked_add(digest.len()).ok_or_else(|| {
+            EncodedValidationError::resource("data-range display length overflowed")
+        })?;
         budget.claim_owned(size_of::<DecodedSymbolValue>())?;
         budget.claim_owned(display_len)?;
         let mut display = String::new();
         display.try_reserve_exact(display_len).map_err(|_| {
-            EncodedValidationError::resource("data-complement display allocation failed")
+            EncodedValidationError::resource("data-range display allocation failed")
         })?;
-        display.push_str("DataComplementOf:");
+        display.push_str(prefix);
         display.push_str(&digest);
-        pending.try_reserve(1).map_err(|_| {
-            EncodedValidationError::resource("data-complement symbol allocation failed")
-        })?;
+        pending
+            .try_reserve(1)
+            .map_err(|_| EncodedValidationError::resource("data-range symbol allocation failed"))?;
         pending.push(DecodedSymbolValue {
             identifier: 0,
             key,
@@ -2474,35 +2484,60 @@ fn named_data_range_domain<B: ByteSource>(
     })
 }
 
-fn atomic_data_complement_operand<B: ByteSource>(
+fn data_range_expression_prefix(tag: u16) -> EncodedResult<&'static str> {
+    match tag {
+        DATA_COMPLEMENT_OF_TAG => Ok("DataComplementOf:"),
+        DATA_ONE_OF_TAG => Ok("DataOneOf:"),
+        DATATYPE_RESTRICTION_TAG => Ok("DatatypeRestriction:"),
+        _ => Err(EncodedValidationError::invariant(
+            "selected data-range expression has an unsupported constructor",
+        )),
+    }
+}
+
+fn atomic_data_range_base<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     identifier: NodeId,
-) -> EncodedResult<Option<u32>> {
+) -> EncodedResult<Option<(NodeId, bool)>> {
     let node = model.node(identifier)?;
-    if node.tag() != DATA_COMPLEMENT_OF_TAG || node.field_count() != 1 {
-        return Ok(None);
+    let (base, negative) = if node.tag() == DATA_COMPLEMENT_OF_TAG {
+        if node.field_count() != 1 {
+            return Err(EncodedValidationError::invariant(
+                "data complement no longer has schema-1 shape",
+            ));
+        }
+        (node_field(model, node, 0, "data-complement operand")?, true)
+    } else {
+        (identifier, false)
+    };
+    let base_node = model.node(base)?;
+    match base_node.tag() {
+        ENTITY_TAG => {
+            let entity_id = symbols.entity_symbol_for_node(base).ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "atomic data-range entity is absent from the reachable entity mapping",
+                )
+            })?;
+            let entity = symbols
+                .entity_domain
+                .values
+                .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant("atomic data-range entity ID is dangling")
+                })?;
+            Ok(entity
+                .display
+                .starts_with("datatype:")
+                .then_some((base, negative)))
+        }
+        DATA_ONE_OF_TAG if base_node.field_count() == 1 => Ok(Some((base, negative))),
+        DATATYPE_RESTRICTION_TAG if base_node.field_count() == 2 => Ok(Some((base, negative))),
+        DATA_ONE_OF_TAG | DATATYPE_RESTRICTION_TAG => Err(EncodedValidationError::invariant(
+            "atomic data-range expression no longer has schema-1 shape",
+        )),
+        _ => Ok(None),
     }
-    let operand = node_field(model, node, 0, "data-complement operand")?;
-    if model.node(operand)?.tag() != ENTITY_TAG {
-        return Ok(None);
-    }
-    let entity_id = symbols.entity_symbol_for_node(operand).ok_or_else(|| {
-        EncodedValidationError::invariant(
-            "data-complement operand is absent from the reachable entity mapping",
-        )
-    })?;
-    let entity = symbols
-        .entity_domain
-        .values
-        .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
-        .ok_or_else(|| {
-            EncodedValidationError::invariant("data-complement operand entity ID is dangling")
-        })?;
-    Ok(
-        (entity.display.starts_with("datatype:") && entity.display != RDFS_LITERAL_DISPLAY)
-            .then_some(entity_id),
-    )
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -5042,8 +5077,14 @@ fn named_data_range<B: ByteSource>(
     let property = node_field(model, node, 0, "data-property range role")?;
     let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
     let range_node = node_field(model, node, 1, "data-property range value")?;
-    let Some(range) =
-        atomic_data_range_literal(model, symbols, data_range_domain, range_node, budget)?
+    let Some(range) = atomic_data_range_literal(
+        model,
+        symbols,
+        data_range_domain,
+        range_node,
+        scope_maps,
+        budget,
+    )?
     else {
         return Ok(None);
     };
@@ -5060,32 +5101,34 @@ fn atomic_data_range_literal<B: ByteSource>(
     symbols: &SymbolPhase,
     data_range_domain: &DecodedSymbolDomain,
     range: NodeId,
+    scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<DataRangeLiteral>> {
-    if model.node(range)?.tag() == ENTITY_TAG {
-        return named_data_range_id(model, symbols, data_range_domain, range, budget).map(
-            |value| {
-                value.map(|range_id| DataRangeLiteral {
-                    range_id,
-                    negative: false,
-                })
-            },
-        );
-    }
-    if atomic_data_complement_operand(model, symbols, range)?.is_none() {
+    let Some((base, negative)) = atomic_data_range_base(model, symbols, range)? else {
         return Ok(None);
-    }
-    let operand = node_field(model, model.node(range)?, 0, "data-complement operand")?;
-    let range_id = named_data_range_id(model, symbols, data_range_domain, operand, budget)?
-        .ok_or_else(|| {
+    };
+    let range_id = if model.node(base)?.tag() == ENTITY_TAG {
+        named_data_range_id(model, symbols, data_range_domain, base, budget)?.ok_or_else(|| {
             EncodedValidationError::invariant(
-                "data-complement operand is absent from the named data-range domain",
+                "atomic datatype is absent from the named data-range domain",
             )
-        })?;
-    Ok(Some(DataRangeLiteral {
-        range_id,
-        negative: true,
-    }))
+        })?
+    } else {
+        let key = canonical::canonical_node_key(model, base, scope_maps, budget)?;
+        budget.claim_work(binary_search_work(data_range_domain.values.len()))?;
+        let index = data_range_domain
+            .values
+            .binary_search_by(|value| value.key.cmp(&key))
+            .map_err(|_| {
+                EncodedValidationError::invariant(
+                    "atomic expression is absent from the data-range domain",
+                )
+            })?;
+        u32::try_from(index).map_err(|_| {
+            EncodedValidationError::resource("atomic data-range symbol ID exceeds u32")
+        })?
+    };
+    Ok(Some(DataRangeLiteral { range_id, negative }))
 }
 
 fn named_data_range_id<B: ByteSource>(
@@ -5158,8 +5201,14 @@ fn named_datatype_definition<B: ByteSource>(
         negative: false,
     };
     let data_range = node_field(model, node, 1, "datatype defining range")?;
-    let Some(right_range) =
-        atomic_data_range_literal(model, symbols, data_range_domain, data_range, budget)?
+    let Some(right_range) = atomic_data_range_literal(
+        model,
+        symbols,
+        data_range_domain,
+        data_range,
+        scope_maps,
+        budget,
+    )?
     else {
         return Ok(None);
     };

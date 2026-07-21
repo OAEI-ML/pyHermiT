@@ -256,7 +256,14 @@ def _expected_manifest(
     retained_data_ranges = [
         value
         for value in data_range_domain.values
-        if value.display.startswith(("datatype:", "DataComplementOf:"))
+        if value.display.startswith(
+            (
+                "datatype:",
+                "DataComplementOf:",
+                "DataOneOf:",
+                "DatatypeRestriction:",
+            )
+        )
     ]
     data_range_remap = {
         value.identifier: identifier
@@ -1625,6 +1632,92 @@ def test_atomic_data_complement_ranges_and_definitions_match_scalar_exactly() ->
         predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 2
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_enumerated_and_restricted_data_literals_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(Datatype(:D))",
+            "Declaration(Datatype(:E))",
+            "Declaration(AnnotationProperty(:note))",
+            'DataPropertyRange(:p DataOneOf("alpha" "beta"))',
+            'DataPropertyRange(Annotation(:note "duplicate") :p '
+            'DataOneOf("alpha" "beta"))',
+            "DataPropertyRange(:q DatatypeRestriction(xsd:integer "
+            'xsd:minInclusive "1"^^xsd:integer '
+            'xsd:maxInclusive "5"^^xsd:integer))',
+            'DatatypeDefinition(:D DataOneOf("alpha" "beta"))',
+            "DatatypeDefinition(:E DatatypeRestriction(xsd:integer "
+            'xsd:minInclusive "1"^^xsd:integer '
+            'xsd:maxInclusive "5"^^xsd:integer))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=5,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
+    )
+    data_range_symbols = cast(
+        list[dict[str, object]], manifest["data_range_symbols"]
+    )
+    assert sum(
+        str(value["display"]).startswith("DataOneOf:")
+        for value in data_range_symbols
+    ) == 1
+    assert sum(
+        str(value["display"]).startswith("DatatypeRestriction:")
+        for value in data_range_symbols
+    ) == 1
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_complemented_enumerated_restricted_and_bottom_ranges_match_scalar() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "Declaration(DataProperty(:r))",
+            "Declaration(Datatype(:D))",
+            "Declaration(Datatype(:E))",
+            'DataPropertyRange(:p DataComplementOf(DataOneOf("alpha" "beta")))',
+            "DataPropertyRange(:q DataComplementOf(DatatypeRestriction(xsd:integer "
+            'xsd:minInclusive "1"^^xsd:integer)))',
+            "DataPropertyRange(:r DataComplementOf("
+            "<http://www.w3.org/2000/01/rdf-schema#Literal>))",
+            'DatatypeDefinition(:D DataComplementOf(DataOneOf("alpha" "beta")))',
+            "DatatypeDefinition(:E DataComplementOf(DatatypeRestriction(xsd:integer "
+            'xsd:minInclusive "1"^^xsd:integer)))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=5,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
+    )
+    data_range_symbols = cast(
+        list[dict[str, object]], manifest["data_range_symbols"]
+    )
+    assert sum(
+        str(value["display"]).startswith("DataComplementOf:")
+        for value in data_range_symbols
+    ) == 3
+    assert sum(
+        predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    ) == 3
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
@@ -3071,6 +3164,42 @@ def test_composite_atomic_data_complements_remap_exactly() -> None:
             "Declaration(Datatype(:A))",
             "DataPropertyRange(:a DataComplementOf(xsd:integer))",
             "DatatypeDefinition(:A DataComplementOf(xsd:integer))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_enumerated_and_restricted_data_literals_remap_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:z))",
+            "Declaration(Datatype(:Z))",
+            'DataPropertyRange(:z DataOneOf("z"))',
+            "DatatypeDefinition(:Z DataComplementOf("
+            "DatatypeRestriction(xsd:integer "
+            'xsd:minInclusive "10"^^xsd:integer)))',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:a))",
+            "Declaration(Datatype(:A))",
+            'DataPropertyRange(:a DataComplementOf(DataOneOf("a")))',
+            "DatatypeDefinition(:A DatatypeRestriction(xsd:integer "
+            'xsd:maxInclusive "5"^^xsd:integer))',
         ),
         options=OPTIONS,
     )
