@@ -610,6 +610,7 @@ def _expected_manifest(
                 "declared": entity_id_by_key[value.key_hex] in declared_individual_ids,
             }
             for value in individual_domain.values
+            if value.key_hex in entity_id_by_key
         ],
         "named_individuals": list(ontology.named_individuals),
         "predicates": predicates,
@@ -2256,16 +2257,94 @@ def test_composite_negative_object_assertions_remap_local_roles_and_individuals_
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-@pytest.mark.parametrize(
-    "constructor",
-    ["ObjectPropertyAssertion", "NegativeObjectPropertyAssertion"],
-)
-def test_anonymous_object_assertion_operand_defers_the_whole_root(constructor: str) -> None:
+def test_anonymous_object_assertion_operands_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(ObjectProperty(:p))",
             "Declaration(NamedIndividual(:i))",
-            f"{constructor}(:p :i _:anonymous)",
+            "ObjectPropertyAssertion(:p :i _:anonymous)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=1,
+        include_object_assertions=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert manifest["named_individuals"] == [0]
+    assert len(cast(list[object], manifest["individual_symbols"])) == 2
+    assert len(cast(list[object], manifest["individual_signature"])) == 1
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_anonymous_class_and_data_assertions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:link))",
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:root))",
+            "ObjectPropertyAssertion(:link :root _:anonymous)",
+            "ClassAssertion(:A _:anonymous)",
+            'DataPropertyAssertion(:p _:anonymous "value")',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=3,
+        include_object_assertions=True,
+        include_data_assertions=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert manifest["named_individuals"] == [0]
+    assert len(cast(list[object], manifest["individual_signature"])) == 1
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_anonymous_assertion_operands_remap_scopes_exactly() -> None:
+    source = functional(
+        "Declaration(ObjectProperty(:p))",
+        "ObjectPropertyAssertion(:p _:source _:target)",
+    )
+    left = pyowl_core.load_snapshot(source, options=OPTIONS)
+    right = pyowl_core.load_snapshot(source, options=OPTIONS)
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_object_assertions=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert manifest["named_individuals"] == []
+    assert len(cast(list[object], manifest["individual_symbols"])) == 4
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+@pytest.mark.parametrize(
+    "axiom",
+    [
+        "NegativeObjectPropertyAssertion(:p :i _:anonymous)",
+        'NegativeDataPropertyAssertion(:d _:anonymous "value")',
+    ],
+)
+def test_forbidden_anonymous_negative_assertions_defer_atomically(axiom: str) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:i))",
+            axiom,
         ),
         options=OPTIONS,
     )
@@ -2275,11 +2354,9 @@ def test_anonymous_object_assertion_operand_defers_the_whole_root(constructor: s
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 1
     assert manifest["named_individuals"] == [0]
-    assert all(
-        predicate["kind"] != PredicateKind.OBJECT_ROLE.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
-    )
+    assert len(cast(list[object], manifest["individual_symbols"])) == 1
     assert len(cast(list[dict[str, object]], manifest["positive_facts"])) == 2
+    assert manifest["negative_facts"] == []
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

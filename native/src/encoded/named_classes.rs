@@ -1,9 +1,9 @@
 //! Transactional named-class, named-individual, and axiom compilation.
 //!
 //! This phase owns a scalar-compatible `class_expression` symbol domain and
-//! a scalar-compatible named `individual` domain and the exact semantic
-//! `source_literal` domain plus scalar-compatible string, Boolean, and exact numeric
-//! `data_value` identities needed by later datatype/ABox phases. It compiles named-only
+//! a scalar-compatible named-and-anonymous `individual` domain and the exact
+//! semantic `source_literal` domain plus scalar-compatible string, Boolean, and
+//! exact numeric `data_value` identities needed by later datatype/ABox phases. It compiles
 //! `SubClassOf`, `EquivalentClasses`, `DisjointClasses`, `ClassAssertion`,
 //! `SameIndividual`, `DifferentIndividuals`, named object-property domains,
 //! ranges, assertions, functionality, inverse functionality, and reflexivity,
@@ -42,6 +42,7 @@ use crate::input_wire::{
 
 const NAMED_CLASS_PHASE_SCHEMA_VERSION: u16 = 1;
 const ENTITY_TAG: u16 = 2;
+const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
 const LITERAL_TAG: u16 = 4;
 const SUBCLASS_TAG: u16 = 61;
 const EQUIVALENT_CLASSES_TAG: u16 = 62;
@@ -68,6 +69,8 @@ const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
 const DISJOINT_GUARD_DOMAIN: &[u8] = b"pyhermit:linear-disjoint-classes:v1\0";
 const THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
 const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
+const NAMED_INDIVIDUAL_PREFIX: &str = "named_individual:";
+const ANONYMOUS_INDIVIDUAL_PREFIX: &str = "anonymous:";
 const OBJECT_PROPERTY_PREFIX: &str = "object_property:";
 const DATA_PROPERTY_PREFIX: &str = "data_property:";
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
@@ -719,6 +722,12 @@ struct NamedDisjointOutput {
     provenance: [u8; 32],
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingIndividualSymbol {
+    value: DecodedSymbolValue,
+    entity: Option<(u32, bool)>,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ProvenanceKey {
     source_sha256: Vec<[u8; 32]>,
@@ -872,14 +881,20 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         class_signature(symbols, &declared_class_ids, &mut budget)?;
     let data_range_domain = named_data_range_domain(symbols, &mut budget)?;
     let declared_individual_ids = declared_individual_ids(symbols, &mut budget)?;
-    let (individual_domain, individual_signature) =
-        individual_signature(symbols, &declared_individual_ids, &mut budget)?;
+    let (individual_domain, individual_signature) = individual_signature(
+        model,
+        symbols,
+        &declared_individual_ids,
+        object_roles.is_some(),
+        data_roles.is_some(),
+        scope_maps,
+        &mut budget,
+    )?;
     let (source_literal_domain, data_value_domain, source_data_identity_ids) =
         literal_symbol_domains(model, symbols, &mut budget)?;
     let mut named_individuals = Vec::new();
     budget.claim_owned(
-        individual_domain
-            .values
+        individual_signature
             .len()
             .checked_mul(size_of::<u32>())
             .ok_or_else(|| {
@@ -887,15 +902,14 @@ fn compile_named_class_phase_impl<B: ByteSource>(
             })?,
     )?;
     named_individuals
-        .try_reserve_exact(individual_domain.values.len())
+        .try_reserve_exact(individual_signature.len())
         .map_err(|_| {
             EncodedValidationError::resource("named-individual ID output allocation failed")
         })?;
     named_individuals.extend(
-        individual_domain
-            .values
+        individual_signature
             .iter()
-            .map(|value| value.identifier),
+            .map(|binding| binding.individual_id),
     );
     let thing = class_id_by_display(&class_domain, THING_DISPLAY)?;
     let nothing = class_id_by_display(&class_domain, NOTHING_DISPLAY)?;
@@ -1408,6 +1422,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     model,
                     symbols,
                     &class_signature,
+                    &individual_domain,
                     &individual_signature,
                     root.node,
                     scope_maps,
@@ -1450,6 +1465,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     model,
                     symbols,
                     object_roles,
+                    &individual_domain,
                     &individual_signature,
                     root.node,
                     OBJECT_PROPERTY_ASSERTION_TAG,
@@ -1493,6 +1509,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     model,
                     symbols,
                     object_roles,
+                    &individual_domain,
                     &individual_signature,
                     root.node,
                     NEGATIVE_OBJECT_PROPERTY_ASSERTION_TAG,
@@ -1536,6 +1553,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     model,
                     symbols,
                     data_roles,
+                    &individual_domain,
                     &individual_signature,
                     &source_literal_domain,
                     &source_data_identity_ids,
@@ -1581,6 +1599,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     model,
                     symbols,
                     data_roles,
+                    &individual_domain,
                     &individual_signature,
                     &source_literal_domain,
                     &source_data_identity_ids,
@@ -1707,6 +1726,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         thing,
         nothing,
         !individual_domain.values.is_empty(),
+        !named_individuals.is_empty(),
         &mut budget,
     )?;
     let scalar_predicate_ids = scalar_predicate_ids(
@@ -1756,6 +1776,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &source_literal_domain,
         &data_value_domain,
         &source_data_identity_ids,
+        &named_individuals,
         named_predicate,
         equality_predicate,
         object_characteristics
@@ -3787,53 +3808,155 @@ fn declared_individual_ids(
     Ok(identifiers)
 }
 
-fn individual_signature(
+fn individual_signature<B: ByteSource>(
+    model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     declared_individual_ids: &[u32],
+    include_object_assertions: bool,
+    include_data_assertions: bool,
+    scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(DecodedSymbolDomain, Vec<IndividualSignatureBinding>)> {
-    let mut values = Vec::new();
-    let mut bindings = Vec::new();
+    let mut pending = Vec::<PendingIndividualSymbol>::new();
     for entity in &symbols.entity_domain.values {
         budget.claim_work(1)?;
-        if !entity.display.starts_with("named_individual:") {
+        if !entity.display.starts_with(NAMED_INDIVIDUAL_PREFIX) {
             continue;
         }
-        let following = values.len().checked_add(1).ok_or_else(|| {
-            EncodedValidationError::resource("named-individual symbol count overflowed")
+        let following = pending.len().checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("individual symbol count overflowed")
         })?;
         PhaseBudget::count(
             following,
             budget.limits.max_individual_symbols,
             "individual symbol count",
         )?;
+        budget.claim_owned(size_of::<PendingIndividualSymbol>())?;
         budget.claim_owned(size_of::<DecodedSymbolValue>())?;
-        budget.claim_owned(size_of::<IndividualSignatureBinding>())?;
         budget.claim_owned(entity.key.len())?;
         budget.claim_owned(entity.display.len())?;
-        values.try_reserve(1).map_err(|_| {
-            EncodedValidationError::resource("named-individual symbol allocation failed")
-        })?;
-        bindings.try_reserve(1).map_err(|_| {
-            EncodedValidationError::resource("named-individual signature allocation failed")
-        })?;
-        let individual_id = u32::try_from(values.len()).map_err(|_| {
-            EncodedValidationError::resource("named-individual symbol ID exceeds u32")
-        })?;
-        values.push(DecodedSymbolValue {
-            identifier: individual_id,
-            key: entity.key.clone(),
-            display: entity.display.clone(),
-            generated: entity.generated,
-            query_local: entity.query_local,
+        pending
+            .try_reserve(1)
+            .map_err(|_| EncodedValidationError::resource("individual symbol allocation failed"))?;
+        pending.push(PendingIndividualSymbol {
+            value: DecodedSymbolValue {
+                identifier: 0,
+                key: entity.key.clone(),
+                display: entity.display.clone(),
+                generated: entity.generated,
+                query_local: entity.query_local,
+            },
+            entity: Some((
+                entity.identifier,
+                declared_individual_ids
+                    .binary_search(&entity.identifier)
+                    .is_ok(),
+            )),
         });
-        bindings.push(IndividualSignatureBinding {
-            individual_id,
-            entity_id: entity.identifier,
-            declared: declared_individual_ids
-                .binary_search(&entity.identifier)
-                .is_ok(),
+    }
+
+    let mut anonymous_nodes = Vec::<NodeId>::new();
+    for root in &symbols.roots {
+        budget.claim_work(1)?;
+        let positions: &[usize] = match root.handler {
+            RootHandler::ClassAssertion => &[1],
+            RootHandler::ObjectPropertyAssertion if include_object_assertions => &[1, 2],
+            RootHandler::DataPropertyAssertion if include_data_assertions => &[1],
+            _ => continue,
+        };
+        let root_node = model.node(root.node)?;
+        for position in positions {
+            let individual = node_field(
+                model,
+                root_node,
+                *position,
+                "anonymous-individual assertion operand",
+            )?;
+            if model.node(individual)?.tag() != ANONYMOUS_INDIVIDUAL_TAG {
+                continue;
+            }
+            budget.claim_owned(size_of::<NodeId>())?;
+            anonymous_nodes.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource(
+                    "anonymous-individual node selection allocation failed",
+                )
+            })?;
+            anonymous_nodes.push(individual);
+        }
+    }
+    budget.claim_work(sort_work(anonymous_nodes.len()))?;
+    anonymous_nodes.sort_unstable();
+    anonymous_nodes.dedup();
+    for identifier in anonymous_nodes {
+        budget.claim_work(1)?;
+        if !symbols.semantic_node_is_reachable(identifier) {
+            continue;
+        }
+        let following = pending.len().checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("individual symbol count overflowed")
+        })?;
+        PhaseBudget::count(
+            following,
+            budget.limits.max_individual_symbols,
+            "individual symbol count",
+        )?;
+        let node = model.node(identifier)?;
+        let key = canonical::canonical_node_key(model, identifier, scope_maps, budget)?;
+        let display = anonymous_individual_display(model, node, scope_maps, budget)?;
+        budget.claim_owned(size_of::<PendingIndividualSymbol>())?;
+        budget.claim_owned(size_of::<DecodedSymbolValue>())?;
+        pending
+            .try_reserve(1)
+            .map_err(|_| EncodedValidationError::resource("individual symbol allocation failed"))?;
+        pending.push(PendingIndividualSymbol {
+            value: DecodedSymbolValue {
+                identifier: 0,
+                key,
+                display,
+                generated: false,
+                query_local: false,
+            },
+            entity: None,
         });
+    }
+
+    budget.claim_work(sort_work(pending.len()))?;
+    pending.sort_by(|left, right| left.value.key.cmp(&right.value.key));
+    let mut values = Vec::<DecodedSymbolValue>::new();
+    let mut bindings = Vec::new();
+    values.try_reserve_exact(pending.len()).map_err(|_| {
+        EncodedValidationError::resource("individual symbol result allocation failed")
+    })?;
+    bindings
+        .try_reserve_exact(pending.len())
+        .map_err(|_| EncodedValidationError::resource("individual signature allocation failed"))?;
+    for mut candidate in pending {
+        if let Some(previous) = values.last() {
+            if previous.key == candidate.value.key {
+                if previous.display != candidate.value.display
+                    || previous.generated != candidate.value.generated
+                    || previous.query_local != candidate.value.query_local
+                    || candidate.entity.is_some()
+                {
+                    return Err(EncodedValidationError::invariant(
+                        "individual symbol key has conflicting metadata",
+                    ));
+                }
+                continue;
+            }
+        }
+        let individual_id = u32::try_from(values.len())
+            .map_err(|_| EncodedValidationError::resource("individual symbol ID exceeds u32"))?;
+        candidate.value.identifier = individual_id;
+        if let Some((entity_id, declared)) = candidate.entity {
+            budget.claim_owned(size_of::<IndividualSignatureBinding>())?;
+            bindings.push(IndividualSignatureBinding {
+                individual_id,
+                entity_id,
+                declared,
+            });
+        }
+        values.push(candidate.value);
     }
     Ok((
         DecodedSymbolDomain {
@@ -3842,6 +3965,98 @@ fn individual_signature(
         },
         bindings,
     ))
+}
+
+fn anonymous_individual_display<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    node: NodeRef,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<String> {
+    const SCOPE_BYTES: usize = 32;
+    if node.tag() != ANONYMOUS_INDIVIDUAL_TAG || node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "anonymous individual no longer has schema-1 shape",
+        ));
+    }
+    let scope_component = required_component(
+        model.field(node.fields().start)?,
+        "anonymous-individual scope",
+    )?;
+    let ComponentValue::Scalar(scope) = model.resolve(scope_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "anonymous-individual scope is not scalar",
+        ));
+    };
+    if scope.kind() != ComponentKind::Bytes || scope.len() != SCOPE_BYTES {
+        return Err(EncodedValidationError::invariant(
+            "anonymous-individual scope no longer has bytes32 shape",
+        ));
+    }
+    let local_field = node.fields().start.checked_add(1).ok_or_else(|| {
+        EncodedValidationError::invariant("anonymous-individual local-key field overflowed")
+    })?;
+    let local_component =
+        required_component(model.field(local_field)?, "anonymous-individual local key")?;
+    let ComponentValue::Scalar(local) = model.resolve(local_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "anonymous-individual local key is not scalar",
+        ));
+    };
+    if local.kind() != ComponentKind::Bytes || local.is_empty() {
+        return Err(EncodedValidationError::invariant(
+            "anonymous-individual local key no longer has nonempty bytes shape",
+        ));
+    }
+    let mut source_scope = [0_u8; SCOPE_BYTES];
+    for (index, byte) in source_scope.iter_mut().enumerate() {
+        *byte = scope.byte(index).ok_or_else(|| {
+            EncodedValidationError::invariant("anonymous-individual scope byte disappeared")
+        })?;
+    }
+    let mapped_scope = canonical::remap_anonymous_scope(source_scope, scope_maps, budget)?;
+    let display_len = ANONYMOUS_INDIVIDUAL_PREFIX
+        .len()
+        .checked_add(SCOPE_BYTES * 2)
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_add(local.len().checked_mul(2)?))
+        .ok_or_else(|| {
+            EncodedValidationError::resource("anonymous-individual display length overflowed")
+        })?;
+    budget.claim_work(SCOPE_BYTES.checked_add(local.len()).ok_or_else(|| {
+        EncodedValidationError::resource("anonymous-individual display work overflowed")
+    })?)?;
+    budget.claim_owned(display_len)?;
+    let mut display = String::new();
+    display.try_reserve_exact(display_len).map_err(|_| {
+        EncodedValidationError::resource("anonymous-individual display allocation failed")
+    })?;
+    display.push_str(ANONYMOUS_INDIVIDUAL_PREFIX);
+    append_hex_bytes(&mut display, &mapped_scope);
+    display.push(':');
+    append_hex_scalar(&mut display, local)?;
+    Ok(display)
+}
+
+fn append_hex_bytes(target: &mut String, bytes: &[u8]) {
+    for byte in bytes {
+        target.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        target.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+}
+
+fn append_hex_scalar<B: ByteSource>(
+    target: &mut String,
+    scalar: ScalarRef<B>,
+) -> EncodedResult<()> {
+    for index in 0..scalar.len() {
+        let byte = scalar.byte(index).ok_or_else(|| {
+            EncodedValidationError::invariant("anonymous-individual local-key byte disappeared")
+        })?;
+        target.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        target.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+    Ok(())
 }
 
 fn class_id_by_display(domain: &DecodedSymbolDomain, display: &str) -> EncodedResult<u32> {
@@ -4789,6 +5004,7 @@ fn named_class_assertion<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     class_signature: &[ClassSignatureBinding],
+    individual_domain: &DecodedSymbolDomain,
     individual_signature: &[IndividualSignatureBinding],
     root: NodeId,
     scope_maps: &[AnonymousScopeMap],
@@ -4803,8 +5019,17 @@ fn named_class_assertion<B: ByteSource>(
     let Some(class_id) = named_class_field(model, symbols, class_signature, node, 0)? else {
         return Ok(None);
     };
-    let Some(individual_id) =
-        named_individual_field(model, symbols, individual_signature, node, 1)?
+    let Some(individual_id) = individual_field(
+        model,
+        symbols,
+        individual_domain,
+        individual_signature,
+        node,
+        1,
+        true,
+        scope_maps,
+        budget,
+    )?
     else {
         return Ok(None);
     };
@@ -4821,6 +5046,7 @@ fn named_object_assertion<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: &ObjectRolePhase,
+    individual_domain: &DecodedSymbolDomain,
     individual_signature: &[IndividualSignatureBinding],
     root: NodeId,
     expected_tag: u16,
@@ -4835,13 +5061,31 @@ fn named_object_assertion<B: ByteSource>(
     }
     let property = node_field(model, node, 0, "object-property assertion role")?;
     let (role_id, inverted) = named_assertion_role(model, symbols, object_roles, property, budget)?;
-    let Some(mut source_individual) =
-        named_individual_field(model, symbols, individual_signature, node, 1)?
+    let Some(mut source_individual) = individual_field(
+        model,
+        symbols,
+        individual_domain,
+        individual_signature,
+        node,
+        1,
+        expected_tag == OBJECT_PROPERTY_ASSERTION_TAG,
+        scope_maps,
+        budget,
+    )?
     else {
         return Ok(None);
     };
-    let Some(mut target_individual) =
-        named_individual_field(model, symbols, individual_signature, node, 2)?
+    let Some(mut target_individual) = individual_field(
+        model,
+        symbols,
+        individual_domain,
+        individual_signature,
+        node,
+        2,
+        expected_tag == OBJECT_PROPERTY_ASSERTION_TAG,
+        scope_maps,
+        budget,
+    )?
     else {
         return Ok(None);
     };
@@ -4862,6 +5106,7 @@ fn named_data_assertion<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     data_roles: &DataRolePhase,
+    individual_domain: &DecodedSymbolDomain,
     individual_signature: &[IndividualSignatureBinding],
     source_literal_domain: &DecodedSymbolDomain,
     source_data_identity_ids: &[Option<u32>],
@@ -4878,8 +5123,17 @@ fn named_data_assertion<B: ByteSource>(
     }
     let property = node_field(model, node, 0, "data-property assertion role")?;
     let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
-    let Some(source_individual) =
-        named_individual_field(model, symbols, individual_signature, node, 1)?
+    let Some(source_individual) = individual_field(
+        model,
+        symbols,
+        individual_domain,
+        individual_signature,
+        node,
+        1,
+        expected_tag == DATA_PROPERTY_ASSERTION_TAG,
+        scope_maps,
+        budget,
+    )?
     else {
         return Ok(None);
     };
@@ -5004,25 +5258,71 @@ fn named_class_id<B: ByteSource>(
         .map(|index| signature[index].class_expression_id))
 }
 
-fn named_individual_field<B: ByteSource>(
+#[allow(clippy::too_many_arguments)]
+fn individual_field<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    domain: &DecodedSymbolDomain,
     signature: &[IndividualSignatureBinding],
     node: NodeRef,
     relative_field: usize,
+    allow_anonymous: bool,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<u32>> {
     let field_index = node
         .fields()
         .start
         .checked_add(relative_field)
         .ok_or_else(|| EncodedValidationError::invariant("individual field index overflowed"))?;
-    let component = required_component(model.field(field_index)?, "named-individual field")?;
+    let component = required_component(model.field(field_index)?, "individual field")?;
     let ComponentValue::Node(identifier) = model.resolve(component)? else {
         return Err(EncodedValidationError::invariant(
             "individual field did not resolve to a node",
         ));
     };
-    named_individual_id(model, symbols, signature, identifier)
+    if !allow_anonymous {
+        return named_individual_id(model, symbols, signature, identifier);
+    }
+    individual_id(
+        model, symbols, domain, signature, identifier, scope_maps, budget,
+    )
+}
+
+fn individual_id<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    domain: &DecodedSymbolDomain,
+    signature: &[IndividualSignatureBinding],
+    identifier: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<u32>> {
+    let tag = model.node(identifier)?.tag();
+    if tag == ENTITY_TAG {
+        return named_individual_id(model, symbols, signature, identifier);
+    }
+    if tag != ANONYMOUS_INDIVIDUAL_TAG {
+        return Ok(None);
+    }
+    if domain.kind != SymbolKind::Individual {
+        return Err(EncodedValidationError::invariant(
+            "individual lookup domain changed kind",
+        ));
+    }
+    let key = canonical::canonical_node_key(model, identifier, scope_maps, budget)?;
+    budget.claim_work(binary_search_work(domain.values.len()))?;
+    let index = domain
+        .values
+        .binary_search_by(|candidate| candidate.key.cmp(&key))
+        .map_err(|_| {
+            EncodedValidationError::invariant(
+                "anonymous individual is absent from its semantic symbol domain",
+            )
+        })?;
+    Ok(Some(u32::try_from(index).map_err(|_| {
+        EncodedValidationError::resource("individual symbol ID exceeds u32")
+    })?))
 }
 
 fn named_individual_id<B: ByteSource>(
@@ -6019,6 +6319,7 @@ fn freeze_predicates(
     thing: u32,
     nothing: u32,
     has_individuals: bool,
+    has_named_individuals: bool,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<FrozenPredicates> {
     let mut class_ids = Vec::new();
@@ -6126,7 +6427,7 @@ fn freeze_predicates(
             owner: PredicateOwner::OrderingGuard,
         });
     }
-    if has_individuals || !keys.is_empty() {
+    if has_named_individuals || !keys.is_empty() {
         let key = named_individual_predicate_key();
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
@@ -6902,6 +7203,7 @@ fn freeze_positive_facts(
     source_literal_domain: &DecodedSymbolDomain,
     data_value_domain: &DecodedSymbolDomain,
     source_data_identity_ids: &[Option<u32>],
+    named_individuals: &[u32],
     named_predicate: Option<u32>,
     equality_predicate: Option<u32>,
     has_object_functionality: bool,
@@ -6926,16 +7228,26 @@ fn freeze_positive_facts(
     } else {
         Some(predicate_id(predicate_by_class, thing)?)
     };
-    let named_predicate = match (
-        individual_domain.values.is_empty(),
-        has_keys,
-        named_predicate,
-    ) {
+    if !named_individuals.windows(2).all(|pair| pair[0] < pair[1])
+        || named_individuals.iter().any(|identifier| {
+            usize::try_from(*identifier).ok().is_none_or(|index| {
+                individual_domain
+                    .values
+                    .get(index)
+                    .is_none_or(|value| !value.display.starts_with(NAMED_INDIVIDUAL_PREFIX))
+            })
+        })
+    {
+        return Err(EncodedValidationError::invariant(
+            "named-individual IDs are not a canonical subset of their domain",
+        ));
+    }
+    let named_predicate = match (named_individuals.is_empty(), has_keys, named_predicate) {
         (true, false, None) | (true, true, Some(_)) => None,
         (false, _, Some(identifier)) => Some(identifier),
         _ => {
             return Err(EncodedValidationError::invariant(
-                "named-individual predicate presence disagrees with its domain",
+                "named-individual predicate presence disagrees with its signature",
             ));
         }
     };
@@ -6963,7 +7275,7 @@ fn freeze_positive_facts(
     let expected = individual_domain
         .values
         .len()
-        .checked_mul(2)
+        .checked_add(named_individuals.len())
         .and_then(|value| value.checked_add(facts.len()))
         .and_then(|value| value.checked_add(object_facts.len()))
         .and_then(|value| value.checked_add(data_facts.len()))
@@ -7004,7 +7316,7 @@ fn freeze_positive_facts(
     let merged_count = individual_domain
         .values
         .len()
-        .checked_mul(2)
+        .checked_add(named_individuals.len())
         .and_then(|value| value.checked_add(class_fact_count))
         .and_then(|value| value.checked_add(object_facts.len()))
         .and_then(|value| value.checked_add(data_facts.len()))
@@ -7023,22 +7335,24 @@ fn freeze_positive_facts(
         .map_err(|_| EncodedValidationError::resource("positive-fact input allocation failed"))?;
     for individual in &individual_domain.values {
         budget.claim_work(1)?;
-        let named = named_predicate.ok_or_else(|| {
-            EncodedValidationError::invariant("named-individual predicate index is incomplete")
-        })?;
         let top = thing_predicate.ok_or_else(|| {
             EncodedValidationError::invariant("top concept predicate index is incomplete")
         })?;
-        pending.push((
-            named,
-            GroundArguments::Unary(individual.identifier),
-            builtin_provenance,
-        ));
         pending.push((
             top,
             GroundArguments::Unary(individual.identifier),
             builtin_provenance,
         ));
+    }
+    if let Some(named) = named_predicate {
+        for individual_id in named_individuals {
+            budget.claim_work(1)?;
+            pending.push((
+                named,
+                GroundArguments::Unary(*individual_id),
+                builtin_provenance,
+            ));
+        }
     }
     for fact in facts {
         budget.claim_work(1)?;
@@ -9417,9 +9731,28 @@ fn merge_named_class_phases_impl(
         phases,
         &entity_maps,
         &individual_maps,
-        individual_domain.values.len(),
+        &individual_domain,
         &mut budget,
     )?;
+    budget.claim_owned(
+        individual_signature
+            .len()
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("merged named-individual IDs overflowed")
+            })?,
+    )?;
+    let mut named_individuals = Vec::<u32>::new();
+    named_individuals
+        .try_reserve_exact(individual_signature.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("merged named-individual ID allocation failed")
+        })?;
+    named_individuals.extend(
+        individual_signature
+            .iter()
+            .map(|binding| binding.individual_id),
+    );
     let scalar_object_role_count = merged_object_roles.map_or_else(
         || scalar_object_role_count(&entity_domain),
         |roles| Ok(roles.object_role_domain.values.len()),
@@ -9522,6 +9855,7 @@ fn merge_named_class_phases_impl(
         thing,
         nothing,
         !individual_domain.values.is_empty(),
+        !named_individuals.is_empty(),
         &mut budget,
     )?;
     let scalar_predicate_ids = scalar_predicate_ids(
@@ -9571,6 +9905,7 @@ fn merge_named_class_phases_impl(
         &source_literal_domain,
         &data_value_domain,
         &source_data_identity_ids,
+        &named_individuals,
         named_predicate,
         equality_predicate,
         object_characteristics
@@ -9636,11 +9971,6 @@ fn merge_named_class_phases_impl(
         limits.max_compiled_roots,
         "compiled root count",
     )?;
-    let named_individuals = individual_domain
-        .values
-        .iter()
-        .map(|value| value.identifier)
-        .collect();
     Ok(NamedClassPhase {
         class_domain,
         class_signature,
@@ -9974,9 +10304,15 @@ fn merge_individual_signatures(
     phases: &[(SymbolPhase, NamedClassPhase)],
     entity_maps: &[Vec<u32>],
     individual_maps: &[Vec<u32>],
-    individual_count: usize,
+    individual_domain: &DecodedSymbolDomain,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<IndividualSignatureBinding>> {
+    if individual_domain.kind != SymbolKind::Individual {
+        return Err(EncodedValidationError::invariant(
+            "merged individual signature domain changed kind",
+        ));
+    }
+    let individual_count = individual_domain.values.len();
     let mut merged = vec![None::<(u32, bool)>; individual_count];
     budget.claim_owned(
         individual_count
@@ -9986,13 +10322,33 @@ fn merge_individual_signatures(
             })?,
     )?;
     for (phase_index, (_, phase)) in phases.iter().enumerate() {
-        if phase.individual_signature.len() != phase.individual_domain.values.len() {
+        let named_count = phase
+            .individual_domain
+            .values
+            .iter()
+            .filter(|value| value.display.starts_with(NAMED_INDIVIDUAL_PREFIX))
+            .count();
+        if phase.individual_signature.len() != named_count {
             return Err(EncodedValidationError::invariant(
-                "merged individual signature no longer covers its domain",
+                "merged individual signature no longer covers its named domain",
             ));
         }
         for binding in &phase.individual_signature {
             budget.claim_work(1)?;
+            let local_value = phase
+                .individual_domain
+                .values
+                .get(usize::try_from(binding.individual_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged individual signature has a dangling local ID",
+                    )
+                })?;
+            if !local_value.display.starts_with(NAMED_INDIVIDUAL_PREFIX) {
+                return Err(EncodedValidationError::invariant(
+                    "merged individual signature binds an anonymous symbol",
+                ));
+            }
             let individual_id = mapped_id(
                 &individual_maps[phase_index],
                 binding.individual_id,
@@ -10020,17 +10376,32 @@ fn merge_individual_signatures(
     merged
         .into_iter()
         .enumerate()
-        .map(|(index, value)| {
-            let (entity_id, declared) = value.ok_or_else(|| {
-                EncodedValidationError::invariant("merged individual signature is incomplete")
-            })?;
-            Ok(IndividualSignatureBinding {
-                individual_id: u32::try_from(index).map_err(|_| {
-                    EncodedValidationError::resource("merged individual signature ID exceeds u32")
-                })?,
-                entity_id,
-                declared,
-            })
+        .filter_map(|(index, value)| {
+            let is_named = individual_domain.values[index]
+                .display
+                .starts_with(NAMED_INDIVIDUAL_PREFIX);
+            match (is_named, value) {
+                (false, None) => None,
+                (true, Some((entity_id, declared))) => Some(
+                    u32::try_from(index)
+                        .map(|individual_id| IndividualSignatureBinding {
+                            individual_id,
+                            entity_id,
+                            declared,
+                        })
+                        .map_err(|_| {
+                            EncodedValidationError::resource(
+                                "merged individual signature ID exceeds u32",
+                            )
+                        }),
+                ),
+                (true, None) => Some(Err(EncodedValidationError::invariant(
+                    "merged individual signature is incomplete",
+                ))),
+                (false, Some(_)) => Some(Err(EncodedValidationError::invariant(
+                    "merged individual signature binds an anonymous symbol",
+                ))),
+            }
         })
         .collect()
 }
