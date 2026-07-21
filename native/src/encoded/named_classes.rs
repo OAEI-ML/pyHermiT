@@ -71,6 +71,7 @@ const NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
 const OBJECT_PROPERTY_PREFIX: &str = "object_property:";
 const DATA_PROPERTY_PREFIX: &str = "data_property:";
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
 const OWL_RATIONAL_IRI: &str = "http://www.w3.org/2002/07/owl#rational";
 const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema#";
@@ -78,6 +79,8 @@ const XSD_BOOLEAN_IRI: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 const XSD_DECIMAL_IRI: &str = "http://www.w3.org/2001/XMLSchema#decimal";
 const XSD_FLOAT_IRI: &str = "http://www.w3.org/2001/XMLSchema#float";
 const XSD_DOUBLE_IRI: &str = "http://www.w3.org/2001/XMLSchema#double";
+const XSD_HEX_BINARY_IRI: &str = "http://www.w3.org/2001/XMLSchema#hexBinary";
+const XSD_BASE64_BINARY_IRI: &str = "http://www.w3.org/2001/XMLSchema#base64Binary";
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 
@@ -93,6 +96,7 @@ pub struct NamedClassPhaseLimits {
     pub max_literal_characters: usize,
     pub max_numeric_digits: usize,
     pub max_decimal_exponent: usize,
+    pub max_binary_bytes: usize,
     pub max_compiled_roots: usize,
     pub max_predicates: usize,
     pub max_clauses: usize,
@@ -118,6 +122,7 @@ impl Default for NamedClassPhaseLimits {
             max_literal_characters: 1_000_000,
             max_numeric_digits: 100_000,
             max_decimal_exponent: 100_000,
+            max_binary_bytes: 1_000_000,
             max_compiled_roots: 100_000_000,
             max_predicates: 100_000_000,
             max_clauses: 100_000_000,
@@ -2204,6 +2209,14 @@ fn literal_data_identity_key(
     if let Some(width) = ieee_width {
         return ieee_data_identity_key(lexical, width, budget).map(Some);
     }
+    let binary_kind = match datatype_iri {
+        XSD_HEX_BINARY_IRI => Some(EncodedBinaryKind::Hex),
+        XSD_BASE64_BINARY_IRI => Some(EncodedBinaryKind::Base64),
+        _ => None,
+    };
+    if let Some(kind) = binary_kind {
+        return binary_data_identity_key(lexical, kind, budget).map(Some);
+    }
     string_data_identity_key(lexical, datatype_iri, language, budget)
 }
 
@@ -2783,6 +2796,221 @@ fn round_scaled_ratio(
         quotient += BigUint::from(1_u8);
     }
     Ok(quotient)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EncodedBinaryKind {
+    Hex,
+    Base64,
+}
+
+impl EncodedBinaryKind {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Hex => "hexBinary",
+            Self::Base64 => "base64Binary",
+        }
+    }
+}
+
+fn binary_data_identity_key(
+    lexical: &str,
+    kind: EncodedBinaryKind,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let character_count = lexical.chars().count();
+    PhaseBudget::count(
+        character_count,
+        budget.limits.max_literal_characters,
+        "literal character count",
+    )?;
+    budget.claim_work(character_count)?;
+    let normalized = collapse_xml_whitespace(lexical, budget)?;
+    let octets = match kind {
+        EncodedBinaryKind::Hex => decode_hex_binary(&normalized, budget)?,
+        EncodedBinaryKind::Base64 => decode_base64_binary(&normalized, budget)?,
+    };
+    let hex_len = octets
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| EncodedValidationError::resource("binary hexadecimal size overflowed"))?;
+    budget.claim_owned(hex_len)?;
+    let mut hex = String::new();
+    hex.try_reserve_exact(hex_len)
+        .map_err(|_| EncodedValidationError::resource("binary hexadecimal allocation failed"))?;
+    for byte in octets {
+        hex.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+    let payload = format!("[\"binary-identity-v1\",\"{}\",\"{hex}\"]", kind.name());
+    prefixed_data_identity_key(payload.as_bytes(), budget)
+}
+
+fn collapse_xml_whitespace(value: &str, budget: &mut PhaseBudget) -> EncodedResult<String> {
+    budget.claim_owned(value.len())?;
+    let mut normalized = String::new();
+    normalized
+        .try_reserve_exact(value.len())
+        .map_err(|_| EncodedValidationError::resource("binary normalization allocation failed"))?;
+    let mut pending_space = false;
+    for character in value.chars() {
+        if matches!(character, '\t' | '\n' | '\r' | ' ') {
+            pending_space = !normalized.is_empty();
+        } else {
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+            normalized.push(character);
+        }
+    }
+    Ok(normalized)
+}
+
+fn decode_hex_binary(value: &str, budget: &mut PhaseBudget) -> EncodedResult<Vec<u8>> {
+    let bytes = value.as_bytes();
+    if bytes.contains(&b' ') || bytes.len() % 2 != 0 {
+        return Err(EncodedValidationError::invariant(
+            "hexBinary literal is outside its datatype lexical space",
+        ));
+    }
+    let byte_count = bytes.len() / 2;
+    PhaseBudget::count(
+        byte_count,
+        budget.limits.max_binary_bytes,
+        "decoded binary byte count",
+    )?;
+    budget.claim_owned(byte_count)?;
+    budget.claim_work(byte_count)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(byte_count)
+        .map_err(|_| EncodedValidationError::resource("hexBinary allocation failed"))?;
+    for pair in bytes.chunks_exact(2) {
+        let Some(high) = hex_value(pair[0]) else {
+            return Err(EncodedValidationError::invariant(
+                "hexBinary literal is outside its datatype lexical space",
+            ));
+        };
+        let Some(low) = hex_value(pair[1]) else {
+            return Err(EncodedValidationError::invariant(
+                "hexBinary literal is outside its datatype lexical space",
+            ));
+        };
+        output.push((high << 4) | low);
+    }
+    Ok(output)
+}
+
+const fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn decode_base64_binary(value: &str, budget: &mut PhaseBudget) -> EncodedResult<Vec<u8>> {
+    if !value.is_ascii() {
+        return Err(EncodedValidationError::invariant(
+            "base64Binary literal is outside its datatype lexical space",
+        ));
+    }
+    budget.claim_owned(value.len())?;
+    let mut compact = Vec::new();
+    compact
+        .try_reserve_exact(value.len())
+        .map_err(|_| EncodedValidationError::resource("base64Binary compaction failed"))?;
+    compact.extend(value.bytes().filter(|byte| *byte != b' '));
+    if compact.len() % 4 != 0 {
+        return Err(EncodedValidationError::invariant(
+            "base64Binary literal is outside its datatype lexical space",
+        ));
+    }
+    let padding = compact
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count();
+    if padding > 2 || compact[..compact.len().saturating_sub(padding)].contains(&b'=') {
+        return Err(EncodedValidationError::invariant(
+            "base64Binary literal is outside its datatype lexical space",
+        ));
+    }
+    let byte_count = compact
+        .len()
+        .checked_div(4)
+        .and_then(|value| value.checked_mul(3))
+        .and_then(|value| value.checked_sub(padding))
+        .ok_or_else(|| EncodedValidationError::resource("base64Binary size overflowed"))?;
+    PhaseBudget::count(
+        byte_count,
+        budget.limits.max_binary_bytes,
+        "decoded binary byte count",
+    )?;
+    budget.claim_owned(byte_count)?;
+    budget.claim_work(compact.len())?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(byte_count)
+        .map_err(|_| EncodedValidationError::resource("base64Binary allocation failed"))?;
+    for (index, quartet) in compact.chunks_exact(4).enumerate() {
+        let last = index + 1 == compact.len() / 4;
+        let Some(first) = base64_value(quartet[0]) else {
+            return invalid_base64();
+        };
+        let Some(second) = base64_value(quartet[1]) else {
+            return invalid_base64();
+        };
+        let third = if quartet[2] == b'=' {
+            if !last || padding != 2 || second & 0x0f != 0 {
+                return invalid_base64();
+            }
+            0
+        } else {
+            let Some(value) = base64_value(quartet[2]) else {
+                return invalid_base64();
+            };
+            value
+        };
+        let fourth = if quartet[3] == b'=' {
+            if !last || padding == 0 || (padding == 1 && third & 0x03 != 0) {
+                return invalid_base64();
+            }
+            0
+        } else {
+            let Some(value) = base64_value(quartet[3]) else {
+                return invalid_base64();
+            };
+            value
+        };
+        output.push((first << 2) | (second >> 4));
+        if quartet[2] != b'=' {
+            output.push((second << 4) | (third >> 2));
+        }
+        if quartet[3] != b'=' {
+            output.push((third << 6) | fourth);
+        }
+    }
+    Ok(output)
+}
+
+const fn base64_value(value: u8) -> Option<u8> {
+    match value {
+        b'A'..=b'Z' => Some(value - b'A'),
+        b'a'..=b'z' => Some(value - b'a' + 26),
+        b'0'..=b'9' => Some(value - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+fn invalid_base64<T>() -> EncodedResult<T> {
+    Err(EncodedValidationError::invariant(
+        "base64Binary literal is outside its datatype lexical space",
+    ))
 }
 
 fn rational_bigint_data_identity_key(
@@ -10464,6 +10692,39 @@ mod tests {
         assert!(invalid.is_some_and(|error| {
             error.code == "NATIVE_ENCODED_INVARIANT"
                 && error.message.contains("datatype lexical space")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn binary_identities_decode_whitespace_and_padding_exactly() -> EncodedResult<()> {
+        let mut budget = PhaseBudget::new(NamedClassPhaseLimits::default());
+        assert_eq!(
+            binary_data_identity_key(" \t0Aff\r\n ", EncodedBinaryKind::Hex, &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"binary-identity-v1\",\"hexBinary\",\"0aff\"]"
+        );
+        assert_eq!(
+            binary_data_identity_key(" C v 8 = ", EncodedBinaryKind::Base64, &mut budget)?,
+            b"pyhermit:data-identity:v1\0[\"binary-identity-v1\",\"base64Binary\",\"0aff\"]"
+        );
+        for lexical in ["A===", "Cv9=", "C=8="] {
+            let invalid =
+                binary_data_identity_key(lexical, EncodedBinaryKind::Base64, &mut budget).err();
+            assert!(invalid.is_some_and(|error| {
+                error.code == "NATIVE_ENCODED_INVARIANT"
+                    && error.message.contains("datatype lexical space")
+            }));
+        }
+
+        let limits = NamedClassPhaseLimits {
+            max_binary_bytes: 1,
+            ..NamedClassPhaseLimits::default()
+        };
+        let mut limited = PhaseBudget::new(limits);
+        let resource = binary_data_identity_key("0aff", EncodedBinaryKind::Hex, &mut limited).err();
+        assert!(resource.is_some_and(|error| {
+            error.code == "NATIVE_ENCODED_RESOURCE_LIMIT"
+                && error.message.contains("decoded binary byte count")
         }));
         Ok(())
     }
