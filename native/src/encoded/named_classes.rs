@@ -615,6 +615,7 @@ struct ClassBooleanDefinition {
     intersection: bool,
     operands: Vec<ClassBooleanOperand>,
     object_self_role_id: Option<u32>,
+    complement: bool,
     polarity: DefinitionPolarity,
     generated_key: Vec<u8>,
     generated_display: String,
@@ -630,7 +631,7 @@ struct ClassExpressionSymbolSeed {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ClassBooleanOperand {
     Atomic(AtomicClassSelection),
-    Generated { key: Vec<u8> },
+    Generated { key: Vec<u8>, negative: bool },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -648,9 +649,18 @@ struct NormalizedClassBooleanTerm {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedObjectSelfTerm {
+    role_id: u32,
+    base_key: Vec<u8>,
+    key: Vec<u8>,
+    complemented: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum NormalizedClassTerm {
     Atomic(NormalizedAtomicClassTerm),
     Boolean(NormalizedClassBooleanTerm),
+    ObjectSelf(NormalizedObjectSelfTerm),
 }
 
 impl NormalizedClassTerm {
@@ -658,6 +668,7 @@ impl NormalizedClassTerm {
         match self {
             Self::Atomic(term) => &term.key,
             Self::Boolean(term) => &term.key,
+            Self::ObjectSelf(term) => &term.key,
         }
     }
 }
@@ -3820,7 +3831,7 @@ fn retain_disjoint_boolean_definitions<B: ByteSource>(
 fn retain_disjoint_union_boolean_definition<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
-    _object_roles: Option<&ObjectRolePhase>,
+    object_roles: Option<&ObjectRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -3873,6 +3884,7 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
         let Some(term) = normalized_class_term(
             model,
             symbols,
+            object_roles,
             identifier,
             false,
             member_depth,
@@ -3882,9 +3894,9 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
         else {
             return Ok(());
         };
-        if let NormalizedClassTerm::Boolean(boolean) = &term {
-            let _generated_key = atomize_normalized_class_boolean(
-                boolean.clone(),
+        if !matches!(term, NormalizedClassTerm::Atomic(_)) {
+            let _generated_key = atomize_normalized_class_term(
+                term.clone(),
                 Some(identifier),
                 DefinitionPolarity::Negative,
                 namespace,
@@ -4060,50 +4072,24 @@ fn class_boolean_definition_candidates<B: ByteSource>(
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<Vec<ClassBooleanDefinition>>> {
-    let node = model.node(expression)?;
-    if node.tag() == OBJECT_HAS_SELF_TAG {
-        if node.field_count() != 1 {
-            return Err(EncodedValidationError::invariant(
-                "object-self definition no longer has schema-1 shape",
-            ));
-        }
-        let Some(object_roles) = object_roles else {
-            return Ok(None);
-        };
-        let property = node_field(model, node, 0, "object-self definition role")?;
-        let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
-        let expression_key = canonical::canonical_node_key(model, expression, scope_maps, budget)?;
-        let expression_seed =
-            class_expression_symbol_seed(&expression_key, OBJECT_HAS_SELF_TAG, budget)?;
-        let mut expression_symbols = Vec::new();
-        push_class_expression_symbol_seed(&mut expression_symbols, expression_seed, budget)?;
-        let (generated_key, generated_display) =
-            generated_class_symbol(namespace, &expression_key, polarity, budget)?;
-        budget.claim_owned(size_of::<ClassBooleanDefinition>() + size_of::<NodeId>())?;
-        return Ok(Some(vec![ClassBooleanDefinition {
-            expressions: vec![expression],
-            roots: Vec::new(),
-            expression_key,
-            expression_symbols,
-            intersection: false,
-            operands: Vec::new(),
-            object_self_role_id: Some(role_id),
-            polarity,
-            generated_key,
-            generated_display,
-            provenance: Vec::new(),
-        }]));
-    }
-    let Some(term) =
-        normalized_class_term(model, symbols, expression, false, 0, scope_maps, budget)?
+    let Some(term) = normalized_class_term(
+        model,
+        symbols,
+        object_roles,
+        expression,
+        false,
+        0,
+        scope_maps,
+        budget,
+    )?
     else {
         return Ok(None);
     };
-    let NormalizedClassTerm::Boolean(term) = term else {
+    if matches!(term, NormalizedClassTerm::Atomic(_)) {
         return Ok(None);
-    };
+    }
     let mut definitions = Vec::new();
-    let _generated_key = atomize_normalized_class_boolean(
+    let _generated_key = atomize_normalized_class_term(
         term,
         Some(expression),
         polarity,
@@ -4118,6 +4104,7 @@ fn class_boolean_definition_candidates<B: ByteSource>(
 fn normalized_class_term<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    object_roles: Option<&ObjectRolePhase>,
     identifier: NodeId,
     inherited_complement: bool,
     initial_depth: usize,
@@ -4150,9 +4137,36 @@ fn normalized_class_term<B: ByteSource>(
 
     let node = model.node(base)?;
     if !matches!(node.tag(), OBJECT_INTERSECTION_OF_TAG | OBJECT_UNION_OF_TAG) {
-        let Some(mut selection) =
-            positive_atomic_class_selection(model, symbols, base, depth, budget)?
-        else {
+        let selection = positive_atomic_class_selection(model, symbols, base, depth, budget)?;
+        if selection.is_none() && node.tag() == OBJECT_HAS_SELF_TAG {
+            if node.field_count() != 1 {
+                return Err(EncodedValidationError::invariant(
+                    "object-self definition no longer has schema-1 shape",
+                ));
+            }
+            let Some(object_roles) = object_roles else {
+                return Ok(None);
+            };
+            let property = node_field(model, node, 0, "object-self definition role")?;
+            let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
+            let base_key = canonical::canonical_node_key(model, base, scope_maps, budget)?;
+            let key = if complemented {
+                synthetic_class_complement_key(&base_key, budget)?
+            } else {
+                budget.claim_owned(base_key.len())?;
+                base_key.clone()
+            };
+            budget.claim_owned(size_of::<NormalizedObjectSelfTerm>())?;
+            return Ok(Some(NormalizedClassTerm::ObjectSelf(
+                NormalizedObjectSelfTerm {
+                    role_id,
+                    base_key,
+                    key,
+                    complemented,
+                },
+            )));
+        }
+        let Some(mut selection) = selection else {
             return Ok(None);
         };
         if complemented {
@@ -4252,6 +4266,7 @@ fn normalized_class_term<B: ByteSource>(
         let Some(term) = normalized_class_term(
             model,
             symbols,
+            object_roles,
             operand,
             complemented,
             operand_depth,
@@ -4413,6 +4428,160 @@ fn push_class_expression_symbol_seed(
     Ok(())
 }
 
+fn atomize_normalized_class_term(
+    term: NormalizedClassTerm,
+    source_expression: Option<NodeId>,
+    polarity: DefinitionPolarity,
+    namespace: [u8; 32],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    match term {
+        NormalizedClassTerm::Atomic(_) => Err(EncodedValidationError::invariant(
+            "atomic class term reached generated-definition atomization",
+        )),
+        NormalizedClassTerm::Boolean(term) => atomize_normalized_class_boolean(
+            term,
+            source_expression,
+            polarity,
+            namespace,
+            definitions,
+            budget,
+        ),
+        NormalizedClassTerm::ObjectSelf(term) => atomize_normalized_object_self(
+            term,
+            source_expression,
+            polarity,
+            namespace,
+            definitions,
+            budget,
+        ),
+    }
+}
+
+fn atomize_normalized_object_self(
+    term: NormalizedObjectSelfTerm,
+    source_expression: Option<NodeId>,
+    polarity: DefinitionPolarity,
+    namespace: [u8; 32],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let NormalizedObjectSelfTerm {
+        role_id,
+        base_key,
+        key,
+        complemented,
+    } = term;
+    if complemented {
+        budget.claim_owned(base_key.len())?;
+        let inner_key = base_key.clone();
+        let inner_polarity = match polarity {
+            DefinitionPolarity::Positive => DefinitionPolarity::Negative,
+            DefinitionPolarity::Negative => DefinitionPolarity::Positive,
+        };
+        let generated_operand = atomize_normalized_object_self(
+            NormalizedObjectSelfTerm {
+                role_id,
+                base_key,
+                key: inner_key,
+                complemented: false,
+            },
+            None,
+            inner_polarity,
+            namespace,
+            definitions,
+            budget,
+        )?;
+        let mut expression_symbols = Vec::new();
+        let source_seed = class_expression_symbol_seed(&key, OBJECT_COMPLEMENT_OF_TAG, budget)?;
+        push_class_expression_symbol_seed(&mut expression_symbols, source_seed, budget)?;
+        let rewritten_key = synthetic_class_complement_key(&generated_operand, budget)?;
+        let rewritten_seed =
+            class_expression_symbol_seed(&rewritten_key, OBJECT_COMPLEMENT_OF_TAG, budget)?;
+        push_class_expression_symbol_seed(&mut expression_symbols, rewritten_seed, budget)?;
+        budget.claim_work(sort_work(expression_symbols.len()))?;
+        expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
+        expression_symbols.dedup_by(|left, right| left.key == right.key);
+        let (generated_key, generated_display) =
+            generated_class_symbol(namespace, &key, polarity, budget)?;
+        budget.claim_owned(generated_key.len())?;
+        let returned_key = generated_key.clone();
+        let mut expressions = Vec::new();
+        if let Some(expression) = source_expression {
+            budget.claim_owned(size_of::<NodeId>())?;
+            expressions.try_reserve_exact(1).map_err(|_| {
+                EncodedValidationError::resource(
+                    "object-self complement expression allocation failed",
+                )
+            })?;
+            expressions.push(expression);
+        }
+        budget
+            .claim_owned(size_of::<ClassBooleanDefinition>() + size_of::<ClassBooleanOperand>())?;
+        definitions.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("object-self complement definition allocation failed")
+        })?;
+        definitions.push(ClassBooleanDefinition {
+            expressions,
+            roots: Vec::new(),
+            expression_key: key,
+            expression_symbols,
+            intersection: false,
+            operands: vec![ClassBooleanOperand::Generated {
+                key: generated_operand,
+                negative: true,
+            }],
+            object_self_role_id: None,
+            complement: true,
+            polarity,
+            generated_key,
+            generated_display,
+            provenance: Vec::new(),
+        });
+        return Ok(returned_key);
+    }
+    if base_key != key {
+        return Err(EncodedValidationError::invariant(
+            "object-self definition changed its normalized key",
+        ));
+    }
+    let expression_seed = class_expression_symbol_seed(&key, OBJECT_HAS_SELF_TAG, budget)?;
+    let mut expression_symbols = Vec::new();
+    push_class_expression_symbol_seed(&mut expression_symbols, expression_seed, budget)?;
+    let (generated_key, generated_display) =
+        generated_class_symbol(namespace, &key, polarity, budget)?;
+    budget.claim_owned(generated_key.len())?;
+    let returned_key = generated_key.clone();
+    let mut expressions = Vec::new();
+    if let Some(expression) = source_expression {
+        budget.claim_owned(size_of::<NodeId>())?;
+        expressions.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("object-self definition expression allocation failed")
+        })?;
+        expressions.push(expression);
+    }
+    budget.claim_owned(size_of::<ClassBooleanDefinition>())?;
+    definitions.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("object-self definition allocation failed")
+    })?;
+    definitions.push(ClassBooleanDefinition {
+        expressions,
+        roots: Vec::new(),
+        expression_key: key,
+        expression_symbols,
+        intersection: false,
+        operands: Vec::new(),
+        object_self_role_id: Some(role_id),
+        complement: false,
+        polarity,
+        generated_key,
+        generated_display,
+        provenance: Vec::new(),
+    });
+    Ok(returned_key)
+}
+
 fn atomize_normalized_class_boolean(
     term: NormalizedClassBooleanTerm,
     source_expression: Option<NodeId>,
@@ -4451,8 +4620,8 @@ fn atomize_normalized_class_boolean(
                 }
                 keyed.push((operand.key, ClassBooleanOperand::Atomic(operand.selection)));
             }
-            NormalizedClassTerm::Boolean(operand) => {
-                let generated_key = atomize_normalized_class_boolean(
+            operand => {
+                let generated_key = atomize_normalized_class_term(
                     operand,
                     None,
                     polarity,
@@ -4463,7 +4632,10 @@ fn atomize_normalized_class_boolean(
                 budget.claim_owned(generated_key.len())?;
                 keyed.push((
                     generated_key.clone(),
-                    ClassBooleanOperand::Generated { key: generated_key },
+                    ClassBooleanOperand::Generated {
+                        key: generated_key,
+                        negative: false,
+                    },
                 ));
             }
         }
@@ -4528,6 +4700,7 @@ fn atomize_normalized_class_boolean(
         intersection: term.intersection,
         operands,
         object_self_role_id: None,
+        complement: false,
         polarity,
         generated_key,
         generated_display,
@@ -4548,6 +4721,7 @@ fn retain_class_boolean_definition(
         if known.intersection != definition.intersection
             || known.operands != definition.operands
             || known.object_self_role_id != definition.object_self_role_id
+            || known.complement != definition.complement
             || known.expression_symbols != definition.expression_symbols
             || known.generated_key != definition.generated_key
             || known.generated_display != definition.generated_display
@@ -11405,7 +11579,10 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             negative: false,
         };
         if let Some(role_id) = definition.object_self_role_id {
-            if !definition.operands.is_empty() || definition.provenance.is_empty() {
+            if definition.complement
+                || !definition.operands.is_empty()
+                || definition.provenance.is_empty()
+            {
                 return Err(EncodedValidationError::invariant(
                     "generated object-self definition changed before emission",
                 ));
@@ -11457,6 +11634,41 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 budget,
             )?;
             operands.push(ClassLiteral { class_id, negative });
+        }
+        if definition.complement {
+            if operands.len() != 1 || definition.provenance.is_empty() {
+                return Err(EncodedValidationError::invariant(
+                    "generated class complement lost its operand or provenance",
+                ));
+            }
+            let operand = operands[0];
+            for provenance in &definition.provenance {
+                budget.claim_owned(size_of::<RawEdge>())?;
+                edges.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "generated class complement edge allocation failed",
+                    )
+                })?;
+                edges.push(match definition.polarity {
+                    DefinitionPolarity::Positive => RawEdge {
+                        sub_class: generated.class_id,
+                        sub_negative: false,
+                        super_class: operand.class_id,
+                        super_negative: operand.negative,
+                        provenance: *provenance,
+                        generated: true,
+                    },
+                    DefinitionPolarity::Negative => RawEdge {
+                        sub_class: operand.class_id,
+                        sub_negative: operand.negative,
+                        super_class: generated.class_id,
+                        super_negative: false,
+                        provenance: *provenance,
+                        generated: true,
+                    },
+                });
+            }
+            continue;
         }
         if operands.len() < 2 || definition.provenance.is_empty() {
             return Err(EncodedValidationError::invariant(
@@ -11538,7 +11750,7 @@ fn class_boolean_operand_literal<B: ByteSource>(
             scope_maps,
             budget,
         ),
-        ClassBooleanOperand::Generated { key } => {
+        ClassBooleanOperand::Generated { key, negative } => {
             budget.claim_work(binary_search_work(class_domain.values.len()))?;
             let index = class_domain
                 .values
@@ -11554,7 +11766,7 @@ fn class_boolean_operand_literal<B: ByteSource>(
                         "recursive generated class operand ID exceeds u32",
                     )
                 })?,
-                false,
+                *negative,
             ))
         }
     }
