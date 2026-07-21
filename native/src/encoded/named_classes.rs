@@ -1202,6 +1202,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     symbols,
                     &class_domain,
                     &class_signature,
+                    &definitions,
                     root.node,
                     scope_maps,
                     &mut budget,
@@ -2172,56 +2173,26 @@ fn class_boolean_definitions<B: ByteSource>(
     let mut definitions = Vec::<ClassBooleanDefinition>::new();
     for root in &symbols.roots {
         budget.claim_work(1)?;
-        if root.handler != RootHandler::SubClassOf {
-            continue;
-        }
-        let node = model.node(root.node)?;
-        if node.tag() != SUBCLASS_TAG || node.field_count() != 3 {
-            return Err(EncodedValidationError::invariant(
-                "subclass root no longer has schema-1 shape",
-            ));
-        }
-        let sub_class = node_field(model, node, 0, "subclass antecedent")?;
-        let super_class = node_field(model, node, 1, "subclass consequent")?;
-        let sub_atomic = atomic_class_selection(model, symbols, sub_class, budget)?.is_some();
-        let super_atomic = atomic_class_selection(model, symbols, super_class, budget)?.is_some();
-        let sub_definition = if sub_atomic {
-            None
-        } else {
-            class_boolean_definition_candidate(
+        match root.handler {
+            RootHandler::SubClassOf => retain_subclass_boolean_definitions(
                 model,
                 symbols,
-                sub_class,
-                DefinitionPolarity::Negative,
+                root.node,
                 namespace,
                 scope_maps,
+                &mut definitions,
                 budget,
-            )?
-        };
-        let super_definition = if super_atomic {
-            None
-        } else {
-            class_boolean_definition_candidate(
+            )?,
+            RootHandler::EquivalentClasses => retain_equivalent_boolean_definitions(
                 model,
                 symbols,
-                super_class,
-                DefinitionPolarity::Positive,
+                root.node,
                 namespace,
                 scope_maps,
+                &mut definitions,
                 budget,
-            )?
-        };
-        if (!sub_atomic && sub_definition.is_none())
-            || (!super_atomic && super_definition.is_none())
-        {
-            continue;
-        }
-        let provenance = source_axiom_digest(model, root.node, scope_maps, budget)?;
-        if let Some(definition) = sub_definition {
-            retain_class_boolean_definition(&mut definitions, definition, provenance, budget)?;
-        }
-        if let Some(definition) = super_definition {
-            retain_class_boolean_definition(&mut definitions, definition, provenance, budget)?;
+            )?,
+            _ => {}
         }
     }
     budget.claim_work(sort_work(definitions.len()))?;
@@ -2239,6 +2210,151 @@ fn class_boolean_definitions<B: ByteSource>(
         definition.provenance.dedup();
     }
     Ok(definitions)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_subclass_boolean_definitions<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    root: NodeId,
+    namespace: [u8; 32],
+    scope_maps: &[AnonymousScopeMap],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let node = model.node(root)?;
+    if node.tag() != SUBCLASS_TAG || node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "subclass root no longer has schema-1 shape",
+        ));
+    }
+    let sub_class = node_field(model, node, 0, "subclass antecedent")?;
+    let super_class = node_field(model, node, 1, "subclass consequent")?;
+    let sub_atomic = atomic_class_selection(model, symbols, sub_class, budget)?.is_some();
+    let super_atomic = atomic_class_selection(model, symbols, super_class, budget)?.is_some();
+    let sub_definition = if sub_atomic {
+        None
+    } else {
+        class_boolean_definition_candidate(
+            model,
+            symbols,
+            sub_class,
+            DefinitionPolarity::Negative,
+            namespace,
+            scope_maps,
+            budget,
+        )?
+    };
+    let super_definition = if super_atomic {
+        None
+    } else {
+        class_boolean_definition_candidate(
+            model,
+            symbols,
+            super_class,
+            DefinitionPolarity::Positive,
+            namespace,
+            scope_maps,
+            budget,
+        )?
+    };
+    if (!sub_atomic && sub_definition.is_none()) || (!super_atomic && super_definition.is_none()) {
+        return Ok(());
+    }
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    if let Some(definition) = sub_definition {
+        retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+    }
+    if let Some(definition) = super_definition {
+        retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_equivalent_boolean_definitions<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    root: NodeId,
+    namespace: [u8; 32],
+    scope_maps: &[AnonymousScopeMap],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let node = model.node(root)?;
+    if node.tag() != EQUIVALENT_CLASSES_TAG || node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "equivalent-classes root no longer has schema-1 shape",
+        ));
+    }
+    let expressions_component = required_component(
+        model.field(node.fields().start)?,
+        "equivalent-classes expressions",
+    )?;
+    let ComponentValue::Collection(expressions) = model.resolve(expressions_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "equivalent-classes expressions did not resolve to a collection",
+        ));
+    };
+    let mut pending = Vec::<ClassBooleanDefinition>::new();
+    for item_index in expressions.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "equivalent-classes member")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "equivalent-classes member did not resolve to a node",
+            ));
+        };
+        if atomic_class_selection(model, symbols, identifier, budget)?.is_some() {
+            continue;
+        }
+        let Some(negative) = class_boolean_definition_candidate(
+            model,
+            symbols,
+            identifier,
+            DefinitionPolarity::Negative,
+            namespace,
+            scope_maps,
+            budget,
+        )?
+        else {
+            return Ok(());
+        };
+        let Some(positive) = class_boolean_definition_candidate(
+            model,
+            symbols,
+            identifier,
+            DefinitionPolarity::Positive,
+            namespace,
+            scope_maps,
+            budget,
+        )?
+        else {
+            return Ok(());
+        };
+        budget.claim_owned(
+            size_of::<ClassBooleanDefinition>()
+                .checked_mul(2)
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "equivalent Boolean definition allocation overflowed",
+                    )
+                })?,
+        )?;
+        pending.try_reserve(2).map_err(|_| {
+            EncodedValidationError::resource("equivalent Boolean definition allocation failed")
+        })?;
+        pending.push(negative);
+        pending.push(positive);
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    for definition in pending {
+        retain_class_boolean_definition(definitions, definition, provenance, budget)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2786,7 +2902,18 @@ fn class_signature<B: ByteSource>(
                             "equivalent-classes member did not resolve to a node",
                         ));
                     };
-                    if atomic_class_selection(model, symbols, identifier, budget)?.is_none() {
+                    let selection = atomic_class_selection(model, symbols, identifier, budget)?;
+                    let negative = class_boolean_definition(
+                        definitions,
+                        identifier,
+                        DefinitionPolarity::Negative,
+                    );
+                    let positive = class_boolean_definition(
+                        definitions,
+                        identifier,
+                        DefinitionPolarity::Positive,
+                    );
+                    if selection.is_none() && (negative.is_none() || positive.is_none()) {
                         continue 'root_selection;
                     }
                 }
@@ -2803,6 +2930,22 @@ fn class_signature<B: ByteSource>(
                         atomic_class_selection(model, symbols, identifier, budget)?
                     {
                         push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                    } else {
+                        for polarity in [DefinitionPolarity::Negative, DefinitionPolarity::Positive]
+                        {
+                            let definition =
+                                class_boolean_definition(definitions, identifier, polarity)
+                                    .ok_or_else(|| {
+                                        EncodedValidationError::invariant(
+                                            "validated equivalent Boolean definition disappeared",
+                                        )
+                                    })?;
+                            push_class_boolean_definition_selections(
+                                &mut selected_expressions,
+                                definition,
+                                budget,
+                            )?;
+                        }
                     }
                 }
             }
@@ -6769,11 +6912,13 @@ fn named_subclass<B: ByteSource>(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn named_equivalent_classes<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
     root: NodeId,
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
@@ -6793,23 +6938,11 @@ fn named_equivalent_classes<B: ByteSource>(
             "equivalent-classes expressions did not resolve to a collection",
         ));
     };
-    for item_index in expressions.items() {
-        budget.claim_work(1)?;
-        let item = required_component(model.item(item_index)?, "equivalent-classes member")?;
-        let ComponentValue::Node(identifier) = model.resolve(item)? else {
-            return Err(EncodedValidationError::invariant(
-                "equivalent-classes member did not resolve to a node",
-            ));
-        };
-        if atomic_class_selection(model, symbols, identifier, budget)?.is_none() {
-            return Ok(None);
-        }
-    }
     let mut classes = Vec::new();
     budget.claim_owned(
         expressions
             .len()
-            .checked_mul(size_of::<(u32, bool)>())
+            .checked_mul(size_of::<NodeId>())
             .ok_or_else(|| {
                 EncodedValidationError::resource("equivalent-classes member allocation overflowed")
             })?,
@@ -6825,19 +6958,15 @@ fn named_equivalent_classes<B: ByteSource>(
                 "equivalent-classes member did not resolve to a node",
             ));
         };
-        let Some(class_literal) = atomic_class_expression_literal(
-            model,
-            symbols,
-            class_domain,
-            signature,
-            identifier,
-            scope_maps,
-            budget,
-        )?
-        else {
+        let selection = atomic_class_selection(model, symbols, identifier, budget)?;
+        let negative =
+            class_boolean_definition(definitions, identifier, DefinitionPolarity::Negative);
+        let positive =
+            class_boolean_definition(definitions, identifier, DefinitionPolarity::Positive);
+        if selection.is_none() && (negative.is_none() || positive.is_none()) {
             return Ok(None);
-        };
-        classes.push(class_literal);
+        }
+        classes.push(identifier);
     }
     if classes.len() < 2 {
         return Err(EncodedValidationError::invariant(
@@ -6857,11 +6986,43 @@ fn named_equivalent_classes<B: ByteSource>(
     edges.try_reserve_exact(classes.len()).map_err(|_| {
         EncodedValidationError::resource("equivalent-classes edge allocation failed")
     })?;
-    for (index, (sub_class, sub_negative)) in classes.iter().copied().enumerate() {
+    for (index, sub_identifier) in classes.iter().copied().enumerate() {
         let following = index.checked_add(1).ok_or_else(|| {
             EncodedValidationError::resource("equivalent-classes edge index overflowed")
         })?;
-        let (super_class, super_negative) = classes[following % classes.len()];
+        let super_identifier = classes[following % classes.len()];
+        let (sub_class, sub_negative) = class_expression_literal_with_definitions(
+            model,
+            symbols,
+            class_domain,
+            signature,
+            sub_identifier,
+            DefinitionPolarity::Negative,
+            definitions,
+            scope_maps,
+            budget,
+        )?
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "validated equivalent-class antecedent became unsupported",
+            )
+        })?;
+        let (super_class, super_negative) = class_expression_literal_with_definitions(
+            model,
+            symbols,
+            class_domain,
+            signature,
+            super_identifier,
+            DefinitionPolarity::Positive,
+            definitions,
+            scope_maps,
+            budget,
+        )?
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "validated equivalent-class consequent became unsupported",
+            )
+        })?;
         edges.push(RawEdge {
             sub_class,
             sub_negative,

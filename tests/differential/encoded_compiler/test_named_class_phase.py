@@ -1681,6 +1681,75 @@ def test_flat_boolean_subclass_definitions_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_flat_boolean_equivalent_class_definitions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(Class(:E))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(AnnotationProperty(:note))",
+            "EquivalentClasses(:A ObjectIntersectionOf(:B :C))",
+            'EquivalentClasses(Annotation(:note "same definitions") :A '
+            "ObjectIntersectionOf(:B :C))",
+            "EquivalentClasses(:D ObjectUnionOf(ObjectComplementOf(:B) :C) "
+            "ObjectIntersectionOf(ObjectOneOf(:i) :E))",
+            "SubClassOf(:E ObjectIntersectionOf(:B :C))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=4)
+    generated = [
+        value
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ]
+    assert len(generated) == 6
+    assert {
+        str(value["display"]).split(":")[-2] for value in generated
+    } == {"negative", "positive"}
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_partial_boolean_equivalence_defers_without_generated_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "EquivalentClasses(:A ObjectIntersectionOf(:B :C) "
+            "ObjectSomeValuesFrom(:p :B))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
+    assert not any(
+        value["generated"]
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert not any(
+        str(value["display"]).startswith("ObjectIntersectionOf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_generated_class_entity_remapping_matches_scalar_exactly() -> None:
     long_iri = "<urn:test:long:" + ("z" * 240) + ">"
     snapshot = pyowl_core.load_snapshot(
@@ -1724,7 +1793,7 @@ def test_composite_boolean_definitions_use_the_global_logical_namespace() -> Non
     right = pyowl_core.load_snapshot(
         functional(
             *declarations,
-            "SubClassOf(ObjectUnionOf(:A :B) :D)",
+            "EquivalentClasses(ObjectUnionOf(:A :B) :D)",
         ),
         options=OPTIONS,
     )
