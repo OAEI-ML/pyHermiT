@@ -607,6 +607,7 @@ impl DefinitionPolarity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ClassBooleanDefinition {
     expressions: Vec<NodeId>,
+    roots: Vec<NodeId>,
     expression_key: Vec<u8>,
     intersection: bool,
     operands: Vec<AtomicClassSelection>,
@@ -1278,11 +1279,12 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                 }
             }
             RootHandler::DisjointUnion => {
-                match named_reducible_disjoint_union(
+                match named_disjoint_union(
                     model,
                     symbols,
                     &class_domain,
                     &class_signature,
+                    &definitions,
                     root.node,
                     thing,
                     nothing,
@@ -2262,6 +2264,15 @@ fn class_boolean_definitions<B: ByteSource>(
                 &mut definitions,
                 budget,
             )?,
+            RootHandler::DisjointUnion => retain_disjoint_union_boolean_definition(
+                model,
+                symbols,
+                root.node,
+                namespace,
+                scope_maps,
+                &mut definitions,
+                budget,
+            )?,
             _ => {}
         }
     }
@@ -2275,6 +2286,9 @@ fn class_boolean_definitions<B: ByteSource>(
         budget.claim_work(sort_work(definition.expressions.len()))?;
         definition.expressions.sort_unstable();
         definition.expressions.dedup();
+        budget.claim_work(sort_work(definition.roots.len()))?;
+        definition.roots.sort_unstable();
+        definition.roots.dedup();
         budget.claim_work(sort_work(definition.provenance.len()))?;
         definition.provenance.sort_unstable();
         definition.provenance.dedup();
@@ -2627,6 +2641,160 @@ fn retain_disjoint_boolean_definitions<B: ByteSource>(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn retain_disjoint_union_boolean_definition<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    root: NodeId,
+    namespace: [u8; 32],
+    scope_maps: &[AnonymousScopeMap],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let node = model.node(root)?;
+    if node.tag() != DISJOINT_UNION_TAG || node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-union root no longer has schema-1 shape",
+        ));
+    }
+    let defined = node_field(model, node, 0, "disjoint-union defined class")?;
+    if atomic_class_selection(model, symbols, defined, budget)?.is_none() {
+        return Ok(());
+    }
+    let expressions_component = required_component(
+        model.field(node.fields().start + 1)?,
+        "disjoint-union expressions",
+    )?;
+    let ComponentValue::Collection(expressions) = model.resolve(expressions_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-union expressions did not resolve to a collection",
+        ));
+    };
+    if expressions.len() < 2 {
+        return Err(EncodedValidationError::invariant(
+            "disjoint-union root has fewer than two members",
+        ));
+    }
+    if reducible_class_boolean_operands(model, symbols, expressions, false, 0, budget)?.is_some() {
+        return Ok(());
+    }
+    let mut keyed = Vec::<(Vec<u8>, AtomicClassSelection)>::new();
+    budget.claim_owned(
+        expressions
+            .len()
+            .checked_mul(size_of::<(Vec<u8>, AtomicClassSelection)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("disjoint-union definition allocation overflowed")
+            })?,
+    )?;
+    keyed.try_reserve_exact(expressions.len()).map_err(|_| {
+        EncodedValidationError::resource("disjoint-union definition allocation failed")
+    })?;
+    for item_index in expressions.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "disjoint-union member")?;
+        let ComponentValue::Node(identifier) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "disjoint-union member did not resolve to a node",
+            ));
+        };
+        if !stable_class_literal_expression(model, symbols, identifier, budget)? {
+            return Ok(());
+        }
+        let selection =
+            atomic_class_selection(model, symbols, identifier, budget)?.ok_or_else(|| {
+                EncodedValidationError::invariant("stable disjoint-union member became unsupported")
+            })?;
+        if atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?
+            || atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?
+            || keyed
+                .iter()
+                .any(|(_, known)| atomic_class_selections_match(*known, selection))
+        {
+            return Ok(());
+        }
+        let key = canonical::canonical_node_key(model, selection.expression, scope_maps, budget)?;
+        keyed.push((key, selection));
+    }
+    if keyed.len() < 2 {
+        return Ok(());
+    }
+    budget.claim_work(sort_work(keyed.len()))?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    if keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Ok(());
+    }
+    let expression_key = synthetic_class_boolean_key(
+        OBJECT_UNION_OF_TAG,
+        keyed.iter().map(|(key, _)| key.as_slice()),
+        keyed.len(),
+        budget,
+    )?;
+    let (generated_key, generated_display) = generated_class_symbol(
+        namespace,
+        &expression_key,
+        DefinitionPolarity::Positive,
+        budget,
+    )?;
+    budget.claim_owned(
+        size_of::<NodeId>()
+            .checked_add(
+                keyed
+                    .len()
+                    .checked_mul(size_of::<AtomicClassSelection>())
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "synthetic class Boolean operands overflowed",
+                        )
+                    })?,
+            )
+            .ok_or_else(|| {
+                EncodedValidationError::resource("synthetic class Boolean ownership overflowed")
+            })?,
+    )?;
+    let mut operands = Vec::new();
+    operands.try_reserve_exact(keyed.len()).map_err(|_| {
+        EncodedValidationError::resource("synthetic class Boolean operand allocation failed")
+    })?;
+    operands.extend(keyed.iter().map(|(_, selection)| *selection));
+    let definition = ClassBooleanDefinition {
+        expressions: Vec::new(),
+        roots: vec![root],
+        expression_key,
+        intersection: false,
+        operands,
+        polarity: DefinitionPolarity::Positive,
+        generated_key,
+        generated_display,
+        provenance: Vec::new(),
+    };
+    let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
+    retain_class_boolean_definition(definitions, definition, provenance, budget)
+}
+
+fn synthetic_class_boolean_key<'a>(
+    tag: u16,
+    keys: impl Iterator<Item = &'a [u8]>,
+    count: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let mut key = Vec::new();
+    push_generated_varint(&mut key, u64::from(tag), budget)?;
+    push_generated_byte(&mut key, 6, budget)?;
+    push_generated_varint(
+        &mut key,
+        u64::try_from(count).map_err(|_| {
+            EncodedValidationError::resource("synthetic class Boolean arity exceeds u64")
+        })?,
+        budget,
+    )?;
+    for member in keys {
+        budget.claim_work(1)?;
+        push_generated_frame(&mut key, member, budget)?;
+    }
+    Ok(key)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn retain_equivalent_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
@@ -2787,6 +2955,7 @@ fn class_boolean_definition_candidate<B: ByteSource>(
     budget.claim_owned(size_of::<NodeId>())?;
     Ok(Some(ClassBooleanDefinition {
         expressions: vec![expression],
+        roots: Vec::new(),
         expression_key,
         intersection: node.tag() == OBJECT_INTERSECTION_OF_TAG,
         operands: selections,
@@ -2843,11 +3012,37 @@ fn retain_class_boolean_definition(
                 "equivalent generated class definitions disagree",
             ));
         }
-        budget.claim_owned(size_of::<NodeId>() + size_of::<[u8; 32]>())?;
-        known.expressions.try_reserve(1).map_err(|_| {
-            EncodedValidationError::resource("generated definition expression allocation failed")
-        })?;
+        let node_count = definition
+            .expressions
+            .len()
+            .checked_add(definition.roots.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("generated definition node count overflowed")
+            })?;
+        budget.claim_owned(
+            node_count
+                .checked_mul(size_of::<NodeId>())
+                .and_then(|value| value.checked_add(size_of::<[u8; 32]>()))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("generated definition ownership overflowed")
+                })?,
+        )?;
+        known
+            .expressions
+            .try_reserve(definition.expressions.len())
+            .map_err(|_| {
+                EncodedValidationError::resource(
+                    "generated definition expression allocation failed",
+                )
+            })?;
         known.expressions.append(&mut definition.expressions);
+        known
+            .roots
+            .try_reserve(definition.roots.len())
+            .map_err(|_| {
+                EncodedValidationError::resource("generated definition root allocation failed")
+            })?;
+        known.roots.append(&mut definition.roots);
         known.provenance.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("generated definition provenance allocation failed")
         })?;
@@ -3109,15 +3304,24 @@ fn class_boolean_definition(
     })
 }
 
+fn class_boolean_definition_for_root(
+    definitions: &[ClassBooleanDefinition],
+    root: NodeId,
+    polarity: DefinitionPolarity,
+) -> Option<&ClassBooleanDefinition> {
+    definitions.iter().find(|definition| {
+        definition.polarity == polarity && definition.roots.binary_search(&root).is_ok()
+    })
+}
+
 fn push_class_boolean_definition_selections(
     expressions: &mut Vec<NodeId>,
     definition: &ClassBooleanDefinition,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
-    let expression = *definition.expressions.first().ok_or_else(|| {
-        EncodedValidationError::invariant("generated definition lost its source expression")
-    })?;
-    push_class_expression_selection(expressions, expression, budget)?;
+    if let Some(expression) = definition.expressions.first().copied() {
+        push_class_expression_selection(expressions, expression, budget)?;
+    }
     for selection in definition.operands.iter().copied() {
         push_atomic_class_selection(expressions, selection, budget)?;
     }
@@ -3403,9 +3607,22 @@ fn class_signature<B: ByteSource>(
                         "disjoint-union expressions did not resolve to a collection",
                     ));
                 };
-                if reducible_class_boolean_operands(model, symbols, expressions, false, 0, budget)?
-                    .is_none()
-                {
+                let reducible = reducible_class_boolean_operands(
+                    model,
+                    symbols,
+                    expressions,
+                    false,
+                    0,
+                    budget,
+                )?
+                .is_some();
+                let generated = class_boolean_definition_for_root(
+                    definitions,
+                    root.node,
+                    DefinitionPolarity::Positive,
+                )
+                .is_some();
+                if !reducible && !generated {
                     continue;
                 }
                 push_atomic_class_selection(&mut selected_expressions, defined_selection, budget)?;
@@ -3553,6 +3770,61 @@ fn class_signature<B: ByteSource>(
     }
 
     for definition in definitions {
+        if definition.expressions.is_empty() {
+            if definition.roots.is_empty() {
+                return Err(EncodedValidationError::invariant(
+                    "synthetic class definition lost its owning root",
+                ));
+            }
+            let following = pending.len().checked_add(1).ok_or_else(|| {
+                EncodedValidationError::resource("synthetic class symbol count overflowed")
+            })?;
+            PhaseBudget::count(
+                following,
+                budget.limits.max_class_symbols,
+                "synthetic class symbol count",
+            )?;
+            budget.claim_work(definition.expression_key.len())?;
+            let digest = crate::model::hex(&Sha256::digest(&definition.expression_key));
+            let prefix = if definition.intersection {
+                "ObjectIntersectionOf:"
+            } else {
+                "ObjectUnionOf:"
+            };
+            let display_len = prefix.len().checked_add(digest.len()).ok_or_else(|| {
+                EncodedValidationError::resource("synthetic class display length overflowed")
+            })?;
+            budget.claim_owned(
+                size_of::<PendingClassSymbol>()
+                    .checked_add(size_of::<DecodedSymbolValue>())
+                    .and_then(|value| value.checked_add(definition.expression_key.len()))
+                    .and_then(|value| value.checked_add(display_len))
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "synthetic class symbol ownership overflowed",
+                        )
+                    })?,
+            )?;
+            let mut display = String::new();
+            display.try_reserve_exact(display_len).map_err(|_| {
+                EncodedValidationError::resource("synthetic class display allocation failed")
+            })?;
+            display.push_str(prefix);
+            display.push_str(&digest);
+            pending.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource("synthetic class symbol allocation failed")
+            })?;
+            pending.push(PendingClassSymbol {
+                value: DecodedSymbolValue {
+                    identifier: 0,
+                    key: definition.expression_key.clone(),
+                    display,
+                    generated: false,
+                    query_local: false,
+                },
+                entity: None,
+            });
+        }
         let following = pending.len().checked_add(1).ok_or_else(|| {
             EncodedValidationError::resource("generated class symbol count overflowed")
         })?;
@@ -7729,11 +8001,12 @@ fn normalized_class_literal_key<B: ByteSource>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn named_reducible_disjoint_union<B: ByteSource>(
+fn named_disjoint_union<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     class_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
     root: NodeId,
     thing: u32,
     nothing: u32,
@@ -7764,11 +8037,13 @@ fn named_reducible_disjoint_union<B: ByteSource>(
             "disjoint-union root has fewer than two members",
         ));
     }
-    let Some(union_selection) =
-        reducible_class_boolean_operands(model, symbols, expressions, false, 0, budget)?
-    else {
+    let union_selection =
+        reducible_class_boolean_operands(model, symbols, expressions, false, 0, budget)?;
+    let union_definition =
+        class_boolean_definition_for_root(definitions, root, DefinitionPolarity::Positive);
+    if union_selection.is_none() && union_definition.is_none() {
         return Ok(None);
-    };
+    }
     let Some((defined_class, defined_negative)) = atomic_class_expression_literal(
         model,
         symbols,
@@ -7781,17 +8056,34 @@ fn named_reducible_disjoint_union<B: ByteSource>(
     else {
         return Ok(None);
     };
-    let Some((union_class, union_negative)) = atomic_class_expression_literal(
-        model,
-        symbols,
-        class_domain,
-        signature,
-        union_selection.expression,
-        scope_maps,
-        budget,
-    )?
-    else {
-        return Ok(None);
+    let (union_class, union_negative) = if let Some(selection) = union_selection {
+        atomic_class_selection_literal(
+            model,
+            class_domain,
+            signature,
+            selection,
+            scope_maps,
+            budget,
+        )?
+    } else {
+        let definition = union_definition.ok_or_else(|| {
+            EncodedValidationError::invariant("generated disjoint-union definition disappeared")
+        })?;
+        budget.claim_work(binary_search_work(class_domain.values.len()))?;
+        let class_index = class_domain
+            .values
+            .binary_search_by(|candidate| candidate.key.cmp(&definition.generated_key))
+            .map_err(|_| {
+                EncodedValidationError::invariant(
+                    "generated disjoint-union class symbol disappeared",
+                )
+            })?;
+        (
+            u32::try_from(class_index).map_err(|_| {
+                EncodedValidationError::resource("generated disjoint-union class ID exceeds u32")
+            })?,
+            false,
+        )
     };
     let provenance = source_axiom_digest(model, root, scope_maps, budget)?;
     let definition_edge_count = expressions.len().checked_add(1).ok_or_else(|| {

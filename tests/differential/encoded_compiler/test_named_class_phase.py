@@ -1990,6 +1990,7 @@ def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
         "Declaration(Class(:A))",
         "Declaration(Class(:B))",
         "Declaration(Class(:C))",
+        "Declaration(Class(:D))",
         "Declaration(ObjectProperty(:p))",
         "Declaration(DataProperty(:data))",
     )
@@ -2006,6 +2007,7 @@ def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
             "DataPropertyDomain(:data ObjectUnionOf(:B :C))",
             "HasKey(ObjectIntersectionOf(:A :B) (:p) (:data))",
             "DisjointClasses(ObjectUnionOf(:A :C) :B)",
+            "DisjointUnion(:D :A :C)",
         ),
         options=OPTIONS,
     )
@@ -2018,7 +2020,7 @@ def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
 
     assert manifest == _expected_manifest(
         composite,
-        compiled_roots=4,
+        compiled_roots=5,
         include_object_constraints=True,
         include_data_domains=True,
         include_keys=True,
@@ -2239,16 +2241,46 @@ def test_reducible_disjoint_unions_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_disjoint_unions_requiring_generated_definitions_defer_atomically() -> None:
+def test_generated_disjoint_unions_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(Class(:C))",
             "Declaration(Class(:D))",
+            "Declaration(Class(:U))",
+            "Declaration(Class(:V))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(AnnotationProperty(:note))",
+            "DisjointUnion(:U :A :B)",
+            'DisjointUnion(Annotation(:note "same definition") :U :A :B)',
+            "SubClassOf(:C ObjectUnionOf(:A :B))",
+            "DisjointUnion(:V ObjectComplementOf(:A) ObjectOneOf(:i) :D)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=4)
+    assert sum(
+        bool(value["generated"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    ) == 2
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:U))",
             "Declaration(ObjectProperty(:p))",
-            "DisjointUnion(:A :B :C)",
-            "DisjointUnion(:D :B ObjectSomeValuesFrom(:p :C))",
+            "DisjointUnion(:U :A ObjectSomeValuesFrom(:p :B))",
         ),
         options=OPTIONS,
     )
@@ -2256,7 +2288,7 @@ def test_disjoint_unions_requiring_generated_definitions_defer_atomically() -> N
     manifest = _native_manifest(snapshot)
 
     assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 2
+    assert manifest["deferred_roots"] == 1
     assert not any(
         value["generated"]
         or str(value["display"]).startswith(
