@@ -24,6 +24,7 @@ pub mod role_model;
 pub mod role_semantics;
 pub mod simple_roles;
 pub mod symbols;
+pub(crate) mod xml_literal;
 
 use std::cmp::Ordering;
 use std::error::Error;

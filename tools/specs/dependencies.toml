@@ -188,6 +188,17 @@ linkage = "statically-linked-native"
 audit_owner = "WPR0,WPR4,WPP0"
 
 [[dependency]]
+name = "quick-xml"
+requirement = "quick-xml==0.37.5"
+scope = "native-runtime"
+license = "MIT"
+source = "https://crates.io/crates/quick-xml"
+purpose = "bounded entity-safe XML literal parsing for native structural compilation"
+shipped = true
+linkage = "statically-linked-native"
+audit_owner = "WP18,WPP0"
+
+[[dependency]]
 name = "serde"
 requirement = "serde==1.0.228"
 scope = "native-runtime"

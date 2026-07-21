@@ -1995,37 +1995,83 @@ def test_composite_date_time_zone_aliases_share_one_identity_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-@pytest.mark.parametrize(
-    ("constructor", "predicate_kind"),
-    [
-        ("DataPropertyAssertion", PredicateKind.DATA_ROLE),
-        ("NegativeDataPropertyAssertion", PredicateKind.NEGATED_DATA_ROLE),
-    ],
-)
-def test_xml_data_assertion_defers_without_a_partial_data_fact(
-    constructor: str,
-    predicate_kind: PredicateKind,
-) -> None:
+def test_xml_data_assertions_canonicalize_and_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
             "Declaration(NamedIndividual(:i))",
-            f'{constructor}(:p :i "<node/>"^^rdf:XMLLiteral)',
+            (
+                'DataPropertyAssertion(:p :i "<a y=\\\"2\\\" x=\\\"1\\\"/>"'
+                "^^rdf:XMLLiteral)"
+            ),
+            (
+                'NegativeDataPropertyAssertion(:q :i "<a x=\\\"1\\\" y=\\\"2\\\"></a>"'
+                "^^rdf:XMLLiteral)"
+            ),
+            (
+                'DataPropertyAssertion(:p :i "<a xmlns:p=\\\"urn:x\\\"><p:b/><p:c/></a>"'
+                "^^rdf:XMLLiteral)"
+            ),
+            (
+                'NegativeDataPropertyAssertion(:q :i "<!--top--><a><![CDATA[x<y&z]]>'
+                '</a><?pi data?>"^^rdf:XMLLiteral)'
+            ),
         ),
         options=OPTIONS,
     )
 
     actual = _native_manifest(snapshot)
 
-    assert actual["compiled_roots"] == 0
-    assert actual["deferred_roots"] == 1
-    assert actual["data_value_symbols"] == []
-    assert all(
-        predicate["kind"] != predicate_kind.value
-        for predicate in cast(list[dict[str, object]], actual["predicates"])
+    assert actual == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_data_assertions=True,
+        include_negative_data_assertions=True,
     )
-    assert len(cast(list[dict[str, object]], actual["positive_facts"])) == 2
-    assert actual["negative_facts"] == []
+    assert actual["data_value_symbols"] == _expected_data_value_symbols(snapshot)
+    assert len(cast(list[object], actual["source_literal_symbols"])) == 4
+    assert len(cast(list[object], actual["data_value_symbols"])) == 3
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_xml_spelling_remaps_one_canonical_identity_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:z))",
+            "Declaration(NamedIndividual(:zSource))",
+            (
+                'DataPropertyAssertion(:z :zSource "<a y=\\\"2\\\" x=\\\"1\\\"/>"'
+                "^^rdf:XMLLiteral)"
+            ),
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:a))",
+            "Declaration(NamedIndividual(:aSource))",
+            (
+                'NegativeDataPropertyAssertion(:a :aSource "<a x=\\\"1\\\" y=\\\"2\\\"></a>"'
+                "^^rdf:XMLLiteral)"
+            ),
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    actual = _native_slices_manifest(*_composite_records(composite, (left, right)))
+
+    assert actual == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_data_assertions=True,
+        include_negative_data_assertions=True,
+    )
+    assert len(cast(list[object], actual["source_literal_symbols"])) == 2
+    assert len(cast(list[object], actual["data_value_symbols"])) == 1
+    assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

@@ -85,6 +85,7 @@ const XSD_BASE64_BINARY_IRI: &str = "http://www.w3.org/2001/XMLSchema#base64Bina
 const XSD_ANY_URI_IRI: &str = "http://www.w3.org/2001/XMLSchema#anyURI";
 const XSD_DATE_TIME_IRI: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 const XSD_DATE_TIME_STAMP_IRI: &str = "http://www.w3.org/2001/XMLSchema#dateTimeStamp";
+const RDF_XML_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral";
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 
@@ -101,6 +102,8 @@ pub struct NamedClassPhaseLimits {
     pub max_numeric_digits: usize,
     pub max_decimal_exponent: usize,
     pub max_binary_bytes: usize,
+    pub max_xml_depth: usize,
+    pub max_xml_nodes: usize,
     pub max_compiled_roots: usize,
     pub max_predicates: usize,
     pub max_clauses: usize,
@@ -127,6 +130,8 @@ impl Default for NamedClassPhaseLimits {
             max_numeric_digits: 100_000,
             max_decimal_exponent: 100_000,
             max_binary_bytes: 1_000_000,
+            max_xml_depth: 256,
+            max_xml_nodes: 100_000,
             max_compiled_roots: 100_000_000,
             max_predicates: 100_000_000,
             max_clauses: 100_000_000,
@@ -720,14 +725,14 @@ struct ProvenanceKey {
     generated: bool,
 }
 
-struct PhaseBudget {
+pub(super) struct PhaseBudget {
     limits: NamedClassPhaseLimits,
     work: u64,
     owned_bytes: usize,
 }
 
 impl PhaseBudget {
-    const fn new(limits: NamedClassPhaseLimits) -> Self {
+    pub(super) const fn new(limits: NamedClassPhaseLimits) -> Self {
         Self {
             limits,
             work: 0,
@@ -735,7 +740,7 @@ impl PhaseBudget {
         }
     }
 
-    fn claim_work(&mut self, amount: usize) -> EncodedResult<()> {
+    pub(super) fn claim_work(&mut self, amount: usize) -> EncodedResult<()> {
         let amount = u64::try_from(amount)
             .map_err(|_| EncodedValidationError::resource("named-class work exceeds u64"))?;
         let following = self
@@ -751,7 +756,7 @@ impl PhaseBudget {
         Ok(())
     }
 
-    fn claim_owned(&mut self, amount: usize) -> EncodedResult<()> {
+    pub(super) fn claim_owned(&mut self, amount: usize) -> EncodedResult<()> {
         let following = self.owned_bytes.checked_add(amount).ok_or_else(|| {
             EncodedValidationError::resource("named-class owned-byte count overflowed")
         })?;
@@ -772,6 +777,14 @@ impl PhaseBudget {
         } else {
             Ok(())
         }
+    }
+
+    pub(super) const fn max_xml_depth(&self) -> usize {
+        self.limits.max_xml_depth
+    }
+
+    pub(super) const fn max_xml_nodes(&self) -> usize {
+        self.limits.max_xml_nodes
     }
 }
 
@@ -2232,7 +2245,26 @@ fn literal_data_identity_key(
     if let Some(require_timezone) = require_timezone {
         return date_time_data_identity_key(lexical, require_timezone, budget).map(Some);
     }
+    if datatype_iri == RDF_XML_LITERAL_IRI {
+        return xml_literal_data_identity_key(lexical, budget).map(Some);
+    }
     string_data_identity_key(lexical, datatype_iri, language, budget)
+}
+
+fn xml_literal_data_identity_key(
+    lexical: &str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let character_count = lexical.chars().count();
+    PhaseBudget::count(
+        character_count,
+        budget.limits.max_literal_characters,
+        "literal character count",
+    )?;
+    let canonical = super::xml_literal::canonicalize(lexical, budget)?;
+    let payload = serde_json::to_vec(&("xml-literal-c14n-v1", canonical.as_str()))
+        .map_err(|_| EncodedValidationError::invariant("XML literal identity encoding failed"))?;
+    prefixed_data_identity_key(&payload, budget)
 }
 
 fn boolean_data_identity_key(lexical: &str, budget: &mut PhaseBudget) -> EncodedResult<Vec<u8>> {
