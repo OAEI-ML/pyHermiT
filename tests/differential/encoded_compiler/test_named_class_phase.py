@@ -3708,7 +3708,7 @@ def test_unsupported_data_quantifier_inputs_defer_without_symbol_leaks() -> None
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "SubClassOf(:A DataSomeValuesFrom(:d :e xsd:string))",
-            "SubClassOf(DataMaxCardinality(2 :d "
+            "SubClassOf(DataExactCardinality(2 :d "
             "DataIntersectionOf(xsd:string xsd:integer)) :B)",
             "SubClassOf(:A DataSomeValuesFrom(:undeclared xsd:string))",
             "EquivalentClasses(:A DataSomeValuesFrom(:d "
@@ -4250,6 +4250,148 @@ def test_composite_data_maximum_definitions_reuse_global_identity() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_recursive_data_maximum_fillers_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A DataMaxCardinality(1 :d "
+            "DataIntersectionOf(xsd:string xsd:integer)))",
+            'SubClassOf(Annotation(:note "same dependencies") :A '
+            "DataMaxCardinality(1 :d "
+            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "SubClassOf(DataMaxCardinality(2 :e "
+            "DataUnionOf(xsd:boolean xsd:decimal)) :B)",
+            "SubClassOf(:B DataMaxCardinality(0 :d DataIntersectionOf("
+            "xsd:string DataUnionOf(xsd:integer xsd:boolean))))",
+            "SubClassOf(ObjectComplementOf(DataMaxCardinality(0 :e "
+            "DataIntersectionOf(xsd:boolean xsd:integer))) :B)",
+            "SubClassOf(:A ObjectComplementOf(DataMaxCardinality(2 :d "
+            "DataUnionOf(xsd:string xsd:decimal))))",
+            "DataPropertyRange(:e DataUnionOf(xsd:boolean xsd:decimal))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=7,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_data_ranges=True,
+        include_generated_data_definitions=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_recursive_data_maximum_fillers_cover_generated_class_contexts() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "ClassAssertion(DataMaxCardinality(1 :d "
+            "DataUnionOf(xsd:string xsd:integer)) :i)",
+            "ObjectPropertyDomain(:p DataMaxCardinality(2 :e "
+            "DataIntersectionOf(xsd:boolean xsd:decimal)))",
+            "DataPropertyDomain(:d DataMaxCardinality(3 :e "
+            "DataUnionOf(xsd:decimal xsd:integer)))",
+            "HasKey(DataMaxCardinality(1 :d "
+            "DataIntersectionOf(xsd:string xsd:boolean)) (:p) (:e))",
+            "DisjointClasses(DataMaxCardinality(2 :e "
+            "DataUnionOf(xsd:string xsd:decimal)) :A)",
+            "SubClassOf(ObjectIntersectionOf(:B DataMaxCardinality(1 :d "
+            "DataIntersectionOf(xsd:boolean xsd:integer))) :A)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=6,
+        include_object_constraints=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_recursive_data_maximum_fillers_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(DataProperty(:d))",
+    )
+    maximum = (
+        "DataMaxCardinality(2 :d "
+        "DataIntersectionOf(xsd:string DataUnionOf(xsd:integer xsd:boolean)))"
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"SubClassOf(:A {maximum})",
+            f"SubClassOf({maximum} :B)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"ObjectPropertyDomain(:p {maximum})",
+            f"DisjointClasses({maximum} :A)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    class_namespace = f":class:{composite.logical_fingerprint.hex}:"
+    data_namespace = f":data:{composite.logical_fingerprint.hex}:"
+    assert sum(
+        class_namespace in str(value["display"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ) == 2
+    assert sum(
+        data_namespace in str(value["display"])
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        if value["generated"]
+    ) == 4
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -4258,12 +4400,13 @@ def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
             "Declaration(DataProperty(:d))",
             "SubClassOf(:A DataMaxCardinality(4294967295 :d xsd:string))",
             "SubClassOf(:A DataMaxCardinality(4294967296 :d xsd:string))",
-            "SubClassOf(:A DataMaxCardinality(2 :d "
+            "SubClassOf(:A DataExactCardinality(2 :d "
             "DataIntersectionOf(xsd:string xsd:integer)))",
             "SubClassOf(:A DataMaxCardinality(2 :undeclared xsd:string))",
             "SubClassOf(ObjectComplementOf("
             "DataMaxCardinality(4294967295 :d xsd:string)) :B)",
-            "EquivalentClasses(:A DataMaxCardinality(2 :d xsd:string) "
+            "EquivalentClasses(:A DataMaxCardinality(2 :d "
+            "DataIntersectionOf(xsd:string xsd:integer)) "
             'DataHasValue(:undeclared "value"))',
         ),
         options=OPTIONS,
@@ -4281,6 +4424,13 @@ def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
         for value in cast(
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
+    )
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            ("DataIntersectionOf:", "DataUnionOf:")
+        )
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert all(
         predicate["kind"]

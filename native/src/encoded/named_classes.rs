@@ -5072,11 +5072,6 @@ fn normalized_class_term<B: ByteSource>(
             else {
                 return Ok(None);
             };
-            if node.tag() == DATA_MAX_CARDINALITY_TAG
-                && matches!(&filler, NormalizedDataTerm::Boolean(_))
-            {
-                return Ok(None);
-            }
             if matches!(
                 &normalized,
                 DataCardinalityNormalization::Cardinality { .. }
