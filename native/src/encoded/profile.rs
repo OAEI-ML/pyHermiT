@@ -2,11 +2,11 @@
 //!
 //! Profile violations are successful semantic output. Malformed columns,
 //! resource exhaustion, and cancellation remain distinct operational failures.
-//! This first private phase owns exact data-arity, top-data-property, and
-//! extension projections. Structural-columns schema 1 does not carry
-//! document-origin rows, so the manifest exposes canonical root provenance without inventing
-//! `ProfileIssue.document_keys`. Issue ordering and deduplication therefore use
-//! the exact projected field tuple published by this phase.
+//! This first private phase owns exact data-arity, top-data-property, local
+//! anonymous-placement, and extension projections. Structural-columns schema 1
+//! does not carry document-origin rows, so the manifest exposes canonical root
+//! provenance without inventing `ProfileIssue.document_keys`. Issue ordering
+//! and deduplication use the exact projected field tuple published by this phase.
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #![forbid(unsafe_code)]
@@ -28,9 +28,16 @@ const POSTINGS_INCLUDE: u8 = 1;
 const POSTINGS_EXCLUDE: u8 = 2;
 const IRI_TAG: u16 = 1;
 const ENTITY_TAG: u16 = 2;
+const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
+const OBJECT_ONE_OF_TAG: u16 = 33;
+const OBJECT_HAS_VALUE_TAG: u16 = 36;
 const DATA_SOME_VALUES_FROM_TAG: u16 = 41;
 const DATA_ALL_VALUES_FROM_TAG: u16 = 42;
 const SUB_DATA_PROPERTY_TAG: u16 = 90;
+const SAME_INDIVIDUAL_TAG: u16 = 110;
+const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
+const NEGATIVE_OBJECT_PROPERTY_ASSERTION_TAG: u16 = 114;
+const NEGATIVE_DATA_PROPERTY_ASSERTION_TAG: u16 = 116;
 const SWRL_RULE_TAG: u16 = 148;
 const TOP_DATA_PROPERTY_IRI: &[u8] = b"http://www.w3.org/2002/07/owl#topDataProperty";
 const DATA_RANGE_ARITY_RULE: &str = "OWL2_DATA_RANGE_ARITY";
@@ -39,6 +46,12 @@ const DATA_RANGE_ARITY_MESSAGE: &str =
 const TOP_DATA_PROPERTY_RULE: &str = "OWL2DL_TOP_DATA_PROPERTY_POSITION";
 const TOP_DATA_PROPERTY_MESSAGE: &str =
     "owl:topDataProperty may occur only as the super-property of a data subproperty axiom";
+const ANONYMOUS_AXIOM_POSITION_RULE: &str = "OWL2DL_ANONYMOUS_AXIOM_POSITION";
+const ANONYMOUS_AXIOM_POSITION_MESSAGE: &str =
+    "anonymous individuals are forbidden in this axiom type";
+const ANONYMOUS_CLASS_EXPRESSION_RULE: &str = "OWL2DL_ANONYMOUS_CLASS_EXPRESSION";
+const ANONYMOUS_CLASS_EXPRESSION_MESSAGE: &str =
+    "anonymous individuals are forbidden in ObjectOneOf and ObjectHasValue expressions";
 const EXTENSION_COMPONENT_RULE: &str = "OWL2DL_EXTENSION_COMPONENT";
 const EXTENSION_COMPONENT_MESSAGE: &str =
     "extension components such as SWRL are outside the OWL 2 DL reasoner scope";
@@ -600,6 +613,13 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         let axiom_constructor = RootHandler::from_root(RootKind::Axiom, axiom_tag)
             .map_err(ProfilePhaseError::Encoded)?
             .as_str();
+        let anonymous_axiom_forbidden = matches!(
+            axiom_tag,
+            SAME_INDIVIDUAL_TAG
+                | DIFFERENT_INDIVIDUALS_TAG
+                | NEGATIVE_OBJECT_PROPERTY_ASSERTION_TAG
+                | NEGATIVE_DATA_PROPERTY_ASSERTION_TAG
+        );
         let top_data_property_allowed = allows_top_data_property(model, root.node(), &mut budget)
             .map_err(ProfilePhaseError::Encoded)?;
 
@@ -620,10 +640,43 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         enqueue_node(root.node(), &mut marks, epoch, &mut stack)
             .map_err(ProfilePhaseError::Encoded)?;
         let mut top_data_property_occurs = false;
+        let mut anonymous_individual_occurs = false;
         while let Some(identifier) = stack.pop() {
             poll(control, "profile-node")?;
             budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
             let node = model.node(identifier).map_err(ProfilePhaseError::Encoded)?;
+            if node.tag() == ANONYMOUS_INDIVIDUAL_TAG {
+                anonymous_individual_occurs = true;
+            }
+            let anonymous_expression =
+                if matches!(node.tag(), OBJECT_ONE_OF_TAG | OBJECT_HAS_VALUE_TAG) {
+                    forbidden_anonymous_expression(model, identifier, &mut budget)
+                        .map_err(ProfilePhaseError::Encoded)?
+                } else {
+                    None
+                };
+            if let Some(constructor) = anonymous_expression {
+                let following = issues.len().checked_add(1).ok_or_else(|| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                        "profile issue count overflowed",
+                    ))
+                })?;
+                budget
+                    .claim_issue(following)
+                    .map_err(ProfilePhaseError::Encoded)?;
+                budget
+                    .claim_owned(size_of::<ProfileIssue>())
+                    .map_err(ProfilePhaseError::Encoded)?;
+                reserve_one(&mut issues, "profile issue allocation failed")
+                    .map_err(ProfilePhaseError::Encoded)?;
+                issues.push(ProfileIssue {
+                    rule_id: ANONYMOUS_CLASS_EXPRESSION_RULE,
+                    severity: "error",
+                    message: ANONYMOUS_CLASS_EXPRESSION_MESSAGE,
+                    constructor,
+                    provenance_sha256,
+                });
+            }
             if node.tag() == ENTITY_TAG
                 && is_top_data_property(model, identifier, &mut budget)
                     .map_err(ProfilePhaseError::Encoded)?
@@ -697,6 +750,28 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                 enqueue_component(model, component, &mut marks, epoch, &mut stack, &mut budget)
                     .map_err(ProfilePhaseError::Encoded)?;
             }
+        }
+        if anonymous_individual_occurs && anonymous_axiom_forbidden {
+            let following = issues.len().checked_add(1).ok_or_else(|| {
+                ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                    "profile issue count overflowed",
+                ))
+            })?;
+            budget
+                .claim_issue(following)
+                .map_err(ProfilePhaseError::Encoded)?;
+            budget
+                .claim_owned(size_of::<ProfileIssue>())
+                .map_err(ProfilePhaseError::Encoded)?;
+            reserve_one(&mut issues, "profile issue allocation failed")
+                .map_err(ProfilePhaseError::Encoded)?;
+            issues.push(ProfileIssue {
+                rule_id: ANONYMOUS_AXIOM_POSITION_RULE,
+                severity: "error",
+                message: ANONYMOUS_AXIOM_POSITION_MESSAGE,
+                constructor: axiom_constructor,
+                provenance_sha256,
+            });
         }
         if top_data_property_occurs && !top_data_property_allowed {
             let following = issues.len().checked_add(1).ok_or_else(|| {
@@ -912,6 +987,69 @@ pub fn merge_profile_phases_controlled<E>(
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
     poll(control, "profile-merge-complete")?;
     Ok(phase)
+}
+
+fn forbidden_anonymous_expression<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<&'static str>> {
+    budget.claim_work(1)?;
+    let node = model.node(identifier)?;
+    match node.tag() {
+        OBJECT_ONE_OF_TAG => {
+            if node.field_count() != 1 {
+                return Err(EncodedValidationError::invariant(
+                    "validated ObjectOneOf lost its schema-1 shape",
+                ));
+            }
+            let component =
+                required_component(model.field(node.fields().start)?, "profile nominal members")?;
+            let ComponentValue::Collection(members) = model.resolve(component)? else {
+                return Err(EncodedValidationError::invariant(
+                    "validated ObjectOneOf members are not a collection",
+                ));
+            };
+            if members.kind() != ComponentKind::Set {
+                return Err(EncodedValidationError::invariant(
+                    "validated ObjectOneOf members are not a canonical set",
+                ));
+            }
+            for item_index in members.items() {
+                budget.claim_work(1)?;
+                let component =
+                    required_component(model.item(item_index)?, "profile nominal member")?;
+                let ComponentValue::Node(member) = model.resolve(component)? else {
+                    return Err(EncodedValidationError::invariant(
+                        "validated ObjectOneOf member is not a node",
+                    ));
+                };
+                if model.node(member)?.tag() == ANONYMOUS_INDIVIDUAL_TAG {
+                    return Ok(Some("ObjectOneOf"));
+                }
+            }
+            Ok(None)
+        }
+        OBJECT_HAS_VALUE_TAG => {
+            if node.field_count() != 2 {
+                return Err(EncodedValidationError::invariant(
+                    "validated ObjectHasValue lost its schema-1 shape",
+                ));
+            }
+            let value_field = node.fields().start.checked_add(1).ok_or_else(|| {
+                EncodedValidationError::resource("profile field index overflowed")
+            })?;
+            let value = required_node(model, value_field, "profile ObjectHasValue value")?;
+            if model.node(value)?.tag() == ANONYMOUS_INDIVIDUAL_TAG {
+                Ok(Some("ObjectHasValue"))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Err(EncodedValidationError::invariant(
+            "profile anonymous-expression dispatch received a different constructor",
+        )),
+    }
 }
 
 fn allows_top_data_property<B: ByteSource>(
@@ -1297,6 +1435,32 @@ mod tests {
         }
     }
 
+    fn anonymous_forbidden_columns() -> OwnedColumns {
+        let mut scalar_bytes = concat!("urn:test#named", "named_individual")
+            .as_bytes()
+            .to_vec();
+        scalar_bytes.extend_from_slice(&[0x11; 32]);
+        scalar_bytes.extend_from_slice(&[0x22; 32]);
+        OwnedColumns {
+            root_kinds: vec![2],
+            root_ids: le32(&[4]),
+            node_tags: le16(&[
+                IRI_TAG,
+                ENTITY_TAG,
+                ANONYMOUS_INDIVIDUAL_TAG,
+                DIFFERENT_INDIVIDUALS_TAG,
+            ]),
+            node_field_offsets: le64(&[0, 1, 3, 5, 7]),
+            field_kinds: vec![2, 5, 1, 3, 3, 6, 6],
+            field_values: le64(&[0, 14, 1, 30, 62, 0, 2]),
+            field_lengths: le64(&[14, 16, 0, 32, 32, 2, 0]),
+            item_kinds: vec![1, 1],
+            item_values: le64(&[2, 3]),
+            item_lengths: le64(&[0, 0]),
+            scalar_bytes,
+        }
+    }
+
     fn extension_columns() -> OwnedColumns {
         OwnedColumns {
             root_kinds: vec![3],
@@ -1359,6 +1523,30 @@ mod tests {
         assert!(allowed_phase.conforms);
         assert_eq!(allowed_phase.axioms_checked, 1);
         assert!(allowed_phase.issues.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn anonymous_axiom_position_is_exact_and_scope_sensitive() -> EncodedResult<()> {
+        let columns = anonymous_forbidden_columns();
+        let model = model(&columns)?;
+        let phase = compile_profile_phase(&model, &[], ProfilePhaseLimits::default())?;
+        assert!(!phase.conforms);
+        assert_eq!(phase.axioms_checked, 1);
+        assert_eq!(phase.issues.len(), 1);
+        assert_eq!(phase.issues[0].rule_id, ANONYMOUS_AXIOM_POSITION_RULE);
+        assert_eq!(phase.issues[0].constructor, "DifferentIndividuals");
+
+        let scope_maps = vec![vec![canonical::AnonymousScopeReplacement {
+            source: [0x11; 32],
+            target: [0x33; 32],
+        }]];
+        let mapped = compile_profile_phase(&model, &scope_maps, ProfilePhaseLimits::default())?;
+        assert_eq!(mapped.issues.len(), 1);
+        assert_ne!(
+            mapped.issues[0].provenance_sha256,
+            phase.issues[0].provenance_sha256
+        );
         Ok(())
     }
 

@@ -35,8 +35,16 @@ OPTIONS = pyowl_core.LoadOptions(
 DATA_RANGE_ARITY_RULE = "OWL2_DATA_RANGE_ARITY"
 EXTENSION_COMPONENT_RULE = "OWL2DL_EXTENSION_COMPONENT"
 TOP_DATA_PROPERTY_RULE = "OWL2DL_TOP_DATA_PROPERTY_POSITION"
+ANONYMOUS_AXIOM_POSITION_RULE = "OWL2DL_ANONYMOUS_AXIOM_POSITION"
+ANONYMOUS_CLASS_EXPRESSION_RULE = "OWL2DL_ANONYMOUS_CLASS_EXPRESSION"
 PROJECTED_RULES = frozenset(
-    (DATA_RANGE_ARITY_RULE, EXTENSION_COMPONENT_RULE, TOP_DATA_PROPERTY_RULE)
+    (
+        ANONYMOUS_AXIOM_POSITION_RULE,
+        ANONYMOUS_CLASS_EXPRESSION_RULE,
+        DATA_RANGE_ARITY_RULE,
+        EXTENSION_COMPONENT_RULE,
+        TOP_DATA_PROPERTY_RULE,
+    )
 )
 
 
@@ -162,6 +170,13 @@ def _top_data_root_posting(snapshot: pyowl_core.OntologyView) -> memoryview:
     raise AssertionError("profile fixture has no invalid top-data-property root")
 
 
+def _anonymous_root_posting(snapshot: pyowl_core.OntologyView) -> memoryview:
+    for index, axiom in enumerate(snapshot.iter_axioms(), 1):
+        if isinstance(axiom, owl.SameIndividual):
+            return memoryview(struct.pack("<I", index))
+    raise AssertionError("profile fixture has no forbidden anonymous-individual root")
+
+
 def _extension_snapshot(label: str) -> pyowl_core.OntologyView:
     class_a = owl.Class(owl.IRI("urn:test:profile#A"))
     variable = swrl.Variable(owl.IRI("urn:test:profile#x"))
@@ -282,6 +297,57 @@ def test_top_data_property_positions_match_scalar_exactly() -> None:
         if issue.rule_id == TOP_DATA_PROPERTY_RULE
     )
     assert all("document_keys" not in issue for issue in top_issues)
+
+
+def test_local_anonymous_individual_positions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:value))",
+            "SameIndividual(_:a :named)",
+            "DifferentIndividuals(_:a :named)",
+            "NegativeObjectPropertyAssertion(:p _:a :named)",
+            'NegativeDataPropertyAssertion(:value _:a "x")',
+            "ClassAssertion(ObjectOneOf(_:a) :named)",
+            "ClassAssertion(ObjectHasValue(:p _:a) :named)",
+        ),
+        options=OPTIONS,
+    )
+    scalar = validate_owl2_dl_view(snapshot)
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    issues = cast(list[dict[str, object]], actual["issues"])
+    axiom_issues = [
+        issue
+        for issue in issues
+        if issue["rule_id"] == ANONYMOUS_AXIOM_POSITION_RULE
+    ]
+    expression_issues = [
+        issue
+        for issue in issues
+        if issue["rule_id"] == ANONYMOUS_CLASS_EXPRESSION_RULE
+    ]
+    assert {issue["constructor"] for issue in axiom_issues} == {
+        "DifferentIndividuals",
+        "NegativeDataPropertyAssertion",
+        "NegativeObjectPropertyAssertion",
+        "SameIndividual",
+    }
+    assert {issue["constructor"] for issue in expression_issues} == {
+        "ObjectHasValue",
+        "ObjectOneOf",
+    }
+    assert len(axiom_issues) == 4
+    assert len(expression_issues) == 2
+    assert all(
+        issue.document_keys
+        for issue in scalar.issues
+        if issue.rule_id
+        in {ANONYMOUS_AXIOM_POSITION_RULE, ANONYMOUS_CLASS_EXPRESSION_RULE}
+    )
+    assert all("document_keys" not in issue for issue in (*axiom_issues, *expression_issues))
 
 
 def test_extension_component_diagnostic_and_count_match_scalar_exactly() -> None:
@@ -418,6 +484,44 @@ def test_top_data_property_selection_and_composite_deduplication_are_canonical()
     assert json.loads(forward)["axioms_checked"] == 1
 
 
+def test_anonymous_position_selection_and_duplicate_slice_merge_are_canonical() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "SameIndividual(_:a :named)",
+            "ClassAssertion(ObjectOneOf(_:a) :named)",
+        ),
+        options=OPTIONS,
+    )
+    invalid = _anonymous_root_posting(snapshot)
+    root_count = len(tuple(snapshot.iter_axioms()))
+    invalid_id = struct.unpack("<I", invalid)[0]
+    complement = memoryview(
+        b"".join(
+            struct.pack("<I", index)
+            for index in range(1, root_count + 1)
+            if index != invalid_id
+        )
+    )
+
+    included = native._encoded_profile_slices_manifest_v1(
+        slices=(_slice_record(snapshot, posting_mode=1, postings=invalid),)
+    )
+    excluded = native._encoded_profile_slices_manifest_v1(
+        slices=(_slice_record(snapshot, posting_mode=2, postings=complement),)
+    )
+
+    assert included == excluded
+    selected = cast(dict[str, object], json.loads(included))
+    assert selected["axioms_checked"] == 1
+    assert selected["ordered_rule_ids"] == [ANONYMOUS_AXIOM_POSITION_RULE]
+
+    record = _slice_record(snapshot)
+    merged = native._encoded_profile_slices_manifest_v1(slices=(record, record))
+
+    assert merged == native._encoded_profile_manifest_v1(**_buffers(snapshot))
+    assert json.loads(merged) == _expected_manifest(snapshot)
+
+
 def test_extension_selection_and_composite_deduplication_are_canonical() -> None:
     snapshot = _extension_snapshot("selection")
     extension = _extension_root_posting(snapshot)
@@ -520,12 +624,15 @@ def test_anonymous_scope_map_rebases_issue_provenance_exactly() -> None:
         _slice_record(snapshot, anonymous_scope_maps=(scope_map,))
     )
 
-    baseline_issue = cast(list[dict[str, object]], baseline["issues"])[0]
-    mapped_issue = cast(list[dict[str, object]], mapped["issues"])[0]
-    assert mapped_issue["provenance_sha256"] == hashlib.sha256(
-        expected_axiom.canonical_bytes()
-    ).hexdigest()
-    assert mapped_issue["provenance_sha256"] != baseline_issue["provenance_sha256"]
+    baseline_issues = cast(list[dict[str, object]], baseline["issues"])
+    mapped_issues = cast(list[dict[str, object]], mapped["issues"])
+    expected_provenance = hashlib.sha256(expected_axiom.canonical_bytes()).hexdigest()
+    assert {
+        cast(str, issue["provenance_sha256"]) for issue in mapped_issues
+    } == {expected_provenance}
+    assert {
+        cast(str, issue["provenance_sha256"]) for issue in baseline_issues
+    } != {expected_provenance}
 
 
 def test_hostile_columns_fail_transactionally_and_valid_retry_is_unchanged() -> None:
