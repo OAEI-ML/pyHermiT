@@ -796,6 +796,8 @@ enum ObjectConstraintKind {
     SelfAntecedent,
     SelfConsequent,
     ExistentialAntecedent,
+    ExistentialConsequent,
+    UniversalAntecedent,
     UniversalConsequent,
 }
 
@@ -2190,6 +2192,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         predicate_by_negative_class,
         predicate_by_object_role,
         predicate_by_negative_object_role,
+        at_least_object_predicates,
         predicate_by_data_role,
         predicate_by_negative_data_role,
         predicate_by_data_range,
@@ -2255,6 +2258,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &predicate_by_class,
         &predicate_by_negative_class,
         &predicate_by_object_role,
+        &at_least_object_predicates,
         &predicate_by_data_role,
         &predicate_by_data_range,
         &predicate_by_negative_data_range,
@@ -3922,9 +3926,6 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
         else {
             return Ok(());
         };
-        if !normalized_class_term_supports_polarity(&term, DefinitionPolarity::Negative) {
-            return Ok(());
-        }
         if !matches!(term, NormalizedClassTerm::Atomic(_)) {
             let _generated_key = atomize_normalized_class_term(
                 term.clone(),
@@ -3944,11 +3945,6 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
     let NormalizedClassTerm::Boolean(union) = union else {
         return Ok(());
     };
-    if !union.operands.iter().all(|operand| {
-        normalized_class_term_supports_polarity(operand, DefinitionPolarity::Positive)
-    }) {
-        return Ok(());
-    }
     let previous_count = pending.len();
     let outer_key = atomize_normalized_class_boolean(
         union,
@@ -4122,9 +4118,6 @@ fn class_boolean_definition_candidates<B: ByteSource>(
         return Ok(None);
     };
     if matches!(term, NormalizedClassTerm::Atomic(_)) {
-        return Ok(None);
-    }
-    if !normalized_class_term_supports_polarity(&term, polarity) {
         return Ok(None);
     }
     let mut definitions = Vec::new();
@@ -4453,26 +4446,6 @@ fn normalized_class_boolean_term(
     )))
 }
 
-fn normalized_class_term_supports_polarity(
-    term: &NormalizedClassTerm,
-    polarity: DefinitionPolarity,
-) -> bool {
-    match term {
-        NormalizedClassTerm::Atomic(_) | NormalizedClassTerm::ObjectSelf(_) => true,
-        NormalizedClassTerm::Boolean(term) => term
-            .operands
-            .iter()
-            .all(|operand| normalized_class_term_supports_polarity(operand, polarity)),
-        NormalizedClassTerm::ObjectQuantifier(term) => {
-            matches!(
-                (term.kind, polarity),
-                (ObjectQuantifierKind::Some, DefinitionPolarity::Negative)
-                    | (ObjectQuantifierKind::All, DefinitionPolarity::Positive)
-            ) && normalized_class_term_supports_polarity(&term.filler, polarity)
-        }
-    }
-}
-
 fn push_normalized_class_term(
     target: &mut Vec<NormalizedClassTerm>,
     term: NormalizedClassTerm,
@@ -4628,15 +4601,6 @@ fn atomize_normalized_object_quantifier(
         key,
         filler,
     } = term;
-    if !matches!(
-        (kind, polarity),
-        (ObjectQuantifierKind::Some, DefinitionPolarity::Negative)
-            | (ObjectQuantifierKind::All, DefinitionPolarity::Positive)
-    ) {
-        return Err(EncodedValidationError::invariant(
-            "unsupported object-quantifier polarity reached atomization",
-        ));
-    }
     let expression_tag = match kind {
         ObjectQuantifierKind::Some => OBJECT_SOME_VALUES_FROM_TAG,
         ObjectQuantifierKind::All => OBJECT_ALL_VALUES_FROM_TAG,
@@ -11879,7 +11843,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                     "generated object-quantifier definition changed before emission",
                 ));
             }
-            let (filler_class_id, filler_negative) = class_boolean_operand_literal(
+            let (filler_class_id, mut filler_negative) = class_boolean_operand_literal(
                 model,
                 class_domain,
                 signature,
@@ -11891,13 +11855,15 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 (ObjectQuantifierKind::Some, DefinitionPolarity::Negative) => {
                     ObjectConstraintKind::ExistentialAntecedent
                 }
+                (ObjectQuantifierKind::Some, DefinitionPolarity::Positive) => {
+                    ObjectConstraintKind::ExistentialConsequent
+                }
+                (ObjectQuantifierKind::All, DefinitionPolarity::Negative) => {
+                    filler_negative = !filler_negative;
+                    ObjectConstraintKind::UniversalAntecedent
+                }
                 (ObjectQuantifierKind::All, DefinitionPolarity::Positive) => {
                     ObjectConstraintKind::UniversalConsequent
-                }
-                _ => {
-                    return Err(EncodedValidationError::invariant(
-                        "generated object-quantifier definition has an unsupported polarity",
-                    ));
                 }
             };
             for provenance in &definition.provenance {
@@ -13362,6 +13328,10 @@ enum PredicateOwner {
     },
     ObjectRole(u32),
     NegatedObjectRole(u32),
+    AtLeastObject {
+        role_id: u32,
+        filler: ClassLiteral,
+    },
     DataRole(u32),
     NegatedDataRole(u32),
     DataRange(u32),
@@ -13385,6 +13355,7 @@ struct PendingPredicate {
 
 type PredicateIndex = Vec<(u32, u32)>;
 type ObjectPredicateIndex = Vec<(u32, u32)>;
+type AtLeastObjectPredicateIndex = Vec<((u32, ClassLiteral), u32)>;
 type GuardPredicateIndex = Vec<([u8; 32], u32, u32)>;
 
 fn nominal_binding(bindings: &[NominalBinding], class_id: u32) -> Option<&NominalBinding> {
@@ -13446,6 +13417,7 @@ type FrozenPredicates = (
     PredicateIndex,
     ObjectPredicateIndex,
     ObjectPredicateIndex,
+    AtLeastObjectPredicateIndex,
     ObjectPredicateIndex,
     ObjectPredicateIndex,
     PredicateIndex,
@@ -13509,6 +13481,9 @@ fn freeze_predicates(
         || object_characteristics
             .iter()
             .any(|value| value.kind == ObjectCharacteristicKind::Reflexive)
+        || object_constraints
+            .iter()
+            .any(|value| value.kind == ObjectConstraintKind::UniversalAntecedent)
     {
         push_u32(&mut class_ids, thing, "predicate class", budget)?;
     }
@@ -13780,6 +13755,37 @@ fn freeze_predicates(
                     individual_ids: binding.individual_ids.clone(),
                 }
             }),
+        });
+    }
+    let mut at_least_objects = Vec::<(u32, ClassLiteral)>::new();
+    for constraint in object_constraints.iter().filter(|constraint| {
+        matches!(
+            constraint.kind,
+            ObjectConstraintKind::ExistentialConsequent | ObjectConstraintKind::UniversalAntecedent
+        )
+    }) {
+        let filler = constraint.filler.ok_or_else(|| {
+            EncodedValidationError::invariant("object at-least constraint lost its filler literal")
+        })?;
+        budget.claim_owned(size_of::<(u32, ClassLiteral)>())?;
+        at_least_objects.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("object at-least predicate allocation failed")
+        })?;
+        at_least_objects.push((constraint.role_id, filler));
+    }
+    budget.claim_work(sort_work(at_least_objects.len()))?;
+    at_least_objects.sort_unstable();
+    at_least_objects.dedup();
+    for (role_id, filler) in at_least_objects {
+        let filler_key = class_literal_predicate_key(nominal_bindings, filler);
+        let key = at_least_object_predicate_key(role_id, &filler_key, budget)?;
+        budget.claim_owned(size_of::<PendingPredicate>() + key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("object at-least predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::AtLeastObject { role_id, filler },
         });
     }
     let mut object_role_ids = Vec::new();
@@ -14070,12 +14076,55 @@ fn freeze_predicates(
         budget.limits.max_predicates,
         "predicate count",
     )?;
+    let mut pending_class_predicates = Vec::<(ClassLiteral, u32)>::new();
+    budget.claim_owned(
+        ordered
+            .len()
+            .checked_mul(size_of::<(ClassLiteral, u32)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "pending class-predicate index allocation overflowed",
+                )
+            })?,
+    )?;
+    pending_class_predicates
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("pending class-predicate index allocation failed")
+        })?;
+    for (identifier, pending) in ordered.iter().enumerate() {
+        let literal = match &pending.owner {
+            PredicateOwner::Concept(class_id) | PredicateOwner::Nominal { class_id, .. } => {
+                Some(ClassLiteral {
+                    class_id: *class_id,
+                    negative: false,
+                })
+            }
+            PredicateOwner::NegatedConcept(class_id)
+            | PredicateOwner::NegatedNominal { class_id, .. } => Some(ClassLiteral {
+                class_id: *class_id,
+                negative: true,
+            }),
+            _ => None,
+        };
+        if let Some(literal) = literal {
+            pending_class_predicates.push((
+                literal,
+                u32::try_from(identifier).map_err(|_| {
+                    EncodedValidationError::resource("pending predicate ID exceeds u32")
+                })?,
+            ));
+        }
+    }
+    budget.claim_work(sort_work(pending_class_predicates.len()))?;
+    pending_class_predicates.sort_unstable_by_key(|(literal, _)| *literal);
 
     let mut predicates = Vec::new();
     let mut predicate_by_class = Vec::new();
     let mut predicate_by_negative_class = Vec::new();
     let mut predicate_by_object_role = Vec::new();
     let mut predicate_by_negative_object_role = Vec::new();
+    let mut at_least_object_predicates = Vec::new();
     let mut predicate_by_data_role = Vec::new();
     let mut predicate_by_negative_data_role = Vec::new();
     let mut predicate_by_data_range = Vec::new();
@@ -14126,6 +14175,21 @@ fn freeze_predicates(
             EncodedValidationError::resource(
                 "negated object-role predicate index allocation failed",
             )
+        })?;
+    budget.claim_owned(
+        ordered
+            .len()
+            .checked_mul(size_of::<((u32, ClassLiteral), u32)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "object at-least predicate index allocation overflowed",
+                )
+            })?,
+    )?;
+    at_least_object_predicates
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("object at-least predicate index allocation failed")
         })?;
     predicate_by_data_role
         .try_reserve_exact(ordered.len())
@@ -14243,6 +14307,29 @@ fn freeze_predicates(
                     internal_key: None,
                 });
                 predicate_by_negative_object_role.push((role_id, predicate_id));
+            }
+            PredicateOwner::AtLeastObject { role_id, filler } => {
+                let filler_predicate_id = pending_class_predicates
+                    .binary_search_by_key(&filler, |(literal, _)| *literal)
+                    .ok()
+                    .map(|position| pending_class_predicates[position].1)
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "object at-least filler predicate is missing",
+                        )
+                    })?;
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::AtLeastObject,
+                    argument_sorts: vec![TermSort::Object],
+                    symbol_id: None,
+                    role_id: Some(role_id),
+                    cardinality: Some(1),
+                    filler_predicate_id: Some(filler_predicate_id),
+                    annotation: Vec::new(),
+                    internal_key: None,
+                });
+                at_least_object_predicates.push(((role_id, filler), predicate_id));
             }
             PredicateOwner::DataRole(role_id) => {
                 budget.claim_owned(size_of::<TermSort>())?;
@@ -14393,6 +14480,7 @@ fn freeze_predicates(
     predicate_by_negative_class.sort_unstable_by_key(|(class_id, _)| *class_id);
     predicate_by_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_negative_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
+    at_least_object_predicates.sort_unstable_by_key(|(key, _)| *key);
     predicate_by_data_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_negative_data_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_data_range.sort_unstable_by_key(|(range_id, _)| *range_id);
@@ -14404,6 +14492,7 @@ fn freeze_predicates(
         predicate_by_negative_class,
         predicate_by_object_role,
         predicate_by_negative_object_role,
+        at_least_object_predicates,
         predicate_by_data_role,
         predicate_by_negative_data_role,
         predicate_by_data_range,
@@ -14439,6 +14528,7 @@ fn freeze_clauses(
     predicate_by_class: &[(u32, u32)],
     predicate_by_negative_class: &[(u32, u32)],
     predicate_by_object_role: &[(u32, u32)],
+    at_least_object_predicates: &AtLeastObjectPredicateIndex,
     predicate_by_data_role: &[(u32, u32)],
     predicate_by_data_range: &[(u32, u32)],
     predicate_by_negative_data_range: &[(u32, u32)],
@@ -14835,7 +14925,6 @@ fn freeze_clauses(
         )?;
     }
     for constraint in object_constraints {
-        let role = object_predicate_id(predicate_by_object_role, constraint.role_id)?;
         let class = class_literal_predicate_id(
             predicate_by_class,
             predicate_by_negative_class,
@@ -14858,18 +14947,64 @@ fn freeze_clauses(
             &constraint.provenance,
             constraint.generated,
         )?;
-        push_object_constraint_clause(
-            &mut ordered,
-            ObjectConstraintClauseSpec {
-                role_predicate_id: role,
-                class_predicate_id: class,
-                filler_predicate_id: filler,
-                kind: constraint.kind,
-                provenance_id: provenance,
-            },
-            scalar_predicate_ids,
-            budget,
-        )?;
+        match constraint.kind {
+            ObjectConstraintKind::ExistentialConsequent => {
+                let filler_literal = constraint.filler.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "existential consequent lost its filler literal",
+                    )
+                })?;
+                let at_least = at_least_object_predicate_id(
+                    at_least_object_predicates,
+                    constraint.role_id,
+                    filler_literal,
+                )?;
+                push_clause(
+                    &mut ordered,
+                    &[class],
+                    &[at_least],
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+            ObjectConstraintKind::UniversalAntecedent => {
+                let filler_literal = constraint.filler.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "universal antecedent lost its filler literal",
+                    )
+                })?;
+                let at_least = at_least_object_predicate_id(
+                    at_least_object_predicates,
+                    constraint.role_id,
+                    filler_literal,
+                )?;
+                let thing_predicate = predicate_id(predicate_by_class, thing)?;
+                push_clause(
+                    &mut ordered,
+                    &[thing_predicate],
+                    &[at_least, class],
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+            _ => {
+                let role = object_predicate_id(predicate_by_object_role, constraint.role_id)?;
+                push_object_constraint_clause(
+                    &mut ordered,
+                    ObjectConstraintClauseSpec {
+                        role_predicate_id: role,
+                        class_predicate_id: class,
+                        filler_predicate_id: filler,
+                        kind: constraint.kind,
+                        provenance_id: provenance,
+                    },
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+        }
     }
     for characteristic in object_characteristics {
         let role = object_predicate_id(predicate_by_object_role, characteristic.role_id)?;
@@ -17139,6 +17274,20 @@ fn object_predicate_id(index: &[(u32, u32)], role_id: u32) -> EncodedResult<u32>
         })
 }
 
+fn at_least_object_predicate_id(
+    index: &AtLeastObjectPredicateIndex,
+    role_id: u32,
+    filler: ClassLiteral,
+) -> EncodedResult<u32> {
+    index
+        .binary_search_by_key(&(role_id, filler), |(candidate, _)| *candidate)
+        .ok()
+        .map(|position| index[position].1)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("object at-least predicate index is incomplete")
+        })
+}
+
 fn data_predicate_id(index: &[(u32, u32)], role_id: u32) -> EncodedResult<u32> {
     index
         .binary_search_by_key(&role_id, |(candidate, _)| *candidate)
@@ -17367,7 +17516,7 @@ fn scalar_predicate_ids(
         ) {
             continue;
         }
-        let key = named_predicate_key(predicate)?;
+        let key = named_predicate_key(predicate, predicates, budget)?;
         budget.claim_owned(size_of::<(Vec<u8>, Option<u32>)>().saturating_add(key.len()))?;
         candidates.push((key, Some(predicate.predicate_id)));
     }
@@ -17425,7 +17574,11 @@ fn role_predicate_key(kind: PredicateKind, role_id: u32) -> Vec<u8> {
     .into_bytes()
 }
 
-fn named_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
+fn named_predicate_key(
+    predicate: &DecodedPredicate,
+    predicates: &[DecodedPredicate],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
     let unary_object = predicate.argument_sorts == [TermSort::Object];
     let unary_data = predicate.argument_sorts == [TermSort::Data];
     let binary_object = predicate.argument_sorts == [TermSort::Object, TermSort::Object];
@@ -17463,6 +17616,42 @@ fn named_predicate_key(predicate: &DecodedPredicate) -> EncodedResult<Vec<u8>> {
             .ok_or_else(|| {
                 EncodedValidationError::invariant("negated data-role predicate lost its role ID")
             });
+    }
+    if predicate.kind == PredicateKind::AtLeastObject
+        && unary_object
+        && predicate.symbol_id.is_none()
+        && predicate.cardinality == Some(1)
+        && predicate.annotation.is_empty()
+        && predicate.internal_key.is_none()
+    {
+        let role_id = predicate.role_id.ok_or_else(|| {
+            EncodedValidationError::invariant("object at-least predicate lost its role ID")
+        })?;
+        let filler_id = predicate.filler_predicate_id.ok_or_else(|| {
+            EncodedValidationError::invariant("object at-least predicate lost its filler")
+        })?;
+        let filler = predicates
+            .get(usize::try_from(filler_id).map_err(|_| {
+                EncodedValidationError::invariant(
+                    "object at-least filler predicate ID exceeds usize",
+                )
+            })?)
+            .ok_or_else(|| {
+                EncodedValidationError::invariant("object at-least filler predicate ID is dangling")
+            })?;
+        if !matches!(
+            filler.kind,
+            PredicateKind::Concept
+                | PredicateKind::NegatedConcept
+                | PredicateKind::Nominal
+                | PredicateKind::NegatedNominal
+        ) {
+            return Err(EncodedValidationError::invariant(
+                "object at-least filler is not a class predicate",
+            ));
+        }
+        let filler_key = named_predicate_key(filler, predicates, budget)?;
+        return at_least_object_predicate_key(role_id, &filler_key, budget);
     }
     if predicate.role_id.is_some()
         || predicate.cardinality.is_some()
@@ -17599,6 +17788,39 @@ fn concept_predicate_key(class_id: u32) -> Vec<u8> {
         "{{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"concept\",\"role_id\":null,\"symbol_id\":{class_id}}}"
     )
     .into_bytes()
+}
+
+fn class_literal_predicate_key(
+    nominal_bindings: &[NominalBinding],
+    literal: ClassLiteral,
+) -> Vec<u8> {
+    let nominal = nominal_binding(nominal_bindings, literal.class_id);
+    nominal.map_or_else(
+        || {
+            if literal.negative {
+                negated_concept_predicate_key(literal.class_id)
+            } else {
+                concept_predicate_key(literal.class_id)
+            }
+        },
+        |binding| {
+            nominal_predicate_key(literal.class_id, &binding.individual_ids, literal.negative)
+        },
+    )
+}
+
+fn at_least_object_predicate_key(
+    role_id: u32,
+    filler_key: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    budget.claim_work(filler_key.len())?;
+    let filler_digest: [u8; 32] = Sha256::digest(filler_key).into();
+    let filler = crate::model::hex(&filler_digest);
+    Ok(format!(
+        "{{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":1,\"filler\":\"{filler}\",\"internal_key\":null,\"kind\":\"at_least_object\",\"role_id\":{role_id},\"symbol_id\":null}}"
+    )
+    .into_bytes())
 }
 
 fn negated_concept_predicate_key(class_id: u32) -> Vec<u8> {
@@ -18166,6 +18388,7 @@ fn merge_named_class_phases_impl(
         predicate_by_negative_class,
         predicate_by_object_role,
         predicate_by_negative_object_role,
+        at_least_object_predicates,
         predicate_by_data_role,
         predicate_by_negative_data_role,
         predicate_by_data_range,
@@ -18231,6 +18454,7 @@ fn merge_named_class_phases_impl(
         &predicate_by_class,
         &predicate_by_negative_class,
         &predicate_by_object_role,
+        &at_least_object_predicates,
         &predicate_by_data_role,
         &predicate_by_data_range,
         &predicate_by_negative_data_range,

@@ -257,6 +257,7 @@ def _expected_manifest(
     include_object_characteristics: bool = False,
     include_generated_object_self_definitions: bool = False,
     include_generated_object_quantifier_definitions: bool = False,
+    include_at_least_object_predicates: bool = False,
     include_data_domains: bool = False,
     include_data_ranges: bool = False,
     include_generated_data_definitions: bool = False,
@@ -315,6 +316,8 @@ def _expected_manifest(
         PredicateKind.NAMED_INDIVIDUAL,
         PredicateKind.ORDERING_GUARD,
     }
+    if include_at_least_object_predicates:
+        fragment_kinds.add(PredicateKind.AT_LEAST_OBJECT)
     constraint_provenance_ids: set[int] = set()
     characteristic_provenance_ids: set[int] = set()
     self_definition_provenance_ids: set[int] = set()
@@ -538,6 +541,20 @@ def _expected_manifest(
         for atom in clause.body + clause.head
         if predicates_by_id[atom.predicate_id].kind is PredicateKind.OBJECT_ROLE
     }
+    at_least_object_role_ids = (
+        {
+            value.role_id
+            for value in program.predicates.predicates
+            if value.kind is PredicateKind.AT_LEAST_OBJECT and value.role_id is not None
+        }
+        if include_at_least_object_predicates
+        else set()
+    )
+    at_least_object_role_predicates = {
+        value.predicate_id
+        for value in program.predicates.predicates
+        if value.kind is PredicateKind.OBJECT_ROLE and value.role_id in at_least_object_role_ids
+    }
     data_domain_role_predicates = {
         atom.predicate_id
         for clause in program.clauses
@@ -643,6 +660,7 @@ def _expected_manifest(
         | characteristic_role_predicates
         | self_definition_role_predicates
         | quantifier_definition_role_predicates
+        | at_least_object_role_predicates
         | data_domain_role_predicates
         | data_range_role_predicates
         | data_functionality_role_predicates
@@ -676,7 +694,11 @@ def _expected_manifest(
             ),
             "role_id": value.role_id,
             "cardinality": value.cardinality,
-            "filler_predicate_id": value.filler_predicate_id,
+            "filler_predicate_id": (
+                None
+                if value.filler_predicate_id is None
+                else predicate_remap[value.filler_predicate_id]
+            ),
             "annotation": list(value.annotation),
             "internal_key": value.internal_key,
         }
@@ -2012,7 +2034,7 @@ def test_composite_recursive_object_quantifier_fillers_reuse_global_identity() -
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_unsupported_recursive_quantifier_fillers_defer_without_symbol_leaks() -> None:
+def test_unsupported_recursive_quantifier_cardinality_fillers_defer_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
@@ -2020,12 +2042,12 @@ def test_unsupported_recursive_quantifier_fillers_defer_without_symbol_leaks() -
             "Declaration(Class(:C))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
-            "SubClassOf(ObjectSomeValuesFrom(:p ObjectAllValuesFrom(:q :A)) :B)",
-            "SubClassOf(:A ObjectAllValuesFrom(:p ObjectSomeValuesFrom(:q :B)))",
+            "SubClassOf(ObjectSomeValuesFrom(:p ObjectMinCardinality(1 :q :A)) :B)",
+            "SubClassOf(:A ObjectAllValuesFrom(:p ObjectMinCardinality(1 :q :B)))",
             "SubClassOf(ObjectSomeValuesFrom(:p ObjectIntersectionOf("
-            "ObjectSomeValuesFrom(:q :A) ObjectAllValuesFrom(:q :B))) :C)",
+            "ObjectSomeValuesFrom(:q :A) ObjectMinCardinality(1 :q :B))) :C)",
             "SubClassOf(ObjectComplementOf(ObjectAllValuesFrom(:p "
-            "ObjectSomeValuesFrom(:q :A))) :C)",
+            "ObjectMinCardinality(1 :q :A))) :C)",
         ),
         options=OPTIONS,
     )
@@ -2036,7 +2058,9 @@ def test_unsupported_recursive_quantifier_fillers_defer_without_symbol_leaks() -
     assert manifest["deferred_roots"] == 4
     assert not any(
         value["generated"]
-        or str(value["display"]).startswith(("ObjectSomeValuesFrom:", "ObjectAllValuesFrom:"))
+        or str(value["display"]).startswith(
+            ("ObjectSomeValuesFrom:", "ObjectAllValuesFrom:", "ObjectMinCardinality:")
+        )
         for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
@@ -2094,7 +2118,7 @@ def test_composite_horn_object_quantifiers_reuse_global_identity() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_opposite_object_quantifier_polarities_defer_without_symbol_leaks() -> None:
+def test_at_least_object_quantifier_polarities_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
@@ -2112,17 +2136,139 @@ def test_opposite_object_quantifier_polarities_defer_without_symbol_leaks() -> N
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 4
-    assert not any(
-        value["generated"]
-        or str(value["display"]).startswith(("ObjectSomeValuesFrom:", "ObjectAllValuesFrom:"))
-        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_generated_object_quantifier_definitions=True,
+        include_at_least_object_predicates=True,
+    )
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 3
     )
     assert all(
-        predicate["kind"] != PredicateKind.OBJECT_ROLE.value
+        predicate["cardinality"] == 1
+        and predicate["role_id"] is not None
+        and predicate["filler_predicate_id"] is not None
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        if predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
     )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_at_least_object_definitions_cover_duality_and_recursive_fillers() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A ObjectSomeValuesFrom(:p :B))",
+            'SubClassOf(Annotation(:note "same at-least") :A '
+            "ObjectSomeValuesFrom(:p :B))",
+            "SubClassOf(:C ObjectComplementOf(ObjectAllValuesFrom("
+            "ObjectInverseOf(:p) ObjectComplementOf(:A))))",
+            "SubClassOf(ObjectComplementOf(ObjectSomeValuesFrom("
+            "ObjectInverseOf(:p) ObjectComplementOf(:B))) :C)",
+            "ClassAssertion(ObjectSomeValuesFrom(:q "
+            "ObjectIntersectionOf(:A :B)) :i)",
+            "DisjointClasses(ObjectAllValuesFrom(:q "
+            "ObjectUnionOf(:A :B)) :C)",
+            "SubClassOf(:B ObjectSomeValuesFrom(:p ObjectOneOf(:i)))",
+            "SubClassOf(ObjectAllValuesFrom(:p ObjectOneOf(:i)) :B)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=8,
+        include_generated_object_quantifier_definitions=True,
+        include_at_least_object_predicates=True,
+    )
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 7
+    )
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+        )
+        == 9
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_at_least_object_definitions_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+    )
+    some = "ObjectSomeValuesFrom(:p ObjectIntersectionOf(:B :C))"
+    all_values = "ObjectAllValuesFrom(:q ObjectUnionOf(:B :C))"
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"SubClassOf(:A {some})",
+            f"SubClassOf({all_values} :A)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"ObjectPropertyDomain(:q {some})",
+            f"DisjointClasses({all_values} :A)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_generated_object_quantifier_definitions=True,
+        include_at_least_object_predicates=True,
+    )
+    generated = [
+        value
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+        if value["generated"]
+    ]
+    assert len(generated) == 4
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 2
+    )
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert all(namespace in str(value["display"]) for value in generated)
+    assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
@@ -2334,7 +2480,7 @@ def test_partial_object_self_equivalence_defers_without_symbol_leaks() -> None:
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "EquivalentClasses(:A ObjectHasSelf(:p) "
-            "ObjectSomeValuesFrom(:q :B))",
+            "ObjectMinCardinality(1 :q :B))",
         ),
         options=OPTIONS,
     )
@@ -2361,7 +2507,7 @@ def test_partial_nested_object_self_root_defers_without_symbol_leaks() -> None:
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "SubClassOf(:A ObjectIntersectionOf(ObjectHasSelf(:p) "
-            "ObjectSomeValuesFrom(:q :B)))",
+            "ObjectMinCardinality(1 :q :B)))",
         ),
         options=OPTIONS,
     )
@@ -2425,7 +2571,7 @@ def test_partial_boolean_equivalence_defers_without_generated_symbol_leaks() -> 
             "Declaration(Class(:C))",
             "Declaration(ObjectProperty(:p))",
             "EquivalentClasses(:A ObjectIntersectionOf(:B :C) "
-            "ObjectSomeValuesFrom(:p :B))",
+            "ObjectMinCardinality(1 :p :B))",
         ),
         options=OPTIONS,
     )
@@ -2598,7 +2744,7 @@ def test_partial_boolean_disjoint_defers_without_generated_symbol_leaks() -> Non
             "Declaration(Class(:C))",
             "Declaration(ObjectProperty(:p))",
             "DisjointClasses(ObjectIntersectionOf(:A :B) "
-            "ObjectAllValuesFrom(:p :C))",
+            "ObjectMinCardinality(1 :p :C))",
         ),
         options=OPTIONS,
     )
@@ -3105,7 +3251,7 @@ def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
             "Declaration(Class(:U))",
             "Declaration(ObjectProperty(:p))",
             "DisjointUnion(:U ObjectIntersectionOf(:A :B) "
-            "ObjectSomeValuesFrom(:p :B))",
+            "ObjectMinCardinality(1 :p :B))",
         ),
         options=OPTIONS,
     )
@@ -3120,7 +3266,7 @@ def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
             (
                 "ObjectIntersectionOf:",
                 "ObjectUnionOf:",
-                "ObjectSomeValuesFrom:",
+                "ObjectMinCardinality:",
             )
         )
         for value in cast(
@@ -5511,7 +5657,8 @@ def test_complex_object_domain_still_defers_the_whole_root() -> None:
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(AnnotationProperty(:note))",
-            'ObjectPropertyDomain(Annotation(:note "source") :p ObjectSomeValuesFrom(:q :A))',
+            'ObjectPropertyDomain(Annotation(:note "source") :p '
+            "ObjectMinCardinality(1 :q :A))",
         ),
         options=OPTIONS,
     )
@@ -5533,7 +5680,7 @@ def test_complex_data_property_domain_still_defers_the_whole_root() -> None:
             "Declaration(Class(:A))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:p))",
-            "DataPropertyDomain(:p ObjectSomeValuesFrom(:q :A))",
+            "DataPropertyDomain(:p ObjectMinCardinality(1 :q :A))",
         ),
         options=OPTIONS,
     )
@@ -5775,7 +5922,7 @@ def test_partially_unsupported_has_key_defers_without_generated_symbols() -> Non
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:d))",
-            "HasKey(ObjectIntersectionOf(:A ObjectAllValuesFrom(:q :B)) (:p) (:d))",
+            "HasKey(ObjectIntersectionOf(:A ObjectMinCardinality(1 :q :B)) (:p) (:d))",
         ),
         options=OPTIONS,
     )
@@ -5858,7 +6005,8 @@ def test_complex_named_class_assertion_still_defers_the_whole_root() -> None:
             "Declaration(ObjectProperty(:p))",
             "Declaration(AnnotationProperty(:note))",
             "Declaration(NamedIndividual(:i))",
-            'ClassAssertion(Annotation(:note "source") ObjectSomeValuesFrom(:p :A) :i)',
+            'ClassAssertion(Annotation(:note "source") '
+            "ObjectMinCardinality(1 :p :A) :i)",
         ),
         options=OPTIONS,
     )
@@ -5876,7 +6024,7 @@ def test_nested_complement_class_assertion_defers_without_partial_symbols() -> N
             "Declaration(Class(:A))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(NamedIndividual(:i))",
-            "ClassAssertion(ObjectSomeValuesFrom(:p :A) :i)",
+            "ClassAssertion(ObjectMinCardinality(1 :p :A) :i)",
         ),
         options=OPTIONS,
     )
@@ -5908,7 +6056,7 @@ def test_unsupported_nominal_assertions_defer_without_partial_symbols() -> None:
             "Declaration(NamedIndividual(:b))",
             "ClassAssertion(ObjectOneOf(_:anonymous) :a)",
             "ClassAssertion(ObjectComplementOf("
-            "ObjectComplementOf(ObjectSomeValuesFrom(:p :A))) :b)",
+            "ObjectComplementOf(ObjectMinCardinality(1 :p :A))) :b)",
         ),
         options=OPTIONS,
     )
@@ -5940,13 +6088,13 @@ def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
             "Declaration(NamedIndividual(:a))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(DataProperty(:data))",
-            "SubClassOf(ObjectOneOf(:a) ObjectSomeValuesFrom(:p :A))",
-            "EquivalentClasses(ObjectOneOf(:a) ObjectSomeValuesFrom(:p :A))",
-            "DisjointClasses(ObjectOneOf(:a) ObjectAllValuesFrom(:p :A))",
+            "SubClassOf(ObjectOneOf(:a) ObjectMinCardinality(1 :p :A))",
+            "EquivalentClasses(ObjectOneOf(:a) ObjectMinCardinality(1 :p :A))",
+            "DisjointClasses(ObjectOneOf(:a) ObjectMinCardinality(1 :p :A))",
             "ObjectPropertyDomain(:p ObjectComplementOf("
-            "ObjectComplementOf(ObjectSomeValuesFrom(:p :A))))",
+            "ObjectComplementOf(ObjectMinCardinality(1 :p :A))))",
             "DataPropertyDomain(:data ObjectComplementOf("
-            "ObjectComplementOf(ObjectSomeValuesFrom(:p :A))))",
+            "ObjectComplementOf(ObjectMinCardinality(1 :p :A))))",
             "HasKey(ObjectOneOf(_:anonymous) (:p) (:data))",
         ),
         options=OPTIONS,
@@ -5975,8 +6123,8 @@ def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
 @pytest.mark.parametrize(
     "axiom",
     [
-        "SubClassOf(ObjectComplementOf(:A) ObjectSomeValuesFrom(:p :B))",
-        "SubClassOf(ObjectAllValuesFrom(:p :A) ObjectComplementOf(:B))",
+        "SubClassOf(ObjectComplementOf(:A) ObjectMinCardinality(1 :p :B))",
+        "SubClassOf(ObjectMinCardinality(1 :p :A) ObjectComplementOf(:B))",
     ],
 )
 def test_partial_atomic_complement_subclass_defers_without_leaking_symbols(
@@ -6015,7 +6163,7 @@ def test_partial_atomic_complement_equivalence_defers_without_leaking_symbols() 
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
-            "EquivalentClasses(ObjectComplementOf(:A) ObjectSomeValuesFrom(:p :B))",
+            "EquivalentClasses(ObjectComplementOf(:A) ObjectMinCardinality(1 :p :B))",
         ),
         options=OPTIONS,
     )
@@ -6043,7 +6191,7 @@ def test_partial_atomic_complement_disjoint_defers_without_leaking_symbols() -> 
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
-            "DisjointClasses(ObjectComplementOf(:A) ObjectAllValuesFrom(:p :B))",
+            "DisjointClasses(ObjectComplementOf(:A) ObjectMinCardinality(1 :p :B))",
         ),
         options=OPTIONS,
     )
@@ -6072,9 +6220,9 @@ def test_nested_complement_constraints_defer_without_leaking_symbols() -> None:
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:d))",
-            "ObjectPropertyDomain(:p ObjectSomeValuesFrom(:q :A))",
-            "DataPropertyDomain(:d ObjectSomeValuesFrom(:q :A))",
-            "HasKey(ObjectAllValuesFrom(:q :A) (:p) (:d))",
+            "ObjectPropertyDomain(:p ObjectMinCardinality(1 :q :A))",
+            "DataPropertyDomain(:d ObjectMinCardinality(1 :q :A))",
+            "HasKey(ObjectMinCardinality(1 :q :A) (:p) (:d))",
         ),
         options=OPTIONS,
     )
@@ -6126,13 +6274,13 @@ def test_anonymous_identity_axiom_defers_the_whole_root_without_partial_fact(
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_existential_consequent_is_deferred_without_breaking_scalar_fallback() -> None:
+def test_object_min_cardinality_is_deferred_without_breaking_scalar_fallback() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
-            "SubClassOf(:B ObjectSomeValuesFrom(:p :A))",
+            "SubClassOf(:B ObjectMinCardinality(1 :p :A))",
         ),
         options=OPTIONS,
     )
