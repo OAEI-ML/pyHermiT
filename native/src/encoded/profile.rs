@@ -3,9 +3,9 @@
 //! Profile violations are successful semantic output. Malformed columns,
 //! resource exhaustion, and cancellation remain distinct operational failures.
 //! This first private phase owns exact data-arity, top-data-property, local
-//! anonymous-placement, global entity/declaration, object-role simplicity, and
-//! extension projections. Structural-columns schema 1 does not carry
-//! document-origin rows, so the manifest exposes canonical root provenance
+//! anonymous-placement, global entity/declaration, object-role regularity and
+//! simplicity, and extension projections. Structural-columns schema 1 does not
+//! carry document-origin rows, so the manifest exposes canonical root provenance
 //! without inventing `ProfileIssue.document_keys`. Anonymous graph, entity,
 //! declaration, and role facts remain private until all selected slices can be
 //! merged and validated globally. Issue ordering and deduplication use the
@@ -91,6 +91,15 @@ const CLASS_DATATYPE_PUNNING_RULE: &str = "OWL2DL_CLASS_DATATYPE_PUNNING";
 const RESERVED_VOCABULARY_RULE: &str = "OWL2DL_RESERVED_VOCABULARY";
 const BUILTIN_ENTITY_KIND_RULE: &str = "OWL2DL_BUILTIN_ENTITY_KIND";
 const MISSING_DECLARATION_RULE: &str = "OWL2DL_MISSING_DECLARATION";
+const RIA_INVERSE_RECURSION_RULE: &str = "RIA_INVERSE_RECURSION";
+const RIA_INVERSE_RECURSION_MESSAGE: &str =
+    "a complex subproperty chain contains the inverse of its super role";
+const RIA_NON_REGULAR_RECURSION_RULE: &str = "RIA_NON_REGULAR_RECURSION";
+const RIA_NON_REGULAR_RECURSION_MESSAGE: &str =
+    "the super role occurs outside a legal chain boundary pattern";
+const RIA_DEPENDENCY_CYCLE_RULE: &str = "RIA_DEPENDENCY_CYCLE";
+const RIA_DEPENDENCY_CYCLE_MESSAGE: &str =
+    "complex role inclusions create a strict dependency cycle";
 const NON_SIMPLE_PROPERTY_RULE: &str = "OWL2DL_NON_SIMPLE_PROPERTY";
 const NON_SIMPLE_PROPERTY_MESSAGE: &str =
     "axiom position requires a simple object property expression";
@@ -178,6 +187,8 @@ pub struct ProfilePhaseLimits {
     pub max_entity_uses: usize,
     pub max_entity_declarations: usize,
     pub max_role_inclusions: usize,
+    pub max_complex_role_inclusions: usize,
+    pub max_role_dependency_edges: usize,
     pub max_non_simple_role_seeds: usize,
     pub max_simple_role_requirements: usize,
     pub max_owned_bytes: usize,
@@ -199,6 +210,8 @@ impl Default for ProfilePhaseLimits {
             max_entity_uses: 10_000_000,
             max_entity_declarations: 10_000_000,
             max_role_inclusions: 100_000_000,
+            max_complex_role_inclusions: 1_000_000,
+            max_role_dependency_edges: 100_000_000,
             max_non_simple_role_seeds: 10_000_000,
             max_simple_role_requirements: 10_000_000,
             max_owned_bytes: 512 * 1024 * 1024,
@@ -304,10 +317,33 @@ struct ProfileRoleInclusion {
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProfileComplexRoleInclusion {
+    super_role: ProfileObjectRole,
+    chain_roles: Vec<ProfileObjectRole>,
+    inverse_generated: bool,
+    statement_order_key: Vec<u8>,
+    provenance_sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ProfileSimpleRoleRequirement {
     role: ProfileObjectRole,
     constructor: &'static str,
     provenance_sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProfileIndexedComplexRoleInclusion {
+    fact_index: usize,
+    super_role_id: usize,
+    chain_role_ids: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProfileDependencyEdge {
+    dependency: usize,
+    consumer: usize,
+    source_index: Option<usize>,
 }
 
 /// Transactional profile result. Violations never use the error channel.
@@ -326,6 +362,7 @@ pub struct ProfilePhase {
     entity_uses: Vec<ProfileEntityIdentity>,
     entity_declarations: Vec<ProfileEntityIdentity>,
     role_inclusions: Vec<ProfileRoleInclusion>,
+    complex_role_inclusions: Vec<ProfileComplexRoleInclusion>,
     non_simple_role_seeds: Vec<ProfileObjectRole>,
     simple_role_requirements: Vec<ProfileSimpleRoleRequirement>,
     manifest_limit: usize,
@@ -557,6 +594,16 @@ impl PhaseBudget {
         if following > self.limits.max_role_inclusions {
             Err(EncodedValidationError::resource(
                 "profile role inclusion count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn claim_complex_role_inclusion(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_complex_role_inclusions {
+            Err(EncodedValidationError::resource(
+                "profile complex role inclusion count exceeds its limit",
             ))
         } else {
             Ok(())
@@ -851,6 +898,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     let mut entity_uses = Vec::new();
     let mut entity_declarations = Vec::new();
     let mut role_inclusions = Vec::new();
+    let mut complex_role_inclusions = Vec::new();
     let mut non_simple_role_seeds = Vec::new();
     let mut simple_role_requirements = Vec::new();
     let mut epoch = 0_u32;
@@ -1014,7 +1062,10 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
             model,
             root.node(),
             &mut role_inclusions,
+            &mut complex_role_inclusions,
             &mut non_simple_role_seeds,
+            &key,
+            provenance_sha256,
             &mut budget,
             control,
         )?;
@@ -1307,6 +1358,8 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         .map_err(ProfilePhaseError::Encoded)?;
     role_inclusions.sort();
     role_inclusions.dedup();
+    canonicalize_profile_complex_role_inclusions(&mut complex_role_inclusions, &mut budget)
+        .map_err(ProfilePhaseError::Encoded)?;
     budget
         .claim_work(sort_work(non_simple_role_seeds.len()))
         .map_err(ProfilePhaseError::Encoded)?;
@@ -1317,6 +1370,13 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         .map_err(ProfilePhaseError::Encoded)?;
     simple_role_requirements.sort();
     simple_role_requirements.dedup();
+    append_role_regularity_issues(
+        &role_inclusions,
+        &complex_role_inclusions,
+        &mut issues,
+        &mut budget,
+        control,
+    )?;
     append_non_simple_role_issues(
         &role_inclusions,
         &non_simple_role_seeds,
@@ -1354,6 +1414,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         entity_uses,
         entity_declarations,
         role_inclusions,
+        complex_role_inclusions,
         non_simple_role_seeds,
         simple_role_requirements,
         manifest_limit: limits.max_manifest_bytes,
@@ -1452,6 +1513,15 @@ pub fn merge_profile_phases_controlled<E>(
                 EncodedValidationError::resource("merged profile role inclusion count overflowed")
             })
     })?;
+    let complex_role_inclusion_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total
+            .checked_add(phase.complex_role_inclusions.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "merged profile complex role inclusion count overflowed",
+                )
+            })
+    })?;
     let non_simple_role_seed_count = phases.iter().try_fold(0_usize, |total, phase| {
         total
             .checked_add(phase.non_simple_role_seeds.len())
@@ -1515,6 +1585,12 @@ pub fn merge_profile_phases_controlled<E>(
     if role_inclusion_count > limits.max_role_inclusions {
         return Err(EncodedValidationError::resource(
             "merged profile role inclusion count exceeds its limit",
+        )
+        .into());
+    }
+    if complex_role_inclusion_count > limits.max_complex_role_inclusions {
+        return Err(EncodedValidationError::resource(
+            "merged profile complex role inclusion count exceeds its limit",
         )
         .into());
     }
@@ -1668,6 +1744,24 @@ pub fn merge_profile_phases_controlled<E>(
                 })?,
         )
         .map_err(ProfilePhaseError::Encoded)?;
+    let mut complex_role_inclusions = Vec::new();
+    reserve_exact(
+        &mut complex_role_inclusions,
+        complex_role_inclusion_count,
+        "merged profile complex role inclusion allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            complex_role_inclusion_count
+                .checked_mul(size_of::<ProfileComplexRoleInclusion>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "merged profile complex role inclusion size overflowed",
+                    )
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
     let mut non_simple_role_seeds = Vec::new();
     reserve_exact(
         &mut non_simple_role_seeds,
@@ -1726,6 +1820,7 @@ pub fn merge_profile_phases_controlled<E>(
         entity_uses.append(&mut phase.entity_uses);
         entity_declarations.append(&mut phase.entity_declarations);
         role_inclusions.append(&mut phase.role_inclusions);
+        complex_role_inclusions.append(&mut phase.complex_role_inclusions);
         non_simple_role_seeds.append(&mut phase.non_simple_role_seeds);
         simple_role_requirements.append(&mut phase.simple_role_requirements);
         poll(control, "profile-merge-source")?;
@@ -1769,6 +1864,8 @@ pub fn merge_profile_phases_controlled<E>(
         .map_err(ProfilePhaseError::Encoded)?;
     role_inclusions.sort();
     role_inclusions.dedup();
+    canonicalize_profile_complex_role_inclusions(&mut complex_role_inclusions, &mut budget)
+        .map_err(ProfilePhaseError::Encoded)?;
     budget
         .claim_work(sort_work(non_simple_role_seeds.len()))
         .map_err(ProfilePhaseError::Encoded)?;
@@ -1779,6 +1876,13 @@ pub fn merge_profile_phases_controlled<E>(
         .map_err(ProfilePhaseError::Encoded)?;
     simple_role_requirements.sort();
     simple_role_requirements.dedup();
+    append_role_regularity_issues(
+        &role_inclusions,
+        &complex_role_inclusions,
+        &mut issues,
+        &mut budget,
+        control,
+    )?;
     append_non_simple_role_issues(
         &role_inclusions,
         &non_simple_role_seeds,
@@ -1816,6 +1920,7 @@ pub fn merge_profile_phases_controlled<E>(
         entity_uses,
         entity_declarations,
         role_inclusions,
+        complex_role_inclusions,
         non_simple_role_seeds,
         simple_role_requirements,
         manifest_limit: limits.max_manifest_bytes,
@@ -2144,11 +2249,127 @@ fn add_non_simple_role_seed_pair(
     push_non_simple_role_seed(target, inverse_profile_object_role(role, budget)?, budget)
 }
 
+fn push_profile_complex_role_inclusion(
+    target: &mut Vec<ProfileComplexRoleInclusion>,
+    inclusion: ProfileComplexRoleInclusion,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let following = target.len().checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("profile complex role inclusion count overflowed")
+    })?;
+    budget.claim_complex_role_inclusion(following)?;
+    reserve_profile_one(
+        target,
+        budget,
+        "profile complex role inclusion allocation failed",
+    )?;
+    target.push(inclusion);
+    Ok(())
+}
+
+fn add_profile_complex_role_inclusion_pair(
+    target: &mut Vec<ProfileComplexRoleInclusion>,
+    chain_roles: Vec<ProfileObjectRole>,
+    super_role: ProfileObjectRole,
+    statement_order_key: &[u8],
+    provenance_sha256: [u8; 32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    if chain_roles.len() < 2 {
+        return Err(EncodedValidationError::invariant(
+            "profile complex role inclusion has fewer than two chain members",
+        ));
+    }
+    let mut inverse_chain = Vec::new();
+    for role in chain_roles.iter().rev() {
+        let inverse = inverse_profile_object_role(role, budget)?;
+        reserve_profile_one(
+            &mut inverse_chain,
+            budget,
+            "profile inverse complex role chain allocation failed",
+        )?;
+        inverse_chain.push(inverse);
+    }
+    let inverse_super = inverse_profile_object_role(&super_role, budget)?;
+    let needs_inverse = inverse_chain != chain_roles || inverse_super != super_role;
+    let source_key = clone_profile_bytes(
+        statement_order_key,
+        budget,
+        "profile complex role statement key allocation failed",
+    )?;
+    let inverse_key = if needs_inverse {
+        Some(clone_profile_bytes(
+            statement_order_key,
+            budget,
+            "profile inverse complex role statement key allocation failed",
+        )?)
+    } else {
+        None
+    };
+    push_profile_complex_role_inclusion(
+        target,
+        ProfileComplexRoleInclusion {
+            super_role,
+            chain_roles,
+            inverse_generated: false,
+            statement_order_key: source_key,
+            provenance_sha256,
+        },
+        budget,
+    )?;
+    if let Some(statement_order_key) = inverse_key {
+        push_profile_complex_role_inclusion(
+            target,
+            ProfileComplexRoleInclusion {
+                super_role: inverse_super,
+                chain_roles: inverse_chain,
+                inverse_generated: true,
+                statement_order_key,
+                provenance_sha256,
+            },
+            budget,
+        )?;
+    }
+    Ok(())
+}
+
+fn same_profile_complex_role_semantics(
+    left: &ProfileComplexRoleInclusion,
+    right: &ProfileComplexRoleInclusion,
+) -> bool {
+    left.super_role == right.super_role
+        && left.chain_roles == right.chain_roles
+        && left.inverse_generated == right.inverse_generated
+}
+
+fn canonicalize_profile_complex_role_inclusions(
+    values: &mut Vec<ProfileComplexRoleInclusion>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    budget.claim_work(sort_work(values.len()))?;
+    values.sort_by(|left, right| {
+        left.super_role
+            .cmp(&right.super_role)
+            .then_with(|| left.chain_roles.cmp(&right.chain_roles))
+            .then_with(|| left.inverse_generated.cmp(&right.inverse_generated))
+            .then_with(|| right.statement_order_key.cmp(&left.statement_order_key))
+            .then_with(|| right.provenance_sha256.cmp(&left.provenance_sha256))
+    });
+    values.dedup_by(|later, retained| same_profile_complex_role_semantics(later, retained));
+    budget.claim_work(sort_work(values.len()))?;
+    values.sort();
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn retain_profile_role_axiom_facts<B: ByteSource, E>(
     model: &ValidatedModel<B>,
     identifier: NodeId,
     inclusions: &mut Vec<ProfileRoleInclusion>,
+    complex_inclusions: &mut Vec<ProfileComplexRoleInclusion>,
     seeds: &mut Vec<ProfileObjectRole>,
+    statement_order_key: &[u8],
+    provenance_sha256: [u8; 32],
     budget: &mut PhaseBudget,
     control: &mut impl FnMut(&'static str) -> Result<(), E>,
 ) -> ControlledResult<(), E> {
@@ -2195,6 +2416,31 @@ fn retain_profile_role_axiom_facts<B: ByteSource, E>(
                     )
                     .into());
                 }
+                let mut chain_roles = Vec::new();
+                for item_index in chain.items() {
+                    poll(control, "profile-role-axiom-member")?;
+                    budget.claim_work(1)?;
+                    let role = profile_role_item(
+                        model,
+                        item_index,
+                        "profile object-property chain member",
+                        budget,
+                    )?;
+                    reserve_profile_one(
+                        &mut chain_roles,
+                        budget,
+                        "profile complex role chain allocation failed",
+                    )?;
+                    chain_roles.push(role);
+                }
+                add_profile_complex_role_inclusion_pair(
+                    complex_inclusions,
+                    chain_roles,
+                    clone_profile_object_role(&super_role, budget)?,
+                    statement_order_key,
+                    provenance_sha256,
+                    budget,
+                )?;
                 add_non_simple_role_seed_pair(seeds, &super_role, budget)?;
             } else {
                 let sub_role = profile_object_role(model, sub_identifier, budget)?;
@@ -2296,6 +2542,23 @@ fn retain_profile_role_axiom_facts<B: ByteSource, E>(
                 node,
                 0,
                 "profile transitive object property",
+                budget,
+            )?;
+            let mut chain_roles = Vec::new();
+            for _ in 0..2 {
+                reserve_profile_one(
+                    &mut chain_roles,
+                    budget,
+                    "profile transitive role chain allocation failed",
+                )?;
+                chain_roles.push(clone_profile_object_role(&role, budget)?);
+            }
+            add_profile_complex_role_inclusion_pair(
+                complex_inclusions,
+                chain_roles,
+                clone_profile_object_role(&role, budget)?,
+                statement_order_key,
+                provenance_sha256,
                 budget,
             )?;
             add_non_simple_role_seed_pair(seeds, &role, budget)?;
@@ -2421,6 +2684,917 @@ fn retain_simple_role_requirements_for_node<B: ByteSource, E>(
         _ => {}
     }
     Ok(())
+}
+
+fn append_role_regularity_issues<E>(
+    inclusions: &[ProfileRoleInclusion],
+    complex_inclusions: &[ProfileComplexRoleInclusion],
+    issues: &mut Vec<ProfileIssue>,
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
+    if complex_inclusions.is_empty() {
+        return Ok(());
+    }
+    poll(control, "profile-regularity-preflight")?;
+    let complex_role_references =
+        complex_inclusions
+            .iter()
+            .try_fold(0_usize, |total, inclusion| {
+                total
+                    .checked_add(inclusion.chain_roles.len())
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "profile regularity role reference count overflowed",
+                        )
+                    })
+            })?;
+    let role_reference_count = inclusions
+        .len()
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(complex_role_references))
+        .ok_or_else(|| {
+            ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                "profile regularity role reference count overflowed",
+            ))
+        })?;
+    let maximum_dependency_edges = inclusions
+        .len()
+        .checked_add(
+            complex_inclusions
+                .iter()
+                .try_fold(0_usize, |total, inclusion| {
+                    total
+                        .checked_add(inclusion.chain_roles.len())
+                        .ok_or_else(|| {
+                            EncodedValidationError::resource(
+                                "profile role dependency edge count overflowed",
+                            )
+                        })
+                })
+                .map_err(ProfilePhaseError::Encoded)?,
+        )
+        .ok_or_else(|| {
+            ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                "profile role dependency edge count overflowed",
+            ))
+        })?;
+    if maximum_dependency_edges > budget.limits.max_role_dependency_edges {
+        return Err(EncodedValidationError::resource(
+            "profile role dependency edge count exceeds its limit",
+        )
+        .into());
+    }
+
+    let mut semantic_roles = profile_reserved_vec(
+        role_reference_count,
+        "profile regularity role reference allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for inclusion in inclusions {
+        poll(control, "profile-regularity-role-reference")?;
+        budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+        semantic_roles.push(&inclusion.sub_role);
+        semantic_roles.push(&inclusion.super_role);
+    }
+    for inclusion in complex_inclusions {
+        poll(control, "profile-regularity-role-reference")?;
+        budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+        semantic_roles.push(&inclusion.super_role);
+        semantic_roles.extend(&inclusion.chain_roles);
+    }
+    budget
+        .claim_work(sort_work(semantic_roles.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    semantic_roles.sort_unstable();
+    semantic_roles.dedup();
+
+    let mut canonical_keys = profile_reserved_vec(
+        semantic_roles.len(),
+        "profile canonical role key vector allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for role in &semantic_roles {
+        poll(control, "profile-regularity-role-key")?;
+        canonical_keys
+            .push(profile_role_canonical_key(role, budget).map_err(ProfilePhaseError::Encoded)?);
+    }
+    let mut canonical_order = profile_reserved_vec(
+        semantic_roles.len(),
+        "profile canonical role order allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    canonical_order.extend(0..semantic_roles.len());
+    budget
+        .claim_work(sort_work(canonical_order.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    canonical_order
+        .sort_unstable_by(|left, right| canonical_keys[*left].cmp(&canonical_keys[*right]));
+    if canonical_order
+        .windows(2)
+        .any(|pair| canonical_keys[pair[0]] >= canonical_keys[pair[1]])
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile canonical object-role keys are not unique",
+        )
+        .into());
+    }
+    let mut canonical_id_by_semantic = profile_filled_usize(
+        semantic_roles.len(),
+        usize::MAX,
+        "profile canonical role ID mapping",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for (canonical_id, semantic_id) in canonical_order.into_iter().enumerate() {
+        poll(control, "profile-regularity-role-id")?;
+        budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+        canonical_id_by_semantic[semantic_id] = canonical_id;
+    }
+
+    let mut simple_edges = profile_reserved_vec(
+        inclusions.len(),
+        "profile indexed simple role edge allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for inclusion in inclusions {
+        poll(control, "profile-regularity-simple-edge")?;
+        let sub = profile_canonical_role_id(
+            &semantic_roles,
+            &canonical_id_by_semantic,
+            &inclusion.sub_role,
+            budget,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+        let sup = profile_canonical_role_id(
+            &semantic_roles,
+            &canonical_id_by_semantic,
+            &inclusion.super_role,
+            budget,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+        simple_edges.push((sub, sup));
+    }
+    budget
+        .claim_work(sort_work(simple_edges.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    simple_edges.sort_unstable();
+    simple_edges.dedup();
+
+    let mut outgoing = profile_empty_rows(
+        semantic_roles.len(),
+        "profile regularity outgoing role rows",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    let mut incoming = profile_empty_rows(
+        semantic_roles.len(),
+        "profile regularity incoming role rows",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for &(sub, sup) in &simple_edges {
+        poll(control, "profile-regularity-simple-adjacency")?;
+        budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+        push_profile_graph_value(
+            &mut outgoing[sub],
+            sup,
+            "profile outgoing role adjacency allocation failed",
+            budget,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+        push_profile_graph_value(
+            &mut incoming[sup],
+            sub,
+            "profile incoming role adjacency allocation failed",
+            budget,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    }
+    canonicalize_profile_rows(&mut outgoing, budget).map_err(ProfilePhaseError::Encoded)?;
+    canonicalize_profile_rows(&mut incoming, budget).map_err(ProfilePhaseError::Encoded)?;
+    let (component_by_role, component_count) =
+        profile_role_components(&outgoing, &incoming, budget, control)?;
+
+    let mut indexed_complex = profile_reserved_vec(
+        complex_inclusions.len(),
+        "profile indexed complex role inclusion allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for (fact_index, inclusion) in complex_inclusions.iter().enumerate() {
+        poll(control, "profile-regularity-complex-index")?;
+        let super_role_id = profile_canonical_role_id(
+            &semantic_roles,
+            &canonical_id_by_semantic,
+            &inclusion.super_role,
+            budget,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+        let mut chain_role_ids = profile_reserved_vec(
+            inclusion.chain_roles.len(),
+            "profile indexed complex role chain allocation failed",
+            budget,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+        for role in &inclusion.chain_roles {
+            chain_role_ids.push(
+                profile_canonical_role_id(&semantic_roles, &canonical_id_by_semantic, role, budget)
+                    .map_err(ProfilePhaseError::Encoded)?,
+            );
+        }
+        indexed_complex.push(ProfileIndexedComplexRoleInclusion {
+            fact_index,
+            super_role_id,
+            chain_role_ids,
+        });
+    }
+    budget
+        .claim_work(sort_work(indexed_complex.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    indexed_complex.sort_by(|left, right| {
+        let left_fact = &complex_inclusions[left.fact_index];
+        let right_fact = &complex_inclusions[right.fact_index];
+        left.super_role_id
+            .cmp(&right.super_role_id)
+            .then_with(|| left.chain_role_ids.cmp(&right.chain_role_ids))
+            .then_with(|| {
+                left_fact
+                    .inverse_generated
+                    .cmp(&right_fact.inverse_generated)
+            })
+            .then_with(|| {
+                left_fact
+                    .provenance_sha256
+                    .cmp(&right_fact.provenance_sha256)
+            })
+    });
+
+    let mut dependency_edges = profile_reserved_vec(
+        maximum_dependency_edges,
+        "profile role dependency edge allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for &(sub, sup) in &simple_edges {
+        poll(control, "profile-regularity-simple-dependency")?;
+        budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+        let dependency = component_by_role[sub];
+        let consumer = component_by_role[sup];
+        if dependency != consumer {
+            dependency_edges.push(ProfileDependencyEdge {
+                dependency,
+                consumer,
+                source_index: None,
+            });
+        }
+    }
+    for (source_index, inclusion) in indexed_complex.iter().enumerate() {
+        poll(control, "profile-regularity-complex")?;
+        budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+        let fact = &complex_inclusions[inclusion.fact_index];
+        if is_top_object_role(&fact.super_role) {
+            continue;
+        }
+        let target = component_by_role[inclusion.super_role_id];
+        let inverse_role_id = profile_inverse_canonical_role_id(
+            &semantic_roles,
+            &canonical_id_by_semantic,
+            &fact.super_role,
+            budget,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+        let inverse_target = component_by_role[inverse_role_id];
+        let mut target_count = 0_usize;
+        let mut first_target = None;
+        let mut inverse_recursion = false;
+        for (position, role_id) in inclusion.chain_role_ids.iter().copied().enumerate() {
+            poll(control, "profile-regularity-chain-member")?;
+            budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+            let component = component_by_role[role_id];
+            if component == target {
+                target_count = target_count.checked_add(1).ok_or_else(|| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                        "profile regularity target count overflowed",
+                    ))
+                })?;
+                first_target.get_or_insert(position);
+            }
+            if component == inverse_target && inverse_target != target {
+                inverse_recursion = true;
+            }
+            if component != target {
+                dependency_edges.push(ProfileDependencyEdge {
+                    dependency: component,
+                    consumer: target,
+                    source_index: Some(source_index),
+                });
+            }
+        }
+        if inverse_recursion {
+            push_profile_issue(
+                issues,
+                ProfileIssue {
+                    rule_id: RIA_INVERSE_RECURSION_RULE,
+                    severity: "error",
+                    message: Cow::Borrowed(RIA_INVERSE_RECURSION_MESSAGE),
+                    constructor: Some("SubObjectPropertyOf"),
+                    provenance_sha256: Some(fact.provenance_sha256),
+                },
+                budget,
+            )
+            .map_err(ProfilePhaseError::Encoded)?;
+        }
+        let chain_length = inclusion.chain_role_ids.len();
+        let valid_recursive = target_count == 0
+            || (target_count == 1
+                && first_target.is_some_and(|position| {
+                    position == 0 || position == chain_length.saturating_sub(1)
+                }))
+            || (chain_length == 2 && target_count == 2);
+        if !valid_recursive {
+            push_profile_issue(
+                issues,
+                ProfileIssue {
+                    rule_id: RIA_NON_REGULAR_RECURSION_RULE,
+                    severity: "error",
+                    message: Cow::Borrowed(RIA_NON_REGULAR_RECURSION_MESSAGE),
+                    constructor: Some("SubObjectPropertyOf"),
+                    provenance_sha256: Some(fact.provenance_sha256),
+                },
+                budget,
+            )
+            .map_err(ProfilePhaseError::Encoded)?;
+        }
+    }
+    if dependency_edges.len() > budget.limits.max_role_dependency_edges {
+        return Err(EncodedValidationError::resource(
+            "profile role dependency edge count exceeds its limit",
+        )
+        .into());
+    }
+    budget
+        .claim_work(sort_work(dependency_edges.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    dependency_edges.sort_unstable_by(|left, right| {
+        (left.dependency, left.consumer)
+            .cmp(&(right.dependency, right.consumer))
+            .then_with(|| match (left.source_index, right.source_index) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
+    });
+    dependency_edges.dedup_by(|later, retained| {
+        (later.dependency, later.consumer) == (retained.dependency, retained.consumer)
+    });
+
+    let mut adjacency = profile_empty_rows(
+        component_count,
+        "profile regularity dependency adjacency",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for edge in &dependency_edges {
+        poll(control, "profile-regularity-dependency")?;
+        budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+        push_profile_graph_value(
+            &mut adjacency[edge.dependency],
+            edge.consumer,
+            "profile regularity dependency row allocation failed",
+            budget,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    }
+    canonicalize_profile_rows(&mut adjacency, budget).map_err(ProfilePhaseError::Encoded)?;
+    if let Some(cycle) = profile_shortest_cycle(&adjacency, budget, control)? {
+        let source_index = cycle
+            .windows(2)
+            .find_map(|pair| profile_dependency_edge_source(&dependency_edges, pair[0], pair[1]));
+        if let Some(source_index) = source_index {
+            let inclusion = indexed_complex.get(source_index).ok_or_else(|| {
+                ProfilePhaseError::Encoded(EncodedValidationError::invariant(
+                    "profile regularity cycle source is dangling",
+                ))
+            })?;
+            let fact = complex_inclusions
+                .get(inclusion.fact_index)
+                .ok_or_else(|| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::invariant(
+                        "profile regularity cycle fact is dangling",
+                    ))
+                })?;
+            push_profile_issue(
+                issues,
+                ProfileIssue {
+                    rule_id: RIA_DEPENDENCY_CYCLE_RULE,
+                    severity: "error",
+                    message: Cow::Borrowed(RIA_DEPENDENCY_CYCLE_MESSAGE),
+                    constructor: Some("SubObjectPropertyOf"),
+                    provenance_sha256: Some(fact.provenance_sha256),
+                },
+                budget,
+            )
+            .map_err(ProfilePhaseError::Encoded)?;
+        } else {
+            return Err(EncodedValidationError::invariant(
+                "profile regularity cycle has no complex source",
+            )
+            .into());
+        }
+    }
+    poll(control, "profile-regularity-complete")?;
+    Ok(())
+}
+
+fn profile_reserved_vec<T>(
+    capacity: usize,
+    message: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<T>> {
+    budget.claim_owned(
+        capacity.checked_mul(size_of::<T>()).ok_or_else(|| {
+            EncodedValidationError::resource("profile allocation size overflowed")
+        })?,
+    )?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(capacity)
+        .map_err(|_| EncodedValidationError::resource(message))?;
+    Ok(values)
+}
+
+fn profile_filled_usize(
+    count: usize,
+    value: usize,
+    message: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<usize>> {
+    let mut values = profile_reserved_vec(count, message, budget)?;
+    values.resize(count, value);
+    Ok(values)
+}
+
+fn profile_empty_rows(
+    count: usize,
+    message: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<Vec<usize>>> {
+    let mut rows = profile_reserved_vec(count, message, budget)?;
+    rows.resize_with(count, Vec::new);
+    Ok(rows)
+}
+
+fn push_profile_graph_value(
+    target: &mut Vec<usize>,
+    value: usize,
+    message: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    reserve_profile_one(target, budget, message)?;
+    target.push(value);
+    Ok(())
+}
+
+fn canonicalize_profile_rows(
+    rows: &mut [Vec<usize>],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    for row in rows {
+        budget.claim_work(sort_work(row.len()))?;
+        row.sort_unstable();
+        row.dedup();
+    }
+    Ok(())
+}
+
+fn profile_role_canonical_key(
+    role: &ProfileObjectRole,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let mut direct = Vec::new();
+    push_profile_key_varint(&mut direct, u64::from(ENTITY_TAG), budget)?;
+    push_profile_key_byte(&mut direct, 5, budget)?;
+    push_profile_key_varint(&mut direct, 15, budget)?;
+    for &byte in b"object_property" {
+        push_profile_key_byte(&mut direct, byte, budget)?;
+    }
+    push_profile_key_byte(&mut direct, 1, budget)?;
+    let iri_length = u64::try_from(role.iri.len())
+        .map_err(|_| EncodedValidationError::resource("profile role IRI length exceeds u64"))?;
+    let iri_node_length = 2_u64
+        .checked_add(profile_key_varint_width(iri_length))
+        .and_then(|length| length.checked_add(iri_length))
+        .ok_or_else(|| {
+            EncodedValidationError::resource("profile canonical role key length overflowed")
+        })?;
+    push_profile_key_varint(&mut direct, iri_node_length, budget)?;
+    push_profile_key_varint(&mut direct, u64::from(IRI_TAG), budget)?;
+    push_profile_key_byte(&mut direct, 2, budget)?;
+    push_profile_key_varint(&mut direct, iri_length, budget)?;
+    for &byte in &role.iri {
+        push_profile_key_byte(&mut direct, byte, budget)?;
+    }
+    if !role.inverse {
+        return Ok(direct);
+    }
+    let mut inverse = Vec::new();
+    push_profile_key_varint(&mut inverse, u64::from(OBJECT_INVERSE_OF_TAG), budget)?;
+    push_profile_key_byte(&mut inverse, 1, budget)?;
+    push_profile_key_varint(
+        &mut inverse,
+        u64::try_from(direct.len()).map_err(|_| {
+            EncodedValidationError::resource("profile direct role key length exceeds u64")
+        })?,
+        budget,
+    )?;
+    for byte in direct {
+        push_profile_key_byte(&mut inverse, byte, budget)?;
+    }
+    Ok(inverse)
+}
+
+const fn profile_key_varint_width(mut value: u64) -> u64 {
+    let mut width = 1_u64;
+    while value >= 0x80 {
+        width += 1;
+        value >>= 7;
+    }
+    width
+}
+
+fn push_profile_key_varint(
+    target: &mut Vec<u8>,
+    mut value: u64,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    loop {
+        let mut byte = u8::try_from(value & 0x7f)
+            .map_err(|_| EncodedValidationError::invariant("profile varint chunk exceeds u8"))?;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        push_profile_key_byte(target, byte, budget)?;
+        if value == 0 {
+            return Ok(());
+        }
+    }
+}
+
+fn push_profile_key_byte(
+    target: &mut Vec<u8>,
+    value: u8,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    budget.claim_work(1)?;
+    reserve_profile_one(
+        target,
+        budget,
+        "profile canonical role key allocation failed",
+    )?;
+    target.push(value);
+    Ok(())
+}
+
+fn profile_canonical_role_id(
+    semantic_roles: &[&ProfileObjectRole],
+    canonical_id_by_semantic: &[usize],
+    target: &ProfileObjectRole,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<usize> {
+    budget.claim_work(search_work(semantic_roles.len()))?;
+    let semantic_id = semantic_roles
+        .binary_search_by(|candidate| (*candidate).cmp(target))
+        .map_err(|_| EncodedValidationError::invariant("profile role domain is incomplete"))?;
+    canonical_id_by_semantic
+        .get(semantic_id)
+        .copied()
+        .filter(|value| *value != usize::MAX)
+        .ok_or_else(|| EncodedValidationError::invariant("profile canonical role ID is dangling"))
+}
+
+fn profile_inverse_canonical_role_id(
+    semantic_roles: &[&ProfileObjectRole],
+    canonical_id_by_semantic: &[usize],
+    role: &ProfileObjectRole,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<usize> {
+    budget.claim_work(search_work(semantic_roles.len()))?;
+    let inverse = if role.iri == TOP_OBJECT_PROPERTY_IRI || role.iri == BOTTOM_OBJECT_PROPERTY_IRI {
+        role.inverse
+    } else {
+        !role.inverse
+    };
+    let semantic_id = semantic_roles
+        .binary_search_by(|candidate| {
+            candidate
+                .iri
+                .as_slice()
+                .cmp(&role.iri)
+                .then_with(|| candidate.inverse.cmp(&inverse))
+        })
+        .map_err(|_| {
+            EncodedValidationError::invariant("profile inverse role domain is incomplete")
+        })?;
+    canonical_id_by_semantic
+        .get(semantic_id)
+        .copied()
+        .filter(|value| *value != usize::MAX)
+        .ok_or_else(|| EncodedValidationError::invariant("profile inverse role ID is dangling"))
+}
+
+fn is_top_object_role(role: &ProfileObjectRole) -> bool {
+    !role.inverse && role.iri == TOP_OBJECT_PROPERTY_IRI
+}
+
+fn profile_role_components<E>(
+    outgoing: &[Vec<usize>],
+    incoming: &[Vec<usize>],
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(Vec<usize>, usize), E> {
+    if outgoing.len() != incoming.len() || outgoing.is_empty() {
+        return Err(EncodedValidationError::invariant(
+            "profile role SCC adjacency has an invalid shape",
+        )
+        .into());
+    }
+    let role_count = outgoing.len();
+    let mut visited = profile_reserved_vec(
+        role_count,
+        "profile role SCC visited allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    visited.resize(role_count, 0_u8);
+    let mut finish = profile_reserved_vec(
+        role_count,
+        "profile role SCC finish allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    let mut depth = profile_reserved_vec(
+        role_count,
+        "profile role SCC stack allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for root in 0..role_count {
+        poll(control, "profile-regularity-scc-forward")?;
+        if visited[root] != 0 {
+            continue;
+        }
+        visited[root] = 1;
+        depth.push((root, 0_usize));
+        while let Some((node, offset)) = depth.last_mut() {
+            poll(control, "profile-regularity-scc-forward")?;
+            budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+            if *offset < outgoing[*node].len() {
+                let successor = outgoing[*node][*offset];
+                *offset = offset.checked_add(1).ok_or_else(|| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                        "profile role SCC offset overflowed",
+                    ))
+                })?;
+                if visited[successor] == 0 {
+                    visited[successor] = 1;
+                    depth.push((successor, 0));
+                }
+            } else {
+                finish.push(*node);
+                depth.pop();
+            }
+        }
+    }
+    if finish.len() != role_count {
+        return Err(EncodedValidationError::invariant(
+            "profile role SCC traversal omitted a finish record",
+        )
+        .into());
+    }
+
+    let mut assigned = profile_reserved_vec(
+        role_count,
+        "profile role SCC assigned allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    assigned.resize(role_count, 0_u8);
+    let mut pending = profile_reserved_vec(
+        role_count,
+        "profile role SCC pending allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    let mut components = Vec::new();
+    for &root in finish.iter().rev() {
+        poll(control, "profile-regularity-scc-reverse")?;
+        if assigned[root] != 0 {
+            continue;
+        }
+        assigned[root] = 1;
+        pending.push(root);
+        let mut members = Vec::new();
+        while let Some(node) = pending.pop() {
+            poll(control, "profile-regularity-scc-reverse")?;
+            budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+            push_profile_graph_value(
+                &mut members,
+                node,
+                "profile role SCC member allocation failed",
+                budget,
+            )
+            .map_err(ProfilePhaseError::Encoded)?;
+            for &predecessor in incoming[node].iter().rev() {
+                if assigned[predecessor] == 0 {
+                    assigned[predecessor] = 1;
+                    pending.push(predecessor);
+                }
+            }
+        }
+        budget
+            .claim_work(sort_work(members.len()))
+            .map_err(ProfilePhaseError::Encoded)?;
+        members.sort_unstable();
+        reserve_profile_one(
+            &mut components,
+            budget,
+            "profile role SCC component allocation failed",
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+        components.push(members);
+    }
+    budget
+        .claim_work(sort_work(components.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    components.sort_unstable_by_key(|members| members.first().copied().unwrap_or(usize::MAX));
+    if components.iter().any(Vec::is_empty) {
+        return Err(EncodedValidationError::invariant(
+            "profile role SCC traversal produced an empty component",
+        )
+        .into());
+    }
+    let mut component_by_role = profile_filled_usize(
+        role_count,
+        usize::MAX,
+        "profile role component mapping allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for (component, members) in components.iter().enumerate() {
+        for &role in members {
+            poll(control, "profile-regularity-scc-map")?;
+            budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+            if component_by_role[role] != usize::MAX {
+                return Err(EncodedValidationError::invariant(
+                    "profile role occurs in multiple SCCs",
+                )
+                .into());
+            }
+            component_by_role[role] = component;
+        }
+    }
+    if component_by_role.contains(&usize::MAX) {
+        return Err(EncodedValidationError::invariant(
+            "profile role SCC decomposition omitted a role",
+        )
+        .into());
+    }
+    Ok((component_by_role, components.len()))
+}
+
+fn profile_shortest_cycle<E>(
+    adjacency: &[Vec<usize>],
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<Option<Vec<usize>>, E> {
+    let component_count = adjacency.len();
+    let mut seen = profile_filled_usize(
+        component_count,
+        usize::MAX,
+        "profile cycle seen allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    let mut parents = profile_filled_usize(
+        component_count,
+        usize::MAX,
+        "profile cycle parent allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    let mut queue = profile_reserved_vec(
+        component_count,
+        "profile cycle queue allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    let mut best: Option<Vec<usize>> = None;
+    for start in 0..component_count {
+        poll(control, "profile-regularity-cycle-start")?;
+        budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+        queue.clear();
+        queue.push(start);
+        seen[start] = start;
+        parents[start] = usize::MAX;
+        let mut offset = 0_usize;
+        let mut found = None;
+        while offset < queue.len() && found.is_none() {
+            poll(control, "profile-regularity-cycle-search")?;
+            budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+            let node = queue[offset];
+            offset = offset.checked_add(1).ok_or_else(|| {
+                ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                    "profile cycle queue offset overflowed",
+                ))
+            })?;
+            for &successor in &adjacency[node] {
+                budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+                if successor == start {
+                    found = Some(node);
+                    break;
+                }
+                if seen[successor] != start {
+                    seen[successor] = start;
+                    parents[successor] = node;
+                    if queue.len() == queue.capacity() {
+                        return Err(EncodedValidationError::resource(
+                            "profile cycle queue exceeded its component domain",
+                        )
+                        .into());
+                    }
+                    queue.push(successor);
+                }
+            }
+        }
+        if let Some(last) = found {
+            let candidate = profile_reconstruct_cycle(start, last, &parents, budget)
+                .map_err(ProfilePhaseError::Encoded)?;
+            if best.as_ref().is_none_or(|known| {
+                (candidate.len(), candidate.as_slice()) < (known.len(), known.as_slice())
+            }) {
+                best = Some(candidate);
+            }
+        }
+    }
+    Ok(best)
+}
+
+fn profile_reconstruct_cycle(
+    start: usize,
+    mut last: usize,
+    parents: &[usize],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<usize>> {
+    let mut reverse = Vec::new();
+    loop {
+        push_profile_graph_value(
+            &mut reverse,
+            last,
+            "profile cycle witness allocation failed",
+            budget,
+        )?;
+        if last == start {
+            break;
+        }
+        last = *parents
+            .get(last)
+            .ok_or_else(|| EncodedValidationError::invariant("profile cycle parent is dangling"))?;
+        if last == usize::MAX {
+            return Err(EncodedValidationError::invariant(
+                "profile cycle parent chain is incomplete",
+            ));
+        }
+    }
+    budget.claim_work(reverse.len())?;
+    reverse.reverse();
+    push_profile_graph_value(
+        &mut reverse,
+        start,
+        "profile cycle witness allocation failed",
+        budget,
+    )?;
+    Ok(reverse)
+}
+
+fn profile_dependency_edge_source(
+    edges: &[ProfileDependencyEdge],
+    dependency: usize,
+    consumer: usize,
+) -> Option<usize> {
+    edges
+        .binary_search_by_key(&(dependency, consumer), |edge| {
+            (edge.dependency, edge.consumer)
+        })
+        .ok()
+        .and_then(|index| edges[index].source_index)
 }
 
 fn append_non_simple_role_issues<E>(
@@ -3156,6 +4330,9 @@ fn is_recomputed_profile_rule(rule_id: &str) -> bool {
             | RESERVED_VOCABULARY_RULE
             | BUILTIN_ENTITY_KIND_RULE
             | MISSING_DECLARATION_RULE
+            | RIA_INVERSE_RECURSION_RULE
+            | RIA_NON_REGULAR_RECURSION_RULE
+            | RIA_DEPENDENCY_CYCLE_RULE
             | NON_SIMPLE_PROPERTY_RULE
     )
 }
@@ -3492,6 +4669,22 @@ fn validate_phase(phase: &ProfilePhase) -> EncodedResult<()> {
     {
         return Err(EncodedValidationError::invariant(
             "profile role inclusions are not canonical sorted unique",
+        ));
+    }
+    if phase
+        .complex_role_inclusions
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile complex role inclusions are not canonical sorted unique",
+        ));
+    }
+    if phase.complex_role_inclusions.iter().any(|inclusion| {
+        inclusion.chain_roles.len() < 2 || inclusion.statement_order_key.is_empty()
+    }) {
+        return Err(EncodedValidationError::invariant(
+            "profile complex role inclusion has an invalid private shape",
         ));
     }
     if phase
@@ -4190,6 +5383,147 @@ mod tests {
             )
             .map_err(|error| error.code),
             Err("NATIVE_ENCODED_RESOURCE_LIMIT")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn role_regularity_is_exact_bounded_and_cancellable() -> EncodedResult<()> {
+        let role = |iri: &str, inverse: bool| ProfileObjectRole {
+            iri: iri.as_bytes().to_vec(),
+            inverse,
+        };
+        let mut facts = Vec::new();
+        let mut fact_budget = PhaseBudget::new(ProfilePhaseLimits::default());
+        add_profile_complex_role_inclusion_pair(
+            &mut facts,
+            vec![role("urn:b", false), role("urn:g", false)],
+            role("urn:a", false),
+            b"cycle-a",
+            [1; 32],
+            &mut fact_budget,
+        )?;
+        add_profile_complex_role_inclusion_pair(
+            &mut facts,
+            vec![role("urn:a", false), role("urn:g", false)],
+            role("urn:b", false),
+            b"cycle-b",
+            [2; 32],
+            &mut fact_budget,
+        )?;
+        add_profile_complex_role_inclusion_pair(
+            &mut facts,
+            vec![
+                role("urn:c", false),
+                role("urn:a", false),
+                role("urn:d", false),
+            ],
+            role("urn:a", false),
+            b"non-regular",
+            [3; 32],
+            &mut fact_budget,
+        )?;
+        add_profile_complex_role_inclusion_pair(
+            &mut facts,
+            vec![role("urn:a", true), role("urn:g", false)],
+            role("urn:a", false),
+            b"inverse",
+            [4; 32],
+            &mut fact_budget,
+        )?;
+        canonicalize_profile_complex_role_inclusions(&mut facts, &mut fact_budget)?;
+
+        let mut issues = Vec::new();
+        let mut budget = PhaseBudget::new(ProfilePhaseLimits::default());
+        let mut control = |_phase| Ok::<(), Infallible>(());
+        into_encoded(append_role_regularity_issues(
+            &[],
+            &facts,
+            &mut issues,
+            &mut budget,
+            &mut control,
+        ))?;
+        issues.sort();
+        issues.dedup();
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| issue.rule_id)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                RIA_DEPENDENCY_CYCLE_RULE,
+                RIA_INVERSE_RECURSION_RULE,
+                RIA_NON_REGULAR_RECURSION_RULE,
+            ])
+        );
+        assert!(issues
+            .iter()
+            .all(|issue| issue.constructor == Some("SubObjectPropertyOf")));
+
+        let mut cancelled_issues = Vec::new();
+        let cancelled = append_role_regularity_issues(
+            &[],
+            &facts,
+            &mut cancelled_issues,
+            &mut PhaseBudget::new(ProfilePhaseLimits::default()),
+            &mut |phase| {
+                if phase == "profile-regularity-preflight" {
+                    Err("injected regularity cancellation")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(
+            cancelled,
+            Err(ProfilePhaseError::Control(
+                "injected regularity cancellation"
+            ))
+        );
+        assert!(cancelled_issues.is_empty());
+
+        let limited = append_role_regularity_issues(
+            &[],
+            &facts,
+            &mut Vec::new(),
+            &mut PhaseBudget::new(ProfilePhaseLimits {
+                max_role_dependency_edges: 0,
+                ..ProfilePhaseLimits::default()
+            }),
+            &mut control,
+        );
+        let Err(ProfilePhaseError::Encoded(error)) = limited else {
+            return Err(EncodedValidationError::invariant(
+                "regularity dependency limit unexpectedly succeeded",
+            ));
+        };
+        assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
+
+        let mut limited_facts = Vec::new();
+        let limited_fact = add_profile_complex_role_inclusion_pair(
+            &mut limited_facts,
+            vec![role("urn:a", false), role("urn:b", false)],
+            role("urn:c", false),
+            b"limited",
+            [5; 32],
+            &mut PhaseBudget::new(ProfilePhaseLimits {
+                max_complex_role_inclusions: 0,
+                ..ProfilePhaseLimits::default()
+            }),
+        );
+        assert_eq!(
+            limited_fact.map_err(|error| error.code),
+            Err("NATIVE_ENCODED_RESOURCE_LIMIT")
+        );
+        assert!(limited_facts.is_empty());
+
+        let key = profile_role_canonical_key(
+            &role("u:z", false),
+            &mut PhaseBudget::new(ProfilePhaseLimits::default()),
+        )?;
+        assert_eq!(
+            crate::model::hex(&key),
+            "02050f6f626a6563745f70726f70657274790106010203753a7a"
         );
         Ok(())
     }

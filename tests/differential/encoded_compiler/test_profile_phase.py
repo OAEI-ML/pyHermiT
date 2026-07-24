@@ -46,6 +46,9 @@ RESERVED_VOCABULARY_RULE = "OWL2DL_RESERVED_VOCABULARY"
 BUILTIN_ENTITY_KIND_RULE = "OWL2DL_BUILTIN_ENTITY_KIND"
 MISSING_DECLARATION_RULE = "OWL2DL_MISSING_DECLARATION"
 NON_SIMPLE_PROPERTY_RULE = "OWL2DL_NON_SIMPLE_PROPERTY"
+RIA_DEPENDENCY_CYCLE_RULE = "RIA_DEPENDENCY_CYCLE"
+RIA_INVERSE_RECURSION_RULE = "RIA_INVERSE_RECURSION"
+RIA_NON_REGULAR_RECURSION_RULE = "RIA_NON_REGULAR_RECURSION"
 ENTITY_RULES = frozenset(
     (
         BUILTIN_ENTITY_KIND_RULE,
@@ -70,6 +73,9 @@ PROJECTED_RULES = frozenset(
         NON_SIMPLE_PROPERTY_RULE,
         PROPERTY_PUNNING_RULE,
         RESERVED_VOCABULARY_RULE,
+        RIA_DEPENDENCY_CYCLE_RULE,
+        RIA_INVERSE_RECURSION_RULE,
+        RIA_NON_REGULAR_RECURSION_RULE,
         TOP_DATA_PROPERTY_RULE,
     )
 )
@@ -585,6 +591,121 @@ def test_simple_object_property_positions_remain_conformant() -> None:
     assert NON_SIMPLE_PROPERTY_RULE not in actual["ordered_rule_ids"]
 
 
+def test_role_regularity_diagnostics_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            *(f"Declaration(ObjectProperty(:{name}))" for name in "abcdg"),
+            "SubObjectPropertyOf(ObjectPropertyChain(:b :g) :a)",
+            "SubObjectPropertyOf(ObjectPropertyChain(:a :g) :b)",
+            "SubObjectPropertyOf(ObjectPropertyChain(:c :a :d) :a)",
+            "SubObjectPropertyOf(ObjectPropertyChain(ObjectInverseOf(:a) :g) :a)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    assert set(cast(list[str], actual["ordered_rule_ids"])) == {
+        RIA_DEPENDENCY_CYCLE_RULE,
+        RIA_INVERSE_RECURSION_RULE,
+        RIA_NON_REGULAR_RECURSION_RULE,
+    }
+    assert all(
+        issue["constructor"] == "SubObjectPropertyOf"
+        for issue in cast(list[dict[str, object]], actual["issues"])
+    )
+
+
+def test_legal_role_recursion_and_top_exception_remain_conformant() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            *(f"Declaration(ObjectProperty(:{name}))" for name in "abcd"),
+            "SubObjectPropertyOf(ObjectPropertyChain(:a :b) :a)",
+            "SubObjectPropertyOf(ObjectPropertyChain(:c :d) :d)",
+            "TransitiveObjectProperty(:b)",
+            "SubObjectPropertyOf(ObjectPropertyChain(:d :c :a) owl:topObjectProperty)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    assert not {
+        RIA_DEPENDENCY_CYCLE_RULE,
+        RIA_INVERSE_RECURSION_RULE,
+        RIA_NON_REGULAR_RECURSION_RULE,
+    } & set(cast(list[str], actual["ordered_rule_ids"]))
+
+
+def test_annotated_duplicate_regularity_source_uses_scalar_last_statement() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(AnnotationProperty(:note))",
+            *(f"Declaration(ObjectProperty(:{name}))" for name in "acd"),
+            'SubObjectPropertyOf(Annotation(:note "first") '
+            "ObjectPropertyChain(:c :a :d) :a)",
+            'SubObjectPropertyOf(Annotation(:note "second") '
+            "ObjectPropertyChain(:c :a :d) :a)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    issues = [
+        issue
+        for issue in cast(list[dict[str, object]], actual["issues"])
+        if issue["rule_id"] == RIA_NON_REGULAR_RECURSION_RULE
+    ]
+    assert len(issues) == 1
+
+
+def test_regularity_cycle_selection_uses_canonical_role_byte_order() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            *(
+                f"Declaration(ObjectProperty(:{name}))"
+                for name in ("aa", "ab", "g", "y", "z")
+            ),
+            "SubObjectPropertyOf(ObjectPropertyChain(:ab :g) :aa)",
+            "SubObjectPropertyOf(ObjectPropertyChain(:aa :g) :ab)",
+            "SubObjectPropertyOf(ObjectPropertyChain(:z :g) :y)",
+            "SubObjectPropertyOf(ObjectPropertyChain(:y :g) :z)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    cycles = [
+        issue
+        for issue in cast(list[dict[str, object]], actual["issues"])
+        if issue["rule_id"] == RIA_DEPENDENCY_CYCLE_RULE
+    ]
+    assert len(cycles) == 1
+
+
+def test_inverse_recursion_disappears_inside_a_symmetric_role_component() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:a))",
+            "Declaration(ObjectProperty(:g))",
+            "SymmetricObjectProperty(:a)",
+            "SubObjectPropertyOf(ObjectPropertyChain(ObjectInverseOf(:a) :g) :a)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    assert RIA_INVERSE_RECURSION_RULE not in actual["ordered_rule_ids"]
+
+
 def test_extension_component_diagnostic_and_count_match_scalar_exactly() -> None:
     snapshot = _extension_snapshot("single")
     scalar = validate_owl2_dl_view(snapshot)
@@ -857,6 +978,36 @@ def test_non_simple_role_closure_is_recomputed_across_one_root_slices() -> None:
     assert forward == reverse == direct
     assert json.loads(forward) == _expected_manifest(snapshot)
     assert json.loads(forward)["ordered_rule_ids"] == [NON_SIMPLE_PROPERTY_RULE]
+
+
+def test_role_regularity_is_recomputed_across_one_root_slices() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            *(f"Declaration(ObjectProperty(:{name}))" for name in "abg"),
+            "SubObjectPropertyOf(ObjectPropertyChain(:b :g) :a)",
+            "SubObjectPropertyOf(ObjectPropertyChain(:a :g) :b)",
+        ),
+        options=OPTIONS,
+    )
+    root_count = len(bytes(_buffers(snapshot)["root_kinds"]))
+    records = tuple(
+        _slice_record(
+            snapshot,
+            posting_mode=1,
+            postings=memoryview(struct.pack("<I", index)),
+        )
+        for index in range(1, root_count + 1)
+    )
+
+    direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
+    forward = native._encoded_profile_slices_manifest_v1(slices=records)
+    reverse = native._encoded_profile_slices_manifest_v1(
+        slices=tuple(reversed(records))
+    )
+
+    assert forward == reverse == direct
+    assert json.loads(forward) == _expected_manifest(snapshot)
+    assert RIA_DEPENDENCY_CYCLE_RULE in json.loads(forward)["ordered_rule_ids"]
 
 
 def test_extension_selection_and_composite_deduplication_are_canonical() -> None:
