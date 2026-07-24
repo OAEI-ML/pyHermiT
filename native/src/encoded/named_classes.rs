@@ -652,6 +652,29 @@ const CLASS_BOOLEAN_REDUCTION_RULES: [ClassBooleanReductionRule; 2] = [
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObjectQuantifierProjectionRule {
+    tag: u16,
+    bottom_reduction: &'static str,
+    absorbing_filler: &'static str,
+    discardable_boolean_operand: bool,
+}
+
+const OBJECT_QUANTIFIER_PROJECTION_RULES: [ObjectQuantifierProjectionRule; 2] = [
+    ObjectQuantifierProjectionRule {
+        tag: OBJECT_SOME_VALUES_FROM_TAG,
+        bottom_reduction: NOTHING_DISPLAY,
+        absorbing_filler: NOTHING_DISPLAY,
+        discardable_boolean_operand: true,
+    },
+    ObjectQuantifierProjectionRule {
+        tag: OBJECT_ALL_VALUES_FROM_TAG,
+        bottom_reduction: THING_DISPLAY,
+        absorbing_filler: THING_DISPLAY,
+        discardable_boolean_operand: true,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ObjectValueProjectionRule {
     tag: u16,
     field_count: usize,
@@ -8990,8 +9013,9 @@ fn positive_atomic_class_projection<B: ByteSource>(
     }
     match node.tag() {
         OBJECT_SOME_VALUES_FROM_TAG | OBJECT_ALL_VALUES_FROM_TAG => {
-            return reducible_object_quantifier_selection(model, symbols, node, depth, budget)
-                .map(|selection| selection.map(AtomicClassProjection::Selected));
+            return reducible_object_quantifier_projection(
+                model, symbols, node, depth, scope, budget,
+            );
         }
         OBJECT_HAS_VALUE_TAG | OBJECT_HAS_SELF_TAG => {
             return reducible_object_value_projection(model, symbols, node, depth, scope, budget);
@@ -9135,13 +9159,22 @@ fn project_class_boolean_operands<B: ByteSource>(
     Ok(retained.or(identity).map(AtomicClassProjection::Selected))
 }
 
-fn reducible_object_quantifier_selection<B: ByteSource>(
+fn reducible_object_quantifier_projection<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     node: NodeRef,
     depth: usize,
+    scope: AtomicClassProjectionScope,
     budget: &mut PhaseBudget,
-) -> EncodedResult<Option<AtomicClassSelection>> {
+) -> EncodedResult<Option<AtomicClassProjection>> {
+    let rule = OBJECT_QUANTIFIER_PROJECTION_RULES
+        .iter()
+        .find(|rule| rule.tag == node.tag())
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "object quantifier constructor lost its projection rule",
+            )
+        })?;
     if node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
             "object quantifier no longer has schema-1 shape",
@@ -9150,27 +9183,23 @@ fn reducible_object_quantifier_selection<B: ByteSource>(
     if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
         return Ok(None);
     }
-    let some = node.tag() == OBJECT_SOME_VALUES_FROM_TAG;
     let property = node_field(model, node, 0, "object quantifier property")?;
     if object_property_has_iri(model, symbols, property, BOTTOM_OBJECT_IRI)? {
-        return builtin_atomic_class_selection(
-            symbols,
-            node.id(),
-            if some { NOTHING_DISPLAY } else { THING_DISPLAY },
-        )
-        .map(Some);
+        return builtin_atomic_class_selection(symbols, node.id(), rule.bottom_reduction)
+            .map(AtomicClassProjection::Selected)
+            .map(Some);
     }
     let filler = node_field(model, node, 1, "object quantifier filler")?;
     let filler_depth = child_expression_depth(depth, "object quantifier filler depth overflowed")?;
-    let Some(selection) =
+    if let Some(selection) =
         atomic_class_selection_at_depth(model, symbols, filler, filler_depth, budget)?
-    else {
-        return Ok(None);
-    };
-    if (some && atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?)
-        || (!some && atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?)
     {
-        return Ok(Some(selection));
+        if atomic_class_selection_has_display(symbols, selection, rule.absorbing_filler)? {
+            return Ok(Some(AtomicClassProjection::Selected(selection)));
+        }
+    }
+    if scope == AtomicClassProjectionScope::BooleanOperand && rule.discardable_boolean_operand {
+        return Ok(Some(AtomicClassProjection::Discardable));
     }
     Ok(None)
 }

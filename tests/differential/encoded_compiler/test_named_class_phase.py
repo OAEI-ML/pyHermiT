@@ -2236,8 +2236,8 @@ def test_absorbing_booleans_validate_every_operand_before_publication() -> None:
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 2
+    assert manifest["compiled_roots"] == 1
+    assert manifest["deferred_roots"] == 1
     assert not any(
         value["generated"]
         for value in cast(
@@ -6627,6 +6627,87 @@ def test_absorbing_class_booleans_discard_object_values_in_scalar_contexts(
     assert all(
         "urn:test:named#dead" not in str(value["display"])
         for value in cast(list[dict[str, object]], manifest["individual_symbols"])
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+@pytest.mark.parametrize(
+    ("constructor", "label"),
+    (
+        ("ObjectSomeValuesFrom", "some"),
+        ("ObjectAllValuesFrom", "all"),
+    ),
+)
+def test_absorbing_class_booleans_discard_object_quantifiers_in_scalar_contexts(
+    constructor: str,
+    label: str,
+) -> None:
+    direct = f"{constructor}(:discarded :A)"
+    complemented = f"ObjectComplementOf({direct})"
+    expressions = (
+        f"ObjectComplementOf(ObjectUnionOf(owl:Thing {direct}))",
+        "ObjectComplementOf(ObjectUnionOf("
+        f":A :B owl:Thing {complemented}))",
+        "ObjectComplementOf(ObjectUnionOf("
+        f"owl:Thing ObjectIntersectionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing {direct}))",
+        "ObjectComplementOf(ObjectIntersectionOf("
+        f":A :B owl:Nothing {complemented}))",
+        "ObjectComplementOf(ObjectIntersectionOf("
+        f"owl:Nothing ObjectUnionOf(:A {direct})))",
+    )
+    contexts = (
+        "SubClassOf({} :Z)",
+        "SubClassOf(:Z {})",
+        "EquivalentClasses(:Z {})",
+        "DisjointClasses(:Z {})",
+        "ClassAssertion({} :i)",
+        "ObjectPropertyDomain(:p {})",
+        "ObjectPropertyRange(:p {})",
+        "DataPropertyDomain(:d {})",
+        "HasKey({} (:p) (:d))",
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:Z))",
+            "Declaration(ObjectProperty(:discarded))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:i))",
+            *(
+                context.format(expression)
+                for expression in expressions
+                for context in contexts
+            ),
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=54,
+        include_object_constraints=True,
+        include_generated_object_quantifier_definitions=True,
+        include_at_least_object_predicates=True,
+        include_data_domains=True,
+        include_keys=True,
+    ), label
+    assert not any(
+        str(value["display"]).startswith(
+            ("ObjectSomeValuesFrom:", "ObjectAllValuesFrom:")
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.AT_LEAST_OBJECT.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
