@@ -621,6 +621,7 @@ struct ClassBooleanDefinition {
     object_cardinality: Option<ObjectCardinalityDefinition>,
     data_quantifier: Option<DataQuantifierDefinition>,
     data_cardinality: Option<DataCardinalityDefinition>,
+    data_dependencies: Vec<DataBooleanDefinition>,
     complement: bool,
     polarity: DefinitionPolarity,
     generated_key: Vec<u8>,
@@ -761,7 +762,7 @@ struct NormalizedDataQuantifierTerm {
     role_id: u32,
     property_key: Vec<u8>,
     key: Vec<u8>,
-    filler: NormalizedAtomicDataTerm,
+    filler: NormalizedDataTerm,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1396,7 +1397,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
 ) -> EncodedResult<NamedClassPhase> {
     let mut budget = PhaseBudget::new(limits);
     canonical::validate_scope_maps(scope_maps, &mut budget)?;
-    let definitions = class_boolean_definitions(
+    let (definitions, class_data_definitions) = class_boolean_definitions(
         model,
         symbols,
         object_roles,
@@ -1411,6 +1412,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         data_roles,
         scope_maps,
         definition_namespace,
+        class_data_definitions,
         &mut budget,
     )?;
     let datatype_boolean_definitions =
@@ -2594,9 +2596,9 @@ fn class_boolean_definitions<B: ByteSource>(
     scope_maps: &[AnonymousScopeMap],
     namespace: Option<[u8; 32]>,
     budget: &mut PhaseBudget,
-) -> EncodedResult<Vec<ClassBooleanDefinition>> {
+) -> EncodedResult<(Vec<ClassBooleanDefinition>, Vec<DataBooleanDefinition>)> {
     let Some(namespace) = namespace else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let mut definitions = Vec::<ClassBooleanDefinition>::new();
     for root in &symbols.roots {
@@ -2720,7 +2722,19 @@ fn class_boolean_definitions<B: ByteSource>(
         definition.provenance.sort_unstable();
         definition.provenance.dedup();
     }
-    Ok(definitions)
+    let mut data_definitions = Vec::new();
+    for definition in &mut definitions {
+        let dependencies = std::mem::take(&mut definition.data_dependencies);
+        for dependency in dependencies {
+            retain_data_boolean_definition_provenances(
+                &mut data_definitions,
+                dependency,
+                &definition.provenance,
+                budget,
+            )?;
+        }
+    }
+    Ok((definitions, data_definitions))
 }
 
 fn data_boolean_definitions<B: ByteSource>(
@@ -2729,12 +2743,12 @@ fn data_boolean_definitions<B: ByteSource>(
     data_roles: Option<&DataRolePhase>,
     scope_maps: &[AnonymousScopeMap],
     namespace: Option<[u8; 32]>,
+    mut definitions: Vec<DataBooleanDefinition>,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<DataBooleanDefinition>> {
     let (Some(namespace), Some(data_roles)) = (namespace, data_roles) else {
-        return Ok(Vec::new());
+        return Ok(definitions);
     };
-    let mut definitions = Vec::<DataBooleanDefinition>::new();
     for root in &symbols.roots {
         budget.claim_work(1)?;
         if root.handler != RootHandler::DataPropertyRange {
@@ -2763,7 +2777,12 @@ fn data_boolean_definitions<B: ByteSource>(
         )?;
         let provenance = source_axiom_digest(model, root.node, scope_maps, budget)?;
         if let Some(definition) = definition {
-            retain_data_boolean_definition(&mut definitions, definition, provenance, budget)?;
+            retain_data_boolean_definition_provenances(
+                &mut definitions,
+                definition,
+                std::slice::from_ref(&provenance),
+                budget,
+            )?;
             continue;
         }
         let _retained = retain_recursive_data_boolean_definitions(
@@ -3423,14 +3442,23 @@ fn retain_recursive_data_boolean_definitions<B: ByteSource>(
     let NormalizedDataTerm::Boolean(term) = term else {
         return Ok(false);
     };
+    let mut pending = Vec::new();
     let _generated_key = atomize_normalized_data_boolean(
         term,
         Some(expression),
         namespace,
-        provenance,
-        definitions,
+        DefinitionPolarity::Positive,
+        &mut pending,
         budget,
     )?;
+    for definition in pending {
+        retain_data_boolean_definition_provenances(
+            definitions,
+            definition,
+            std::slice::from_ref(&provenance),
+            budget,
+        )?;
+    }
     Ok(true)
 }
 
@@ -3438,7 +3466,7 @@ fn atomize_normalized_data_boolean(
     term: NormalizedDataBooleanTerm,
     source_expression: Option<NodeId>,
     namespace: [u8; 32],
-    provenance: [u8; 32],
+    polarity: DefinitionPolarity,
     definitions: &mut Vec<DataBooleanDefinition>,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<u8>> {
@@ -3482,7 +3510,7 @@ fn atomize_normalized_data_boolean(
                     operand,
                     None,
                     namespace,
-                    provenance,
+                    polarity,
                     definitions,
                     budget,
                 )?;
@@ -3529,7 +3557,7 @@ fn atomize_normalized_data_boolean(
     })?;
     operands.extend(keyed.into_iter().map(|(_, operand)| operand));
     let (generated_key, generated_display) =
-        generated_data_symbol(namespace, &term.key, DefinitionPolarity::Positive, budget)?;
+        generated_data_symbol(namespace, &term.key, polarity, budget)?;
     budget.claim_owned(generated_key.len())?;
     let returned_key = generated_key.clone();
     let mut expressions = Vec::new();
@@ -3542,22 +3570,21 @@ fn atomize_normalized_data_boolean(
         })?;
         expressions.push(expression);
     }
-    retain_data_boolean_definition(
-        definitions,
-        DataBooleanDefinition {
-            expressions,
-            expression_key: term.key,
-            expression_symbols,
-            intersection: term.intersection,
-            operands,
-            polarity: DefinitionPolarity::Positive,
-            generated_key,
-            generated_display,
-            provenance: Vec::new(),
-        },
-        provenance,
-        budget,
-    )?;
+    budget.claim_owned(size_of::<DataBooleanDefinition>())?;
+    definitions.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("recursive data definition allocation failed")
+    })?;
+    definitions.push(DataBooleanDefinition {
+        expressions,
+        expression_key: term.key,
+        expression_symbols,
+        intersection: term.intersection,
+        operands,
+        polarity,
+        generated_key,
+        generated_display,
+        provenance: Vec::new(),
+    });
     Ok(returned_key)
 }
 
@@ -3621,12 +3648,17 @@ fn datatype_boolean_definitions<B: ByteSource>(
     Ok(definitions)
 }
 
-fn retain_data_boolean_definition(
+fn retain_data_boolean_definition_provenances(
     definitions: &mut Vec<DataBooleanDefinition>,
     mut definition: DataBooleanDefinition,
-    provenance: [u8; 32],
+    provenances: &[[u8; 32]],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
+    if !definition.provenance.is_empty() || provenances.is_empty() {
+        return Err(EncodedValidationError::invariant(
+            "generated data definition has invalid pending provenance",
+        ));
+    }
     if let Some(known) = definitions.iter_mut().find(|known| {
         known.expression_key == definition.expression_key && known.polarity == definition.polarity
     }) {
@@ -3645,7 +3677,12 @@ fn retain_data_boolean_definition(
                 .expressions
                 .len()
                 .checked_mul(size_of::<NodeId>())
-                .and_then(|value| value.checked_add(size_of::<[u8; 32]>()))
+                .and_then(|value| {
+                    provenances
+                        .len()
+                        .checked_mul(size_of::<[u8; 32]>())
+                        .and_then(|provenance_bytes| value.checked_add(provenance_bytes))
+                })
                 .ok_or_else(|| {
                     EncodedValidationError::resource(
                         "generated data definition ownership overflowed",
@@ -3661,12 +3698,15 @@ fn retain_data_boolean_definition(
                 )
             })?;
         known.expressions.append(&mut definition.expressions);
-        known.provenance.try_reserve(1).map_err(|_| {
-            EncodedValidationError::resource(
-                "generated data definition provenance allocation failed",
-            )
-        })?;
-        known.provenance.push(provenance);
+        known
+            .provenance
+            .try_reserve(provenances.len())
+            .map_err(|_| {
+                EncodedValidationError::resource(
+                    "generated data definition provenance allocation failed",
+                )
+            })?;
+        known.provenance.extend_from_slice(provenances);
         return Ok(());
     }
     let following = definitions.len().checked_add(1).ok_or_else(|| {
@@ -3677,11 +3717,26 @@ fn retain_data_boolean_definition(
         budget.limits.max_data_range_symbols,
         "generated data definition count",
     )?;
-    budget.claim_owned(size_of::<DataBooleanDefinition>() + size_of::<[u8; 32]>())?;
-    definition.provenance.try_reserve(1).map_err(|_| {
-        EncodedValidationError::resource("generated data definition provenance allocation failed")
-    })?;
-    definition.provenance.push(provenance);
+    budget.claim_owned(
+        provenances
+            .len()
+            .checked_mul(size_of::<[u8; 32]>())
+            .and_then(|value| value.checked_add(size_of::<DataBooleanDefinition>()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "generated data definition provenance ownership overflowed",
+                )
+            })?,
+    )?;
+    definition
+        .provenance
+        .try_reserve(provenances.len())
+        .map_err(|_| {
+            EncodedValidationError::resource(
+                "generated data definition provenance allocation failed",
+            )
+        })?;
+    definition.provenance.extend_from_slice(provenances);
     definitions.try_reserve(1).map_err(|_| {
         EncodedValidationError::resource("generated data definition allocation failed")
     })?;
@@ -4590,7 +4645,7 @@ fn normalized_class_term<B: ByteSource>(
                     role_id,
                     property_key,
                     key,
-                    filler,
+                    filler: NormalizedDataTerm::Atomic(filler),
                 },
             )));
         }
@@ -4723,9 +4778,6 @@ fn normalized_class_term<B: ByteSource>(
             else {
                 return Ok(None);
             };
-            let NormalizedDataTerm::Atomic(filler) = filler else {
-                return Ok(None);
-            };
             let kind = match (node.tag(), complemented) {
                 (DATA_SOME_VALUES_FROM_TAG, false) | (DATA_ALL_VALUES_FROM_TAG, true) => {
                     DataQuantifierKind::Some
@@ -4740,7 +4792,7 @@ fn normalized_class_term<B: ByteSource>(
                 }
             };
             let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
-            let key = synthetic_data_quantifier_key(kind, &property_key, &filler.key, budget)?;
+            let key = synthetic_data_quantifier_key(kind, &property_key, filler.key(), budget)?;
             budget.claim_owned(size_of::<NormalizedDataQuantifierTerm>())?;
             return Ok(Some(NormalizedClassTerm::DataQuantifier(
                 NormalizedDataQuantifierTerm {
@@ -5049,7 +5101,7 @@ fn normalized_class_term<B: ByteSource>(
                             role_id,
                             property_key,
                             key,
-                            filler,
+                            filler: NormalizedDataTerm::Atomic(filler),
                         },
                     )))
                 }
@@ -5754,7 +5806,7 @@ fn normalized_data_restriction_term<B: ByteSource>(
                     role_id,
                     property_key,
                     key,
-                    filler,
+                    filler: NormalizedDataTerm::Atomic(filler),
                 },
             )))
         }
@@ -6053,13 +6105,31 @@ fn atomize_normalized_data_quantifier(
         DataQuantifierKind::Some => DATA_SOME_VALUES_FROM_TAG,
         DataQuantifierKind::All => DATA_ALL_VALUES_FROM_TAG,
     };
-    let NormalizedAtomicDataTerm {
-        selection: _,
-        base_key: filler_base_key,
-        negative: filler_negative,
-        key: filler_key,
-        symbols: data_expression_symbols,
-    } = filler;
+    let mut data_dependencies = Vec::new();
+    let (filler_base_key, filler_negative, filler_key, data_expression_symbols) = match filler {
+        NormalizedDataTerm::Atomic(filler) => {
+            let NormalizedAtomicDataTerm {
+                selection: _,
+                base_key,
+                negative,
+                key,
+                symbols,
+            } = filler;
+            (base_key, negative, key, symbols)
+        }
+        NormalizedDataTerm::Boolean(filler) => {
+            let generated_key = atomize_normalized_data_boolean(
+                filler,
+                None,
+                namespace,
+                polarity,
+                &mut data_dependencies,
+                budget,
+            )?;
+            budget.claim_owned(generated_key.len())?;
+            (generated_key.clone(), false, generated_key, Vec::new())
+        }
+    };
     let mut expression_symbols = Vec::new();
     let source_seed = class_expression_symbol_seed(&key, expression_tag, budget)?;
     push_class_expression_symbol_seed(&mut expression_symbols, source_seed, budget)?;
@@ -6107,6 +6177,7 @@ fn atomize_normalized_data_quantifier(
             },
         }),
         data_cardinality: None,
+        data_dependencies,
         complement: false,
         polarity,
         generated_key,
@@ -6198,6 +6269,7 @@ fn atomize_normalized_data_cardinality(
                 negative: filler_negative,
             },
         }),
+        data_dependencies: Vec::new(),
         complement: false,
         polarity,
         generated_key,
@@ -6324,6 +6396,7 @@ fn atomize_normalized_object_cardinality(
         }),
         data_quantifier: None,
         data_cardinality: None,
+        data_dependencies: Vec::new(),
         complement: false,
         polarity,
         generated_key,
@@ -6431,6 +6504,7 @@ fn atomize_normalized_object_quantifier(
         object_cardinality: None,
         data_quantifier: None,
         data_cardinality: None,
+        data_dependencies: Vec::new(),
         complement: false,
         polarity,
         generated_key,
@@ -6519,6 +6593,7 @@ fn atomize_normalized_object_self(
             object_cardinality: None,
             data_quantifier: None,
             data_cardinality: None,
+            data_dependencies: Vec::new(),
             complement: true,
             polarity,
             generated_key,
@@ -6564,6 +6639,7 @@ fn atomize_normalized_object_self(
         object_cardinality: None,
         data_quantifier: None,
         data_cardinality: None,
+        data_dependencies: Vec::new(),
         complement: false,
         polarity,
         generated_key,
@@ -6709,6 +6785,7 @@ fn atomize_normalized_class_boolean(
         object_cardinality: None,
         data_quantifier: None,
         data_cardinality: None,
+        data_dependencies: Vec::new(),
         complement: false,
         polarity,
         generated_key,
@@ -6734,6 +6811,7 @@ fn retain_class_boolean_definition(
             || known.object_cardinality != definition.object_cardinality
             || known.data_quantifier != definition.data_quantifier
             || known.data_cardinality != definition.data_cardinality
+            || known.data_dependencies != definition.data_dependencies
             || known.complement != definition.complement
             || known.expression_symbols != definition.expression_symbols
             || known.data_expression_symbols != definition.data_expression_symbols
@@ -13859,6 +13937,11 @@ fn emit_class_boolean_definitions<B: ByteSource>(
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
     for definition in definitions {
+        if !definition.data_dependencies.is_empty() {
+            return Err(EncodedValidationError::invariant(
+                "generated class definition retained uncollected data dependencies",
+            ));
+        }
         budget.claim_work(binary_search_work(class_domain.values.len()))?;
         let generated_index = class_domain
             .values
