@@ -223,6 +223,7 @@ pub struct NamedClassPhase {
     normalized_boolean_clauses: Vec<NormalizedBooleanClause>,
     normalized_disjoints: Vec<NormalizedDisjoint>,
     normalized_object_constraints: Vec<NormalizedObjectConstraint>,
+    normalized_data_constraints: Vec<NormalizedDataConstraint>,
     normalized_object_characteristics: Vec<NormalizedObjectCharacteristic>,
     normalized_data_domains: Vec<NormalizedDataDomain>,
     normalized_data_ranges: Vec<NormalizedDataRange>,
@@ -612,11 +613,13 @@ struct ClassBooleanDefinition {
     roots: Vec<NodeId>,
     expression_key: Vec<u8>,
     expression_symbols: Vec<ClassExpressionSymbolSeed>,
+    data_expression_symbols: Vec<DataRangeSymbolSeed>,
     intersection: bool,
     operands: Vec<ClassBooleanOperand>,
     object_self_role_id: Option<u32>,
     object_quantifier: Option<ObjectQuantifierDefinition>,
     object_cardinality: Option<ObjectCardinalityDefinition>,
+    data_quantifier: Option<DataQuantifierDefinition>,
     complement: bool,
     polarity: DefinitionPolarity,
     generated_key: Vec<u8>,
@@ -732,6 +735,28 @@ struct NormalizedObjectCardinalityTerm {
     filler: Box<NormalizedClassTerm>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DataQuantifierKind {
+    Some,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DataQuantifierDefinition {
+    kind: DataQuantifierKind,
+    role_id: u32,
+    filler: AtomicDataRangeSelection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedDataQuantifierTerm {
+    kind: DataQuantifierKind,
+    role_id: u32,
+    property_key: Vec<u8>,
+    key: Vec<u8>,
+    filler: NormalizedAtomicDataTerm,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NormalizedClassTerm {
     Atomic(NormalizedAtomicClassTerm),
@@ -740,6 +765,7 @@ enum NormalizedClassTerm {
     ObjectSelf(NormalizedObjectSelfTerm),
     ObjectQuantifier(NormalizedObjectQuantifierTerm),
     ObjectCardinality(NormalizedObjectCardinalityTerm),
+    DataQuantifier(NormalizedDataQuantifierTerm),
 }
 
 impl NormalizedClassTerm {
@@ -751,6 +777,7 @@ impl NormalizedClassTerm {
             Self::ObjectSelf(term) => &term.key,
             Self::ObjectQuantifier(term) => &term.key,
             Self::ObjectCardinality(term) => &term.key,
+            Self::DataQuantifier(term) => &term.key,
         }
     }
 }
@@ -881,6 +908,34 @@ struct NormalizedObjectConstraint {
     class: ClassLiteral,
     filler: Option<ClassLiteral>,
     cardinality: Option<u32>,
+    provenance: Vec<[u8; 32]>,
+    generated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum DataConstraintKind {
+    ExistentialAntecedent,
+    ExistentialConsequent,
+    UniversalAntecedent,
+    UniversalConsequent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RawDataConstraint {
+    kind: DataConstraintKind,
+    role_id: u32,
+    class: ClassLiteral,
+    filler: DataRangeLiteral,
+    provenance: [u8; 32],
+    generated: bool,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NormalizedDataConstraint {
+    kind: DataConstraintKind,
+    role_id: u32,
+    class: ClassLiteral,
+    filler: DataRangeLiteral,
     provenance: Vec<[u8; 32]>,
     generated: bool,
 }
@@ -1324,6 +1379,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         symbols,
         data_roles.is_some(),
         scope_maps,
+        &definitions,
         &data_definitions,
         &datatype_boolean_definitions,
         &mut budget,
@@ -1389,6 +1445,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut raw_boolean_clauses = Vec::<RawBooleanClause>::new();
     let mut raw_disjoints = Vec::<RawDisjoint>::new();
     let mut raw_object_constraints = Vec::<RawObjectConstraint>::new();
+    let mut raw_data_constraints = Vec::<RawDataConstraint>::new();
     let mut raw_object_characteristics = Vec::<RawObjectCharacteristic>::new();
     let mut raw_data_domains = Vec::<RawDataDomain>::new();
     let mut raw_data_ranges = Vec::<RawDataRange>::new();
@@ -1408,13 +1465,16 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let mut deferred_roots = 0_usize;
     emit_class_boolean_definitions(
         model,
+        symbols,
         &class_domain,
+        &data_range_domain,
         &class_signature,
         &definitions,
         scope_maps,
         &mut raw_edges,
         &mut raw_boolean_clauses,
         &mut raw_object_constraints,
+        &mut raw_data_constraints,
         &mut budget,
     )?;
     emit_data_boolean_definitions(
@@ -2212,6 +2272,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let boolean_clauses = normalize_boolean_clauses(raw_boolean_clauses, &mut budget)?;
     let disjoints = normalize_disjoints(raw_disjoints, &mut budget)?;
     let object_constraints = normalize_object_constraints(raw_object_constraints, &mut budget)?;
+    let data_constraints = normalize_data_constraints(raw_data_constraints, &mut budget)?;
     let object_characteristics =
         normalize_object_characteristics(raw_object_characteristics, &mut budget)?;
     let data_domains = normalize_data_domains(raw_data_domains, &mut budget)?;
@@ -2235,6 +2296,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &boolean_clauses,
         &disjoints,
         &object_constraints,
+        &data_constraints,
         &object_characteristics,
         &data_domains,
         &data_ranges,
@@ -2258,6 +2320,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         predicate_by_object_role,
         predicate_by_negative_object_role,
         at_least_object_predicates,
+        at_least_data_predicates,
         annotated_equality_predicates,
         predicate_by_data_role,
         predicate_by_negative_data_role,
@@ -2276,6 +2339,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &boolean_clauses,
         &disjoints,
         &object_constraints,
+        &data_constraints,
         &object_characteristics,
         &data_domains,
         &data_ranges,
@@ -2310,6 +2374,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &boolean_clauses,
         &disjoints,
         &object_constraints,
+        &data_constraints,
         &object_characteristics,
         &data_domains,
         &data_ranges,
@@ -2325,6 +2390,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &predicate_by_negative_class,
         &predicate_by_object_role,
         &at_least_object_predicates,
+        &at_least_data_predicates,
         &annotated_equality_predicates,
         &predicate_by_data_role,
         &predicate_by_data_range,
@@ -2427,6 +2493,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_boolean_clauses: boolean_clauses,
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
+        normalized_data_constraints: data_constraints,
         normalized_object_characteristics: object_characteristics,
         normalized_data_domains: data_domains,
         normalized_data_ranges: data_ranges,
@@ -2485,6 +2552,7 @@ fn class_boolean_definitions<B: ByteSource>(
                 model,
                 symbols,
                 object_roles,
+                data_roles,
                 root.node,
                 namespace,
                 scope_maps,
@@ -2495,6 +2563,7 @@ fn class_boolean_definitions<B: ByteSource>(
                 model,
                 symbols,
                 object_roles,
+                data_roles,
                 root.node,
                 namespace,
                 scope_maps,
@@ -2505,6 +2574,7 @@ fn class_boolean_definitions<B: ByteSource>(
                 model,
                 symbols,
                 object_roles,
+                data_roles,
                 root.node,
                 namespace,
                 scope_maps,
@@ -2517,7 +2587,7 @@ fn class_boolean_definitions<B: ByteSource>(
                         model,
                         symbols,
                         Some(roles),
-                        None,
+                        data_roles,
                         root.handler,
                         root.node,
                         namespace,
@@ -2558,6 +2628,7 @@ fn class_boolean_definitions<B: ByteSource>(
                 model,
                 symbols,
                 object_roles,
+                data_roles,
                 root.node,
                 namespace,
                 scope_maps,
@@ -2568,6 +2639,7 @@ fn class_boolean_definitions<B: ByteSource>(
                 model,
                 symbols,
                 object_roles,
+                data_roles,
                 root.node,
                 namespace,
                 scope_maps,
@@ -3555,6 +3627,7 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -3578,6 +3651,7 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
             model,
             symbols,
             object_roles,
+            data_roles,
             sub_class,
             DefinitionPolarity::Negative,
             namespace,
@@ -3592,6 +3666,7 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
             model,
             symbols,
             object_roles,
+            data_roles,
             super_class,
             DefinitionPolarity::Positive,
             namespace,
@@ -3622,6 +3697,7 @@ fn retain_class_assertion_boolean_definition<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -3642,6 +3718,7 @@ fn retain_class_assertion_boolean_definition<B: ByteSource>(
         model,
         symbols,
         object_roles,
+        data_roles,
         expression,
         DefinitionPolarity::Positive,
         namespace,
@@ -3738,6 +3815,7 @@ fn retain_class_constraint_boolean_definition<B: ByteSource>(
         model,
         symbols,
         object_roles,
+        data_roles,
         expression,
         DefinitionPolarity::Positive,
         namespace,
@@ -3834,6 +3912,7 @@ fn retain_key_boolean_definition<B: ByteSource>(
         model,
         symbols,
         object_roles,
+        data_roles,
         expression,
         DefinitionPolarity::Negative,
         namespace,
@@ -3855,6 +3934,7 @@ fn retain_disjoint_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -3892,6 +3972,7 @@ fn retain_disjoint_boolean_definitions<B: ByteSource>(
             model,
             symbols,
             object_roles,
+            data_roles,
             identifier,
             DefinitionPolarity::Negative,
             namespace,
@@ -3931,6 +4012,7 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -3984,6 +4066,7 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
             model,
             symbols,
             object_roles,
+            data_roles,
             identifier,
             false,
             member_depth,
@@ -4076,6 +4159,7 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
     root: NodeId,
     namespace: [u8; 32],
     scope_maps: &[AnonymousScopeMap],
@@ -4113,6 +4197,7 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
             model,
             symbols,
             object_roles,
+            data_roles,
             identifier,
             DefinitionPolarity::Negative,
             namespace,
@@ -4126,6 +4211,7 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
             model,
             symbols,
             object_roles,
+            data_roles,
             identifier,
             DefinitionPolarity::Positive,
             namespace,
@@ -4168,6 +4254,7 @@ fn class_boolean_definition_candidates<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
     expression: NodeId,
     polarity: DefinitionPolarity,
     namespace: [u8; 32],
@@ -4178,6 +4265,7 @@ fn class_boolean_definition_candidates<B: ByteSource>(
         model,
         symbols,
         object_roles,
+        data_roles,
         expression,
         false,
         0,
@@ -4210,6 +4298,7 @@ fn normalized_class_term<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: Option<&ObjectRolePhase>,
+    data_roles: Option<&DataRolePhase>,
     identifier: NodeId,
     inherited_complement: bool,
     initial_depth: usize,
@@ -4402,6 +4491,7 @@ fn normalized_class_term<B: ByteSource>(
                 model,
                 symbols,
                 Some(object_roles),
+                data_roles,
                 filler,
                 complemented,
                 filler_depth,
@@ -4436,6 +4526,95 @@ fn normalized_class_term<B: ByteSource>(
                     property_key,
                     key,
                     filler: Box::new(filler),
+                },
+            )));
+        }
+        if selection.is_none()
+            && matches!(
+                node.tag(),
+                DATA_SOME_VALUES_FROM_TAG | DATA_ALL_VALUES_FROM_TAG
+            )
+        {
+            if node.field_count() != 2 {
+                return Err(EncodedValidationError::invariant(
+                    "data-quantifier definition no longer has schema-1 shape",
+                ));
+            }
+            let Some(data_roles) = data_roles else {
+                return Ok(None);
+            };
+            let properties_component = required_component(
+                model.field(node.fields().start)?,
+                "data-quantifier definition properties",
+            )?;
+            let ComponentValue::Collection(properties) = model.resolve(properties_component)?
+            else {
+                return Err(EncodedValidationError::invariant(
+                    "data-quantifier definition properties did not resolve to a collection",
+                ));
+            };
+            if properties.len() != 1 {
+                return Ok(None);
+            }
+            let property_item = required_component(
+                model.item(properties.items().start)?,
+                "data-quantifier definition property",
+            )?;
+            let ComponentValue::Node(property) = model.resolve(property_item)? else {
+                return Err(EncodedValidationError::invariant(
+                    "data-quantifier definition property did not resolve to a node",
+                ));
+            };
+            if !reduction_inputs_are_retained(model, symbols, property, depth, budget)? {
+                return Ok(None);
+            }
+            let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
+            let filler = node_field(model, node, 1, "data-quantifier definition filler")?;
+            let filler_depth =
+                child_expression_depth(depth, "data-quantifier filler depth overflowed")?;
+            PhaseBudget::count(
+                filler_depth,
+                budget.limits.max_canonical_depth,
+                "class-expression depth",
+            )?;
+            let Some(filler) = normalized_data_term(
+                model,
+                symbols,
+                filler,
+                complemented,
+                filler_depth,
+                scope_maps,
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            let NormalizedDataTerm::Atomic(filler) = filler else {
+                return Ok(None);
+            };
+            let kind = match (node.tag(), complemented) {
+                (DATA_SOME_VALUES_FROM_TAG, false) | (DATA_ALL_VALUES_FROM_TAG, true) => {
+                    DataQuantifierKind::Some
+                }
+                (DATA_ALL_VALUES_FROM_TAG, false) | (DATA_SOME_VALUES_FROM_TAG, true) => {
+                    DataQuantifierKind::All
+                }
+                _ => {
+                    return Err(EncodedValidationError::invariant(
+                        "data-quantifier definition changed constructor",
+                    ));
+                }
+            };
+            let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
+            let key = synthetic_data_quantifier_key(kind, &property_key, &filler.key, budget)?;
+            budget.claim_owned(size_of::<NormalizedDataQuantifierTerm>())?;
+            return Ok(Some(NormalizedClassTerm::DataQuantifier(
+                NormalizedDataQuantifierTerm {
+                    kind,
+                    role_id,
+                    property_key,
+                    key,
+                    filler,
                 },
             )));
         }
@@ -4488,6 +4667,7 @@ fn normalized_class_term<B: ByteSource>(
                     model,
                     symbols,
                     object_roles,
+                    data_roles,
                     property,
                     role_id,
                     filler,
@@ -4552,6 +4732,7 @@ fn normalized_class_term<B: ByteSource>(
                 model,
                 symbols,
                 object_roles,
+                data_roles,
                 property,
                 role_id,
                 filler,
@@ -4567,6 +4748,7 @@ fn normalized_class_term<B: ByteSource>(
                 model,
                 symbols,
                 object_roles,
+                data_roles,
                 property,
                 role_id,
                 filler,
@@ -4696,6 +4878,7 @@ fn normalized_class_term<B: ByteSource>(
                 model,
                 symbols,
                 Some(object_roles),
+                data_roles,
                 filler,
                 complement_filler,
                 filler_depth,
@@ -4882,6 +5065,7 @@ fn normalized_class_term<B: ByteSource>(
             model,
             symbols,
             object_roles,
+            data_roles,
             operand,
             complemented,
             operand_depth,
@@ -4966,6 +5150,7 @@ fn normalized_object_restriction_term<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     object_roles: &ObjectRolePhase,
+    data_roles: Option<&DataRolePhase>,
     property: NodeId,
     role_id: u32,
     filler: NodeId,
@@ -4985,6 +5170,7 @@ fn normalized_object_restriction_term<B: ByteSource>(
         model,
         symbols,
         Some(object_roles),
+        data_roles,
         filler,
         complement_filler,
         filler_depth,
@@ -5089,6 +5275,27 @@ fn synthetic_object_quantifier_key(
     };
     let mut key = Vec::new();
     push_generated_varint(&mut key, u64::from(tag), budget)?;
+    push_generated_byte(&mut key, 1, budget)?;
+    push_generated_frame(&mut key, property_key, budget)?;
+    push_generated_byte(&mut key, 1, budget)?;
+    push_generated_frame(&mut key, filler_key, budget)?;
+    Ok(key)
+}
+
+fn synthetic_data_quantifier_key(
+    kind: DataQuantifierKind,
+    property_key: &[u8],
+    filler_key: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let tag = match kind {
+        DataQuantifierKind::Some => DATA_SOME_VALUES_FROM_TAG,
+        DataQuantifierKind::All => DATA_ALL_VALUES_FROM_TAG,
+    };
+    let mut key = Vec::new();
+    push_generated_varint(&mut key, u64::from(tag), budget)?;
+    push_generated_byte(&mut key, 7, budget)?;
+    push_generated_varint(&mut key, 1, budget)?;
     push_generated_byte(&mut key, 1, budget)?;
     push_generated_frame(&mut key, property_key, budget)?;
     push_generated_byte(&mut key, 1, budget)?;
@@ -5221,7 +5428,91 @@ fn atomize_normalized_class_term(
             definitions,
             budget,
         ),
+        NormalizedClassTerm::DataQuantifier(term) => atomize_normalized_data_quantifier(
+            term,
+            source_expression,
+            polarity,
+            namespace,
+            definitions,
+            budget,
+        ),
     }
+}
+
+fn atomize_normalized_data_quantifier(
+    term: NormalizedDataQuantifierTerm,
+    source_expression: Option<NodeId>,
+    polarity: DefinitionPolarity,
+    namespace: [u8; 32],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let NormalizedDataQuantifierTerm {
+        kind,
+        role_id,
+        property_key,
+        key,
+        filler,
+    } = term;
+    let expression_tag = match kind {
+        DataQuantifierKind::Some => DATA_SOME_VALUES_FROM_TAG,
+        DataQuantifierKind::All => DATA_ALL_VALUES_FROM_TAG,
+    };
+    let NormalizedAtomicDataTerm {
+        selection,
+        key: filler_key,
+        symbols: data_expression_symbols,
+    } = filler;
+    let mut expression_symbols = Vec::new();
+    let source_seed = class_expression_symbol_seed(&key, expression_tag, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, source_seed, budget)?;
+    let rewritten_key = synthetic_data_quantifier_key(kind, &property_key, &filler_key, budget)?;
+    let rewritten_seed = class_expression_symbol_seed(&rewritten_key, expression_tag, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, rewritten_seed, budget)?;
+    budget.claim_work(sort_work(expression_symbols.len()))?;
+    expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
+    expression_symbols.dedup_by(|left, right| left.key == right.key);
+    let (generated_key, generated_display) =
+        generated_class_symbol(namespace, &key, polarity, budget)?;
+    budget.claim_owned(generated_key.len())?;
+    let returned_key = generated_key.clone();
+    let mut expressions = Vec::new();
+    if let Some(expression) = source_expression {
+        budget.claim_owned(size_of::<NodeId>())?;
+        expressions.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "data-quantifier definition expression allocation failed",
+            )
+        })?;
+        expressions.push(expression);
+    }
+    budget.claim_owned(size_of::<ClassBooleanDefinition>())?;
+    definitions.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("data-quantifier definition allocation failed")
+    })?;
+    definitions.push(ClassBooleanDefinition {
+        expressions,
+        roots: Vec::new(),
+        expression_key: key,
+        expression_symbols,
+        data_expression_symbols,
+        intersection: false,
+        operands: Vec::new(),
+        object_self_role_id: None,
+        object_quantifier: None,
+        object_cardinality: None,
+        data_quantifier: Some(DataQuantifierDefinition {
+            kind,
+            role_id,
+            filler: selection,
+        }),
+        complement: false,
+        polarity,
+        generated_key,
+        generated_display,
+        provenance: Vec::new(),
+    });
+    Ok(returned_key)
 }
 
 fn atomize_normalized_object_cardinality(
@@ -5329,6 +5620,7 @@ fn atomize_normalized_object_cardinality(
         roots: Vec::new(),
         expression_key: key,
         expression_symbols,
+        data_expression_symbols: Vec::new(),
         intersection: false,
         operands: vec![filler_operand],
         object_self_role_id: None,
@@ -5338,6 +5630,7 @@ fn atomize_normalized_object_cardinality(
             cardinality,
             role_id,
         }),
+        data_quantifier: None,
         complement: false,
         polarity,
         generated_key,
@@ -5437,11 +5730,13 @@ fn atomize_normalized_object_quantifier(
         roots: Vec::new(),
         expression_key: key,
         expression_symbols,
+        data_expression_symbols: Vec::new(),
         intersection: false,
         operands: vec![filler_operand],
         object_self_role_id: None,
         object_quantifier: Some(ObjectQuantifierDefinition { kind, role_id }),
         object_cardinality: None,
+        data_quantifier: None,
         complement: false,
         polarity,
         generated_key,
@@ -5519,6 +5814,7 @@ fn atomize_normalized_object_self(
             roots: Vec::new(),
             expression_key: key,
             expression_symbols,
+            data_expression_symbols: Vec::new(),
             intersection: false,
             operands: vec![ClassBooleanOperand::Generated {
                 key: generated_operand,
@@ -5527,6 +5823,7 @@ fn atomize_normalized_object_self(
             object_self_role_id: None,
             object_quantifier: None,
             object_cardinality: None,
+            data_quantifier: None,
             complement: true,
             polarity,
             generated_key,
@@ -5564,11 +5861,13 @@ fn atomize_normalized_object_self(
         roots: Vec::new(),
         expression_key: key,
         expression_symbols,
+        data_expression_symbols: Vec::new(),
         intersection: false,
         operands: Vec::new(),
         object_self_role_id: Some(role_id),
         object_quantifier: None,
         object_cardinality: None,
+        data_quantifier: None,
         complement: false,
         polarity,
         generated_key,
@@ -5706,11 +6005,13 @@ fn atomize_normalized_class_boolean(
         roots: Vec::new(),
         expression_key: term.key,
         expression_symbols,
+        data_expression_symbols: Vec::new(),
         intersection: term.intersection,
         operands,
         object_self_role_id: None,
         object_quantifier: None,
         object_cardinality: None,
+        data_quantifier: None,
         complement: false,
         polarity,
         generated_key,
@@ -5733,8 +6034,11 @@ fn retain_class_boolean_definition(
             || known.operands != definition.operands
             || known.object_self_role_id != definition.object_self_role_id
             || known.object_quantifier != definition.object_quantifier
+            || known.object_cardinality != definition.object_cardinality
+            || known.data_quantifier != definition.data_quantifier
             || known.complement != definition.complement
             || known.expression_symbols != definition.expression_symbols
+            || known.data_expression_symbols != definition.data_expression_symbols
             || known.generated_key != definition.generated_key
             || known.generated_display != definition.generated_display
         {
@@ -6809,6 +7113,8 @@ fn class_expression_prefix(tag: u16) -> EncodedResult<&'static str> {
         OBJECT_MIN_CARDINALITY_TAG => Ok("ObjectMinCardinality:"),
         OBJECT_MAX_CARDINALITY_TAG => Ok("ObjectMaxCardinality:"),
         OBJECT_EXACT_CARDINALITY_TAG => Ok("ObjectExactCardinality:"),
+        DATA_SOME_VALUES_FROM_TAG => Ok("DataSomeValuesFrom:"),
+        DATA_ALL_VALUES_FROM_TAG => Ok("DataAllValuesFrom:"),
         _ => Err(EncodedValidationError::invariant(
             "selected class expression has an unsupported constructor",
         )),
@@ -8110,11 +8416,13 @@ fn class_entity_display(symbols: &SymbolPhase, entity_id: u32) -> EncodedResult<
         .ok_or_else(|| EncodedValidationError::invariant("atomic class entity ID is dangling"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn named_data_range_domain<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     has_data_roles: bool,
     scope_maps: &[AnonymousScopeMap],
+    class_definitions: &[ClassBooleanDefinition],
     definitions: &[DataBooleanDefinition],
     datatype_definitions: &[DatatypeBooleanDefinition],
     budget: &mut PhaseBudget,
@@ -8150,6 +8458,11 @@ fn named_data_range_domain<B: ByteSource>(
 
     for definition in definitions {
         for seed in &definition.expression_symbols {
+            push_seeded_data_range_symbol(&mut pending, seed, budget)?;
+        }
+    }
+    for definition in class_definitions {
+        for seed in &definition.data_expression_symbols {
             push_seeded_data_range_symbol(&mut pending, seed, budget)?;
         }
     }
@@ -12805,13 +13118,16 @@ fn retain_edge(
 #[allow(clippy::too_many_arguments)]
 fn emit_class_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
     class_domain: &DecodedSymbolDomain,
+    data_range_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
     definitions: &[ClassBooleanDefinition],
     scope_maps: &[AnonymousScopeMap],
     edges: &mut Vec<RawEdge>,
     boolean_clauses: &mut Vec<RawBooleanClause>,
     object_constraints: &mut Vec<RawObjectConstraint>,
+    data_constraints: &mut Vec<RawDataConstraint>,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
     for definition in definitions {
@@ -12833,6 +13149,8 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 || !definition.operands.is_empty()
                 || definition.object_quantifier.is_some()
                 || definition.object_cardinality.is_some()
+                || definition.data_quantifier.is_some()
+                || !definition.data_expression_symbols.is_empty()
                 || definition.provenance.is_empty()
             {
                 return Err(EncodedValidationError::invariant(
@@ -12865,6 +13183,8 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             if definition.complement
                 || definition.object_self_role_id.is_some()
                 || definition.object_cardinality.is_some()
+                || definition.data_quantifier.is_some()
+                || !definition.data_expression_symbols.is_empty()
                 || definition.operands.len() != 1
                 || definition.provenance.is_empty()
             {
@@ -12921,6 +13241,8 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             if definition.complement
                 || definition.object_self_role_id.is_some()
                 || definition.object_quantifier.is_some()
+                || definition.data_quantifier.is_some()
+                || !definition.data_expression_symbols.is_empty()
                 || definition.operands.len() != 1
                 || definition.provenance.is_empty()
             {
@@ -12965,6 +13287,59 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                         negative: filler_negative,
                     }),
                     cardinality: Some(cardinality.cardinality),
+                    provenance: *provenance,
+                    generated: true,
+                });
+            }
+            continue;
+        }
+        if let Some(quantifier) = definition.data_quantifier {
+            if definition.complement
+                || definition.object_self_role_id.is_some()
+                || definition.object_quantifier.is_some()
+                || definition.object_cardinality.is_some()
+                || !definition.operands.is_empty()
+                || definition.provenance.is_empty()
+            {
+                return Err(EncodedValidationError::invariant(
+                    "generated data-quantifier definition changed before emission",
+                ));
+            }
+            let mut filler = atomic_data_range_selection_literal(
+                model,
+                symbols,
+                data_range_domain,
+                quantifier.filler,
+                scope_maps,
+                budget,
+            )?;
+            let kind = match (quantifier.kind, definition.polarity) {
+                (DataQuantifierKind::Some, DefinitionPolarity::Negative) => {
+                    DataConstraintKind::ExistentialAntecedent
+                }
+                (DataQuantifierKind::Some, DefinitionPolarity::Positive) => {
+                    DataConstraintKind::ExistentialConsequent
+                }
+                (DataQuantifierKind::All, DefinitionPolarity::Negative) => {
+                    filler.negative = !filler.negative;
+                    DataConstraintKind::UniversalAntecedent
+                }
+                (DataQuantifierKind::All, DefinitionPolarity::Positive) => {
+                    DataConstraintKind::UniversalConsequent
+                }
+            };
+            for provenance in &definition.provenance {
+                budget.claim_owned(size_of::<RawDataConstraint>())?;
+                data_constraints.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "generated data-quantifier clause allocation failed",
+                    )
+                })?;
+                data_constraints.push(RawDataConstraint {
+                    kind,
+                    role_id: quantifier.role_id,
+                    class: generated,
+                    filler,
                     provenance: *provenance,
                     generated: true,
                 });
@@ -13038,6 +13413,8 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             || definition.object_self_role_id.is_some()
             || definition.object_quantifier.is_some()
             || definition.object_cardinality.is_some()
+            || definition.data_quantifier.is_some()
+            || !definition.data_expression_symbols.is_empty()
             || definition.provenance.is_empty()
         {
             return Err(EncodedValidationError::invariant(
@@ -13700,6 +14077,59 @@ fn normalize_object_constraints(
     Ok(normalized)
 }
 
+fn normalize_data_constraints(
+    mut raw: Vec<RawDataConstraint>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<NormalizedDataConstraint>> {
+    budget.claim_work(sort_work(raw.len()))?;
+    raw.sort_unstable();
+    let mut normalized = Vec::<NormalizedDataConstraint>::new();
+    for constraint in raw {
+        budget.claim_work(1)?;
+        if let Some(previous) = normalized.last_mut() {
+            if previous.kind == constraint.kind
+                && previous.role_id == constraint.role_id
+                && previous.class == constraint.class
+                && previous.filler == constraint.filler
+                && previous.generated == constraint.generated
+            {
+                if previous.provenance.last() != Some(&constraint.provenance) {
+                    budget.claim_owned(size_of::<[u8; 32]>())?;
+                    previous.provenance.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "data-quantifier constraint provenance allocation failed",
+                        )
+                    })?;
+                    previous.provenance.push(constraint.provenance);
+                }
+                continue;
+            }
+        }
+        budget.claim_owned(size_of::<NormalizedDataConstraint>() + size_of::<[u8; 32]>())?;
+        normalized.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "normalized data-quantifier constraint allocation failed",
+            )
+        })?;
+        let mut provenance = Vec::new();
+        provenance.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "data-quantifier constraint provenance allocation failed",
+            )
+        })?;
+        provenance.push(constraint.provenance);
+        normalized.push(NormalizedDataConstraint {
+            kind: constraint.kind,
+            role_id: constraint.role_id,
+            class: constraint.class,
+            filler: constraint.filler,
+            provenance,
+            generated: constraint.generated,
+        });
+    }
+    Ok(normalized)
+}
+
 fn normalize_object_characteristics(
     mut raw: Vec<RawObjectCharacteristic>,
     budget: &mut PhaseBudget,
@@ -14149,6 +14579,7 @@ fn freeze_provenance(
     boolean_clauses: &[NormalizedBooleanClause],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
+    data_constraints: &[NormalizedDataConstraint],
     object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
     data_ranges: &[NormalizedDataRange],
@@ -14206,6 +14637,16 @@ fn freeze_provenance(
         )?;
     }
     for constraint in object_constraints {
+        push_provenance_key(
+            &mut keys,
+            ProvenanceKey {
+                source_sha256: constraint.provenance.clone(),
+                generated: constraint.generated,
+            },
+            budget,
+        )?;
+    }
+    for constraint in data_constraints {
         push_provenance_key(
             &mut keys,
             ProvenanceKey {
@@ -14435,6 +14876,11 @@ enum PredicateOwner {
         role_id: u32,
         filler: ClassLiteral,
     },
+    AtLeastData {
+        cardinality: u32,
+        role_id: u32,
+        filler: DataRangeLiteral,
+    },
     AnnotatedEquality {
         cardinality: u32,
         role_id: u32,
@@ -14464,6 +14910,7 @@ struct PendingPredicate {
 type PredicateIndex = Vec<(u32, u32)>;
 type ObjectPredicateIndex = Vec<(u32, u32)>;
 type AtLeastObjectPredicateIndex = Vec<((u32, u32, ClassLiteral), u32)>;
+type AtLeastDataPredicateIndex = Vec<((u32, u32, DataRangeLiteral), u32)>;
 type AnnotatedEqualityPredicateIndex = Vec<((u32, u32, ClassLiteral), u32)>;
 type GuardPredicateIndex = Vec<([u8; 32], u32, u32)>;
 
@@ -14527,6 +14974,7 @@ type FrozenPredicates = (
     ObjectPredicateIndex,
     ObjectPredicateIndex,
     AtLeastObjectPredicateIndex,
+    AtLeastDataPredicateIndex,
     AnnotatedEqualityPredicateIndex,
     ObjectPredicateIndex,
     ObjectPredicateIndex,
@@ -14548,6 +14996,7 @@ fn freeze_predicates(
     boolean_clauses: &[NormalizedBooleanClause],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
+    data_constraints: &[NormalizedDataConstraint],
     object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
     data_ranges: &[NormalizedDataRange],
@@ -14597,6 +15046,9 @@ fn freeze_predicates(
                 ObjectConstraintKind::UniversalAntecedent | ObjectConstraintKind::MaximumAntecedent
             )
         })
+        || data_constraints
+            .iter()
+            .any(|value| value.kind == DataConstraintKind::UniversalAntecedent)
     {
         push_u32(&mut class_ids, thing, "predicate class", budget)?;
     }
@@ -14619,6 +15071,17 @@ fn freeze_predicates(
                 budget,
             )?;
         }
+    }
+    for constraint in data_constraints
+        .iter()
+        .filter(|constraint| constraint.class.negative)
+    {
+        push_u32(
+            &mut negative_class_ids,
+            constraint.class.class_id,
+            "data-quantifier complement clause class",
+            budget,
+        )?;
     }
     for clause in boolean_clauses {
         for literal in clause.body.iter().chain(&clause.head) {
@@ -14665,6 +15128,22 @@ fn freeze_predicates(
                     budget,
                 )?;
             }
+        }
+    }
+    for constraint in data_constraints {
+        push_u32(
+            &mut class_ids,
+            constraint.class.class_id,
+            "data-quantifier predicate class",
+            budget,
+        )?;
+        if constraint.class.negative {
+            push_u32(
+                &mut negative_class_ids,
+                constraint.class.class_id,
+                "negated data-quantifier predicate class",
+                budget,
+            )?;
         }
     }
     for domain in data_domains {
@@ -14966,6 +15445,38 @@ fn freeze_predicates(
             },
         });
     }
+    let mut at_least_data = Vec::<(u32, u32, DataRangeLiteral)>::new();
+    for constraint in data_constraints.iter().filter(|constraint| {
+        matches!(
+            constraint.kind,
+            DataConstraintKind::ExistentialConsequent | DataConstraintKind::UniversalAntecedent
+        )
+    }) {
+        budget.claim_owned(size_of::<(u32, u32, DataRangeLiteral)>())?;
+        at_least_data.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("data at-least predicate allocation failed")
+        })?;
+        at_least_data.push((1, constraint.role_id, constraint.filler));
+    }
+    budget.claim_work(sort_work(at_least_data.len()))?;
+    at_least_data.sort_unstable();
+    at_least_data.dedup();
+    for (cardinality, role_id, filler) in at_least_data {
+        let filler_key = data_range_literal_predicate_key(filler);
+        let key = at_least_data_predicate_key(cardinality, role_id, &filler_key, budget)?;
+        budget.claim_owned(size_of::<PendingPredicate>() + key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("data at-least predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::AtLeastData {
+                cardinality,
+                role_id,
+                filler,
+            },
+        });
+    }
     let mut annotated_equalities = Vec::<(u32, u32, ClassLiteral)>::new();
     for constraint in object_constraints
         .iter()
@@ -15082,6 +15593,14 @@ fn freeze_predicates(
         });
     }
     let mut data_role_ids = Vec::new();
+    for constraint in data_constraints {
+        push_u32(
+            &mut data_role_ids,
+            constraint.role_id,
+            "predicate data-quantifier role",
+            budget,
+        )?;
+    }
     for domain in data_domains {
         push_u32(
             &mut data_role_ids,
@@ -15165,6 +15684,33 @@ fn freeze_predicates(
     }
     let mut data_range_ids = Vec::new();
     let mut negative_data_range_ids = Vec::new();
+    for constraint in data_constraints
+        .iter()
+        .filter(|constraint| constraint.filler.negative)
+    {
+        push_u32(
+            &mut negative_data_range_ids,
+            constraint.filler.range_id,
+            "complement clause data-quantifier range",
+            budget,
+        )?;
+    }
+    for constraint in data_constraints {
+        push_u32(
+            &mut data_range_ids,
+            constraint.filler.range_id,
+            "predicate data-quantifier range",
+            budget,
+        )?;
+        if constraint.filler.negative {
+            push_u32(
+                &mut negative_data_range_ids,
+                constraint.filler.range_id,
+                "negated predicate data-quantifier range",
+                budget,
+            )?;
+        }
+    }
     for range in data_ranges {
         push_u32(
             &mut data_range_ids,
@@ -15338,12 +15884,53 @@ fn freeze_predicates(
     budget.claim_work(sort_work(pending_class_predicates.len()))?;
     pending_class_predicates.sort_unstable_by_key(|(literal, _)| *literal);
 
+    let mut pending_data_range_predicates = Vec::<(DataRangeLiteral, u32)>::new();
+    budget.claim_owned(
+        ordered
+            .len()
+            .checked_mul(size_of::<(DataRangeLiteral, u32)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "pending data-range predicate index allocation overflowed",
+                )
+            })?,
+    )?;
+    pending_data_range_predicates
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("pending data-range predicate index allocation failed")
+        })?;
+    for (identifier, pending) in ordered.iter().enumerate() {
+        let literal = match &pending.owner {
+            PredicateOwner::DataRange(range_id) => Some(DataRangeLiteral {
+                range_id: *range_id,
+                negative: false,
+            }),
+            PredicateOwner::NegatedDataRange(range_id) => Some(DataRangeLiteral {
+                range_id: *range_id,
+                negative: true,
+            }),
+            _ => None,
+        };
+        if let Some(literal) = literal {
+            pending_data_range_predicates.push((
+                literal,
+                u32::try_from(identifier).map_err(|_| {
+                    EncodedValidationError::resource("pending predicate ID exceeds u32")
+                })?,
+            ));
+        }
+    }
+    budget.claim_work(sort_work(pending_data_range_predicates.len()))?;
+    pending_data_range_predicates.sort_unstable_by_key(|(literal, _)| *literal);
+
     let mut predicates = Vec::new();
     let mut predicate_by_class = Vec::new();
     let mut predicate_by_negative_class = Vec::new();
     let mut predicate_by_object_role = Vec::new();
     let mut predicate_by_negative_object_role = Vec::new();
     let mut at_least_object_predicates = Vec::new();
+    let mut at_least_data_predicates = Vec::new();
     let mut annotated_equality_predicates = Vec::new();
     let mut predicate_by_data_role = Vec::new();
     let mut predicate_by_negative_data_role = Vec::new();
@@ -15410,6 +15997,21 @@ fn freeze_predicates(
         .try_reserve_exact(ordered.len())
         .map_err(|_| {
             EncodedValidationError::resource("object at-least predicate index allocation failed")
+        })?;
+    budget.claim_owned(
+        ordered
+            .len()
+            .checked_mul(size_of::<((u32, u32, DataRangeLiteral), u32)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "data at-least predicate index allocation overflowed",
+                )
+            })?,
+    )?;
+    at_least_data_predicates
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("data at-least predicate index allocation failed")
         })?;
     budget.claim_owned(
         ordered
@@ -15569,6 +16171,34 @@ fn freeze_predicates(
                     internal_key: None,
                 });
                 at_least_object_predicates.push(((cardinality, role_id, filler), predicate_id));
+            }
+            PredicateOwner::AtLeastData {
+                cardinality,
+                role_id,
+                filler,
+            } => {
+                let filler_predicate_id = pending_data_range_predicates
+                    .binary_search_by_key(&filler, |(literal, _)| *literal)
+                    .ok()
+                    .map(|position| pending_data_range_predicates[position].1)
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "data at-least filler predicate is missing",
+                        )
+                    })?;
+                budget.claim_owned(size_of::<u32>())?;
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::AtLeastData,
+                    argument_sorts: vec![TermSort::Object],
+                    symbol_id: None,
+                    role_id: Some(role_id),
+                    cardinality: Some(cardinality),
+                    filler_predicate_id: Some(filler_predicate_id),
+                    annotation: vec![role_id],
+                    internal_key: None,
+                });
+                at_least_data_predicates.push(((cardinality, role_id, filler), predicate_id));
             }
             PredicateOwner::AnnotatedEquality {
                 cardinality,
@@ -15748,6 +16378,7 @@ fn freeze_predicates(
     predicate_by_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_negative_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     at_least_object_predicates.sort_unstable_by_key(|(key, _)| *key);
+    at_least_data_predicates.sort_unstable_by_key(|(key, _)| *key);
     annotated_equality_predicates.sort_unstable_by_key(|(key, _)| *key);
     predicate_by_data_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_negative_data_role.sort_unstable_by_key(|(role_id, _)| *role_id);
@@ -15761,6 +16392,7 @@ fn freeze_predicates(
         predicate_by_object_role,
         predicate_by_negative_object_role,
         at_least_object_predicates,
+        at_least_data_predicates,
         annotated_equality_predicates,
         predicate_by_data_role,
         predicate_by_negative_data_role,
@@ -15783,6 +16415,7 @@ fn freeze_clauses(
     boolean_clauses: &[NormalizedBooleanClause],
     disjoints: &[NormalizedDisjoint],
     object_constraints: &[NormalizedObjectConstraint],
+    data_constraints: &[NormalizedDataConstraint],
     object_characteristics: &[NormalizedObjectCharacteristic],
     data_domains: &[NormalizedDataDomain],
     data_ranges: &[NormalizedDataRange],
@@ -15798,6 +16431,7 @@ fn freeze_clauses(
     predicate_by_negative_class: &[(u32, u32)],
     predicate_by_object_role: &[(u32, u32)],
     at_least_object_predicates: &AtLeastObjectPredicateIndex,
+    at_least_data_predicates: &AtLeastDataPredicateIndex,
     annotated_equality_predicates: &AnnotatedEqualityPredicateIndex,
     predicate_by_data_role: &[(u32, u32)],
     predicate_by_data_range: &[(u32, u32)],
@@ -15899,6 +16533,17 @@ fn freeze_clauses(
     negative_class_ids.sort_unstable();
     negative_class_ids.dedup();
     let mut negative_data_range_ids = Vec::new();
+    for constraint in data_constraints
+        .iter()
+        .filter(|constraint| constraint.filler.negative)
+    {
+        push_u32(
+            &mut negative_data_range_ids,
+            constraint.filler.range_id,
+            "complement clause data-quantifier range",
+            budget,
+        )?;
+    }
     for range in data_ranges.iter().filter(|range| range.range.negative) {
         push_u32(
             &mut negative_data_range_ids,
@@ -15974,6 +16619,7 @@ fn freeze_clauses(
         .and_then(|value| value.checked_add(data_boolean_clauses.len()))
         .and_then(|value| value.checked_add(1))
         .and_then(|value| value.checked_add(object_constraints.len()))
+        .and_then(|value| value.checked_add(data_constraints.len()))
         .and_then(|value| value.checked_add(object_characteristics.len()))
         .and_then(|value| value.checked_add(data_domains.len()))
         .and_then(|value| value.checked_add(data_ranges.len()))
@@ -16378,6 +17024,72 @@ fn freeze_clauses(
                         kind: constraint.kind,
                         provenance_id: provenance,
                     },
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+        }
+    }
+    for constraint in data_constraints {
+        let class = class_literal_predicate_id(
+            predicate_by_class,
+            predicate_by_negative_class,
+            constraint.class.class_id,
+            constraint.class.negative,
+        )?;
+        let filler = data_range_literal_predicate_id(
+            predicate_by_data_range,
+            predicate_by_negative_data_range,
+            constraint.filler,
+        )?;
+        let provenance = provenance_id(
+            provenance_keys,
+            &constraint.provenance,
+            constraint.generated,
+        )?;
+        match constraint.kind {
+            DataConstraintKind::ExistentialConsequent => {
+                let at_least = at_least_data_predicate_id(
+                    at_least_data_predicates,
+                    1,
+                    constraint.role_id,
+                    constraint.filler,
+                )?;
+                push_clause(
+                    &mut ordered,
+                    &[class],
+                    &[at_least],
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+            DataConstraintKind::UniversalAntecedent => {
+                let at_least = at_least_data_predicate_id(
+                    at_least_data_predicates,
+                    1,
+                    constraint.role_id,
+                    constraint.filler,
+                )?;
+                let thing_predicate = predicate_id(predicate_by_class, thing)?;
+                push_clause(
+                    &mut ordered,
+                    &[thing_predicate],
+                    &[at_least, class],
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+            DataConstraintKind::ExistentialAntecedent | DataConstraintKind::UniversalConsequent => {
+                let role = data_predicate_id(predicate_by_data_role, constraint.role_id)?;
+                push_data_constraint_clause(
+                    &mut ordered,
+                    role,
+                    class,
+                    filler,
+                    constraint.kind,
+                    provenance,
                     scalar_predicate_ids,
                     budget,
                 )?;
@@ -17717,6 +18429,80 @@ fn push_object_constraint_clause(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn push_data_constraint_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    role_predicate_id: u32,
+    class_predicate_id: u32,
+    filler_predicate_id: u32,
+    kind: DataConstraintKind,
+    provenance_id: u32,
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let (body, head) = match kind {
+        DataConstraintKind::ExistentialAntecedent => (
+            vec![
+                data_variable_atom(role_predicate_id, 0, 1),
+                variable_atom_at(filler_predicate_id, 1, TermSort::Data),
+            ],
+            vec![variable_atom_at(class_predicate_id, 0, TermSort::Object)],
+        ),
+        DataConstraintKind::UniversalConsequent => (
+            vec![
+                variable_atom_at(class_predicate_id, 0, TermSort::Object),
+                data_variable_atom(role_predicate_id, 0, 1),
+            ],
+            vec![variable_atom_at(filler_predicate_id, 1, TermSort::Data)],
+        ),
+        _ => {
+            return Err(EncodedValidationError::invariant(
+                "data-quantifier relational clause received an at-least kind",
+            ));
+        }
+    };
+    let (body, head) =
+        canonicalize_variable_rule(body, head, &[], &[], scalar_predicate_ids, budget)?;
+    let join_order = plan_key_join(&body, u32::MAX, scalar_predicate_ids, budget)?;
+    let key = variable_rule_key(&body, &head)?;
+    budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>() + key.len())?;
+    let atom_count = body.len().checked_add(head.len()).ok_or_else(|| {
+        EncodedValidationError::resource("data-quantifier constraint atom count overflowed")
+    })?;
+    let term_count = body.iter().chain(&head).try_fold(0_usize, |count, atom| {
+        count.checked_add(atom.arguments.len()).ok_or_else(|| {
+            EncodedValidationError::resource("data-quantifier constraint term count overflowed")
+        })
+    })?;
+    budget.claim_owned(
+        atom_count
+            .checked_mul(size_of::<DecodedAtom>())
+            .and_then(|value| value.checked_add(term_count.checked_mul(size_of::<DecodedTerm>())?))
+            .and_then(|value| {
+                value.checked_add(body.len().checked_add(1)?.checked_mul(size_of::<u32>())?)
+            })
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "data-quantifier constraint clause payload overflowed",
+                )
+            })?,
+    )?;
+    clauses.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("data-quantifier constraint clause allocation failed")
+    })?;
+    clauses.push((
+        key,
+        DecodedClause {
+            clause_id: 0,
+            body,
+            head,
+            provenance_ids: vec![provenance_id],
+            join_order,
+        },
+    ));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn push_object_at_most_clause(
     clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
     class_predicate_id: u32,
@@ -18893,6 +19679,21 @@ fn at_least_object_predicate_id(
         })
 }
 
+fn at_least_data_predicate_id(
+    index: &AtLeastDataPredicateIndex,
+    cardinality: u32,
+    role_id: u32,
+    filler: DataRangeLiteral,
+) -> EncodedResult<u32> {
+    index
+        .binary_search_by_key(&(cardinality, role_id, filler), |(candidate, _)| *candidate)
+        .ok()
+        .map(|position| index[position].1)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("data at-least predicate index is incomplete")
+        })
+}
+
 fn annotated_equality_predicate_id(
     index: &AnnotatedEqualityPredicateIndex,
     cardinality: u32,
@@ -19281,6 +20082,50 @@ fn named_predicate_key(
             budget,
         );
     }
+    if predicate.kind == PredicateKind::AtLeastData
+        && unary_object
+        && predicate.symbol_id.is_none()
+        && predicate.cardinality.is_some_and(|value| value > 0)
+        && predicate.annotation.len() == 1
+        && predicate.internal_key.is_none()
+    {
+        let role_id = predicate.role_id.ok_or_else(|| {
+            EncodedValidationError::invariant("data at-least predicate lost its role ID")
+        })?;
+        if predicate.annotation[0] != role_id {
+            return Err(EncodedValidationError::invariant(
+                "data at-least predicate annotation changed role",
+            ));
+        }
+        let filler_id = predicate.filler_predicate_id.ok_or_else(|| {
+            EncodedValidationError::invariant("data at-least predicate lost its filler")
+        })?;
+        let filler = predicates
+            .get(usize::try_from(filler_id).map_err(|_| {
+                EncodedValidationError::invariant("data at-least filler predicate ID exceeds usize")
+            })?)
+            .ok_or_else(|| {
+                EncodedValidationError::invariant("data at-least filler predicate ID is dangling")
+            })?;
+        if !matches!(
+            filler.kind,
+            PredicateKind::DataRange | PredicateKind::NegatedDataRange
+        ) || filler.argument_sorts != [TermSort::Data]
+        {
+            return Err(EncodedValidationError::invariant(
+                "data at-least filler is not a unary data-range predicate",
+            ));
+        }
+        let filler_key = named_predicate_key(filler, predicates, budget)?;
+        return at_least_data_predicate_key(
+            predicate.cardinality.ok_or_else(|| {
+                EncodedValidationError::invariant("data at-least predicate lost its cardinality")
+            })?,
+            role_id,
+            &filler_key,
+            budget,
+        );
+    }
     if predicate.kind == PredicateKind::AnnotatedEquality
         && ternary_object
         && predicate.symbol_id.is_none()
@@ -19504,6 +20349,26 @@ fn at_least_object_predicate_key(
     .into_bytes())
 }
 
+fn at_least_data_predicate_key(
+    cardinality: u32,
+    role_id: u32,
+    filler_key: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    if cardinality == 0 {
+        return Err(EncodedValidationError::invariant(
+            "data at-least predicate has zero cardinality",
+        ));
+    }
+    budget.claim_work(filler_key.len())?;
+    let filler_digest: [u8; 32] = Sha256::digest(filler_key).into();
+    let filler = crate::model::hex(&filler_digest);
+    Ok(format!(
+        "{{\"annotation\":[{role_id}],\"argument_sorts\":[\"object\"],\"cardinality\":{cardinality},\"filler\":\"{filler}\",\"internal_key\":null,\"kind\":\"at_least_data\",\"role_id\":{role_id},\"symbol_id\":null}}"
+    )
+    .into_bytes())
+}
+
 fn annotated_equality_predicate_key(
     cardinality: u32,
     role_id: u32,
@@ -19560,6 +20425,14 @@ fn negated_data_range_predicate_key(range_id: u32) -> Vec<u8> {
         "{{\"annotation\":[],\"argument_sorts\":[\"data\"],\"cardinality\":null,\"filler\":null,\"internal_key\":null,\"kind\":\"negated_data_range\",\"role_id\":null,\"symbol_id\":{range_id}}}"
     )
     .into_bytes()
+}
+
+fn data_range_literal_predicate_key(literal: DataRangeLiteral) -> Vec<u8> {
+    if literal.negative {
+        negated_data_range_predicate_key(literal.range_id)
+    } else {
+        data_range_predicate_key(literal.range_id)
+    }
 }
 
 fn named_individual_predicate_key() -> Vec<u8> {
@@ -20032,6 +20905,7 @@ fn merge_named_class_phases_impl(
         boolean_clauses,
         disjoints,
         object_constraints,
+        data_constraints,
         object_characteristics,
         data_domains,
         data_ranges,
@@ -20067,6 +20941,7 @@ fn merge_named_class_phases_impl(
         &boolean_clauses,
         &disjoints,
         &object_constraints,
+        &data_constraints,
         &object_characteristics,
         &data_domains,
         &data_ranges,
@@ -20090,6 +20965,7 @@ fn merge_named_class_phases_impl(
         predicate_by_object_role,
         predicate_by_negative_object_role,
         at_least_object_predicates,
+        at_least_data_predicates,
         annotated_equality_predicates,
         predicate_by_data_role,
         predicate_by_negative_data_role,
@@ -20108,6 +20984,7 @@ fn merge_named_class_phases_impl(
         &boolean_clauses,
         &disjoints,
         &object_constraints,
+        &data_constraints,
         &object_characteristics,
         &data_domains,
         &data_ranges,
@@ -20142,6 +21019,7 @@ fn merge_named_class_phases_impl(
         &boolean_clauses,
         &disjoints,
         &object_constraints,
+        &data_constraints,
         &object_characteristics,
         &data_domains,
         &data_ranges,
@@ -20157,6 +21035,7 @@ fn merge_named_class_phases_impl(
         &predicate_by_negative_class,
         &predicate_by_object_role,
         &at_least_object_predicates,
+        &at_least_data_predicates,
         &annotated_equality_predicates,
         &predicate_by_data_role,
         &predicate_by_data_range,
@@ -20289,6 +21168,7 @@ fn merge_named_class_phases_impl(
         normalized_boolean_clauses: boolean_clauses,
         normalized_disjoints: disjoints,
         normalized_object_constraints: object_constraints,
+        normalized_data_constraints: data_constraints,
         normalized_object_characteristics: object_characteristics,
         normalized_data_domains: data_domains,
         normalized_data_ranges: data_ranges,
@@ -20836,6 +21716,7 @@ type NormalizedSources = (
     Vec<NormalizedBooleanClause>,
     Vec<NormalizedDisjoint>,
     Vec<NormalizedObjectConstraint>,
+    Vec<NormalizedDataConstraint>,
     Vec<NormalizedObjectCharacteristic>,
     Vec<NormalizedDataDomain>,
     Vec<NormalizedDataRange>,
@@ -20870,6 +21751,7 @@ fn merge_normalized_sources(
     let mut raw_boolean_clauses = Vec::new();
     let mut raw_disjoints = Vec::new();
     let mut raw_object_constraints = Vec::new();
+    let mut raw_data_constraints = Vec::new();
     let mut raw_object_characteristics = Vec::new();
     let mut raw_data_domains = Vec::new();
     let mut raw_data_ranges = Vec::new();
@@ -21075,6 +21957,62 @@ fn merge_normalized_sources(
                             })
                             .transpose()?,
                         cardinality: constraint.cardinality,
+                        provenance: *provenance,
+                        generated: constraint.generated,
+                    });
+                }
+            }
+        }
+        if !phase.normalized_data_constraints.is_empty() {
+            let source_roles = source_data_roles
+                .and_then(|roles| roles.get(phase_index))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged data-quantifier constraints lost their source role domain",
+                    )
+                })?;
+            let merged_roles = merged_data_roles.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "merged data-quantifier constraints lost their global role domain",
+                )
+            })?;
+            for constraint in &phase.normalized_data_constraints {
+                if constraint.provenance.is_empty() {
+                    return Err(EncodedValidationError::invariant(
+                        "merged data-quantifier constraint lost provenance",
+                    ));
+                }
+                let role_id =
+                    remap_data_role(source_roles, merged_roles, constraint.role_id, budget)?;
+                let class = ClassLiteral {
+                    class_id: mapped_id(
+                        class_map,
+                        constraint.class.class_id,
+                        "data-quantifier constraint class",
+                    )?,
+                    negative: constraint.class.negative,
+                };
+                let filler = DataRangeLiteral {
+                    range_id: mapped_id(
+                        data_range_map,
+                        constraint.filler.range_id,
+                        "data-quantifier filler range",
+                    )?,
+                    negative: constraint.filler.negative,
+                };
+                for provenance in &constraint.provenance {
+                    budget.claim_work(1)?;
+                    budget.claim_owned(size_of::<RawDataConstraint>())?;
+                    raw_data_constraints.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "merged data-quantifier constraint allocation failed",
+                        )
+                    })?;
+                    raw_data_constraints.push(RawDataConstraint {
+                        kind: constraint.kind,
+                        role_id,
+                        class,
+                        filler,
                         provenance: *provenance,
                         generated: constraint.generated,
                     });
@@ -21746,6 +22684,7 @@ fn merge_normalized_sources(
         normalize_boolean_clauses(raw_boolean_clauses, budget)?,
         normalize_disjoints(raw_disjoints, budget)?,
         normalize_object_constraints(raw_object_constraints, budget)?,
+        normalize_data_constraints(raw_data_constraints, budget)?,
         normalize_object_characteristics(raw_object_characteristics, budget)?,
         normalize_data_domains(raw_data_domains, budget)?,
         normalize_data_ranges(raw_data_ranges, budget)?,

@@ -259,6 +259,8 @@ def _expected_manifest(
     include_generated_object_quantifier_definitions: bool = False,
     include_generated_object_cardinality_definitions: bool = False,
     include_at_least_object_predicates: bool = False,
+    include_generated_data_quantifier_definitions: bool = False,
+    include_at_least_data_predicates: bool = False,
     include_annotated_equality_predicates: bool = False,
     include_data_domains: bool = False,
     include_data_ranges: bool = False,
@@ -320,6 +322,8 @@ def _expected_manifest(
     }
     if include_at_least_object_predicates:
         fragment_kinds.add(PredicateKind.AT_LEAST_OBJECT)
+    if include_at_least_data_predicates:
+        fragment_kinds.add(PredicateKind.AT_LEAST_DATA)
     if include_annotated_equality_predicates:
         fragment_kinds.add(PredicateKind.ANNOTATED_EQUALITY)
     constraint_provenance_ids: set[int] = set()
@@ -327,6 +331,7 @@ def _expected_manifest(
     self_definition_provenance_ids: set[int] = set()
     quantifier_definition_provenance_ids: set[int] = set()
     cardinality_definition_provenance_ids: set[int] = set()
+    data_quantifier_definition_provenance_ids: set[int] = set()
     data_domain_provenance_ids: set[int] = set()
     data_range_provenance_ids: set[int] = set()
     generated_data_definition_provenance_ids: set[int] = set()
@@ -343,6 +348,7 @@ def _expected_manifest(
         or include_generated_object_self_definitions
         or include_generated_object_quantifier_definitions
         or include_generated_object_cardinality_definitions
+        or include_generated_data_quantifier_definitions
         or include_data_domains
         or include_data_ranges
         or include_generated_data_definitions
@@ -422,6 +428,23 @@ def _expected_manifest(
                 or isinstance(
                     record.statement.super_class,
                     (owl.ObjectMinCardinality, owl.ObjectMaxCardinality),
+                )
+            )
+        }
+    if include_generated_data_quantifier_definitions:
+        data_quantifier_definition_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if record.generated
+            and isinstance(record.statement, owl.SubClassOf)
+            and (
+                isinstance(
+                    record.statement.sub_class,
+                    (owl.DataSomeValuesFrom, owl.DataAllValuesFrom),
+                )
+                or isinstance(
+                    record.statement.super_class,
+                    (owl.DataSomeValuesFrom, owl.DataAllValuesFrom),
                 )
             )
         }
@@ -511,6 +534,11 @@ def _expected_manifest(
         for clause in program.clauses
         if cardinality_definition_provenance_ids.intersection(clause.provenance_ids)
     }
+    data_quantifier_definition_clauses = {
+        clause.clause_id
+        for clause in program.clauses
+        if data_quantifier_definition_provenance_ids.intersection(clause.provenance_ids)
+    }
     data_domain_clauses = {
         clause.clause_id
         for clause in program.clauses
@@ -576,6 +604,13 @@ def _expected_manifest(
         for atom in clause.body + clause.head
         if predicates_by_id[atom.predicate_id].kind is PredicateKind.OBJECT_ROLE
     }
+    data_quantifier_definition_role_predicates = {
+        atom.predicate_id
+        for clause in program.clauses
+        if clause.clause_id in data_quantifier_definition_clauses
+        for atom in clause.body + clause.head
+        if predicates_by_id[atom.predicate_id].kind is PredicateKind.DATA_ROLE
+    }
     at_least_object_role_ids = (
         {
             value.role_id
@@ -605,6 +640,21 @@ def _expected_manifest(
         for value in program.predicates.predicates
         if value.kind is PredicateKind.OBJECT_ROLE
         and value.role_id in annotated_equality_role_ids
+    }
+    at_least_data_role_ids = (
+        {
+            role_id
+            for value in program.predicates.predicates
+            if value.kind is PredicateKind.AT_LEAST_DATA
+            for role_id in value.annotation
+        }
+        if include_at_least_data_predicates
+        else set()
+    )
+    at_least_data_role_predicates = {
+        value.predicate_id
+        for value in program.predicates.predicates
+        if value.kind is PredicateKind.DATA_ROLE and value.role_id in at_least_data_role_ids
     }
     data_domain_role_predicates = {
         atom.predicate_id
@@ -636,6 +686,21 @@ def _expected_manifest(
         if predicates_by_id[atom.predicate_id].kind
         in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
     }
+    data_quantifier_definition_predicates = {
+        atom.predicate_id
+        for clause in program.clauses
+        if clause.clause_id in data_quantifier_definition_clauses
+        for atom in clause.body + clause.head
+        if predicates_by_id[atom.predicate_id].kind
+        in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
+    }
+    if include_at_least_data_predicates:
+        data_quantifier_definition_predicates.update(
+            cast(int, value.filler_predicate_id)
+            for value in program.predicates.predicates
+            if value.kind is PredicateKind.AT_LEAST_DATA
+            and value.filler_predicate_id is not None
+        )
     datatype_definition_predicates = {
         atom.predicate_id
         for clause in program.clauses
@@ -647,6 +712,7 @@ def _expected_manifest(
     selected_data_range_predicates = (
         data_range_predicates
         | generated_data_definition_predicates
+        | data_quantifier_definition_predicates
         | datatype_definition_predicates
     )
     complemented_data_range_symbols = {
@@ -712,7 +778,9 @@ def _expected_manifest(
         | self_definition_role_predicates
         | quantifier_definition_role_predicates
         | cardinality_definition_role_predicates
+        | data_quantifier_definition_role_predicates
         | at_least_object_role_predicates
+        | at_least_data_role_predicates
         | annotated_equality_role_predicates
         | data_domain_role_predicates
         | data_range_role_predicates
@@ -785,6 +853,7 @@ def _expected_manifest(
             and clause.clause_id not in self_definition_clauses
             and clause.clause_id not in quantifier_definition_clauses
             and clause.clause_id not in cardinality_definition_clauses
+            and clause.clause_id not in data_quantifier_definition_clauses
             and clause.clause_id not in data_domain_clauses
             and clause.clause_id not in data_range_clauses
             and clause.clause_id not in generated_data_definition_clauses
@@ -3295,6 +3364,184 @@ def test_object_has_value_unsupported_inputs_defer_without_symbol_leaks() -> Non
             PredicateKind.NEGATED_NOMINAL.value,
             PredicateKind.AT_LEAST_OBJECT.value,
             PredicateKind.OBJECT_ROLE.value,
+        }
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_atomic_data_quantifier_definitions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(DataSomeValuesFrom(:d xsd:string) :A)",
+            'SubClassOf(Annotation(:note "same definition") '
+            "DataSomeValuesFrom(:d xsd:string) :A)",
+            "SubClassOf(:A DataSomeValuesFrom(:d xsd:boolean))",
+            "SubClassOf(DataAllValuesFrom(:d xsd:decimal) :B)",
+            "SubClassOf(:A DataAllValuesFrom(:e xsd:integer))",
+            "SubClassOf(ObjectComplementOf("
+            "DataAllValuesFrom(:e xsd:string)) :B)",
+            "SubClassOf(:B ObjectComplementOf("
+            "DataSomeValuesFrom(:d xsd:integer)))",
+            'EquivalentClasses(:A DataSomeValuesFrom(:e DataOneOf("value")))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=8,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+    )
+    predicates = cast(list[dict[str, object]], manifest["predicates"])
+    at_least = [
+        predicate
+        for predicate in predicates
+        if predicate["kind"] == PredicateKind.AT_LEAST_DATA.value
+    ]
+    assert at_least
+    assert all(
+        predicate["cardinality"] == 1
+        and predicate["role_id"] is not None
+        and predicate["annotation"] == [predicate["role_id"]]
+        and predicate["filler_predicate_id"] is not None
+        for predicate in at_least
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_atomic_data_quantifiers_cover_generated_class_contexts() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "ClassAssertion(DataAllValuesFrom(:d xsd:string) :i)",
+            "ObjectPropertyDomain(:p DataSomeValuesFrom(:d xsd:boolean))",
+            "DataPropertyDomain(:e DataAllValuesFrom(:d xsd:decimal))",
+            "HasKey(DataSomeValuesFrom(:e xsd:integer) (:p) (:d))",
+            "DisjointClasses(ObjectComplementOf("
+            "DataSomeValuesFrom(:d xsd:string)) :A)",
+            "SubClassOf(ObjectIntersectionOf(:B "
+            "DataAllValuesFrom(:e DataOneOf(\"value\"))) :A)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=6,
+        include_object_constraints=True,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_atomic_data_quantifiers_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(DataProperty(:d))",
+        "Declaration(DataProperty(:e))",
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "SubClassOf(:A DataSomeValuesFrom(:d xsd:string))",
+            "SubClassOf(DataAllValuesFrom(:e xsd:integer) :B)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "ObjectPropertyDomain(:p DataSomeValuesFrom(:d xsd:string))",
+            "DisjointClasses(DataAllValuesFrom(:e xsd:integer) :A)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+    )
+    generated = [
+        value
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ]
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert len(generated) == 2
+    assert all(namespace in str(value["display"]) for value in generated)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_unsupported_data_quantifier_inputs_defer_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "SubClassOf(:A DataSomeValuesFrom(:d :e xsd:string))",
+            "SubClassOf(DataAllValuesFrom(:d "
+            "DataIntersectionOf(xsd:string xsd:integer)) :B)",
+            "SubClassOf(:A DataSomeValuesFrom(:undeclared xsd:string))",
+            "EquivalentClasses(:A DataSomeValuesFrom(:d xsd:string) "
+            "DataHasValue(:e \"value\"))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 4
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            ("DataSomeValuesFrom:", "DataAllValuesFrom:")
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"]
+        not in {
+            PredicateKind.DATA_ROLE.value,
+            PredicateKind.AT_LEAST_DATA.value,
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
