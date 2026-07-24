@@ -46,6 +46,11 @@ RESERVED_VOCABULARY_RULE = "OWL2DL_RESERVED_VOCABULARY"
 BUILTIN_ENTITY_KIND_RULE = "OWL2DL_BUILTIN_ENTITY_KIND"
 MISSING_DECLARATION_RULE = "OWL2DL_MISSING_DECLARATION"
 NON_SIMPLE_PROPERTY_RULE = "OWL2DL_NON_SIMPLE_PROPERTY"
+BUILTIN_DATATYPE_REDEFINITION_RULE = "BUILTIN_DATATYPE_REDEFINITION"
+CUSTOM_DATATYPE_LITERAL_RULE = "CUSTOM_DATATYPE_LITERAL"
+DUPLICATE_DATATYPE_DEFINITION_RULE = "DUPLICATE_DATATYPE_DEFINITION"
+RECURSIVE_DATATYPE_DEFINITION_RULE = "RECURSIVE_DATATYPE_DEFINITION"
+UNSUPPORTED_DATATYPE_RULE = "UNSUPPORTED_DATATYPE"
 RIA_DEPENDENCY_CYCLE_RULE = "RIA_DEPENDENCY_CYCLE"
 RIA_INVERSE_RECURSION_RULE = "RIA_INVERSE_RECURSION"
 RIA_NON_REGULAR_RECURSION_RULE = "RIA_NON_REGULAR_RECURSION"
@@ -66,17 +71,22 @@ PROJECTED_RULES = frozenset(
         ANONYMOUS_PARALLEL_EDGE_RULE,
         ANONYMOUS_TREE_ROOT_RULE,
         BUILTIN_ENTITY_KIND_RULE,
+        BUILTIN_DATATYPE_REDEFINITION_RULE,
         CLASS_DATATYPE_PUNNING_RULE,
+        CUSTOM_DATATYPE_LITERAL_RULE,
         DATA_RANGE_ARITY_RULE,
+        DUPLICATE_DATATYPE_DEFINITION_RULE,
         EXTENSION_COMPONENT_RULE,
         MISSING_DECLARATION_RULE,
         NON_SIMPLE_PROPERTY_RULE,
         PROPERTY_PUNNING_RULE,
         RESERVED_VOCABULARY_RULE,
+        RECURSIVE_DATATYPE_DEFINITION_RULE,
         RIA_DEPENDENCY_CYCLE_RULE,
         RIA_INVERSE_RECURSION_RULE,
         RIA_NON_REGULAR_RECURSION_RULE,
         TOP_DATA_PROPERTY_RULE,
+        UNSUPPORTED_DATATYPE_RULE,
     )
 )
 
@@ -509,6 +519,101 @@ def test_legal_builtin_entity_kinds_match_scalar_without_global_issues() -> None
         issue["rule_id"] in ENTITY_RULES
         for issue in cast(list[dict[str, object]], actual["issues"])
     )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_rule"),
+    (
+        (
+            ("Declaration(Datatype(:unknown))",),
+            UNSUPPORTED_DATATYPE_RULE,
+        ),
+        (
+            ("DatatypeDefinition(xsd:string xsd:integer)",),
+            BUILTIN_DATATYPE_REDEFINITION_RULE,
+        ),
+        (
+            (
+                "Declaration(Datatype(:custom))",
+                "DatatypeDefinition(:custom xsd:string)",
+                "DatatypeDefinition(:custom xsd:integer)",
+            ),
+            DUPLICATE_DATATYPE_DEFINITION_RULE,
+        ),
+        (
+            (
+                "Declaration(Datatype(:first))",
+                "Declaration(Datatype(:second))",
+                "DatatypeDefinition(:first DataComplementOf(:second))",
+                "DatatypeDefinition(:second DataUnionOf(:first xsd:string))",
+            ),
+            RECURSIVE_DATATYPE_DEFINITION_RULE,
+        ),
+    ),
+)
+def test_global_datatype_definition_errors_match_scalar_exactly(
+    body: tuple[str, ...],
+    expected_rule: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(functional(*body), options=OPTIONS)
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    datatype_rules = {
+        BUILTIN_DATATYPE_REDEFINITION_RULE,
+        DUPLICATE_DATATYPE_DEFINITION_RULE,
+        RECURSIVE_DATATYPE_DEFINITION_RULE,
+        UNSUPPORTED_DATATYPE_RULE,
+    }
+    assert [
+        rule
+        for rule in cast(list[str], actual["ordered_rule_ids"])
+        if rule in datatype_rules
+    ] == [expected_rule]
+
+
+def test_custom_datatype_literal_message_matches_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:custom))",
+            "Declaration(DataProperty(:value))",
+            "DatatypeDefinition(:custom xsd:string)",
+            'DataPropertyAssertion(:value :individual "value"^^:custom)',
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    issue = next(
+        item
+        for item in cast(list[dict[str, object]], actual["issues"])
+        if item["rule_id"] == CUSTOM_DATATYPE_LITERAL_RULE
+    )
+    assert issue["constructor"] == "Literal"
+    assert issue["message"] == (
+        "a datatype defined in the ontology has no lexical space and cannot be "
+        "used on a literal: urn:test:profile#custom"
+    )
+    assert issue["provenance_sha256"] is None
+
+
+def test_datatype_definition_error_precedence_matches_scalar_statement_order() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:custom))",
+            "DatatypeDefinition(:custom xsd:string)",
+            "DatatypeDefinition(:custom xsd:integer)",
+            "DatatypeDefinition(xsd:boolean xsd:string)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
 
 
 def test_non_simple_object_property_positions_match_scalar_exactly() -> None:
@@ -1008,6 +1113,42 @@ def test_role_regularity_is_recomputed_across_one_root_slices() -> None:
     assert forward == reverse == direct
     assert json.loads(forward) == _expected_manifest(snapshot)
     assert RIA_DEPENDENCY_CYCLE_RULE in json.loads(forward)["ordered_rule_ids"]
+
+
+def test_datatype_rules_are_recomputed_across_one_root_slices() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:first))",
+            "Declaration(Datatype(:second))",
+            "Declaration(DataProperty(:value))",
+            "DatatypeDefinition(:first :second)",
+            "DatatypeDefinition(:second :first)",
+            'DataPropertyAssertion(:value :individual "value"^^:first)',
+        ),
+        options=OPTIONS,
+    )
+    root_count = len(bytes(_buffers(snapshot)["root_kinds"]))
+    records = tuple(
+        _slice_record(
+            snapshot,
+            posting_mode=1,
+            postings=memoryview(struct.pack("<I", index)),
+        )
+        for index in range(1, root_count + 1)
+    )
+
+    direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
+    forward = native._encoded_profile_slices_manifest_v1(slices=records)
+    reverse = native._encoded_profile_slices_manifest_v1(
+        slices=tuple(reversed(records))
+    )
+
+    assert forward == reverse == direct
+    assert json.loads(forward) == _expected_manifest(snapshot)
+    assert {
+        RECURSIVE_DATATYPE_DEFINITION_RULE,
+        CUSTOM_DATATYPE_LITERAL_RULE,
+    } <= set(json.loads(forward)["ordered_rule_ids"])
 
 
 def test_extension_selection_and_composite_deduplication_are_canonical() -> None:
