@@ -5312,7 +5312,11 @@ fn normalized_class_term<B: ByteSource>(
                 return Ok(None);
             };
             let normalized = match (node.tag(), complemented, cardinality) {
-                (OBJECT_MIN_CARDINALITY_TAG, false, 0 | 1) => return Ok(None),
+                (OBJECT_MIN_CARDINALITY_TAG, false, 0) => return Ok(None),
+                (OBJECT_MIN_CARDINALITY_TAG, false, 1) => CardinalityNormalization::Quantifier {
+                    kind: ObjectQuantifierKind::Some,
+                    complement_filler: false,
+                },
                 (OBJECT_MIN_CARDINALITY_TAG, false, _) => CardinalityNormalization::Cardinality {
                     kind: ObjectCardinalityKind::Minimum,
                     cardinality,
