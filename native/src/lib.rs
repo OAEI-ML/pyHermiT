@@ -1121,89 +1121,22 @@ struct EncodedSliceProgram {
     role_clauses: encoded::role_clauses::RoleClausePhase,
 }
 
-fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<EncodedSliceProgram> {
-    compile_encoded_slice_program_with_namespace(slices, None)
-}
-
-fn compile_encoded_slice_program_with_namespace(
-    slices: &Bound<'_, PyAny>,
-    definition_namespace: Option<[u8; 32]>,
-) -> NativeResult<EncodedSliceProgram> {
-    if !slices.is_exact_instance_of::<PyTuple>() {
-        return Err(encoded_slice_invalid(
-            "encoded slice program is not an exact tuple",
-        ));
-    }
-    let slices = slices
-        .cast::<PyTuple>()
-        .map_err(|_| encoded_slice_invalid("encoded slice program changed type"))?;
-    let limits = encoded::named_classes::NamedClassPhaseLimits::default();
-    if slices.is_empty() {
-        return Err(encoded_slice_invalid(
-            "encoded slice program requires at least one slice",
-        ));
-    }
-    if slices.len() > limits.max_slices {
-        return Err(encoded_validation_error(
-            encoded::EncodedValidationError::resource(
-                "encoded slice program exceeds its slice limit",
-            ),
-        ));
-    }
+fn compile_encoded_slice_symbol_phases(
+    slices: &Bound<'_, PyTuple>,
+    limits: encoded::named_classes::NamedClassPhaseLimits,
+) -> NativeResult<Vec<encoded::symbols::SymbolPhase>> {
     let mut phases = Vec::new();
     phases.try_reserve_exact(slices.len()).map_err(|_| {
         encoded_validation_error(encoded::EncodedValidationError::resource(
-            "encoded slice transaction allocation failed",
+            "encoded symbol slice transaction allocation failed",
         ))
     })?;
-    let mut object_role_phases = Vec::new();
-    object_role_phases
-        .try_reserve_exact(slices.len())
-        .map_err(|_| {
-            encoded_validation_error(encoded::EncodedValidationError::resource(
-                "encoded object-role slice transaction allocation failed",
-            ))
-        })?;
-    let mut data_role_phases = Vec::new();
-    data_role_phases
-        .try_reserve_exact(slices.len())
-        .map_err(|_| {
-            encoded_validation_error(encoded::EncodedValidationError::resource(
-                "encoded data-property slice transaction allocation failed",
-            ))
-        })?;
-    let mut data_inclusion_phases = Vec::new();
-    data_inclusion_phases
-        .try_reserve_exact(slices.len())
-        .map_err(|_| {
-            encoded_validation_error(encoded::EncodedValidationError::resource(
-                "encoded data-property inclusion slice allocation failed",
-            ))
-        })?;
-    let mut simple_role_phases = Vec::new();
-    simple_role_phases
-        .try_reserve_exact(slices.len())
-        .map_err(|_| {
-            encoded_validation_error(encoded::EncodedValidationError::resource(
-                "encoded simple-role slice transaction allocation failed",
-            ))
-        })?;
-    let mut complex_role_phases = Vec::new();
-    complex_role_phases
-        .try_reserve_exact(slices.len())
-        .map_err(|_| {
-            encoded_validation_error(encoded::EncodedValidationError::resource(
-                "encoded complex-role slice transaction allocation failed",
-            ))
-        })?;
-    let mut role_characteristic_phases = Vec::new();
-    role_characteristic_phases
-        .try_reserve_exact(slices.len())
-        .map_err(|_| {
-            encoded_validation_error(encoded::EncodedValidationError::resource(
-                "encoded role-characteristic slice transaction allocation failed",
-            ))
-        })?;
+    let mut catalogs = Vec::new();
+    catalogs.try_reserve_exact(slices.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded source declaration catalog allocation failed",
+        ))
+    })?;
     let mut source_work = 0_u64;
     let mut source_owned = 0_usize;
     let mut context_bytes = 0_usize;
@@ -1269,31 +1202,198 @@ fn compile_encoded_slice_program_with_namespace(
         )?;
         let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
             .map_err(encoded_validation_error)?;
-        let remaining_owned = limits
-            .max_owned_bytes
-            .checked_sub(source_owned)
-            .ok_or_else(|| {
-                encoded_validation_error(encoded::EncodedValidationError::resource(
-                    "encoded slice source ownership exceeded its aggregate limit",
-                ))
-            })?;
-        let remaining_work = limits.max_work.checked_sub(source_work).ok_or_else(|| {
-            encoded_validation_error(encoded::EncodedValidationError::resource(
-                "encoded slice source work exceeded its aggregate limit",
-            ))
-        })?;
         let symbol_limits = encoded::symbols::SymbolPhaseLimits {
-            max_owned_bytes: remaining_owned,
-            max_work: remaining_work,
+            max_owned_bytes: limits
+                .max_owned_bytes
+                .checked_sub(source_owned)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded slice symbol ownership exceeded its aggregate limit",
+                    ))
+                })?,
+            max_work: limits.max_work.checked_sub(source_work).ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice symbol work exceeded its aggregate limit",
+                ))
+            })?,
             ..encoded::symbols::SymbolPhaseLimits::default()
         };
-        let symbols = encoded::symbols::compile_symbol_phase_selected(
+        let (phase, catalog) = encoded::symbols::compile_symbol_phase_selected_with_catalog(
             &model,
             symbol_limits,
             posting_mode,
             postings,
         )
         .map_err(encoded_validation_error)?;
+        source_work = source_work.checked_add(phase.work).ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded slice symbol work overflowed",
+            ))
+        })?;
+        source_owned = source_owned.checked_add(phase.owned_bytes).ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded slice symbol ownership overflowed",
+            ))
+        })?;
+        phases.push(phase);
+        catalogs.push(catalog);
+    }
+    let proof_limits = encoded::symbols::SymbolPhaseLimits {
+        max_owned_bytes: limits
+            .max_owned_bytes
+            .checked_sub(source_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded slice symbols exceeded their aggregate ownership limit",
+                ))
+            })?,
+        max_work: limits.max_work.checked_sub(source_work).ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded slice symbols exceeded their aggregate work limit",
+            ))
+        })?,
+        ..encoded::symbols::SymbolPhaseLimits::default()
+    };
+    encoded::symbols::install_source_declaration_proof(&mut phases, &mut catalogs, proof_limits)
+        .map_err(encoded_validation_error)?;
+    Ok(phases)
+}
+
+fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<EncodedSliceProgram> {
+    compile_encoded_slice_program_with_namespace(slices, None)
+}
+
+fn compile_encoded_slice_program_with_namespace(
+    slices: &Bound<'_, PyAny>,
+    definition_namespace: Option<[u8; 32]>,
+) -> NativeResult<EncodedSliceProgram> {
+    if !slices.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded slice program is not an exact tuple",
+        ));
+    }
+    let slices = slices
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("encoded slice program changed type"))?;
+    let limits = encoded::named_classes::NamedClassPhaseLimits::default();
+    if slices.is_empty() {
+        return Err(encoded_slice_invalid(
+            "encoded slice program requires at least one slice",
+        ));
+    }
+    if slices.len() > limits.max_slices {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "encoded slice program exceeds its slice limit",
+            ),
+        ));
+    }
+    let symbol_phases = compile_encoded_slice_symbol_phases(slices, limits)?;
+    let mut symbol_phases = symbol_phases.into_iter();
+    let mut phases = Vec::new();
+    phases.try_reserve_exact(slices.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded slice transaction allocation failed",
+        ))
+    })?;
+    let mut object_role_phases = Vec::new();
+    object_role_phases
+        .try_reserve_exact(slices.len())
+        .map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded object-role slice transaction allocation failed",
+            ))
+        })?;
+    let mut data_role_phases = Vec::new();
+    data_role_phases
+        .try_reserve_exact(slices.len())
+        .map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded data-property slice transaction allocation failed",
+            ))
+        })?;
+    let mut data_inclusion_phases = Vec::new();
+    data_inclusion_phases
+        .try_reserve_exact(slices.len())
+        .map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded data-property inclusion slice allocation failed",
+            ))
+        })?;
+    let mut simple_role_phases = Vec::new();
+    simple_role_phases
+        .try_reserve_exact(slices.len())
+        .map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded simple-role slice transaction allocation failed",
+            ))
+        })?;
+    let mut complex_role_phases = Vec::new();
+    complex_role_phases
+        .try_reserve_exact(slices.len())
+        .map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded complex-role slice transaction allocation failed",
+            ))
+        })?;
+    let mut role_characteristic_phases = Vec::new();
+    role_characteristic_phases
+        .try_reserve_exact(slices.len())
+        .map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded role-characteristic slice transaction allocation failed",
+            ))
+        })?;
+    let mut source_work = 0_u64;
+    let mut source_owned = 0_usize;
+    for slice_index in 0..slices.len() {
+        let record = tuple_item(slices, slice_index, "record")?;
+        if !record.is_exact_instance_of::<PyTuple>() {
+            return Err(encoded_slice_invalid(
+                "encoded slice record is not an exact tuple",
+            ));
+        }
+        let record = record
+            .cast::<PyTuple>()
+            .map_err(|_| encoded_slice_invalid("encoded slice record changed type"))?;
+        if record.len() != ENCODED_SLICE_RECORD_LEN {
+            return Err(encoded_slice_invalid(
+                "encoded slice record has the wrong field count",
+            ));
+        }
+        let root_kinds = tuple_item(record, 4, "root_kinds")?;
+        let root_ids = tuple_item(record, 5, "root_ids")?;
+        let node_tags = tuple_item(record, 6, "node_tags")?;
+        let node_field_offsets = tuple_item(record, 7, "node_field_offsets")?;
+        let field_kinds = tuple_item(record, 8, "field_kinds")?;
+        let field_values = tuple_item(record, 9, "field_values")?;
+        let field_lengths = tuple_item(record, 10, "field_lengths")?;
+        let item_kinds = tuple_item(record, 11, "item_kinds")?;
+        let item_values = tuple_item(record, 12, "item_values")?;
+        let item_lengths = tuple_item(record, 13, "item_lengths")?;
+        let scalar_bytes = tuple_item(record, 14, "scalar_bytes")?;
+        let columns = borrowed_encoded_columns(
+            &root_kinds,
+            &root_ids,
+            &node_tags,
+            &node_field_offsets,
+            &field_kinds,
+            &field_values,
+            &field_lengths,
+            &item_kinds,
+            &item_values,
+            &item_lengths,
+            &scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let symbols = symbol_phases.next().ok_or_else(|| {
+            NativeError::new(
+                ErrorKind::Invariant,
+                "NATIVE_ENCODED_INVARIANT",
+                "encoded symbol prepass ended before its source slices",
+            )
+        })?;
         let after_symbol_work = source_work.checked_add(symbols.work).ok_or_else(|| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "encoded slice source work overflowed",
@@ -1665,6 +1765,13 @@ fn compile_encoded_slice_program_with_namespace(
         simple_role_phases.push(simple_roles);
         complex_role_phases.push(complex_roles);
         role_characteristic_phases.push(role_characteristics);
+    }
+    if symbol_phases.next().is_some() {
+        return Err(NativeError::new(
+            ErrorKind::Invariant,
+            "NATIVE_ENCODED_INVARIANT",
+            "encoded symbol prepass outlived its source slices",
+        ));
     }
     let object_role_limits = encoded::object_roles::ObjectRolePhaseLimits {
         max_owned_bytes: limits.max_owned_bytes,

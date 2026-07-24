@@ -116,19 +116,36 @@ def _composite_records(
     composite: pyowl_core.OntologyView,
     sources: tuple[pyowl_core.OntologyView, ...],
 ) -> tuple[tuple[object, ...], ...]:
+    return _composite_selected_records(
+        composite,
+        sources,
+        tuple((0, None) for _source in sources),
+    )
+
+
+def _composite_selected_records(
+    composite: pyowl_core.OntologyView,
+    sources: tuple[pyowl_core.OntologyView, ...],
+    selections: tuple[tuple[int, memoryview | None], ...],
+) -> tuple[tuple[object, ...], ...]:
     tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
     mappings = cast(
         tuple[dict[bytes, bytes], ...],
         cast(Any, composite)._scope_replacements(),
     )
-    rows = sorted(zip(tokens, sources, mappings, strict=True), key=lambda row: row[0])
+    rows = sorted(
+        zip(tokens, sources, mappings, selections, strict=True),
+        key=lambda row: row[0],
+    )
     return tuple(
         _slice_record(
             source,
+            posting_mode=posting_mode,
+            postings=postings,
             member_tokens=(token,),
             anonymous_scope_maps=(() if not mapping else (_scope_map(mapping),)),
         )
-        for token, source, mapping in rows
+        for token, source, mapping, (posting_mode, postings) in rows
     )
 
 
@@ -1730,6 +1747,170 @@ def test_source_local_selection_excludes_unsupported_restriction_without_leaks()
         value["display"] != "class:urn:test:named#C"
         for value in cast(
             list[dict[str, object]], included["class_expression_symbols"]
+        )
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+@pytest.mark.parametrize("reverse_slices", [False, True])
+def test_composite_selection_retains_cross_slice_restriction_declarations(
+    reverse_slices: bool,
+) -> None:
+    declarations = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+        ),
+        options=OPTIONS,
+    )
+    logical = pyowl_core.load_snapshot(
+        functional(
+            "ObjectPropertyRange(ObjectInverseOf(:p) ObjectIntersectionOf("
+            "ObjectExactCardinality(2 :q ObjectIntersectionOf(:A :B)) "
+            "DataExactCardinality(1 :d DataUnionOf(xsd:string xsd:integer))))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(
+        declarations,
+        logical,
+        roles=("declarations", "logical"),
+    )
+    declaration_buffers = produce_encoded_structural_view_v1(declarations).buffers
+    declaration_count = len(memoryview(declaration_buffers["root_ids"]).cast("I"))
+    declaration_postings = memoryview(
+        b"".join(
+            struct.pack("<I", root_id)
+            for root_id in range(1, declaration_count + 1)
+        )
+    )
+    records = _composite_selected_records(
+        composite,
+        (declarations, logical),
+        (
+            (2, declaration_postings),
+            (1, memoryview(struct.pack("<I", 1))),
+        ),
+    )
+    if reverse_slices:
+        records = tuple(reversed(records))
+
+    actual = _native_slices_manifest(
+        *records,
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    expected = _expected_manifest(
+        composite,
+        compiled_roots=1,
+        include_object_constraints=True,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    for binding in cast(list[dict[str, object]], expected["class_signature"]):
+        binding["declared"] = False
+    assert actual == expected
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+@pytest.mark.parametrize("reverse_slices", [False, True])
+def test_composite_selection_excludes_unreachable_declaration_proof_without_leaks(
+    reverse_slices: bool,
+) -> None:
+    declarations = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(ObjectProperty(:r))",
+            "Declaration(DataProperty(:d))",
+        ),
+        options=OPTIONS,
+    )
+    logical = pyowl_core.load_snapshot(
+        functional(
+            "ObjectPropertyRange(ObjectInverseOf(:p) ObjectIntersectionOf("
+            "ObjectExactCardinality(2 :q ObjectIntersectionOf(:A :B)) "
+            "DataExactCardinality(1 :d DataUnionOf(xsd:string xsd:integer))))",
+            "SubClassOf(ObjectIntersectionOf(:C ObjectSomeValuesFrom(:r :C)) "
+            "ObjectMinCardinality(4294967296 :r :C))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(
+        declarations,
+        logical,
+        roles=("declarations", "logical"),
+    )
+    declaration_buffers = produce_encoded_structural_view_v1(declarations).buffers
+    declaration_count = len(memoryview(declaration_buffers["root_ids"]).cast("I"))
+    declaration_postings = memoryview(
+        b"".join(
+            struct.pack("<I", root_id)
+            for root_id in range(1, declaration_count + 1)
+        )
+    )
+    logical_buffers = produce_encoded_structural_view_v1(logical).buffers
+    root_ids = memoryview(logical_buffers["root_ids"]).cast("I")
+    node_tags = memoryview(logical_buffers["node_tags"]).cast("H")
+    range_root = next(
+        index + 1
+        for index, node_id in enumerate(root_ids)
+        if node_tags[node_id - 1] == 75
+    )
+    unsupported_root = next(
+        index + 1
+        for index, node_id in enumerate(root_ids)
+        if node_tags[node_id - 1] == 61
+    )
+    included = _composite_selected_records(
+        composite,
+        (declarations, logical),
+        (
+            (2, declaration_postings),
+            (1, memoryview(struct.pack("<I", range_root))),
+        ),
+    )
+    excluded = _composite_selected_records(
+        composite,
+        (declarations, logical),
+        (
+            (2, declaration_postings),
+            (2, memoryview(struct.pack("<I", unsupported_root))),
+        ),
+    )
+    if reverse_slices:
+        included = tuple(reversed(included))
+        excluded = tuple(reversed(excluded))
+
+    include_manifest = _native_slices_manifest(
+        *included,
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+    exclude_manifest = _native_slices_manifest(
+        *excluded,
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert include_manifest == exclude_manifest
+    assert include_manifest["compiled_roots"] == 1
+    assert include_manifest["deferred_roots"] == 0
+    assert all(
+        value["display"] != "class:urn:test:named#C"
+        for value in cast(
+            list[dict[str, object]], include_manifest["class_expression_symbols"]
         )
     )
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES

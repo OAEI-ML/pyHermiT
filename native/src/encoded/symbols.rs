@@ -291,11 +291,13 @@ impl SymbolPhase {
             .map(|index| self.entity_node_symbols[index].1)
     }
 
-    /// Return whether a reachable entity has a declaration in its source.
+    /// Return whether a reachable entity has a declaration in the retained
+    /// source set.
     ///
     /// Source-local root selection controls the published declaration set, but
-    /// normalization still needs the underlying declaration to prove that a
-    /// restriction input has stable scalar symbol identity.
+    /// normalization still needs an underlying declaration, potentially from
+    /// another selected slice, to prove that a restriction input has stable
+    /// scalar symbol identity.
     pub(super) fn entity_has_source_declaration(&self, entity_id: u32) -> bool {
         self.source_declared_entity_ids
             .binary_search(&entity_id)
@@ -406,6 +408,11 @@ struct DeclaredIdentity {
     key: Vec<u8>,
     kind: EntityKind,
     iri: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct SourceDeclarationCatalog {
+    keys: Vec<Vec<u8>>,
 }
 
 struct PhaseBudget {
@@ -564,7 +571,9 @@ pub fn compile_symbol_phase<B: ByteSource>(
     model: &ValidatedModel<B>,
     limits: SymbolPhaseLimits,
 ) -> EncodedResult<SymbolPhase> {
-    compile_symbol_phase_with_selection(model, limits, RootSelection::<&[u8]>::All)
+    let (phase, catalog) =
+        compile_symbol_phase_with_selection(model, limits, RootSelection::<&[u8]>::All)?;
+    finish_single_symbol_phase(phase, catalog, limits)
 }
 
 /// Compile only roots selected by source-local ALL, INCLUDE, or EXCLUDE postings.
@@ -574,6 +583,17 @@ pub fn compile_symbol_phase_selected<B: ByteSource, S: ByteSource>(
     posting_mode: u8,
     postings: S,
 ) -> EncodedResult<SymbolPhase> {
+    let (phase, catalog) =
+        compile_symbol_phase_selected_with_catalog(model, limits, posting_mode, postings)?;
+    finish_single_symbol_phase(phase, catalog, limits)
+}
+
+pub(crate) fn compile_symbol_phase_selected_with_catalog<B: ByteSource, S: ByteSource>(
+    model: &ValidatedModel<B>,
+    limits: SymbolPhaseLimits,
+    posting_mode: u8,
+    postings: S,
+) -> EncodedResult<(SymbolPhase, SourceDeclarationCatalog)> {
     let selection = match posting_mode {
         POSTINGS_ALL if postings.is_empty() => RootSelection::All,
         POSTINGS_ALL => {
@@ -600,11 +620,39 @@ pub fn compile_symbol_phase_selected<B: ByteSource, S: ByteSource>(
     compile_symbol_phase_with_selection(model, limits, selection)
 }
 
+fn finish_single_symbol_phase(
+    phase: SymbolPhase,
+    catalog: SourceDeclarationCatalog,
+    limits: SymbolPhaseLimits,
+) -> EncodedResult<SymbolPhase> {
+    let remaining = SymbolPhaseLimits {
+        max_owned_bytes: limits
+            .max_owned_bytes
+            .checked_sub(phase.owned_bytes)
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "source declaration catalog exceeded the symbol ownership limit",
+                )
+            })?,
+        max_work: limits.max_work.checked_sub(phase.work).ok_or_else(|| {
+            EncodedValidationError::resource(
+                "source declaration catalog exceeded the symbol work limit",
+            )
+        })?,
+        ..limits
+    };
+    let mut phases = [phase];
+    let mut catalogs = [catalog];
+    install_source_declaration_proof(&mut phases, &mut catalogs, remaining)?;
+    let [phase] = phases;
+    Ok(phase)
+}
+
 fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
     model: &ValidatedModel<B>,
     limits: SymbolPhaseLimits,
     mut selection: RootSelection<S>,
-) -> EncodedResult<SymbolPhase> {
+) -> EncodedResult<(SymbolPhase, SourceDeclarationCatalog)> {
     let summary = model.summary();
     let mut budget = PhaseBudget::new(limits);
     budget.claim_work(selection.validation_work())?;
@@ -621,15 +669,38 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
         .try_reserve_exact(selected_root_count)
         .map_err(|_| EncodedValidationError::resource("encoded root dispatch allocation failed"))?;
     let mut declarations = Vec::<DeclaredIdentity>::new();
+    let mut source_declaration_keys = Vec::<Vec<u8>>::new();
     for root_index in 0..summary.root_count {
         budget.claim_work(1)?;
-        if selection.excludes(root_index)? {
-            continue;
-        }
+        let excluded = selection.excludes(root_index)?;
         let root = model
             .root(root_index)?
             .ok_or_else(|| EncodedValidationError::invariant("validated root row disappeared"))?;
         let node = model.node(root.node())?;
+        if node.tag() == DECLARATION_TAG {
+            let identity = declaration_identity(model, root.node(), &mut budget)?;
+            budget.claim_owned(size_of::<Vec<u8>>())?;
+            source_declaration_keys.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource("source declaration catalog allocation failed")
+            })?;
+            if excluded {
+                source_declaration_keys.push(identity.key);
+            } else {
+                source_declaration_keys.push(clone_owned_bytes(
+                    &identity.key,
+                    &mut budget,
+                    "source declaration key allocation failed",
+                )?);
+                budget.claim_owned(size_of::<DeclaredIdentity>())?;
+                declarations.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource("encoded declaration allocation failed")
+                })?;
+                declarations.push(identity);
+            }
+        }
+        if excluded {
+            continue;
+        }
         let handler = RootHandler::from_root(root.kind(), node.tag())?;
         roots.push(DispatchedRoot {
             kind: root.kind(),
@@ -637,15 +708,10 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
             tag: node.tag(),
             handler,
         });
-        if node.tag() == DECLARATION_TAG {
-            let identity = declaration_identity(model, root.node(), &mut budget)?;
-            budget.claim_owned(size_of::<DeclaredIdentity>())?;
-            declarations.try_reserve(1).map_err(|_| {
-                EncodedValidationError::resource("encoded declaration allocation failed")
-            })?;
-            declarations.push(identity);
-        }
     }
+    budget.claim_work(sort_work(source_declaration_keys.len()))?;
+    source_declaration_keys.sort();
+    source_declaration_keys.dedup();
 
     let semantic_nodes = semantic_reachability(model, &roots, &mut budget)?;
     let mut entities = Vec::<ExtractedEntity>::new();
@@ -775,9 +841,6 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
             })?,
         ));
     }
-    let source_declared_entity_ids =
-        source_declared_entity_ids(model, &semantic_nodes, &entity_node_symbols, &mut budget)?;
-
     let mut values = Vec::new();
     values.try_reserve_exact(entities.len()).map_err(|_| {
         EncodedValidationError::resource("encoded entity symbol output allocation failed")
@@ -801,66 +864,183 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
             query_local: false,
         });
     }
-    Ok(SymbolPhase {
-        roots,
-        entity_domain: DecodedSymbolDomain {
-            kind: SymbolKind::Entity,
-            values,
+    Ok((
+        SymbolPhase {
+            roots,
+            entity_domain: DecodedSymbolDomain {
+                kind: SymbolKind::Entity,
+                values,
+            },
+            declared_entities,
+            work: budget.work,
+            owned_bytes: budget.owned_bytes,
+            entity_node_symbols,
+            source_declared_entity_ids: Vec::new(),
+            semantic_nodes,
+            manifest_limit: limits.max_manifest_bytes,
         },
-        declared_entities,
-        work: budget.work,
-        owned_bytes: budget.owned_bytes,
-        entity_node_symbols,
-        source_declared_entity_ids,
-        semantic_nodes,
-        manifest_limit: limits.max_manifest_bytes,
-    })
+        SourceDeclarationCatalog {
+            keys: source_declaration_keys,
+        },
+    ))
 }
 
-fn source_declared_entity_ids<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    semantic_nodes: &[u8],
-    entity_node_symbols: &[(NodeId, u32)],
-    budget: &mut PhaseBudget,
-) -> EncodedResult<Vec<u32>> {
-    let mut identifiers = Vec::new();
-    for root_index in 0..model.summary().root_count {
-        budget.claim_work(1)?;
-        let root = model
-            .root(root_index)?
-            .ok_or_else(|| EncodedValidationError::invariant("validated root row disappeared"))?;
-        let node = model.node(root.node())?;
-        if node.tag() != DECLARATION_TAG {
-            continue;
-        }
-        let entity = declaration_entity_node(model, root.node())?;
-        let entity_index = usize::try_from(entity.get() - 1).map_err(|_| {
-            EncodedValidationError::invariant("declaration entity index exceeds usize")
+/// Merge source declaration keys, intersect them with the entity keys reached
+/// by selected roots across the coarse call, and install only source-local IDs.
+///
+/// The canonical key proof is temporary. Public declaration metadata remains
+/// filtered independently in every source phase.
+pub(crate) fn install_source_declaration_proof(
+    phases: &mut [SymbolPhase],
+    catalogs: &mut [SourceDeclarationCatalog],
+    limits: SymbolPhaseLimits,
+) -> EncodedResult<()> {
+    if phases.is_empty() || phases.len() != catalogs.len() {
+        return Err(EncodedValidationError::invariant(
+            "source declaration catalogs do not align with symbol phases",
+        ));
+    }
+    let mut budget = PhaseBudget::new(limits);
+    let source_key_count = catalogs.iter().try_fold(0_usize, |total, catalog| {
+        total.checked_add(catalog.keys.len()).ok_or_else(|| {
+            EncodedValidationError::resource("source declaration key count overflowed")
+        })
+    })?;
+    budget.entity(source_key_count)?;
+    budget.claim_owned(
+        source_key_count
+            .checked_mul(size_of::<Vec<u8>>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("source declaration key catalog size overflowed")
+            })?,
+    )?;
+    let mut source_keys = Vec::new();
+    source_keys
+        .try_reserve_exact(source_key_count)
+        .map_err(|_| {
+            EncodedValidationError::resource("source declaration key merge allocation failed")
         })?;
-        if semantic_nodes
-            .get(entity_index)
-            .is_none_or(|reachable| *reachable == 0)
-        {
-            continue;
+    for catalog in catalogs {
+        budget.claim_work(catalog.keys.len())?;
+        source_keys.append(&mut catalog.keys);
+    }
+    budget.claim_work(sort_work(source_keys.len()))?;
+    source_keys.sort();
+    source_keys.dedup();
+
+    let reachable_key_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total
+            .checked_add(phase.entity_node_symbols.len())
+            .ok_or_else(|| EncodedValidationError::resource("reachable entity count overflowed"))
+    })?;
+    budget.entity(reachable_key_count)?;
+    budget.claim_owned(
+        reachable_key_count
+            .checked_mul(size_of::<Vec<u8>>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("reachable entity key size overflowed")
+            })?,
+    )?;
+    let mut reachable_keys = Vec::new();
+    reachable_keys
+        .try_reserve_exact(reachable_key_count)
+        .map_err(|_| EncodedValidationError::resource("reachable entity key allocation failed"))?;
+    for phase in phases.iter() {
+        for (_, entity_id) in &phase.entity_node_symbols {
+            budget.claim_work(1)?;
+            let entity = phase
+                .entity_domain
+                .values
+                .get(usize::try_from(*entity_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "reachable entity mapping contains a dangling symbol ID",
+                    )
+                })?;
+            reachable_keys.push(clone_owned_bytes(
+                &entity.key,
+                &mut budget,
+                "reachable entity key allocation failed",
+            )?);
         }
-        budget.claim_work(binary_search_work(entity_node_symbols.len()))?;
-        let symbol_index = entity_node_symbols
-            .binary_search_by_key(&entity, |(candidate, _)| *candidate)
+    }
+    budget.claim_work(sort_work(reachable_keys.len()))?;
+    reachable_keys.sort();
+    reachable_keys.dedup();
+
+    let proof_capacity = source_keys.len().min(reachable_keys.len());
+    budget.claim_owned(
+        proof_capacity
+            .checked_mul(size_of::<Vec<u8>>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("source declaration proof size overflowed")
+            })?,
+    )?;
+    let mut proof = Vec::new();
+    proof.try_reserve_exact(proof_capacity).map_err(|_| {
+        EncodedValidationError::resource("source declaration proof allocation failed")
+    })?;
+    for key in source_keys {
+        budget.claim_work(binary_search_work(reachable_keys.len()))?;
+        if reachable_keys.binary_search(&key).is_ok() {
+            proof.push(key);
+        }
+    }
+
+    for phase in phases.iter_mut() {
+        let identifier_capacity = phase.entity_node_symbols.len().min(proof.len());
+        budget.claim_owned(
+            identifier_capacity
+                .checked_mul(size_of::<u32>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "source declaration proof identifier size overflowed",
+                    )
+                })?,
+        )?;
+        let mut identifiers = Vec::new();
+        identifiers
+            .try_reserve_exact(identifier_capacity)
             .map_err(|_| {
-                EncodedValidationError::invariant(
-                    "reachable declared entity is absent from the entity-node mapping",
+                EncodedValidationError::resource(
+                    "source declaration proof identifier allocation failed",
                 )
             })?;
-        budget.claim_owned(size_of::<u32>())?;
-        identifiers.try_reserve(1).map_err(|_| {
-            EncodedValidationError::resource("source declaration retention allocation failed")
-        })?;
-        identifiers.push(entity_node_symbols[symbol_index].1);
+        for (_, entity_id) in &phase.entity_node_symbols {
+            budget.claim_work(1)?;
+            let entity = phase
+                .entity_domain
+                .values
+                .get(usize::try_from(*entity_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "source declaration proof contains a dangling entity ID",
+                    )
+                })?;
+            budget.claim_work(binary_search_work(proof.len()))?;
+            if proof.binary_search(&entity.key).is_ok() {
+                identifiers.push(*entity_id);
+            }
+        }
+        budget.claim_work(sort_work(identifiers.len()))?;
+        identifiers.sort_unstable();
+        identifiers.dedup();
+        phase.source_declared_entity_ids = identifiers;
     }
-    budget.claim_work(sort_work(identifiers.len()))?;
-    identifiers.sort_unstable();
-    identifiers.dedup();
-    Ok(identifiers)
+
+    let first = phases.first_mut().ok_or_else(|| {
+        EncodedValidationError::invariant("source declaration proof lost its first symbol phase")
+    })?;
+    first.work = first.work.checked_add(budget.work).ok_or_else(|| {
+        EncodedValidationError::resource("source declaration proof work overflowed")
+    })?;
+    first.owned_bytes = first
+        .owned_bytes
+        .checked_add(budget.owned_bytes)
+        .ok_or_else(|| {
+            EncodedValidationError::resource("source declaration proof ownership overflowed")
+        })?;
+    Ok(())
 }
 
 fn semantic_reachability<B: ByteSource>(
@@ -983,6 +1163,20 @@ fn declaration_entity_node<B: ByteSource>(
         ));
     };
     Ok(entity_id)
+}
+
+fn clone_owned_bytes(
+    value: &[u8],
+    budget: &mut PhaseBudget,
+    allocation_error: &'static str,
+) -> EncodedResult<Vec<u8>> {
+    budget.claim_owned(value.len())?;
+    let mut owned = Vec::new();
+    owned
+        .try_reserve_exact(value.len())
+        .map_err(|_| EncodedValidationError::resource(allocation_error))?;
+    owned.extend_from_slice(value);
+    Ok(owned)
 }
 
 fn extract_entity<B: ByteSource>(
@@ -1409,6 +1603,41 @@ mod tests {
         assert_eq!(manifest["schema_version"], 1);
         assert_eq!(manifest["root_dispatch"][0]["handler"], "Declaration");
         assert_eq!(manifest["declared_entities"][0]["iri"], "urn:C");
+        Ok(())
+    }
+
+    #[test]
+    fn source_declaration_proof_is_bounded_before_installation() -> EncodedResult<()> {
+        let owned = declaration("urn:C");
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let (phase, catalog) = compile_symbol_phase_with_selection(
+            &model,
+            SymbolPhaseLimits::default(),
+            RootSelection::<&[u8]>::All,
+        )?;
+        let source_id = phase
+            .entity_domain
+            .values
+            .iter()
+            .find(|value| value.display == "class:urn:C")
+            .map(|value| value.identifier)
+            .ok_or_else(|| EncodedValidationError::invariant("source entity is missing"))?;
+        let mut phases = [phase];
+        let mut catalogs = [catalog];
+        let error = install_source_declaration_proof(
+            &mut phases,
+            &mut catalogs,
+            SymbolPhaseLimits {
+                max_owned_bytes: 0,
+                ..SymbolPhaseLimits::default()
+            },
+        )
+        .err();
+        assert!(error.is_some_and(|value| value.code == "NATIVE_ENCODED_RESOURCE_LIMIT"));
+        assert!(!phases[0].entity_has_source_declaration(source_id));
+
+        install_source_declaration_proof(&mut phases, &mut catalogs, SymbolPhaseLimits::default())?;
+        assert!(phases[0].entity_has_source_declaration(source_id));
         Ok(())
     }
 
