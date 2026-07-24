@@ -103,6 +103,11 @@ const NAMED_INDIVIDUAL_PREFIX: &str = "named_individual:";
 const ANONYMOUS_INDIVIDUAL_PREFIX: &str = "anonymous:";
 const OBJECT_PROPERTY_PREFIX: &str = "object_property:";
 const DATA_PROPERTY_PREFIX: &str = "data_property:";
+const TOP_OBJECT_DISPLAY: &str = "object_property:http://www.w3.org/2002/07/owl#topObjectProperty";
+const BOTTOM_OBJECT_DISPLAY: &str =
+    "object_property:http://www.w3.org/2002/07/owl#bottomObjectProperty";
+const TOP_DATA_DISPLAY: &str = "data_property:http://www.w3.org/2002/07/owl#topDataProperty";
+const BOTTOM_DATA_DISPLAY: &str = "data_property:http://www.w3.org/2002/07/owl#bottomDataProperty";
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const ANY_URI_IDENTITY_PREFIX: &str = "[\"any-uri-v1\",";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -124,6 +129,10 @@ const RDF_XML_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#XM
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 const BOTTOM_DATA_IRI: &str = "http://www.w3.org/2002/07/owl#bottomDataProperty";
+const TOP_OBJECT_FLAG: u8 = 1;
+const BOTTOM_OBJECT_FLAG: u8 = 1 << 1;
+const TOP_DATA_FLAG: u8 = 1 << 2;
+const BOTTOM_DATA_FLAG: u8 = 1 << 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NamedClassPhaseLimits {
@@ -1438,8 +1447,15 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &mut data_definitions,
         &mut budget,
     )?;
-    let (entity_domain, source_entity_map) =
-        phase_entity_domain(symbols, &definitions, &data_definitions, &mut budget)?;
+    let retained_implicit_builtin_properties =
+        retained_implicit_builtin_properties(model, symbols, &mut budget)?;
+    let (entity_domain, source_entity_map) = phase_entity_domain(
+        symbols,
+        &definitions,
+        &data_definitions,
+        retained_implicit_builtin_properties,
+        &mut budget,
+    )?;
     let declared_class_ids = declared_class_ids(symbols, &mut budget)?;
     let (class_domain, class_signature) = class_signature(
         model,
@@ -7260,6 +7276,158 @@ fn generated_data_entity_key(iri: &[u8], budget: &mut PhaseBudget) -> EncodedRes
     Ok(key)
 }
 
+fn retained_implicit_builtin_properties<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<u8> {
+    let pending_bytes = symbols
+        .roots
+        .len()
+        .checked_mul(size_of::<(NodeId, usize)>())
+        .ok_or_else(|| {
+            EncodedValidationError::resource("implicit builtin-property traversal size overflowed")
+        })?;
+    budget.claim_owned(pending_bytes)?;
+    let mut pending = Vec::new();
+    pending
+        .try_reserve_exact(symbols.roots.len())
+        .map_err(|_| {
+            EncodedValidationError::resource(
+                "implicit builtin-property traversal allocation failed",
+            )
+        })?;
+    pending.extend(symbols.roots.iter().map(|root| (root.node, 0_usize)));
+    let mut retained = 0_u8;
+    while let Some((identifier, depth)) = pending.pop() {
+        PhaseBudget::count(
+            depth,
+            budget.limits.max_canonical_depth,
+            "implicit builtin-property traversal depth",
+        )?;
+        budget.claim_work(1)?;
+        let node = model.node(identifier)?;
+        if node.tag() == ENTITY_TAG {
+            let Some(entity_id) = symbols.entity_symbol_for_node(identifier) else {
+                continue;
+            };
+            let entity = symbols
+                .entity_domain
+                .values
+                .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "implicit builtin property entity ID is dangling",
+                    )
+                })?;
+            retained |= implicit_builtin_property_flag(&entity.display).unwrap_or(0);
+            continue;
+        }
+        if is_class_expression_constructor(node.tag()) {
+            if let Some(selection) =
+                atomic_class_selection_at_depth(model, symbols, identifier, depth, budget)?
+            {
+                let reduces_to_builtin =
+                    atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?
+                        || atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?;
+                if reduces_to_builtin {
+                    continue;
+                }
+            }
+        }
+        let child_depth =
+            child_expression_depth(depth, "implicit builtin-property depth overflowed")?;
+        for field_index in node.fields() {
+            budget.claim_work(1)?;
+            let component =
+                required_component(model.field(field_index)?, "implicit builtin-property field")?;
+            match model.resolve(component)? {
+                ComponentValue::None | ComponentValue::Scalar(_) => {}
+                ComponentValue::Node(child) => {
+                    budget.claim_owned(size_of::<(NodeId, usize)>())?;
+                    pending.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "implicit builtin-property traversal allocation failed",
+                        )
+                    })?;
+                    pending.push((child, child_depth));
+                }
+                ComponentValue::Collection(values) => {
+                    for item_index in values.items() {
+                        budget.claim_work(1)?;
+                        let item = required_component(
+                            model.item(item_index)?,
+                            "implicit builtin-property collection item",
+                        )?;
+                        match model.resolve(item)? {
+                            ComponentValue::None | ComponentValue::Scalar(_) => {}
+                            ComponentValue::Node(child) => {
+                                budget.claim_owned(size_of::<(NodeId, usize)>())?;
+                                pending.try_reserve(1).map_err(|_| {
+                                    EncodedValidationError::resource(
+                                        "implicit builtin-property traversal allocation failed",
+                                    )
+                                })?;
+                                pending.push((child, child_depth));
+                            }
+                            ComponentValue::Collection(_) => {
+                                return Err(EncodedValidationError::invariant(
+                                    "implicit builtin-property traversal found a nested collection",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(retained)
+}
+
+const fn is_class_expression_constructor(tag: u16) -> bool {
+    matches!(
+        tag,
+        OBJECT_INTERSECTION_OF_TAG
+            | OBJECT_UNION_OF_TAG
+            | OBJECT_COMPLEMENT_OF_TAG
+            | OBJECT_ONE_OF_TAG
+            | OBJECT_SOME_VALUES_FROM_TAG
+            | OBJECT_ALL_VALUES_FROM_TAG
+            | OBJECT_HAS_VALUE_TAG
+            | OBJECT_HAS_SELF_TAG
+            | OBJECT_MIN_CARDINALITY_TAG
+            | OBJECT_MAX_CARDINALITY_TAG
+            | OBJECT_EXACT_CARDINALITY_TAG
+            | DATA_SOME_VALUES_FROM_TAG
+            | DATA_ALL_VALUES_FROM_TAG
+            | DATA_HAS_VALUE_TAG
+            | DATA_MIN_CARDINALITY_TAG
+            | DATA_MAX_CARDINALITY_TAG
+            | DATA_EXACT_CARDINALITY_TAG
+    )
+}
+
+fn implicit_builtin_property_flag(display: &str) -> Option<u8> {
+    match display {
+        TOP_OBJECT_DISPLAY => Some(TOP_OBJECT_FLAG),
+        BOTTOM_OBJECT_DISPLAY => Some(BOTTOM_OBJECT_FLAG),
+        TOP_DATA_DISPLAY => Some(TOP_DATA_FLAG),
+        BOTTOM_DATA_DISPLAY => Some(BOTTOM_DATA_FLAG),
+        _ => None,
+    }
+}
+
+fn source_entity_is_published(
+    symbols: &SymbolPhase,
+    value: &DecodedSymbolValue,
+    retained_implicit_builtin_properties: u8,
+) -> bool {
+    implicit_builtin_property_flag(&value.display).is_none_or(|flag| {
+        symbols.entity_has_source_declaration(value.identifier)
+            || retained_implicit_builtin_properties & flag != 0
+    })
+}
+
 fn push_generated_frame(
     target: &mut Vec<u8>,
     value: &[u8],
@@ -7315,6 +7483,7 @@ fn phase_entity_domain(
     symbols: &SymbolPhase,
     class_definitions: &[ClassBooleanDefinition],
     data_definitions: &[DataBooleanDefinition],
+    retained_implicit_builtin_properties: u8,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(DecodedSymbolDomain, Vec<u32>)> {
     if symbols.entity_domain.kind != SymbolKind::Entity {
@@ -7322,10 +7491,16 @@ fn phase_entity_domain(
             "generated definitions received a non-entity source domain",
         ));
     }
-    let total = symbols
+    budget.claim_work(symbols.entity_domain.values.len())?;
+    let retained_source_entities = symbols
         .entity_domain
         .values
-        .len()
+        .iter()
+        .filter(|value| {
+            source_entity_is_published(symbols, value, retained_implicit_builtin_properties)
+        })
+        .count();
+    let total = retained_source_entities
         .checked_add(class_definitions.len())
         .and_then(|value| value.checked_add(data_definitions.len()))
         .ok_or_else(|| EncodedValidationError::resource("generated entity count overflowed"))?;
@@ -7340,6 +7515,9 @@ fn phase_entity_domain(
     })?;
     for value in &symbols.entity_domain.values {
         budget.claim_work(1)?;
+        if !source_entity_is_published(symbols, value, retained_implicit_builtin_properties) {
+            continue;
+        }
         budget
             .claim_owned(size_of::<DecodedSymbolValue>() + value.key.len() + value.display.len())?;
         values.push(value.clone());
@@ -7411,6 +7589,11 @@ fn phase_entity_domain(
         .try_reserve_exact(symbols.entity_domain.values.len())
         .map_err(|_| EncodedValidationError::resource("source entity map allocation failed"))?;
     for value in &symbols.entity_domain.values {
+        budget.claim_work(1)?;
+        if !source_entity_is_published(symbols, value, retained_implicit_builtin_properties) {
+            source_map.push(u32::MAX);
+            continue;
+        }
         budget.claim_work(binary_search_work(frozen.len()))?;
         let index = frozen
             .binary_search_by(|candidate| candidate.key.cmp(&value.key))
@@ -8895,7 +9078,8 @@ fn reduction_entity_is_retained(symbols: &SymbolPhase, entity_id: u32) -> Encode
         })?;
     let builtin = entity.display == THING_DISPLAY
         || entity.display == NOTHING_DISPLAY
-        || entity.display == RDFS_LITERAL_DISPLAY;
+        || entity.display == RDFS_LITERAL_DISPLAY
+        || implicit_builtin_property_flag(&entity.display).is_some();
     if builtin {
         return Ok(true);
     }
