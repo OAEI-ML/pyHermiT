@@ -759,7 +759,26 @@ struct NormalizedDataQuantifierTerm {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DataCardinalityKind {
+    Minimum,
+    Maximum,
+}
+
+enum DataCardinalityNormalization {
+    Quantifier {
+        kind: DataQuantifierKind,
+        complement_filler: bool,
+    },
+    Cardinality {
+        kind: DataCardinalityKind,
+        cardinality: u32,
+        cardinality_bytes: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DataCardinalityDefinition {
+    kind: DataCardinalityKind,
     cardinality: u32,
     role_id: u32,
     filler: AtomicDataRangeSelection,
@@ -767,6 +786,7 @@ struct DataCardinalityDefinition {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NormalizedDataCardinalityTerm {
+    kind: DataCardinalityKind,
     cardinality: u32,
     cardinality_bytes: Vec<u8>,
     role_id: u32,
@@ -940,6 +960,8 @@ enum DataConstraintKind {
     UniversalConsequent,
     MinimumAntecedent,
     MinimumConsequent,
+    MaximumAntecedent,
+    MaximumConsequent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -4642,10 +4664,15 @@ fn normalized_class_term<B: ByteSource>(
                 },
             )));
         }
-        if selection.is_none() && node.tag() == DATA_MIN_CARDINALITY_TAG && !complemented {
+        if selection.is_none()
+            && matches!(
+                node.tag(),
+                DATA_MIN_CARDINALITY_TAG | DATA_MAX_CARDINALITY_TAG
+            )
+        {
             if node.field_count() != 3 {
                 return Err(EncodedValidationError::invariant(
-                    "data-minimum definition no longer has schema-1 shape",
+                    "data-cardinality definition no longer has schema-1 shape",
                 ));
             }
             let Some(data_roles) = data_roles else {
@@ -4655,33 +4682,108 @@ fn normalized_class_term<B: ByteSource>(
                 model,
                 node,
                 0,
-                "data-minimum definition cardinality",
+                "data-cardinality definition cardinality",
                 budget,
             )?
             else {
                 return Ok(None);
             };
-            if cardinality <= 1 {
-                return Ok(None);
-            }
-            let property = node_field(model, node, 1, "data-minimum definition role")?;
+            let normalized = match (node.tag(), complemented, cardinality) {
+                (DATA_MIN_CARDINALITY_TAG, false, 0) => return Ok(None),
+                (DATA_MIN_CARDINALITY_TAG, false, 1) | (DATA_MAX_CARDINALITY_TAG, true, 0) => {
+                    DataCardinalityNormalization::Quantifier {
+                        kind: DataQuantifierKind::Some,
+                        complement_filler: false,
+                    }
+                }
+                (DATA_MIN_CARDINALITY_TAG, false, _) => DataCardinalityNormalization::Cardinality {
+                    kind: DataCardinalityKind::Minimum,
+                    cardinality,
+                    cardinality_bytes,
+                },
+                (DATA_MIN_CARDINALITY_TAG, true, 0) => {
+                    return Err(EncodedValidationError::invariant(
+                        "complemented zero data minimum did not reduce to a builtin",
+                    ));
+                }
+                (DATA_MIN_CARDINALITY_TAG, true, 1) | (DATA_MAX_CARDINALITY_TAG, false, 0) => {
+                    DataCardinalityNormalization::Quantifier {
+                        kind: DataQuantifierKind::All,
+                        complement_filler: true,
+                    }
+                }
+                (DATA_MIN_CARDINALITY_TAG, true, _) => {
+                    let normalized_cardinality = cardinality.checked_sub(1).ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "complemented data minimum cardinality underflowed",
+                        )
+                    })?;
+                    DataCardinalityNormalization::Cardinality {
+                        kind: DataCardinalityKind::Maximum,
+                        cardinality: normalized_cardinality,
+                        cardinality_bytes: canonical_u32_integer_bytes(
+                            normalized_cardinality,
+                            budget,
+                        )?,
+                    }
+                }
+                (DATA_MAX_CARDINALITY_TAG, false, u32::MAX) => return Ok(None),
+                (DATA_MAX_CARDINALITY_TAG, false, _) => DataCardinalityNormalization::Cardinality {
+                    kind: DataCardinalityKind::Maximum,
+                    cardinality,
+                    cardinality_bytes,
+                },
+                (DATA_MAX_CARDINALITY_TAG, true, _) => {
+                    let Some(normalized_cardinality) = cardinality.checked_add(1) else {
+                        return Ok(None);
+                    };
+                    if normalized_cardinality == 1 {
+                        DataCardinalityNormalization::Quantifier {
+                            kind: DataQuantifierKind::Some,
+                            complement_filler: false,
+                        }
+                    } else {
+                        DataCardinalityNormalization::Cardinality {
+                            kind: DataCardinalityKind::Minimum,
+                            cardinality: normalized_cardinality,
+                            cardinality_bytes: canonical_u32_integer_bytes(
+                                normalized_cardinality,
+                                budget,
+                            )?,
+                        }
+                    }
+                }
+                _ => {
+                    return Err(EncodedValidationError::invariant(
+                        "data-cardinality definition changed constructor",
+                    ));
+                }
+            };
+            let property = node_field(model, node, 1, "data-cardinality definition role")?;
             if !reduction_inputs_are_retained(model, symbols, property, depth, budget)? {
                 return Ok(None);
             }
             let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
-            let filler = node_field(model, node, 2, "data-minimum definition filler")?;
+            let filler = node_field(model, node, 2, "data-cardinality definition filler")?;
             let filler_depth =
-                child_expression_depth(depth, "data-minimum filler depth overflowed")?;
+                child_expression_depth(depth, "data-cardinality filler depth overflowed")?;
             PhaseBudget::count(
                 filler_depth,
                 budget.limits.max_canonical_depth,
                 "class-expression depth",
             )?;
+            let complement_filler = matches!(
+                &normalized,
+                DataCardinalityNormalization::Quantifier {
+                    complement_filler: true,
+                    ..
+                }
+            );
             let Some(filler) = normalized_data_term(
                 model,
                 symbols,
                 filler,
-                false,
+                complement_filler,
                 filler_depth,
                 scope_maps,
                 budget,
@@ -4692,28 +4794,59 @@ fn normalized_class_term<B: ByteSource>(
             let NormalizedDataTerm::Atomic(filler) = filler else {
                 return Ok(None);
             };
-            if atomic_data_range_selection_is_bottom(model, symbols, filler.selection)? {
+            if matches!(
+                &normalized,
+                DataCardinalityNormalization::Cardinality { .. }
+            ) && atomic_data_range_selection_is_bottom(model, symbols, filler.selection)?
+            {
                 return Ok(None);
             }
             let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
-            let key = synthetic_data_cardinality_key(
-                DATA_MIN_CARDINALITY_TAG,
-                &cardinality_bytes,
-                &property_key,
-                &filler.key,
-                budget,
-            )?;
-            budget.claim_owned(size_of::<NormalizedDataCardinalityTerm>())?;
-            return Ok(Some(NormalizedClassTerm::DataCardinality(
-                NormalizedDataCardinalityTerm {
+            return match normalized {
+                DataCardinalityNormalization::Quantifier { kind, .. } => {
+                    let key =
+                        synthetic_data_quantifier_key(kind, &property_key, &filler.key, budget)?;
+                    budget.claim_owned(size_of::<NormalizedDataQuantifierTerm>())?;
+                    Ok(Some(NormalizedClassTerm::DataQuantifier(
+                        NormalizedDataQuantifierTerm {
+                            kind,
+                            role_id,
+                            property_key,
+                            key,
+                            filler,
+                        },
+                    )))
+                }
+                DataCardinalityNormalization::Cardinality {
+                    kind,
                     cardinality,
                     cardinality_bytes,
-                    role_id,
-                    property_key,
-                    key,
-                    filler,
-                },
-            )));
+                } => {
+                    let tag = match kind {
+                        DataCardinalityKind::Minimum => DATA_MIN_CARDINALITY_TAG,
+                        DataCardinalityKind::Maximum => DATA_MAX_CARDINALITY_TAG,
+                    };
+                    let key = synthetic_data_cardinality_key(
+                        tag,
+                        &cardinality_bytes,
+                        &property_key,
+                        &filler.key,
+                        budget,
+                    )?;
+                    budget.claim_owned(size_of::<NormalizedDataCardinalityTerm>())?;
+                    Ok(Some(NormalizedClassTerm::DataCardinality(
+                        NormalizedDataCardinalityTerm {
+                            kind,
+                            cardinality,
+                            cardinality_bytes,
+                            role_id,
+                            property_key,
+                            key,
+                            filler,
+                        },
+                    )))
+                }
+            };
         }
         if selection.is_none() && node.tag() == OBJECT_EXACT_CARDINALITY_TAG {
             if node.field_count() != 3 {
@@ -5658,6 +5791,7 @@ fn atomize_normalized_data_cardinality(
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<u8>> {
     let NormalizedDataCardinalityTerm {
+        kind,
         cardinality,
         cardinality_bytes,
         role_id,
@@ -5670,18 +5804,21 @@ fn atomize_normalized_data_cardinality(
         key: filler_key,
         symbols: data_expression_symbols,
     } = filler;
+    let expression_tag = match kind {
+        DataCardinalityKind::Minimum => DATA_MIN_CARDINALITY_TAG,
+        DataCardinalityKind::Maximum => DATA_MAX_CARDINALITY_TAG,
+    };
     let mut expression_symbols = Vec::new();
-    let source_seed = class_expression_symbol_seed(&key, DATA_MIN_CARDINALITY_TAG, budget)?;
+    let source_seed = class_expression_symbol_seed(&key, expression_tag, budget)?;
     push_class_expression_symbol_seed(&mut expression_symbols, source_seed, budget)?;
     let rewritten_key = synthetic_data_cardinality_key(
-        DATA_MIN_CARDINALITY_TAG,
+        expression_tag,
         &cardinality_bytes,
         &property_key,
         &filler_key,
         budget,
     )?;
-    let rewritten_seed =
-        class_expression_symbol_seed(&rewritten_key, DATA_MIN_CARDINALITY_TAG, budget)?;
+    let rewritten_seed = class_expression_symbol_seed(&rewritten_key, expression_tag, budget)?;
     push_class_expression_symbol_seed(&mut expression_symbols, rewritten_seed, budget)?;
     budget.claim_work(sort_work(expression_symbols.len()))?;
     expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
@@ -5694,13 +5831,15 @@ fn atomize_normalized_data_cardinality(
     if let Some(expression) = source_expression {
         budget.claim_owned(size_of::<NodeId>())?;
         expressions.try_reserve_exact(1).map_err(|_| {
-            EncodedValidationError::resource("data-minimum definition expression allocation failed")
+            EncodedValidationError::resource(
+                "data-cardinality definition expression allocation failed",
+            )
         })?;
         expressions.push(expression);
     }
     budget.claim_owned(size_of::<ClassBooleanDefinition>())?;
     definitions.try_reserve(1).map_err(|_| {
-        EncodedValidationError::resource("data-minimum definition allocation failed")
+        EncodedValidationError::resource("data-cardinality definition allocation failed")
     })?;
     definitions.push(ClassBooleanDefinition {
         expressions,
@@ -5715,6 +5854,7 @@ fn atomize_normalized_data_cardinality(
         object_cardinality: None,
         data_quantifier: None,
         data_cardinality: Some(DataCardinalityDefinition {
+            kind,
             cardinality,
             role_id,
             filler: selection,
@@ -13583,7 +13723,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 || definition.provenance.is_empty()
             {
                 return Err(EncodedValidationError::invariant(
-                    "generated data-minimum definition changed before emission",
+                    "generated data-cardinality definition changed before emission",
                 ));
             }
             let filler = atomic_data_range_selection_literal(
@@ -13598,13 +13738,23 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 budget.claim_owned(size_of::<RawDataConstraint>())?;
                 data_constraints.try_reserve(1).map_err(|_| {
                     EncodedValidationError::resource(
-                        "generated data-minimum clause allocation failed",
+                        "generated data-cardinality clause allocation failed",
                     )
                 })?;
                 data_constraints.push(RawDataConstraint {
-                    kind: match definition.polarity {
-                        DefinitionPolarity::Positive => DataConstraintKind::MinimumConsequent,
-                        DefinitionPolarity::Negative => DataConstraintKind::MinimumAntecedent,
+                    kind: match (cardinality.kind, definition.polarity) {
+                        (DataCardinalityKind::Minimum, DefinitionPolarity::Positive) => {
+                            DataConstraintKind::MinimumConsequent
+                        }
+                        (DataCardinalityKind::Minimum, DefinitionPolarity::Negative) => {
+                            DataConstraintKind::MinimumAntecedent
+                        }
+                        (DataCardinalityKind::Maximum, DefinitionPolarity::Positive) => {
+                            DataConstraintKind::MaximumConsequent
+                        }
+                        (DataCardinalityKind::Maximum, DefinitionPolarity::Negative) => {
+                            DataConstraintKind::MaximumAntecedent
+                        }
                     },
                     role_id: cardinality.role_id,
                     class: generated,
@@ -15319,9 +15469,12 @@ fn freeze_predicates(
                 ObjectConstraintKind::UniversalAntecedent | ObjectConstraintKind::MaximumAntecedent
             )
         })
-        || data_constraints
-            .iter()
-            .any(|value| value.kind == DataConstraintKind::UniversalAntecedent)
+        || data_constraints.iter().any(|value| {
+            matches!(
+                value.kind,
+                DataConstraintKind::UniversalAntecedent | DataConstraintKind::MaximumAntecedent
+            )
+        })
     {
         push_u32(&mut class_ids, thing, "predicate class", budget)?;
     }
@@ -15494,7 +15647,11 @@ fn freeze_predicates(
             owner: PredicateOwner::Equality(TermSort::Object),
         });
     }
-    if !data_functionalities.is_empty() {
+    if !data_functionalities.is_empty()
+        || data_constraints
+            .iter()
+            .any(|constraint| constraint.kind == DataConstraintKind::MaximumConsequent)
+    {
         let key = equality_predicate_key(TermSort::Data);
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
@@ -15531,10 +15688,12 @@ fn freeze_predicates(
     if !negative_data_facts.is_empty()
         || keys.iter().any(|key| !key.data_role_ids.is_empty())
         || data_constraints.iter().any(|constraint| {
-            matches!(
+            (matches!(
                 constraint.kind,
                 DataConstraintKind::MinimumAntecedent | DataConstraintKind::MinimumConsequent
-            ) && constraint.cardinality.is_some_and(|value| value > 1)
+            ) && constraint.cardinality.is_some_and(|value| value > 1))
+                || (constraint.kind == DataConstraintKind::MaximumAntecedent
+                    && constraint.cardinality.is_some())
         })
     {
         let key = inequality_predicate_key(TermSort::Data);
@@ -15734,6 +15893,7 @@ fn freeze_predicates(
                 | DataConstraintKind::UniversalAntecedent
                 | DataConstraintKind::MinimumAntecedent
                 | DataConstraintKind::MinimumConsequent
+                | DataConstraintKind::MaximumAntecedent
         )
     }) {
         let cardinality = match constraint.kind {
@@ -15758,6 +15918,19 @@ fn freeze_predicates(
                 }
                 cardinality
             }
+            DataConstraintKind::MaximumAntecedent => constraint
+                .cardinality
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "data-maximum constraint lost its cardinality",
+                    )
+                })?
+                .checked_add(1)
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "data-maximum antecedent cardinality overflowed",
+                    )
+                })?,
             _ => {
                 return Err(EncodedValidationError::invariant(
                     "non-cardinality data constraint reached at-least collection",
@@ -17423,6 +17596,60 @@ fn freeze_clauses(
                     budget,
                 )?;
             }
+            DataConstraintKind::MaximumAntecedent => {
+                let cardinality = constraint
+                    .cardinality
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "data-maximum antecedent lost its cardinality",
+                        )
+                    })?
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "data-maximum antecedent cardinality overflowed",
+                        )
+                    })?;
+                let at_least = at_least_data_predicate_id(
+                    at_least_data_predicates,
+                    cardinality,
+                    constraint.role_id,
+                    constraint.filler,
+                )?;
+                let thing_predicate = predicate_id(predicate_by_class, thing)?;
+                push_clause(
+                    &mut ordered,
+                    &[thing_predicate],
+                    &[at_least, class],
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+            DataConstraintKind::MaximumConsequent => {
+                let cardinality = constraint.cardinality.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "data-maximum consequent lost its cardinality",
+                    )
+                })?;
+                let role = data_predicate_id(predicate_by_data_role, constraint.role_id)?;
+                let equality = data_equality_predicate.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "data-maximum consequent lost the data equality predicate",
+                    )
+                })?;
+                push_data_at_most_clause(
+                    &mut ordered,
+                    class,
+                    role,
+                    filler,
+                    equality,
+                    cardinality,
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
             DataConstraintKind::ExistentialAntecedent | DataConstraintKind::UniversalConsequent => {
                 let role = data_predicate_id(predicate_by_data_role, constraint.role_id)?;
                 push_data_constraint_clause(
@@ -19028,6 +19255,145 @@ fn push_object_at_most_clause(
     clauses
         .try_reserve(1)
         .map_err(|_| EncodedValidationError::resource("object at-most clause allocation failed"))?;
+    clauses.push((
+        key,
+        DecodedClause {
+            clause_id: 0,
+            body,
+            head,
+            provenance_ids: vec![provenance_id],
+            join_order,
+        },
+    ));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_data_at_most_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    class_predicate_id: u32,
+    role_predicate_id: u32,
+    filler_predicate_id: u32,
+    equality_predicate_id: u32,
+    cardinality: u32,
+    provenance_id: u32,
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    if cardinality == 0 {
+        return Err(EncodedValidationError::invariant(
+            "zero data at-most did not normalize to a universal restriction",
+        ));
+    }
+    let target_count = usize::try_from(cardinality)
+        .map_err(|_| EncodedValidationError::resource("data at-most cardinality exceeds usize"))?
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("data at-most target count overflowed"))?;
+    let equality_count = target_count
+        .checked_mul(target_count.checked_sub(1).ok_or_else(|| {
+            EncodedValidationError::invariant("data at-most target count is empty")
+        })?)
+        .and_then(|value| value.checked_div(2))
+        .ok_or_else(|| {
+            EncodedValidationError::resource("data at-most equality count overflowed")
+        })?;
+    let body_count = target_count
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| {
+            EncodedValidationError::resource("data at-most body atom count overflowed")
+        })?;
+    let atom_count = body_count
+        .checked_add(equality_count)
+        .ok_or_else(|| EncodedValidationError::resource("data at-most atom count overflowed"))?;
+    let term_count = target_count
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(equality_count.checked_mul(2)?))
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| EncodedValidationError::resource("data at-most term count overflowed"))?;
+    budget.claim_work(atom_count)?;
+    budget.claim_owned(
+        atom_count
+            .checked_mul(size_of::<DecodedAtom>())
+            .and_then(|value| value.checked_add(term_count.checked_mul(size_of::<DecodedTerm>())?))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("data at-most temporary clause payload overflowed")
+            })?,
+    )?;
+
+    let mut body = Vec::new();
+    let mut head = Vec::new();
+    body.try_reserve_exact(body_count)
+        .map_err(|_| EncodedValidationError::resource("data at-most body allocation failed"))?;
+    head.try_reserve_exact(equality_count)
+        .map_err(|_| EncodedValidationError::resource("data at-most head allocation failed"))?;
+    body.push(variable_atom_at(class_predicate_id, 0, TermSort::Object));
+    for offset in 0..target_count {
+        let target = u32::try_from(offset)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("data at-most variable ID exceeds u32")
+            })?;
+        body.push(data_variable_atom(role_predicate_id, 0, target));
+        body.push(variable_atom_at(
+            filler_predicate_id,
+            target,
+            TermSort::Data,
+        ));
+    }
+    for left_offset in 0..target_count {
+        let left = u32::try_from(left_offset)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("data at-most variable ID exceeds u32")
+            })?;
+        for right_offset in left_offset.checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("data at-most variable offset overflowed")
+        })?..target_count
+        {
+            let right = u32::try_from(right_offset)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("data at-most variable ID exceeds u32")
+                })?;
+            head.push(data_equality_variable_atom(
+                equality_predicate_id,
+                left,
+                right,
+            ));
+        }
+    }
+
+    let equality_predicates = [equality_predicate_id];
+    let (body, head) = canonicalize_variable_rule(
+        body,
+        head,
+        &equality_predicates,
+        &[],
+        scalar_predicate_ids,
+        budget,
+    )?;
+    let join_order = plan_key_join(&body, u32::MAX, scalar_predicate_ids, budget)?;
+    let key = variable_rule_key(&body, &head)?;
+    budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>() + key.len())?;
+    budget.claim_owned(
+        body.len()
+            .checked_add(head.len())
+            .and_then(|value| value.checked_mul(size_of::<DecodedAtom>()))
+            .and_then(|value| value.checked_add(term_count.checked_mul(size_of::<DecodedTerm>())?))
+            .and_then(|value| {
+                value.checked_add(body.len().checked_add(1)?.checked_mul(size_of::<u32>())?)
+            })
+            .ok_or_else(|| {
+                EncodedValidationError::resource("data at-most clause payload overflowed")
+            })?,
+    )?;
+    clauses
+        .try_reserve(1)
+        .map_err(|_| EncodedValidationError::resource("data at-most clause allocation failed"))?;
     clauses.push((
         key,
         DecodedClause {
