@@ -6167,6 +6167,100 @@ def test_implicit_builtin_datatype_restriction_reductions_match_scalar() -> None
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_discarded_data_range_values_reduce_without_symbols() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            'SubClassOf(:A DataSomeValuesFrom(owl:bottomDataProperty '
+            'DataOneOf("discarded")))',
+            'SubClassOf(DataAllValuesFrom(owl:bottomDataProperty '
+            'DataOneOf("discarded")) :B)',
+            "SubClassOf(:A DataSomeValuesFrom(owl:bottomDataProperty "
+            'DatatypeRestriction(xsd:string xsd:minLength "1"^^xsd:integer)))',
+            "SubClassOf(DataAllValuesFrom(owl:bottomDataProperty "
+            'DatatypeRestriction(xsd:string xsd:minLength "1"^^xsd:integer)) :B)',
+            'SubClassOf(DataMinCardinality(0 :d DataOneOf("discarded")) :B)',
+            "SubClassOf(:A ObjectComplementOf(DataMinCardinality(0 :d "
+            'DatatypeRestriction(xsd:string xsd:minLength "1"^^xsd:integer))))',
+            'SubClassOf(:A DataMaxCardinality(2 owl:bottomDataProperty '
+            'DataOneOf("discarded")))',
+            "SubClassOf(DataExactCardinality(2 owl:bottomDataProperty "
+            'DatatypeRestriction(xsd:string xsd:minLength "1"^^xsd:integer)) :B)',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=8)
+    assert manifest["source_literal_symbols"] == []
+    assert manifest["data_value_symbols"] == []
+    assert [
+        value["display"]
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            (
+                "DataSomeValuesFrom:",
+                "DataAllValuesFrom:",
+                "DataMinCardinality:",
+                "DataMaxCardinality:",
+                "DataExactCardinality:",
+            )
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_discarded_data_range_value_keeps_shared_live_literal() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            'SubClassOf(:A DataSomeValuesFrom(owl:bottomDataProperty '
+            'DataOneOf("shared")))',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            'SubClassOf(:B DataHasValue(:d "shared"))',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    records = _composite_records(composite, (left, right))
+
+    forward = _native_slices_manifest(
+        *records,
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+    reverse = _native_slices_manifest(
+        *reversed(records),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert forward == reverse == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+    )
+    assert len(cast(list[object], forward["source_literal_symbols"])) == 1
+    assert len(cast(list[object], forward["data_value_symbols"])) == 1
+    assert forward["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
     string_datatype = "<http://www.w3.org/2001/XMLSchema#string>"
     snapshot = pyowl_core.load_snapshot(

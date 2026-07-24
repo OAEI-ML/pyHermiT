@@ -9111,8 +9111,11 @@ fn reduction_inputs_are_retained<B: ByteSource>(
         })?;
         return reduction_entity_is_retained(symbols, entity_id);
     }
-    if matches!(node.tag(), ANONYMOUS_INDIVIDUAL_TAG | LITERAL_TAG) {
+    if node.tag() == ANONYMOUS_INDIVIDUAL_TAG {
         return Ok(false);
+    }
+    if node.tag() == LITERAL_TAG {
+        return Ok(symbols.semantic_node_is_reachable(identifier));
     }
     let child_depth = child_expression_depth(depth, "reducible-expression depth overflowed")?;
     for field_index in node.fields() {
