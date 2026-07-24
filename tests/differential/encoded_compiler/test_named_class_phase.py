@@ -3708,7 +3708,7 @@ def test_unsupported_data_quantifier_inputs_defer_without_symbol_leaks() -> None
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "SubClassOf(:A DataSomeValuesFrom(:d :e xsd:string))",
-            "SubClassOf(DataMinCardinality(2 :d "
+            "SubClassOf(DataMaxCardinality(2 :d "
             "DataIntersectionOf(xsd:string xsd:integer)) :B)",
             "SubClassOf(:A DataSomeValuesFrom(:undeclared xsd:string))",
             "EquivalentClasses(:A DataSomeValuesFrom(:d "
@@ -3890,6 +3890,149 @@ def test_composite_data_minimum_definitions_reuse_global_identity() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_recursive_data_minimum_fillers_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A DataMinCardinality(2 :d "
+            "DataIntersectionOf(xsd:string xsd:integer)))",
+            'SubClassOf(Annotation(:note "same dependencies") :A '
+            "DataMinCardinality(2 :d "
+            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "SubClassOf(DataMinCardinality(3 :e "
+            "DataUnionOf(xsd:boolean xsd:decimal)) :B)",
+            "SubClassOf(:B DataMinCardinality(1 :d DataIntersectionOf("
+            "xsd:string DataUnionOf(xsd:integer xsd:boolean))))",
+            "SubClassOf(ObjectComplementOf(DataMinCardinality(3 :d "
+            "DataUnionOf(xsd:string xsd:decimal))) :A)",
+            "SubClassOf(:A ObjectComplementOf(DataMinCardinality(1 :e "
+            "DataIntersectionOf(xsd:boolean xsd:integer))))",
+            "DataPropertyRange(:e "
+            "DataIntersectionOf(xsd:string xsd:integer))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=7,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_data_ranges=True,
+        include_generated_data_definitions=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_recursive_data_minimum_fillers_cover_generated_class_contexts() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "ClassAssertion(DataMinCardinality(2 :d "
+            "DataUnionOf(xsd:string xsd:integer)) :i)",
+            "ObjectPropertyDomain(:p DataMinCardinality(3 :e "
+            "DataIntersectionOf(xsd:boolean xsd:decimal)))",
+            "DataPropertyDomain(:d DataMinCardinality(4 :e "
+            "DataUnionOf(xsd:decimal xsd:integer)))",
+            "HasKey(DataMinCardinality(5 :d "
+            "DataIntersectionOf(xsd:string xsd:boolean)) (:p) (:e))",
+            "DisjointClasses(DataMinCardinality(2 :e "
+            "DataUnionOf(xsd:string xsd:decimal)) :A)",
+            "SubClassOf(ObjectIntersectionOf(:B DataMinCardinality(3 :d "
+            "DataIntersectionOf(xsd:boolean xsd:integer))) :A)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=6,
+        include_object_constraints=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_recursive_data_minimum_fillers_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(DataProperty(:d))",
+    )
+    minimum = (
+        "DataMinCardinality(2 :d "
+        "DataIntersectionOf(xsd:string DataUnionOf(xsd:integer xsd:boolean)))"
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"SubClassOf(:A {minimum})",
+            f"SubClassOf({minimum} :B)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"ObjectPropertyDomain(:p {minimum})",
+            f"DisjointClasses({minimum} :A)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    class_namespace = f":class:{composite.logical_fingerprint.hex}:"
+    data_namespace = f":data:{composite.logical_fingerprint.hex}:"
+    assert sum(
+        class_namespace in str(value["display"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ) == 2
+    assert sum(
+        data_namespace in str(value["display"])
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        if value["generated"]
+    ) == 4
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_unsupported_data_minimum_inputs_defer_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -3897,10 +4040,11 @@ def test_unsupported_data_minimum_inputs_defer_without_symbol_leaks() -> None:
             "Declaration(Class(:B))",
             "Declaration(DataProperty(:d))",
             "SubClassOf(:A DataMinCardinality(4294967296 :d xsd:string))",
-            "SubClassOf(:A DataMinCardinality(2 :d "
-            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "SubClassOf(:A ObjectComplementOf("
+            "DataMinCardinality(4294967296 :d xsd:string)))",
             "SubClassOf(:A DataMinCardinality(2 :undeclared xsd:string))",
-            "EquivalentClasses(:A DataMinCardinality(2 :d xsd:string) "
+            "EquivalentClasses(:A DataMinCardinality(2 :d "
+            "DataIntersectionOf(xsd:string xsd:integer)) "
             'DataHasValue(:undeclared "value"))',
         ),
         options=OPTIONS,
@@ -3916,6 +4060,13 @@ def test_unsupported_data_minimum_inputs_defer_without_symbol_leaks() -> None:
         for value in cast(
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
+    )
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            ("DataIntersectionOf:", "DataUnionOf:")
+        )
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert all(
         predicate["kind"]

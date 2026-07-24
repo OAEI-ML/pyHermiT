@@ -799,7 +799,7 @@ struct NormalizedDataCardinalityTerm {
     role_id: u32,
     property_key: Vec<u8>,
     key: Vec<u8>,
-    filler: NormalizedAtomicDataTerm,
+    filler: NormalizedDataTerm,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5072,28 +5072,34 @@ fn normalized_class_term<B: ByteSource>(
             else {
                 return Ok(None);
             };
-            let NormalizedDataTerm::Atomic(filler) = filler else {
+            if node.tag() == DATA_MAX_CARDINALITY_TAG
+                && matches!(&filler, NormalizedDataTerm::Boolean(_))
+            {
                 return Ok(None);
-            };
+            }
             if matches!(
                 &normalized,
                 DataCardinalityNormalization::Cardinality { .. }
-            ) && atomic_data_range_selection_is_bottom(
-                model,
-                symbols,
-                filler.selection.ok_or_else(|| {
-                    EncodedValidationError::invariant(
-                        "data-cardinality source filler became synthetic",
-                    )
-                })?,
-            )? {
-                return Ok(None);
+            ) {
+                if let NormalizedDataTerm::Atomic(atomic) = &filler {
+                    if atomic_data_range_selection_is_bottom(
+                        model,
+                        symbols,
+                        atomic.selection.ok_or_else(|| {
+                            EncodedValidationError::invariant(
+                                "data-cardinality source filler became synthetic",
+                            )
+                        })?,
+                    )? {
+                        return Ok(None);
+                    }
+                }
             }
             let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
             return match normalized {
                 DataCardinalityNormalization::Quantifier { kind, .. } => {
                     let key =
-                        synthetic_data_quantifier_key(kind, &property_key, &filler.key, budget)?;
+                        synthetic_data_quantifier_key(kind, &property_key, filler.key(), budget)?;
                     budget.claim_owned(size_of::<NormalizedDataQuantifierTerm>())?;
                     Ok(Some(NormalizedClassTerm::DataQuantifier(
                         NormalizedDataQuantifierTerm {
@@ -5101,7 +5107,7 @@ fn normalized_class_term<B: ByteSource>(
                             role_id,
                             property_key,
                             key,
-                            filler: NormalizedDataTerm::Atomic(filler),
+                            filler,
                         },
                     )))
                 }
@@ -5118,7 +5124,7 @@ fn normalized_class_term<B: ByteSource>(
                         tag,
                         &cardinality_bytes,
                         &property_key,
-                        &filler.key,
+                        filler.key(),
                         budget,
                     )?;
                     budget.claim_owned(size_of::<NormalizedDataCardinalityTerm>())?;
@@ -5835,7 +5841,7 @@ fn normalized_data_restriction_term<B: ByteSource>(
                     role_id,
                     property_key,
                     key,
-                    filler,
+                    filler: NormalizedDataTerm::Atomic(filler),
                 },
             )))
         }
@@ -6204,16 +6210,41 @@ fn atomize_normalized_data_cardinality(
         key,
         filler,
     } = term;
-    let NormalizedAtomicDataTerm {
-        selection: _,
-        base_key: filler_base_key,
-        negative: filler_negative,
-        key: filler_key,
-        symbols: data_expression_symbols,
-    } = filler;
     let expression_tag = match kind {
         DataCardinalityKind::Minimum => DATA_MIN_CARDINALITY_TAG,
         DataCardinalityKind::Maximum => DATA_MAX_CARDINALITY_TAG,
+    };
+    let mut data_dependencies = Vec::new();
+    let (filler_base_key, filler_negative, filler_key, data_expression_symbols) = match filler {
+        NormalizedDataTerm::Atomic(filler) => {
+            let NormalizedAtomicDataTerm {
+                selection: _,
+                base_key,
+                negative,
+                key,
+                symbols,
+            } = filler;
+            (base_key, negative, key, symbols)
+        }
+        NormalizedDataTerm::Boolean(filler) => {
+            let filler_polarity = match kind {
+                DataCardinalityKind::Minimum => polarity,
+                DataCardinalityKind::Maximum => match polarity {
+                    DefinitionPolarity::Positive => DefinitionPolarity::Negative,
+                    DefinitionPolarity::Negative => DefinitionPolarity::Positive,
+                },
+            };
+            let generated_key = atomize_normalized_data_boolean(
+                filler,
+                None,
+                namespace,
+                filler_polarity,
+                &mut data_dependencies,
+                budget,
+            )?;
+            budget.claim_owned(generated_key.len())?;
+            (generated_key.clone(), false, generated_key, Vec::new())
+        }
     };
     let mut expression_symbols = Vec::new();
     let source_seed = class_expression_symbol_seed(&key, expression_tag, budget)?;
@@ -6269,7 +6300,7 @@ fn atomize_normalized_data_cardinality(
                 negative: filler_negative,
             },
         }),
-        data_dependencies: Vec::new(),
+        data_dependencies,
         complement: false,
         polarity,
         generated_key,
