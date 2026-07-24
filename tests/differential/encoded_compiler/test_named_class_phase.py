@@ -6453,6 +6453,90 @@ def test_complemented_reduced_atomic_class_booleans_match_scalar_contexts() -> N
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+@pytest.mark.parametrize(
+    ("mode", "expression"),
+    (
+        (
+            "union/direct",
+            "ObjectComplementOf(ObjectUnionOf("
+            "owl:Thing ObjectHasSelf(:discarded)))",
+        ),
+        (
+            "union/complemented-multi-live",
+            "ObjectComplementOf(ObjectUnionOf("
+            ":A :B owl:Thing ObjectComplementOf(ObjectHasSelf(:discarded))))",
+        ),
+        (
+            "union/nested",
+            "ObjectComplementOf(ObjectUnionOf("
+            "owl:Thing ObjectIntersectionOf(:A ObjectHasSelf(:discarded))))",
+        ),
+        (
+            "intersection/direct",
+            "ObjectComplementOf(ObjectIntersectionOf("
+            "owl:Nothing ObjectHasSelf(:discarded)))",
+        ),
+        (
+            "intersection/complemented-multi-live",
+            "ObjectComplementOf(ObjectIntersectionOf("
+            ":A :B owl:Nothing ObjectComplementOf(ObjectHasSelf(:discarded))))",
+        ),
+        (
+            "intersection/nested",
+            "ObjectComplementOf(ObjectIntersectionOf("
+            "owl:Nothing ObjectUnionOf(:A ObjectHasSelf(:discarded))))",
+        ),
+    ),
+)
+def test_absorbing_class_booleans_discard_object_self_in_scalar_contexts(
+    mode: str,
+    expression: str,
+) -> None:
+    contexts = (
+        "SubClassOf({} :Z)",
+        "SubClassOf(:Z {})",
+        "EquivalentClasses(:Z {})",
+        "DisjointClasses(:Z {})",
+        "ClassAssertion({} :i)",
+        "ObjectPropertyDomain(:p {})",
+        "ObjectPropertyRange(:p {})",
+        "DataPropertyDomain(:d {})",
+        "HasKey({} (:p) (:d))",
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:Z))",
+            "Declaration(ObjectProperty(:discarded))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:i))",
+            *(context.format(expression) for context in contexts),
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=9,
+        include_object_constraints=True,
+        include_generated_object_self_definitions=True,
+        include_data_domains=True,
+        include_keys=True,
+    ), mode
+    assert not any(
+        str(value["display"]).startswith("ObjectHasSelf:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
     string_datatype = "<http://www.w3.org/2001/XMLSchema#string>"
     snapshot = pyowl_core.load_snapshot(

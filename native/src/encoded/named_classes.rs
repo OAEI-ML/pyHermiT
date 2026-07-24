@@ -613,6 +613,67 @@ struct AtomicClassSelection {
     synthetic_complement: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AtomicClassProjection {
+    Selected(AtomicClassSelection),
+    Discardable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AtomicClassProjectionScope {
+    Required,
+    BooleanOperand,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClassBooleanReductionMode {
+    Intersection,
+    Union,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClassBooleanReductionRule {
+    mode: ClassBooleanReductionMode,
+    identity_display: &'static str,
+    absorbing_display: &'static str,
+}
+
+const CLASS_BOOLEAN_REDUCTION_RULES: [ClassBooleanReductionRule; 2] = [
+    ClassBooleanReductionRule {
+        mode: ClassBooleanReductionMode::Intersection,
+        identity_display: THING_DISPLAY,
+        absorbing_display: NOTHING_DISPLAY,
+    },
+    ClassBooleanReductionRule {
+        mode: ClassBooleanReductionMode::Union,
+        identity_display: NOTHING_DISPLAY,
+        absorbing_display: THING_DISPLAY,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObjectValueProjectionRule {
+    tag: u16,
+    field_count: usize,
+    top_reduction: Option<&'static str>,
+    discardable_boolean_operand: bool,
+}
+
+const OBJECT_VALUE_PROJECTION_RULES: [ObjectValueProjectionRule; 2] = [
+    ObjectValueProjectionRule {
+        tag: OBJECT_HAS_VALUE_TAG,
+        field_count: 2,
+        top_reduction: None,
+        discardable_boolean_operand: false,
+    },
+    ObjectValueProjectionRule {
+        tag: OBJECT_HAS_SELF_TAG,
+        field_count: 1,
+        top_reduction: Some(THING_DISPLAY),
+        discardable_boolean_operand: true,
+    },
+];
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum DefinitionPolarity {
     Positive,
@@ -4406,7 +4467,16 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
             "disjoint-union root has fewer than two members",
         ));
     }
-    if reducible_class_boolean_operands(model, symbols, expressions, false, 0, budget)?.is_some() {
+    if reducible_class_boolean_operands(
+        model,
+        symbols,
+        expressions,
+        ClassBooleanReductionMode::Union,
+        0,
+        budget,
+    )?
+    .is_some()
+    {
         return Ok(());
     }
     let member_depth = child_expression_depth(0, "class-expression depth overflowed")?;
@@ -8149,7 +8219,7 @@ fn class_signature<B: ByteSource>(
                     model,
                     symbols,
                     expressions,
-                    false,
+                    ClassBooleanReductionMode::Union,
                     0,
                     budget,
                 )?
@@ -8778,6 +8848,28 @@ fn atomic_class_selection_at_depth<B: ByteSource>(
     initial_depth: usize,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<AtomicClassSelection>> {
+    let projection = atomic_class_projection_at_depth(
+        model,
+        symbols,
+        identifier,
+        initial_depth,
+        AtomicClassProjectionScope::Required,
+        budget,
+    )?;
+    Ok(match projection {
+        Some(AtomicClassProjection::Selected(selection)) => Some(selection),
+        Some(AtomicClassProjection::Discardable) | None => None,
+    })
+}
+
+fn atomic_class_projection_at_depth<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    initial_depth: usize,
+    scope: AtomicClassProjectionScope,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassProjection>> {
     let mut base = identifier;
     let mut negative = false;
     let mut normalized_complement = None;
@@ -8813,20 +8905,25 @@ fn atomic_class_selection_at_depth<B: ByteSource>(
 
     let base_node = model.node(base)?;
     let base_is_atomic = matches!(base_node.tag(), ENTITY_TAG | OBJECT_ONE_OF_TAG);
-    let Some(selection) = positive_atomic_class_selection(model, symbols, base, depth, budget)?
+    let Some(projection) =
+        positive_atomic_class_projection(model, symbols, base, depth, scope, budget)?
     else {
         return Ok(None);
     };
+    let AtomicClassProjection::Selected(selection) = projection else {
+        return Ok(Some(AtomicClassProjection::Discardable));
+    };
     if !negative {
-        return Ok(Some(selection));
+        return Ok(Some(AtomicClassProjection::Selected(selection)));
     }
-    complement_atomic_class_selection(
+    Ok(complement_atomic_class_selection(
         model,
         symbols,
         selection,
         normalized_complement.unwrap_or(identifier),
         base_is_atomic,
-    )
+    )?
+    .map(AtomicClassProjection::Selected))
 }
 
 fn positive_atomic_class_selection<B: ByteSource>(
@@ -8836,6 +8933,28 @@ fn positive_atomic_class_selection<B: ByteSource>(
     depth: usize,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<AtomicClassSelection>> {
+    let projection = positive_atomic_class_projection(
+        model,
+        symbols,
+        identifier,
+        depth,
+        AtomicClassProjectionScope::Required,
+        budget,
+    )?;
+    Ok(match projection {
+        Some(AtomicClassProjection::Selected(selection)) => Some(selection),
+        Some(AtomicClassProjection::Discardable) | None => None,
+    })
+}
+
+fn positive_atomic_class_projection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    depth: usize,
+    scope: AtomicClassProjectionScope,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassProjection>> {
     let node = model.node(identifier)?;
     if node.tag() == ENTITY_TAG {
         let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
@@ -8847,42 +8966,51 @@ fn positive_atomic_class_selection<B: ByteSource>(
         if !display.starts_with("class:") {
             return Ok(None);
         }
-        return Ok(Some(AtomicClassSelection {
-            source: AtomicClassSource::Entity(entity_id),
-            expression: identifier,
-            negative: false,
-            synthetic_complement: false,
-        }));
+        return Ok(Some(AtomicClassProjection::Selected(
+            AtomicClassSelection {
+                source: AtomicClassSource::Entity(entity_id),
+                expression: identifier,
+                negative: false,
+                synthetic_complement: false,
+            },
+        )));
     }
     if node.tag() == OBJECT_ONE_OF_TAG {
         if !is_named_nominal(model, symbols, identifier, budget)? {
             return Ok(None);
         }
-        return Ok(Some(AtomicClassSelection {
-            source: AtomicClassSource::Nominal(identifier),
-            expression: identifier,
-            negative: false,
-            synthetic_complement: false,
-        }));
+        return Ok(Some(AtomicClassProjection::Selected(
+            AtomicClassSelection {
+                source: AtomicClassSource::Nominal(identifier),
+                expression: identifier,
+                negative: false,
+                synthetic_complement: false,
+            },
+        )));
     }
     match node.tag() {
         OBJECT_SOME_VALUES_FROM_TAG | OBJECT_ALL_VALUES_FROM_TAG => {
-            return reducible_object_quantifier_selection(model, symbols, node, depth, budget);
+            return reducible_object_quantifier_selection(model, symbols, node, depth, budget)
+                .map(|selection| selection.map(AtomicClassProjection::Selected));
         }
         OBJECT_HAS_VALUE_TAG | OBJECT_HAS_SELF_TAG => {
-            return reducible_object_value_selection(model, symbols, node, depth, budget);
+            return reducible_object_value_projection(model, symbols, node, depth, scope, budget);
         }
         OBJECT_MIN_CARDINALITY_TAG | OBJECT_MAX_CARDINALITY_TAG | OBJECT_EXACT_CARDINALITY_TAG => {
-            return reducible_object_cardinality_selection(model, symbols, node, depth, budget);
+            return reducible_object_cardinality_selection(model, symbols, node, depth, budget)
+                .map(|selection| selection.map(AtomicClassProjection::Selected));
         }
         DATA_SOME_VALUES_FROM_TAG | DATA_ALL_VALUES_FROM_TAG => {
-            return reducible_data_quantifier_selection(model, symbols, node, depth, budget);
+            return reducible_data_quantifier_selection(model, symbols, node, depth, budget)
+                .map(|selection| selection.map(AtomicClassProjection::Selected));
         }
         DATA_HAS_VALUE_TAG => {
-            return reducible_data_has_value_selection(model, symbols, node, depth, budget);
+            return reducible_data_has_value_selection(model, symbols, node, depth, budget)
+                .map(|selection| selection.map(AtomicClassProjection::Selected));
         }
         DATA_MIN_CARDINALITY_TAG | DATA_MAX_CARDINALITY_TAG | DATA_EXACT_CARDINALITY_TAG => {
-            return reducible_data_cardinality_selection(model, symbols, node, depth, budget);
+            return reducible_data_cardinality_selection(model, symbols, node, depth, budget)
+                .map(|selection| selection.map(AtomicClassProjection::Selected));
         }
         _ => {}
     }
@@ -8901,11 +9029,15 @@ fn positive_atomic_class_selection<B: ByteSource>(
             "class Boolean operands did not resolve to a collection",
         ));
     };
-    reducible_class_boolean_operands(
+    project_class_boolean_operands(
         model,
         symbols,
         operands,
-        node.tag() == OBJECT_INTERSECTION_OF_TAG,
+        if node.tag() == OBJECT_INTERSECTION_OF_TAG {
+            ClassBooleanReductionMode::Intersection
+        } else {
+            ClassBooleanReductionMode::Union
+        },
         depth,
         budget,
     )
@@ -8915,10 +9047,31 @@ fn reducible_class_boolean_operands<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     operands: CollectionRef,
-    intersection: bool,
+    mode: ClassBooleanReductionMode,
     depth: usize,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<AtomicClassSelection>> {
+    let projection = project_class_boolean_operands(model, symbols, operands, mode, depth, budget)?;
+    Ok(match projection {
+        Some(AtomicClassProjection::Selected(selection)) => Some(selection),
+        Some(AtomicClassProjection::Discardable) | None => None,
+    })
+}
+
+fn project_class_boolean_operands<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    operands: CollectionRef,
+    mode: ClassBooleanReductionMode,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicClassProjection>> {
+    let rule = CLASS_BOOLEAN_REDUCTION_RULES
+        .iter()
+        .find(|rule| rule.mode == mode)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("class Boolean reduction mode lost its rule")
+        })?;
     let operand_depth = child_expression_depth(depth, "class-expression depth overflowed")?;
     PhaseBudget::count(
         operand_depth,
@@ -8928,6 +9081,8 @@ fn reducible_class_boolean_operands<B: ByteSource>(
     let mut absorbing = None;
     let mut retained = None;
     let mut identity = None;
+    let mut discardable = false;
+    let mut multiple_retained = false;
     for item_index in operands.items() {
         budget.claim_work(1)?;
         let item = required_component(model.item(item_index)?, "class Boolean operand")?;
@@ -8936,21 +9091,29 @@ fn reducible_class_boolean_operands<B: ByteSource>(
                 "class Boolean operand did not resolve to a node",
             ));
         };
-        let Some(selection) =
-            atomic_class_selection_at_depth(model, symbols, operand, operand_depth, budget)?
+        let Some(projection) = atomic_class_projection_at_depth(
+            model,
+            symbols,
+            operand,
+            operand_depth,
+            AtomicClassProjectionScope::BooleanOperand,
+            budget,
+        )?
         else {
             return Ok(None);
         };
-        let is_thing = atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?;
-        let is_nothing = atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?;
-        if (intersection && is_nothing) || (!intersection && is_thing) {
+        let AtomicClassProjection::Selected(selection) = projection else {
+            discardable = true;
+            continue;
+        };
+        if atomic_class_selection_has_display(symbols, selection, rule.absorbing_display)? {
             absorbing.get_or_insert(selection);
             continue;
         }
         if absorbing.is_some() {
             continue;
         }
-        if (intersection && is_thing) || (!intersection && is_nothing) {
+        if atomic_class_selection_has_display(symbols, selection, rule.identity_display)? {
             identity.get_or_insert(selection);
             continue;
         }
@@ -8958,11 +9121,18 @@ fn reducible_class_boolean_operands<B: ByteSource>(
             continue;
         }
         if retained.is_some() {
-            return Ok(None);
+            multiple_retained = true;
+            continue;
         }
         retained = Some(selection);
     }
-    Ok(absorbing.or(retained).or(identity))
+    if absorbing.is_some() {
+        return Ok(absorbing.map(AtomicClassProjection::Selected));
+    }
+    if discardable || multiple_retained {
+        return Ok(Some(AtomicClassProjection::Discardable));
+    }
+    Ok(retained.or(identity).map(AtomicClassProjection::Selected))
 }
 
 fn reducible_object_quantifier_selection<B: ByteSource>(
@@ -9005,19 +9175,23 @@ fn reducible_object_quantifier_selection<B: ByteSource>(
     Ok(None)
 }
 
-fn reducible_object_value_selection<B: ByteSource>(
+fn reducible_object_value_projection<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     node: NodeRef,
     depth: usize,
+    scope: AtomicClassProjectionScope,
     budget: &mut PhaseBudget,
-) -> EncodedResult<Option<AtomicClassSelection>> {
-    let expected_fields = if node.tag() == OBJECT_HAS_VALUE_TAG {
-        2
-    } else {
-        1
-    };
-    if node.field_count() != expected_fields {
+) -> EncodedResult<Option<AtomicClassProjection>> {
+    let rule = OBJECT_VALUE_PROJECTION_RULES
+        .iter()
+        .find(|rule| rule.tag == node.tag())
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "object value-restriction constructor lost its projection rule",
+            )
+        })?;
+    if node.field_count() != rule.field_count {
         return Err(EncodedValidationError::invariant(
             "object value restriction no longer has schema-1 shape",
         ));
@@ -9027,14 +9201,21 @@ fn reducible_object_value_selection<B: ByteSource>(
     }
     let property = node_field(model, node, 0, "object value-restriction property")?;
     if object_property_has_iri(model, symbols, property, BOTTOM_OBJECT_IRI)? {
-        return builtin_atomic_class_selection(symbols, node.id(), NOTHING_DISPLAY).map(Some);
+        return builtin_atomic_class_selection(symbols, node.id(), NOTHING_DISPLAY)
+            .map(AtomicClassProjection::Selected)
+            .map(Some);
     }
-    if node.tag() == OBJECT_HAS_SELF_TAG
-        && object_property_has_iri(model, symbols, property, TOP_OBJECT_IRI)?
-    {
-        return builtin_atomic_class_selection(symbols, node.id(), THING_DISPLAY).map(Some);
+    if let Some(display) = rule.top_reduction {
+        if object_property_has_iri(model, symbols, property, TOP_OBJECT_IRI)? {
+            return builtin_atomic_class_selection(symbols, node.id(), display)
+                .map(AtomicClassProjection::Selected)
+                .map(Some);
+        }
     }
     budget.claim_work(1)?;
+    if scope == AtomicClassProjectionScope::BooleanOperand && rule.discardable_boolean_operand {
+        return Ok(Some(AtomicClassProjection::Discardable));
+    }
     Ok(None)
 }
 
@@ -13109,8 +13290,14 @@ fn named_disjoint_union<B: ByteSource>(
             "disjoint-union root has fewer than two members",
         ));
     }
-    let union_selection =
-        reducible_class_boolean_operands(model, symbols, expressions, false, 0, budget)?;
+    let union_selection = reducible_class_boolean_operands(
+        model,
+        symbols,
+        expressions,
+        ClassBooleanReductionMode::Union,
+        0,
+        budget,
+    )?;
     let union_definition =
         class_boolean_definition_for_root(definitions, root, DefinitionPolarity::Positive);
     if union_selection.is_none() && union_definition.is_none() {
