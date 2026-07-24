@@ -5441,7 +5441,7 @@ def test_composite_data_has_value_definitions_reuse_global_identity() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_unsupported_data_has_value_inputs_defer_without_symbol_leaks() -> None:
+def test_partially_unsupported_data_has_value_inputs_defer_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
@@ -5458,8 +5458,8 @@ def test_unsupported_data_has_value_inputs_defer_without_symbol_leaks() -> None:
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 3
+    assert manifest["compiled_roots"] == 1
+    assert manifest["deferred_roots"] == 2
     assert not any(
         value["generated"]
         or str(value["display"]).startswith(
@@ -6025,13 +6025,14 @@ def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
             f"{string_datatype}) :B)",
             "SubClassOf(DataExactCardinality(2 owl:bottomDataProperty "
             f"{string_datatype}) :B)",
+            'SubClassOf(DataHasValue(owl:bottomDataProperty "pruned") :B)',
         ),
         options=OPTIONS,
     )
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest == _expected_manifest(snapshot, compiled_roots=9)
+    assert manifest == _expected_manifest(snapshot, compiled_roots=10)
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
@@ -6054,13 +6055,14 @@ def test_implicit_builtin_property_restrictions_reduce_exactly() -> None:
             "SubClassOf(:A DataMaxCardinality(2 owl:bottomDataProperty rdfs:Literal))",
             "SubClassOf(DataExactCardinality(0 owl:bottomDataProperty rdfs:Literal) :B)",
             "SubClassOf(DataExactCardinality(2 owl:bottomDataProperty rdfs:Literal) :B)",
+            'SubClassOf(DataHasValue(owl:bottomDataProperty "pruned") :B)',
         ),
         options=OPTIONS,
     )
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest == _expected_manifest(snapshot, compiled_roots=12)
+    assert manifest == _expected_manifest(snapshot, compiled_roots=13)
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
@@ -6134,6 +6136,97 @@ def test_implicit_builtin_property_reductions_remap_composite_slices_exactly() -
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_bottom_data_has_value_reduces_without_literal_symbols() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(AnnotationProperty(:note))",
+            'SubClassOf(Annotation(:note "pruned") '
+            'DataHasValue(owl:bottomDataProperty "pruned") :B)',
+            'SubClassOf(:A ObjectComplementOf(DataHasValue('
+            'owl:bottomDataProperty "pruned")))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=2)
+    assert manifest["source_literal_symbols"] == []
+    assert manifest["data_value_symbols"] == []
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_bottom_data_has_value_keeps_a_shared_live_literal() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            'SubClassOf(DataHasValue(owl:bottomDataProperty "shared") :B)',
+            'SubClassOf(:A DataHasValue(:d "shared"))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=2,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+    )
+    assert len(cast(list[object], manifest["source_literal_symbols"])) == 1
+    assert len(cast(list[object], manifest["data_value_symbols"])) == 1
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_bottom_data_has_value_reduction_remaps_composite_literals_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            'SubClassOf(DataHasValue(owl:bottomDataProperty "shared") :B)',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(DataProperty(:d))",
+            'SubClassOf(:C DataHasValue(:d "shared"))',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    records = _composite_records(composite, (left, right))
+
+    forward = _native_slices_manifest(
+        *records,
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+    reverse = _native_slices_manifest(
+        *reversed(records),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert forward == reverse == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+    )
+    assert len(cast(list[object], forward["source_literal_symbols"])) == 1
+    assert len(cast(list[object], forward["data_value_symbols"])) == 1
+    assert forward["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_reduced_restriction_disjoint_duplicates_force_empty_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -6168,8 +6261,8 @@ def test_reducible_restrictions_require_retained_nonbuiltin_inputs() -> None:
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest["compiled_roots"] == 1
-    assert manifest["deferred_roots"] == 3
+    assert manifest["compiled_roots"] == 2
+    assert manifest["deferred_roots"] == 2
     class_symbols = cast(list[dict[str, object]], manifest["class_expression_symbols"])
     assert not any(
         str(value["display"]).startswith(

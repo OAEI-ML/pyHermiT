@@ -129,10 +129,19 @@ const RDF_XML_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#XM
 const TOP_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_IRI: &str = "http://www.w3.org/2002/07/owl#bottomObjectProperty";
 const BOTTOM_DATA_IRI: &str = "http://www.w3.org/2002/07/owl#bottomDataProperty";
-const TOP_OBJECT_FLAG: u8 = 1;
-const BOTTOM_OBJECT_FLAG: u8 = 1 << 1;
-const TOP_DATA_FLAG: u8 = 1 << 2;
-const BOTTOM_DATA_FLAG: u8 = 1 << 3;
+
+#[derive(Debug, Eq, PartialEq)]
+struct NormalizedReachability {
+    entity_ids: Vec<u32>,
+    literal_nodes: Vec<NodeId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NormalizedReachabilityPending {
+    node: NodeId,
+    depth: usize,
+    semantic_root: bool,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NamedClassPhaseLimits {
@@ -1447,13 +1456,12 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &mut data_definitions,
         &mut budget,
     )?;
-    let retained_implicit_builtin_properties =
-        retained_implicit_builtin_properties(model, symbols, &mut budget)?;
+    let normalized_reachability = normalized_reachability(model, symbols, &mut budget)?;
     let (entity_domain, source_entity_map) = phase_entity_domain(
         symbols,
         &definitions,
         &data_definitions,
-        retained_implicit_builtin_properties,
+        &normalized_reachability.entity_ids,
         &mut budget,
     )?;
     let declared_class_ids = declared_class_ids(symbols, &mut budget)?;
@@ -1470,6 +1478,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
     let data_range_domain = named_data_range_domain(
         model,
         symbols,
+        &normalized_reachability.entity_ids,
         data_roles.is_some(),
         scope_maps,
         &definitions,
@@ -1497,7 +1506,12 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &mut budget,
     )?;
     let (source_literal_domain, data_value_domain, source_data_identity_ids) =
-        literal_symbol_domains(model, symbols, &mut budget)?;
+        literal_symbol_domains(
+            model,
+            symbols,
+            &normalized_reachability.literal_nodes,
+            &mut budget,
+        )?;
     let mut named_individuals = Vec::new();
     budget.claim_owned(
         individual_signature
@@ -7276,103 +7290,159 @@ fn generated_data_entity_key(iri: &[u8], budget: &mut PhaseBudget) -> EncodedRes
     Ok(key)
 }
 
-fn retained_implicit_builtin_properties<B: ByteSource>(
+fn normalized_reachability<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     budget: &mut PhaseBudget,
-) -> EncodedResult<u8> {
+) -> EncodedResult<NormalizedReachability> {
     let pending_bytes = symbols
         .roots
         .len()
-        .checked_mul(size_of::<(NodeId, usize)>())
+        .checked_mul(size_of::<NormalizedReachabilityPending>())
         .ok_or_else(|| {
-            EncodedValidationError::resource("implicit builtin-property traversal size overflowed")
+            EncodedValidationError::resource("normalized-reachability traversal size overflowed")
         })?;
     budget.claim_owned(pending_bytes)?;
     let mut pending = Vec::new();
     pending
         .try_reserve_exact(symbols.roots.len())
         .map_err(|_| {
-            EncodedValidationError::resource(
-                "implicit builtin-property traversal allocation failed",
-            )
+            EncodedValidationError::resource("normalized-reachability allocation failed")
         })?;
-    pending.extend(symbols.roots.iter().map(|root| (root.node, 0_usize)));
-    let mut retained = 0_u8;
-    while let Some((identifier, depth)) = pending.pop() {
+    pending.extend(
+        symbols
+            .roots
+            .iter()
+            .filter(|root| root_contributes_normalized_inputs(root.handler))
+            .map(|root| NormalizedReachabilityPending {
+                node: root.node,
+                depth: 0,
+                semantic_root: true,
+            }),
+    );
+    let mut entity_ids = Vec::<u32>::new();
+    let mut literal_nodes = Vec::<NodeId>::new();
+    while let Some(current) = pending.pop() {
         PhaseBudget::count(
-            depth,
+            current.depth,
             budget.limits.max_canonical_depth,
-            "implicit builtin-property traversal depth",
+            "normalized-reachability traversal depth",
         )?;
         budget.claim_work(1)?;
-        let node = model.node(identifier)?;
-        if node.tag() == ENTITY_TAG {
-            let Some(entity_id) = symbols.entity_symbol_for_node(identifier) else {
-                continue;
-            };
-            let entity = symbols
-                .entity_domain
-                .values
-                .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
-                .ok_or_else(|| {
-                    EncodedValidationError::invariant(
-                        "implicit builtin property entity ID is dangling",
+        let node = model.node(current.node)?;
+        if !current.semantic_root {
+            if node.tag() == ENTITY_TAG {
+                let Some(entity_id) = symbols.entity_symbol_for_node(current.node) else {
+                    continue;
+                };
+                symbols
+                    .entity_domain
+                    .values
+                    .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "normalized-reachability entity ID is dangling",
+                        )
+                    })?;
+                budget.claim_owned(size_of::<u32>())?;
+                entity_ids.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "normalized-reachability entity allocation failed",
                     )
                 })?;
-            retained |= implicit_builtin_property_flag(&entity.display).unwrap_or(0);
-            continue;
-        }
-        if is_class_expression_constructor(node.tag()) {
-            if let Some(selection) =
-                atomic_class_selection_at_depth(model, symbols, identifier, depth, budget)?
-            {
-                let reduces_to_builtin =
-                    atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?
-                        || atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?;
-                if reduces_to_builtin {
-                    continue;
+                entity_ids.push(entity_id);
+                continue;
+            }
+            if node.tag() == LITERAL_TAG {
+                budget.claim_owned(size_of::<NodeId>())?;
+                literal_nodes.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "normalized-reachability literal allocation failed",
+                    )
+                })?;
+                literal_nodes.push(current.node);
+            }
+            if is_class_expression_constructor(node.tag()) {
+                if let Some(selection) = atomic_class_selection_at_depth(
+                    model,
+                    symbols,
+                    current.node,
+                    current.depth,
+                    budget,
+                )? {
+                    let reduces_to_builtin =
+                        atomic_class_selection_has_display(symbols, selection, THING_DISPLAY)?
+                            || atomic_class_selection_has_display(
+                                symbols,
+                                selection,
+                                NOTHING_DISPLAY,
+                            )?;
+                    if reduces_to_builtin {
+                        continue;
+                    }
                 }
             }
         }
-        let child_depth =
-            child_expression_depth(depth, "implicit builtin-property depth overflowed")?;
-        for field_index in node.fields() {
+        let fields = node.fields();
+        let (field_end, child_depth) = if current.semantic_root {
+            (
+                fields.end.checked_sub(1).ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "normalized semantic root has no annotation field",
+                    )
+                })?,
+                0,
+            )
+        } else {
+            (
+                fields.end,
+                child_expression_depth(current.depth, "normalized-reachability depth overflowed")?,
+            )
+        };
+        for field_index in fields.start..field_end {
             budget.claim_work(1)?;
             let component =
-                required_component(model.field(field_index)?, "implicit builtin-property field")?;
+                required_component(model.field(field_index)?, "normalized-reachability field")?;
             match model.resolve(component)? {
                 ComponentValue::None | ComponentValue::Scalar(_) => {}
                 ComponentValue::Node(child) => {
-                    budget.claim_owned(size_of::<(NodeId, usize)>())?;
+                    budget.claim_owned(size_of::<NormalizedReachabilityPending>())?;
                     pending.try_reserve(1).map_err(|_| {
                         EncodedValidationError::resource(
-                            "implicit builtin-property traversal allocation failed",
+                            "normalized-reachability allocation failed",
                         )
                     })?;
-                    pending.push((child, child_depth));
+                    pending.push(NormalizedReachabilityPending {
+                        node: child,
+                        depth: child_depth,
+                        semantic_root: false,
+                    });
                 }
                 ComponentValue::Collection(values) => {
                     for item_index in values.items() {
                         budget.claim_work(1)?;
                         let item = required_component(
                             model.item(item_index)?,
-                            "implicit builtin-property collection item",
+                            "normalized-reachability collection item",
                         )?;
                         match model.resolve(item)? {
                             ComponentValue::None | ComponentValue::Scalar(_) => {}
                             ComponentValue::Node(child) => {
-                                budget.claim_owned(size_of::<(NodeId, usize)>())?;
+                                budget.claim_owned(size_of::<NormalizedReachabilityPending>())?;
                                 pending.try_reserve(1).map_err(|_| {
                                     EncodedValidationError::resource(
-                                        "implicit builtin-property traversal allocation failed",
+                                        "normalized-reachability allocation failed",
                                     )
                                 })?;
-                                pending.push((child, child_depth));
+                                pending.push(NormalizedReachabilityPending {
+                                    node: child,
+                                    depth: child_depth,
+                                    semantic_root: false,
+                                });
                             }
                             ComponentValue::Collection(_) => {
                                 return Err(EncodedValidationError::invariant(
-                                    "implicit builtin-property traversal found a nested collection",
+                                    "normalized-reachability found a nested collection",
                                 ));
                             }
                         }
@@ -7381,7 +7451,28 @@ fn retained_implicit_builtin_properties<B: ByteSource>(
             }
         }
     }
-    Ok(retained)
+    budget.claim_work(sort_work(entity_ids.len()))?;
+    entity_ids.sort_unstable();
+    entity_ids.dedup();
+    budget.claim_work(sort_work(literal_nodes.len()))?;
+    literal_nodes.sort_unstable();
+    literal_nodes.dedup();
+    Ok(NormalizedReachability {
+        entity_ids,
+        literal_nodes,
+    })
+}
+
+const fn root_contributes_normalized_inputs(handler: RootHandler) -> bool {
+    !matches!(
+        handler,
+        RootHandler::OntologyAnnotation
+            | RootHandler::AnnotationAssertion
+            | RootHandler::SubAnnotationPropertyOf
+            | RootHandler::AnnotationPropertyDomain
+            | RootHandler::AnnotationPropertyRange
+            | RootHandler::SwrlRule
+    )
 }
 
 const fn is_class_expression_constructor(tag: u16) -> bool {
@@ -7407,25 +7498,25 @@ const fn is_class_expression_constructor(tag: u16) -> bool {
     )
 }
 
-fn implicit_builtin_property_flag(display: &str) -> Option<u8> {
-    match display {
-        TOP_OBJECT_DISPLAY => Some(TOP_OBJECT_FLAG),
-        BOTTOM_OBJECT_DISPLAY => Some(BOTTOM_OBJECT_FLAG),
-        TOP_DATA_DISPLAY => Some(TOP_DATA_FLAG),
-        BOTTOM_DATA_DISPLAY => Some(BOTTOM_DATA_FLAG),
-        _ => None,
-    }
+fn is_implicit_builtin_property(display: &str) -> bool {
+    matches!(
+        display,
+        TOP_OBJECT_DISPLAY | BOTTOM_OBJECT_DISPLAY | TOP_DATA_DISPLAY | BOTTOM_DATA_DISPLAY
+    )
 }
 
 fn source_entity_is_published(
     symbols: &SymbolPhase,
     value: &DecodedSymbolValue,
-    retained_implicit_builtin_properties: u8,
+    normalized_entity_ids: &[u32],
 ) -> bool {
-    implicit_builtin_property_flag(&value.display).is_none_or(|flag| {
-        symbols.entity_has_source_declaration(value.identifier)
-            || retained_implicit_builtin_properties & flag != 0
-    })
+    matches!(
+        value.display.as_str(),
+        THING_DISPLAY | NOTHING_DISPLAY | RDFS_LITERAL_DISPLAY
+    ) || symbols.entity_has_source_declaration(value.identifier)
+        || normalized_entity_ids
+            .binary_search(&value.identifier)
+            .is_ok()
 }
 
 fn push_generated_frame(
@@ -7483,7 +7574,7 @@ fn phase_entity_domain(
     symbols: &SymbolPhase,
     class_definitions: &[ClassBooleanDefinition],
     data_definitions: &[DataBooleanDefinition],
-    retained_implicit_builtin_properties: u8,
+    normalized_entity_ids: &[u32],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(DecodedSymbolDomain, Vec<u32>)> {
     if symbols.entity_domain.kind != SymbolKind::Entity {
@@ -7491,15 +7582,14 @@ fn phase_entity_domain(
             "generated definitions received a non-entity source domain",
         ));
     }
-    budget.claim_work(symbols.entity_domain.values.len())?;
-    let retained_source_entities = symbols
-        .entity_domain
-        .values
-        .iter()
-        .filter(|value| {
-            source_entity_is_published(symbols, value, retained_implicit_builtin_properties)
-        })
-        .count();
+    let mut retained_source_entities = 0_usize;
+    for value in &symbols.entity_domain.values {
+        budget.claim_work(1)?;
+        budget.claim_work(binary_search_work(normalized_entity_ids.len()))?;
+        if source_entity_is_published(symbols, value, normalized_entity_ids) {
+            retained_source_entities += 1;
+        }
+    }
     let total = retained_source_entities
         .checked_add(class_definitions.len())
         .and_then(|value| value.checked_add(data_definitions.len()))
@@ -7515,7 +7605,8 @@ fn phase_entity_domain(
     })?;
     for value in &symbols.entity_domain.values {
         budget.claim_work(1)?;
-        if !source_entity_is_published(symbols, value, retained_implicit_builtin_properties) {
+        budget.claim_work(binary_search_work(normalized_entity_ids.len()))?;
+        if !source_entity_is_published(symbols, value, normalized_entity_ids) {
             continue;
         }
         budget
@@ -7590,7 +7681,8 @@ fn phase_entity_domain(
         .map_err(|_| EncodedValidationError::resource("source entity map allocation failed"))?;
     for value in &symbols.entity_domain.values {
         budget.claim_work(1)?;
-        if !source_entity_is_published(symbols, value, retained_implicit_builtin_properties) {
+        budget.claim_work(binary_search_work(normalized_entity_ids.len()))?;
+        if !source_entity_is_published(symbols, value, normalized_entity_ids) {
             source_map.push(u32::MAX);
             continue;
         }
@@ -8936,12 +9028,12 @@ fn reducible_data_has_value_selection<B: ByteSource>(
             "data has-value restriction no longer has schema-1 shape",
         ));
     }
-    if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
-        return Ok(None);
-    }
     let property = node_field(model, node, 0, "data has-value property")?;
     if data_property_has_iri(model, symbols, property, BOTTOM_DATA_IRI)? {
         return builtin_atomic_class_selection(symbols, node.id(), NOTHING_DISPLAY).map(Some);
+    }
+    if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
+        return Ok(None);
     }
     budget.claim_work(1)?;
     Ok(None)
@@ -9079,7 +9171,7 @@ fn reduction_entity_is_retained(symbols: &SymbolPhase, entity_id: u32) -> Encode
     let builtin = entity.display == THING_DISPLAY
         || entity.display == NOTHING_DISPLAY
         || entity.display == RDFS_LITERAL_DISPLAY
-        || implicit_builtin_property_flag(&entity.display).is_some();
+        || is_implicit_builtin_property(&entity.display);
     if builtin {
         return Ok(true);
     }
@@ -9613,6 +9705,7 @@ fn class_entity_display(symbols: &SymbolPhase, entity_id: u32) -> EncodedResult<
 fn named_data_range_domain<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    normalized_entity_ids: &[u32],
     has_data_roles: bool,
     scope_maps: &[AnonymousScopeMap],
     class_definitions: &[ClassBooleanDefinition],
@@ -9623,7 +9716,10 @@ fn named_data_range_domain<B: ByteSource>(
     let mut pending = Vec::new();
     for entity in &symbols.entity_domain.values {
         budget.claim_work(1)?;
-        if !entity.display.starts_with("datatype:") {
+        budget.claim_work(binary_search_work(normalized_entity_ids.len()))?;
+        if !entity.display.starts_with("datatype:")
+            || !source_entity_is_published(symbols, entity, normalized_entity_ids)
+        {
             continue;
         }
         let following = pending.len().checked_add(1).ok_or_else(|| {
@@ -10088,6 +10184,7 @@ enum StringDatatypeKind {
 fn literal_symbol_domains<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
+    normalized_literal_nodes: &[NodeId],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(DecodedSymbolDomain, DecodedSymbolDomain, Vec<Option<u32>>)> {
     let mut candidates = Vec::<RawLiteralSymbol>::new();
@@ -10097,6 +10194,10 @@ fn literal_symbol_domains<B: ByteSource>(
             EncodedValidationError::invariant("validated literal node disappeared")
         })?;
         if node.tag() != LITERAL_TAG || !symbols.semantic_node_is_reachable(node.id()) {
+            continue;
+        }
+        budget.claim_work(binary_search_work(normalized_literal_nodes.len()))?;
+        if normalized_literal_nodes.binary_search(&node.id()).is_err() {
             continue;
         }
         let following = candidates.len().checked_add(1).ok_or_else(|| {
