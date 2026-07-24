@@ -1486,11 +1486,10 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &datatype_boolean_definitions,
         &mut budget,
     )?;
-    let declared_individual_ids = declared_individual_ids(symbols, &mut budget)?;
     let (individual_domain, individual_signature) = individual_signature(
         model,
         symbols,
-        &declared_individual_ids,
+        &normalized_reachability.entity_ids,
         object_roles.is_some(),
         data_roles.is_some(),
         scope_maps,
@@ -9172,11 +9171,47 @@ fn reduction_entity_is_retained(symbols: &SymbolPhase, entity_id: u32) -> Encode
         || entity.display == NOTHING_DISPLAY
         || entity.display == RDFS_LITERAL_DISPLAY
         || is_implicit_builtin_property(&entity.display)
+        || is_implicit_builtin_datatype(&entity.display)
         || entity.display.starts_with(NAMED_INDIVIDUAL_PREFIX);
     if implicitly_retained {
         return Ok(true);
     }
     Ok(symbols.entity_has_source_declaration(entity_id))
+}
+
+fn is_implicit_builtin_datatype(display: &str) -> bool {
+    let Some(iri) = display.strip_prefix("datatype:") else {
+        return false;
+    };
+    matches!(
+        iri,
+        OWL_REAL_IRI
+            | OWL_RATIONAL_IRI
+            | XSD_BOOLEAN_IRI
+            | XSD_DECIMAL_IRI
+            | XSD_FLOAT_IRI
+            | XSD_DOUBLE_IRI
+            | XSD_HEX_BINARY_IRI
+            | XSD_BASE64_BINARY_IRI
+            | XSD_ANY_URI_IRI
+            | XSD_DATE_TIME_IRI
+            | XSD_DATE_TIME_STAMP_IRI
+            | RDF_PLAIN_LITERAL_IRI
+            | RDF_XML_LITERAL_IRI
+            | RDFS_LITERAL_IRI
+    ) || integer_datatype_bounds(iri).is_some()
+        || iri.strip_prefix(XSD_NAMESPACE).is_some_and(|local| {
+            matches!(
+                local,
+                "string"
+                    | "normalizedString"
+                    | "token"
+                    | "language"
+                    | "Name"
+                    | "NCName"
+                    | "NMTOKEN"
+            )
+        })
 }
 
 fn builtin_atomic_class_selection(
@@ -12127,16 +12162,20 @@ fn declared_individual_ids(
 fn individual_signature<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
-    declared_individual_ids: &[u32],
+    normalized_entity_ids: &[u32],
     include_object_assertions: bool,
     include_data_assertions: bool,
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(DecodedSymbolDomain, Vec<IndividualSignatureBinding>)> {
+    let declared_individual_ids = declared_individual_ids(symbols, budget)?;
     let mut pending = Vec::<PendingIndividualSymbol>::new();
     for entity in &symbols.entity_domain.values {
         budget.claim_work(1)?;
-        if !entity.display.starts_with(NAMED_INDIVIDUAL_PREFIX) {
+        budget.claim_work(binary_search_work(normalized_entity_ids.len()))?;
+        if !entity.display.starts_with(NAMED_INDIVIDUAL_PREFIX)
+            || !source_entity_is_published(symbols, entity, normalized_entity_ids)
+        {
             continue;
         }
         let following = pending.len().checked_add(1).ok_or_else(|| {

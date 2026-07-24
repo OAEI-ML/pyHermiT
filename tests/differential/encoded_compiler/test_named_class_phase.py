@@ -29,6 +29,7 @@ from pyhermit.clauses.model import (
     TermSort,
     Variable,
 )
+from pyhermit.datatypes import SUPPORTED_DATATYPES
 from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE
 from pyhermit.exceptions import BackendMismatchError
 from pyhermit.inputs import capture_ontology
@@ -6087,6 +6088,85 @@ def test_builtin_restrictions_and_cardinalities_reduce_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+@pytest.mark.parametrize("datatype_iri", sorted(SUPPORTED_DATATYPES))
+def test_implicit_builtin_datatype_minimum_zero_reduces_exactly(
+    datatype_iri: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "SubClassOf(DataMinCardinality("
+            f"0 :d <{datatype_iri}>) :B)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=1)
+    assert [
+        value["display"]
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_implicit_builtin_datatype_restriction_reductions_match_scalar() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "SubClassOf(:A DataSomeValuesFrom(:d "
+            "DataIntersectionOf(xsd:string DataComplementOf(rdfs:Literal))))",
+            "SubClassOf(DataAllValuesFrom(:d "
+            "DataUnionOf(xsd:string rdfs:Literal)) :B)",
+            "SubClassOf(:A DataSomeValuesFrom("
+            "owl:bottomDataProperty xsd:string))",
+            "SubClassOf(DataAllValuesFrom("
+            "owl:bottomDataProperty xsd:string) :B)",
+            "SubClassOf(DataMinCardinality(0 :d xsd:string) :B)",
+            "SubClassOf(DataMinCardinality("
+            "2 owl:bottomDataProperty xsd:string) :B)",
+            "SubClassOf(:A DataMaxCardinality("
+            "2 owl:bottomDataProperty xsd:string))",
+            "SubClassOf(DataExactCardinality("
+            "0 owl:bottomDataProperty xsd:string) :B)",
+            "SubClassOf(:A DataExactCardinality("
+            "2 owl:bottomDataProperty xsd:string))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=9)
+    assert [
+        value["display"]
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            (
+                "DataSomeValuesFrom:",
+                "DataAllValuesFrom:",
+                "DataMinCardinality:",
+                "DataMaxCardinality:",
+                "DataExactCardinality:",
+            )
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
     string_datatype = "<http://www.w3.org/2001/XMLSchema#string>"
     snapshot = pyowl_core.load_snapshot(
@@ -6310,6 +6390,72 @@ def test_bottom_data_has_value_reduction_remaps_composite_literals_exactly() -> 
     )
     assert len(cast(list[object], forward["source_literal_symbols"])) == 1
     assert len(cast(list[object], forward["data_value_symbols"])) == 1
+    assert forward["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_bottom_object_has_value_drops_implicit_individual_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "SubClassOf(:A ObjectHasValue("
+            "owl:bottomObjectProperty :discarded))",
+            "SubClassOf(ObjectComplementOf(ObjectHasValue("
+            "owl:bottomObjectProperty :discarded)) :B)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(snapshot, compiled_roots=2)
+    assert manifest["individual_symbols"] == []
+    assert manifest["individual_signature"] == []
+    assert manifest["named_individuals"] == []
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_bottom_object_has_value_keeps_shared_live_individual() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "SubClassOf(:A ObjectHasValue("
+            "owl:bottomObjectProperty :shared))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "SubClassOf(:B ObjectHasValue(:p :shared))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    records = _composite_records(composite, (left, right))
+
+    forward = _native_slices_manifest(
+        *records,
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+    reverse = _native_slices_manifest(
+        *reversed(records),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert forward == reverse == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_generated_object_quantifier_definitions=True,
+        include_at_least_object_predicates=True,
+    )
+    assert len(cast(list[object], forward["individual_symbols"])) == 1
+    assert cast(list[dict[str, object]], forward["individual_signature"])[0][
+        "declared"
+    ] is False
     assert forward["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
