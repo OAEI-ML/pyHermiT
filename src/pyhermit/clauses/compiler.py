@@ -46,6 +46,7 @@ from pyhermit.normalize import (
     NormalizedOntology,
     NormalizedQuery,
     NormalizedRecord,
+    Polarity,
     normalize_view,
 )
 from pyhermit.roles import RoleAxiomGraph, build_role_axiom_graph
@@ -420,6 +421,7 @@ def compile_normalized(
     if cancelled is not None and not callable(cancelled):
         raise TypeError("cancelled must be callable or None")
     _raise_if_cancelled(cancelled)
+    _validate_mixed_datatype_definition_expansions(normalized, cancelled)
     roles = role_model or build_role_axiom_graph(
         _role_source_axioms(normalized, cancelled),
         cancelled=cancelled,
@@ -1522,6 +1524,137 @@ def _data_predicate(
     )
 
 
+def _is_normalized_data_literal(data_range: owl.DataRange) -> bool:
+    atomic = (owl.Datatype, owl.DatatypeRestriction, owl.DataOneOf)
+    return isinstance(data_range, atomic) or (
+        isinstance(data_range, owl.DataComplementOf) and isinstance(data_range.operand, atomic)
+    )
+
+
+def _is_flat_datatype_definition_range(data_range: owl.DataRange) -> bool:
+    if _is_normalized_data_literal(data_range):
+        return True
+    atomic = (owl.Datatype, owl.DatatypeRestriction, owl.DataOneOf)
+    if isinstance(data_range, (owl.DataIntersectionOf, owl.DataUnionOf)):
+        return all(
+            isinstance(operand, atomic)
+            or (isinstance(operand, owl.DataComplementOf) and isinstance(operand.operand, atomic))
+            for operand in data_range.operands
+        )
+    return False
+
+
+def _validate_mixed_datatype_definition_expansions(
+    normalized: NormalizedOntology,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    definition_symbols: dict[tuple[bytes, Polarity], owl.Datatype] = {}
+    for index, definition in enumerate(normalized.definitions):
+        if index & 0x3F == 0:
+            _raise_if_cancelled(cancelled)
+        if isinstance(definition.symbol, owl.Datatype):
+            definition_symbols[(definition.canonical_expression, definition.polarity)] = (
+                definition.symbol
+            )
+    _raise_if_cancelled(cancelled)
+    expansions: dict[
+        tuple[tuple[str, ...], bytes],
+        tuple[list[bytes], list[bytes]],
+    ] = {}
+    for index, record in enumerate(normalized.records):
+        if index & 0x3F == 0:
+            _raise_if_cancelled(cancelled)
+        statement = record.statement
+        if (
+            record.family is not NormalizedFamily.DATATYPE
+            or record.generated
+            or not isinstance(statement, DataRangeInclusion)
+        ):
+            continue
+        if isinstance(statement.sub_range, owl.Datatype) and (
+            _is_flat_datatype_definition_range(statement.super_range)
+        ):
+            ranges = expansions.setdefault(
+                (
+                    record.provenance_sha256,
+                    statement.sub_range.canonical_bytes(),
+                ),
+                ([], []),
+            )
+            ranges[0].append(statement.super_range.canonical_bytes())
+        if isinstance(statement.super_range, owl.Datatype) and (
+            _is_flat_datatype_definition_range(statement.sub_range)
+        ):
+            ranges = expansions.setdefault(
+                (
+                    record.provenance_sha256,
+                    statement.super_range.canonical_bytes(),
+                ),
+                ([], []),
+            )
+            ranges[1].append(statement.sub_range.canonical_bytes())
+    _raise_if_cancelled(cancelled)
+    for index, record in enumerate(normalized.records):
+        if index & 0x3F == 0:
+            _raise_if_cancelled(cancelled)
+        statement = record.statement
+        if not isinstance(statement, owl.DatatypeDefinition) or _is_flat_datatype_definition_range(
+            statement.data_range
+        ):
+            continue
+        positive = _rewrite_mixed_datatype_definition_range(
+            statement.data_range,
+            Polarity.POSITIVE,
+            definition_symbols,
+        ).canonical_bytes()
+        negative = _rewrite_mixed_datatype_definition_range(
+            statement.data_range,
+            Polarity.NEGATIVE,
+            definition_symbols,
+        ).canonical_bytes()
+        ranges = expansions.get(
+            (
+                record.provenance_sha256,
+                statement.datatype.canonical_bytes(),
+            ),
+            ([], []),
+        )
+        if ranges != ([positive], [negative]):
+            raise ValueError("mixed datatype definition has inconsistent structural inclusions")
+    _raise_if_cancelled(cancelled)
+
+
+def _rewrite_mixed_datatype_definition_range(
+    data_range: owl.DataRange,
+    polarity: Polarity,
+    definition_symbols: Mapping[tuple[bytes, Polarity], owl.Datatype],
+) -> owl.DataRange:
+    def atomize(value: owl.DataRange, selected: Polarity) -> owl.DataRange:
+        if _is_normalized_data_literal(value):
+            return value
+        symbol = definition_symbols.get((value.canonical_bytes(), selected))
+        if symbol is None:
+            raise ValueError("mixed datatype definition has inconsistent generated dependencies")
+        return symbol
+
+    constructor = type(data_range)
+    if constructor is owl.DataComplementOf:
+        complement = cast(owl.DataComplementOf, data_range)
+        opposite = Polarity.NEGATIVE if polarity is Polarity.POSITIVE else Polarity.POSITIVE
+        return owl.DataComplementOf(atomize(complement.operand, opposite))
+    if constructor is owl.DataIntersectionOf:
+        intersection = cast(owl.DataIntersectionOf, data_range)
+        return owl.DataIntersectionOf(
+            owl.CanonicalSet(atomize(value, polarity) for value in intersection.operands)
+        )
+    if constructor is owl.DataUnionOf:
+        union = cast(owl.DataUnionOf, data_range)
+        return owl.DataUnionOf(
+            owl.CanonicalSet(atomize(value, polarity) for value in union.operands)
+        )
+    raise ValueError("mixed datatype definition has an invalid normalized range")
+
+
 def _equality(sort: TermSort, *, inequality: bool = False) -> _PredicateSpec:
     return _PredicateSpec(
         PredicateKind.INEQUALITY if inequality else PredicateKind.EQUALITY,
@@ -1739,6 +1872,8 @@ def _compile_record(state: _CompilationState, record: NormalizedRecord) -> None:
         )
         return
     if isinstance(statement, owl.DatatypeDefinition):
+        if not _is_flat_datatype_definition_range(statement.data_range):
+            return
         _compile_data_inclusion(state, statement.datatype, statement.data_range, provenance)
         _compile_data_inclusion(state, statement.data_range, statement.datatype, provenance)
         return

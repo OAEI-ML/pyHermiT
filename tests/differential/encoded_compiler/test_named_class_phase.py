@@ -9238,7 +9238,7 @@ def test_data_boolean_complements_normalize_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_mixed_nested_datatype_definition_still_defers_without_symbol_leaks() -> None:
+def test_mixed_nested_datatype_definition_matches_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Datatype(:D))",
@@ -9250,12 +9250,44 @@ def test_mixed_nested_datatype_definition_still_defers_without_symbol_leaks() ->
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 1
-    assert not any(
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=1,
+        include_generated_data_definitions=True,
+        include_datatype_definitions=True,
+    )
+    assert sum(
         value["generated"]
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ) == 2
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_deep_mixed_nested_datatype_definition_matches_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:D))",
+            "DatatypeDefinition(:D DataUnionOf(xsd:string "
+            "DataIntersectionOf(xsd:integer "
+            "DataUnionOf(xsd:boolean xsd:decimal))))",
+        ),
+        options=OPTIONS,
     )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=1,
+        include_generated_data_definitions=True,
+        include_datatype_definitions=True,
+    )
+    assert sum(
+        value["generated"]
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ) == 4
+    assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
@@ -9290,7 +9322,7 @@ def test_boolean_datatype_definitions_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_partial_boolean_datatype_definition_defers_without_symbol_leaks() -> None:
+def test_recursive_boolean_datatype_definition_matches_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Datatype(:D))",
@@ -9302,12 +9334,101 @@ def test_partial_boolean_datatype_definition_defers_without_symbol_leaks() -> No
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 1
-    assert not any(
-        str(value["display"]).startswith(("DataIntersectionOf:", "DataUnionOf:"))
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=1,
+        include_generated_data_definitions=True,
+        include_datatype_definitions=True,
     )
+    assert sum(
+        value["generated"]
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ) == 2
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_mixed_nested_datatype_definitions_reuse_polarized_dependencies() -> None:
+    mixed = (
+        "DataIntersectionOf(DataComplementOf(xsd:string) "
+        "DataUnionOf(DataComplementOf(xsd:integer) "
+        "DataComplementOf(xsd:boolean)))"
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:D))",
+            "Declaration(Datatype(:E))",
+            "Declaration(Datatype(:F))",
+            "Declaration(AnnotationProperty(:note))",
+            "DatatypeDefinition(:D DataComplementOf(DataUnionOf(xsd:string "
+            "DataIntersectionOf(xsd:integer xsd:boolean))))",
+            'DatatypeDefinition(Annotation(:note "same") :E '
+            "DataComplementOf(DataUnionOf(xsd:string "
+            "DataIntersectionOf(xsd:integer xsd:boolean))))",
+            f"DatatypeDefinition(:F {mixed})",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=3,
+        include_generated_data_definitions=True,
+        include_datatype_definitions=True,
+    )
+    assert sum(
+        value["generated"]
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ) == 2
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_mixed_nested_datatype_definitions_compose_canonically() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:D))",
+            "DatatypeDefinition(:D DataComplementOf(DataUnionOf(xsd:string "
+            "DataIntersectionOf(xsd:integer xsd:boolean))))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:E))",
+            "DatatypeDefinition(:E DataIntersectionOf("
+            "DataComplementOf(xsd:string) "
+            "DataUnionOf(DataComplementOf(xsd:integer) "
+            "DataComplementOf(xsd:boolean))))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    records = _composite_records(composite, (left, right))
+
+    forward = _native_slices_manifest(
+        *records,
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+    reverse = _native_slices_manifest(
+        *reversed(records),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+    expected = _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_generated_data_definitions=True,
+        include_datatype_definitions=True,
+    )
+
+    assert forward == reverse == expected
+    assert sum(
+        value["generated"]
+        for value in cast(list[dict[str, object]], forward["data_range_symbols"])
+    ) == 2
+    assert forward["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

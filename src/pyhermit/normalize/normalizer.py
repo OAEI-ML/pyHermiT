@@ -1104,11 +1104,28 @@ def _dispatch(
     if handler == _DATATYPE_DEFINITION:
         datatype_definition = cast(owl.DatatypeDefinition, axiom)
         data_range = state.expression_normalizer.data_nnf(datatype_definition.data_range)
+        normalized_definition = owl.DatatypeDefinition(
+            datatype_definition.datatype,
+            data_range,
+        )
         state.add_record(
             NormalizedFamily.DATATYPE,
-            owl.DatatypeDefinition(datatype_definition.datatype, data_range),
+            normalized_definition,
             provenance,
         )
+        if not _is_flat_datatype_definition_range(data_range):
+            positive = state.rewrite_data_root(data_range, Polarity.POSITIVE, provenance)
+            negative = state.rewrite_data_root(data_range, Polarity.NEGATIVE, provenance)
+            state.add_record(
+                NormalizedFamily.DATATYPE,
+                DataRangeInclusion(datatype_definition.datatype, positive),
+                provenance,
+            )
+            state.add_record(
+                NormalizedFamily.DATATYPE,
+                DataRangeInclusion(negative, datatype_definition.datatype),
+                provenance,
+            )
         return
     if handler == _HAS_KEY:
         has_key = cast(owl.HasKey, axiom)
@@ -1295,6 +1312,14 @@ def _is_data_literal(data_range: owl.DataRange) -> bool:
         data_range.operand,
         (owl.Datatype, owl.DatatypeRestriction, owl.DataOneOf),
     )
+
+
+def _is_flat_datatype_definition_range(data_range: owl.DataRange) -> bool:
+    if _is_data_literal(data_range):
+        return True
+    if isinstance(data_range, (owl.DataIntersectionOf, owl.DataUnionOf)):
+        return all(_is_data_literal(operand) for operand in data_range.operands)
+    return False
 
 
 def _is_thing(expression: owl.ClassExpression) -> bool:

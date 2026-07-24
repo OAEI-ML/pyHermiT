@@ -48,6 +48,7 @@ from pyhermit.exceptions import (
     UnsupportedDatatypeError,
 )
 from pyhermit.normalize import (
+    DataRangeInclusion,
     NormalizedFamily,
     NormalizedOntology,
     NormalizedRecord,
@@ -754,6 +755,90 @@ def test_custom_data_ranges_definitions_facets_and_enumerations_retain_ids() -> 
         PredicateKind.NEGATED_DATA_RANGE,
     } <= {value.kind for value in program.predicates.predicates}
     assert program.expressivity.datatypes
+
+
+def test_mixed_nested_datatype_definition_atomizes_both_directions() -> None:
+    custom = owl.Datatype(owl.IRI("urn:test:clauses:mixed-datatype"))
+    boolean = owl.Datatype(owl.IRI("http://www.w3.org/2001/XMLSchema#boolean"))
+    nested = owl.DataIntersectionOf(
+        owl.CanonicalSet(
+            (
+                owl.DataComplementOf(owl.XSD_STRING),
+                owl.DataUnionOf(
+                    owl.CanonicalSet(
+                        (
+                            owl.DataComplementOf(INTEGER),
+                            owl.DataComplementOf(boolean),
+                        )
+                    )
+                ),
+            )
+        )
+    )
+    normalized = normalize_axioms(
+        (owl.DatatypeDefinition(custom, nested),),
+        logical_fingerprint=FINGERPRINT,
+    )
+
+    assert {definition.polarity.value for definition in normalized.definitions} == {
+        "negative",
+        "positive",
+    }
+    assert (
+        sum(isinstance(record.statement, owl.DatatypeDefinition) for record in normalized.records)
+        == 1
+    )
+    inclusions = tuple(
+        record for record in normalized.records if isinstance(record.statement, DataRangeInclusion)
+    )
+    assert sum(not record.generated for record in inclusions) == 2
+    assert sum(record.generated for record in inclusions) == 2
+    program = compile_normalized(normalized)
+    assert len(program.datatype_model.datatype_definitions) == 1
+    assert (
+        sum(value.generated for value in program.symbols.domain(SymbolKind.DATA_RANGE).values) == 2
+    )
+    assert program.expressivity.datatypes
+
+    incomplete = dataclasses.replace(
+        normalized,
+        records=tuple(
+            record
+            for record in normalized.records
+            if record.generated or not isinstance(record.statement, DataRangeInclusion)
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="mixed datatype definition has inconsistent structural inclusions",
+    ):
+        compile_normalized(incomplete)
+
+    drifted_records = tuple(
+        sorted(
+            (
+                dataclasses.replace(
+                    record,
+                    statement=DataRangeInclusion(
+                        custom,
+                        owl.DataUnionOf(owl.CanonicalSet((owl.XSD_STRING, boolean))),
+                    ),
+                )
+                if isinstance(record.statement, DataRangeInclusion)
+                and not record.generated
+                and record.statement.sub_range == custom
+                else record
+                for record in normalized.records
+            ),
+            key=lambda record: (record.family.value, record.canonical_statement),
+        )
+    )
+    drifted = dataclasses.replace(normalized, records=drifted_records)
+    with pytest.raises(
+        ValueError,
+        match="mixed datatype definition has inconsistent structural inclusions",
+    ):
+        compile_normalized(drifted)
 
 
 def test_unsupported_datatype_range_without_literals_sets_safe_strategy_flag() -> None:

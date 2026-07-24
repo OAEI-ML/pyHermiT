@@ -901,7 +901,16 @@ struct DatatypeBooleanDefinition {
     expression: NodeId,
     expression_symbols: Vec<DataRangeSymbolSeed>,
     intersection: bool,
-    operands: Vec<AtomicDataRangeSelection>,
+    operands: DatatypeBooleanOperands,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DatatypeBooleanOperands {
+    Flat(Vec<AtomicDataRangeSelection>),
+    Polarized {
+        positive: Vec<DataBooleanOperand>,
+        negative: Vec<DataBooleanOperand>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1412,7 +1421,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         definition_namespace,
         &mut budget,
     )?;
-    let data_definitions = data_boolean_definitions(
+    let mut data_definitions = data_boolean_definitions(
         model,
         symbols,
         data_roles,
@@ -1421,8 +1430,14 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         class_data_definitions,
         &mut budget,
     )?;
-    let datatype_boolean_definitions =
-        datatype_boolean_definitions(model, symbols, scope_maps, &mut budget)?;
+    let datatype_boolean_definitions = datatype_boolean_definitions(
+        model,
+        symbols,
+        scope_maps,
+        definition_namespace,
+        &mut data_definitions,
+        &mut budget,
+    )?;
     let (entity_domain, source_entity_map) =
         phase_entity_domain(symbols, &definitions, &data_definitions, &mut budget)?;
     let declared_class_ids = declared_class_ids(symbols, &mut budget)?;
@@ -3598,6 +3613,8 @@ fn datatype_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     scope_maps: &[AnonymousScopeMap],
+    namespace: Option<[u8; 32]>,
+    data_definitions: &mut Vec<DataBooleanDefinition>,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<DatatypeBooleanDefinition>> {
     let mut definitions = Vec::<DatatypeBooleanDefinition>::new();
@@ -3616,10 +3633,75 @@ fn datatype_boolean_definitions<B: ByteSource>(
         if atomic_data_range_selection(model, symbols, expression, budget)?.is_some() {
             continue;
         }
-        let Some(candidate) =
-            flat_data_boolean_expression(model, symbols, expression, scope_maps, budget)?
-        else {
-            continue;
+        let candidate =
+            flat_data_boolean_expression(model, symbols, expression, scope_maps, budget)?;
+        let (expression_symbols, intersection, operands) = if let Some(candidate) = candidate {
+            (
+                candidate.expression_symbols,
+                candidate.intersection,
+                DatatypeBooleanOperands::Flat(candidate.operands),
+            )
+        } else {
+            let Some(namespace) = namespace else {
+                continue;
+            };
+            let Some(NormalizedDataTerm::Boolean(positive_term)) =
+                normalized_data_term(model, symbols, expression, false, 0, scope_maps, budget)?
+            else {
+                continue;
+            };
+            // Normalization is polarity-independent, but nested atomization consumes
+            // one owned term for each directional polarity.
+            let Some(NormalizedDataTerm::Boolean(negative_term)) =
+                normalized_data_term(model, symbols, expression, false, 0, scope_maps, budget)?
+            else {
+                return Err(EncodedValidationError::invariant(
+                    "datatype Boolean normalization changed between polarities",
+                ));
+            };
+            if positive_term.intersection != negative_term.intersection
+                || positive_term.key != negative_term.key
+            {
+                return Err(EncodedValidationError::invariant(
+                    "datatype Boolean normalization is not canonical",
+                ));
+            }
+            let intersection = positive_term.intersection;
+            let mut pending = Vec::new();
+            let (positive, mut expression_symbols) = datatype_boolean_operands(
+                positive_term,
+                namespace,
+                DefinitionPolarity::Positive,
+                &mut pending,
+                budget,
+            )?;
+            let (negative, negative_symbols) = datatype_boolean_operands(
+                negative_term,
+                namespace,
+                DefinitionPolarity::Negative,
+                &mut pending,
+                budget,
+            )?;
+            for seed in negative_symbols {
+                push_data_range_symbol_seed(&mut expression_symbols, seed, budget)?;
+            }
+            budget.claim_work(sort_work(expression_symbols.len()))?;
+            expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
+            expression_symbols.dedup_by(|left, right| left.key == right.key);
+            let provenance = source_axiom_digest(model, root.node, scope_maps, budget)?;
+            for definition in pending {
+                retain_data_boolean_definition_provenances(
+                    data_definitions,
+                    definition,
+                    std::slice::from_ref(&provenance),
+                    budget,
+                )?;
+            }
+            (
+                expression_symbols,
+                intersection,
+                DatatypeBooleanOperands::Polarized { positive, negative },
+            )
         };
         let following = definitions.len().checked_add(1).ok_or_else(|| {
             EncodedValidationError::resource("datatype Boolean definition count overflowed")
@@ -3636,9 +3718,9 @@ fn datatype_boolean_definitions<B: ByteSource>(
         definitions.push(DatatypeBooleanDefinition {
             root: root.node,
             expression,
-            expression_symbols: candidate.expression_symbols,
-            intersection: candidate.intersection,
-            operands: candidate.operands,
+            expression_symbols,
+            intersection,
+            operands,
         });
     }
     budget.claim_work(sort_work(definitions.len()))?;
@@ -3651,7 +3733,119 @@ fn datatype_boolean_definitions<B: ByteSource>(
             "datatype Boolean definition root is duplicated",
         ));
     }
+    budget.claim_work(sort_work(data_definitions.len()))?;
+    data_definitions.sort_by(|left, right| {
+        left.expression_key
+            .cmp(&right.expression_key)
+            .then_with(|| left.polarity.cmp(&right.polarity))
+    });
+    for definition in data_definitions {
+        budget.claim_work(sort_work(definition.expressions.len()))?;
+        definition.expressions.sort_unstable();
+        definition.expressions.dedup();
+        budget.claim_work(sort_work(definition.provenance.len()))?;
+        definition.provenance.sort_unstable();
+        definition.provenance.dedup();
+    }
     Ok(definitions)
+}
+
+fn datatype_boolean_operands(
+    term: NormalizedDataBooleanTerm,
+    namespace: [u8; 32],
+    polarity: DefinitionPolarity,
+    definitions: &mut Vec<DataBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(Vec<DataBooleanOperand>, Vec<DataRangeSymbolSeed>)> {
+    if term.operands.len() < 2 {
+        return Err(EncodedValidationError::invariant(
+            "recursive datatype Boolean definition lost its operands",
+        ));
+    }
+    let expression_tag = if term.intersection {
+        DATA_INTERSECTION_OF_TAG
+    } else {
+        DATA_UNION_OF_TAG
+    };
+    let mut expression_symbols = Vec::new();
+    let source_seed = data_range_symbol_seed(&term.key, expression_tag, budget)?;
+    push_data_range_symbol_seed(&mut expression_symbols, source_seed, budget)?;
+    let mut keyed = Vec::<(Vec<u8>, DataBooleanOperand)>::new();
+    budget.claim_owned(
+        term.operands
+            .len()
+            .checked_mul(size_of::<(Vec<u8>, DataBooleanOperand)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("datatype Boolean operand allocation overflowed")
+            })?,
+    )?;
+    keyed.try_reserve_exact(term.operands.len()).map_err(|_| {
+        EncodedValidationError::resource("datatype Boolean operand allocation failed")
+    })?;
+    for operand in term.operands {
+        match operand {
+            NormalizedDataTerm::Atomic(operand) => {
+                for seed in operand.symbols {
+                    push_data_range_symbol_seed(&mut expression_symbols, seed, budget)?;
+                }
+                let selection = operand.selection.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "datatype Boolean definition contains a synthetic atomic operand",
+                    )
+                })?;
+                keyed.push((operand.key, DataBooleanOperand::Atomic(selection)));
+            }
+            NormalizedDataTerm::Boolean(operand) => {
+                let generated_key = atomize_normalized_data_boolean(
+                    operand,
+                    None,
+                    namespace,
+                    polarity,
+                    definitions,
+                    budget,
+                )?;
+                budget.claim_owned(generated_key.len())?;
+                keyed.push((
+                    generated_key.clone(),
+                    DataBooleanOperand::Generated { key: generated_key },
+                ));
+            }
+        }
+    }
+    budget.claim_work(sort_work(keyed.len()))?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    if keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(EncodedValidationError::invariant(
+            "recursive datatype Boolean definition lost distinct operands",
+        ));
+    }
+    let rewritten_key = synthetic_boolean_key(
+        expression_tag,
+        keyed.iter().map(|(key, _)| key.as_slice()),
+        keyed.len(),
+        budget,
+    )?;
+    let rewritten_seed = data_range_symbol_seed(&rewritten_key, expression_tag, budget)?;
+    push_data_range_symbol_seed(&mut expression_symbols, rewritten_seed, budget)?;
+    budget.claim_work(sort_work(expression_symbols.len()))?;
+    expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
+    expression_symbols.dedup_by(|left, right| left.key == right.key);
+    budget.claim_owned(
+        keyed
+            .len()
+            .checked_mul(size_of::<DataBooleanOperand>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "datatype Boolean operand result allocation overflowed",
+                )
+            })?,
+    )?;
+    let mut operands = Vec::new();
+    operands.try_reserve_exact(keyed.len()).map_err(|_| {
+        EncodedValidationError::resource("datatype Boolean operand result allocation failed")
+    })?;
+    operands.extend(keyed.into_iter().map(|(_, operand)| operand));
+    Ok((operands, expression_symbols))
 }
 
 fn retain_data_boolean_definition_provenances(
@@ -13045,7 +13239,7 @@ fn emit_datatype_boolean_definition<B: ByteSource>(
         )
     })?;
     let expression = node_field(model, node, 1, "datatype defining range")?;
-    if expression != definition.expression || definition.operands.len() < 2 {
+    if expression != definition.expression {
         return Err(EncodedValidationError::invariant(
             "planned datatype Boolean definition changed before emission",
         ));
@@ -13054,65 +13248,178 @@ fn emit_datatype_boolean_definition<B: ByteSource>(
         range_id: left_range_id,
         negative: false,
     };
-    let mut operands = Vec::new();
+    let provenance = source_axiom_digest(model, definition.root, scope_maps, budget)?;
+    match &definition.operands {
+        DatatypeBooleanOperands::Flat(selections) => {
+            if selections.len() < 2 {
+                return Err(EncodedValidationError::invariant(
+                    "flat datatype Boolean definition lost its operands",
+                ));
+            }
+            let mut operands = Vec::new();
+            budget.claim_owned(
+                selections
+                    .len()
+                    .checked_mul(size_of::<DataRangeLiteral>())
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "datatype Boolean literal allocation overflowed",
+                        )
+                    })?,
+            )?;
+            operands.try_reserve_exact(selections.len()).map_err(|_| {
+                EncodedValidationError::resource("datatype Boolean literal allocation failed")
+            })?;
+            for selection in selections.iter().copied() {
+                operands.push(atomic_data_range_selection_literal(
+                    model,
+                    symbols,
+                    data_range_domain,
+                    selection,
+                    scope_maps,
+                    budget,
+                )?);
+            }
+            if definition.intersection {
+                for operand in &operands {
+                    push_raw_data_boolean_clause(
+                        clauses,
+                        vec![left],
+                        vec![*operand],
+                        provenance,
+                        false,
+                        budget,
+                    )?;
+                }
+                push_raw_data_boolean_clause(
+                    clauses,
+                    operands,
+                    vec![left],
+                    provenance,
+                    false,
+                    budget,
+                )?;
+            } else {
+                push_raw_data_boolean_clause(
+                    clauses,
+                    vec![left],
+                    operands.clone(),
+                    provenance,
+                    false,
+                    budget,
+                )?;
+                for operand in operands {
+                    push_raw_data_boolean_clause(
+                        clauses,
+                        vec![operand],
+                        vec![left],
+                        provenance,
+                        false,
+                        budget,
+                    )?;
+                }
+            }
+        }
+        DatatypeBooleanOperands::Polarized { positive, negative } => {
+            let positive = datatype_boolean_operand_literals(
+                model,
+                symbols,
+                data_range_domain,
+                positive,
+                scope_maps,
+                budget,
+            )?;
+            let negative = datatype_boolean_operand_literals(
+                model,
+                symbols,
+                data_range_domain,
+                negative,
+                scope_maps,
+                budget,
+            )?;
+            if positive.len() < 2 || negative.len() < 2 {
+                return Err(EncodedValidationError::invariant(
+                    "polarized datatype Boolean definition lost its operands",
+                ));
+            }
+            if definition.intersection {
+                for operand in positive {
+                    push_raw_data_boolean_clause(
+                        clauses,
+                        vec![left],
+                        vec![operand],
+                        provenance,
+                        false,
+                        budget,
+                    )?;
+                }
+                push_raw_data_boolean_clause(
+                    clauses,
+                    negative,
+                    vec![left],
+                    provenance,
+                    false,
+                    budget,
+                )?;
+            } else {
+                push_raw_data_boolean_clause(
+                    clauses,
+                    vec![left],
+                    positive,
+                    provenance,
+                    false,
+                    budget,
+                )?;
+                for operand in negative {
+                    push_raw_data_boolean_clause(
+                        clauses,
+                        vec![operand],
+                        vec![left],
+                        provenance,
+                        false,
+                        budget,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(provenance)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn datatype_boolean_operand_literals<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    data_range_domain: &DecodedSymbolDomain,
+    operands: &[DataBooleanOperand],
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DataRangeLiteral>> {
     budget.claim_owned(
-        definition
-            .operands
+        operands
             .len()
             .checked_mul(size_of::<DataRangeLiteral>())
             .ok_or_else(|| {
-                EncodedValidationError::resource("datatype Boolean literal allocation overflowed")
+                EncodedValidationError::resource(
+                    "polarized datatype Boolean literal allocation overflowed",
+                )
             })?,
     )?;
-    operands
-        .try_reserve_exact(definition.operands.len())
-        .map_err(|_| {
-            EncodedValidationError::resource("datatype Boolean literal allocation failed")
-        })?;
-    for selection in definition.operands.iter().copied() {
-        operands.push(atomic_data_range_selection_literal(
+    let mut literals = Vec::new();
+    literals.try_reserve_exact(operands.len()).map_err(|_| {
+        EncodedValidationError::resource("polarized datatype Boolean literal allocation failed")
+    })?;
+    for operand in operands {
+        literals.push(data_boolean_operand_literal(
             model,
             symbols,
             data_range_domain,
-            selection,
+            operand,
             scope_maps,
             budget,
         )?);
     }
-    let provenance = source_axiom_digest(model, definition.root, scope_maps, budget)?;
-    if definition.intersection {
-        for operand in &operands {
-            push_raw_data_boolean_clause(
-                clauses,
-                vec![left],
-                vec![*operand],
-                provenance,
-                false,
-                budget,
-            )?;
-        }
-        push_raw_data_boolean_clause(clauses, operands, vec![left], provenance, false, budget)?;
-    } else {
-        push_raw_data_boolean_clause(
-            clauses,
-            vec![left],
-            operands.clone(),
-            provenance,
-            false,
-            budget,
-        )?;
-        for operand in operands {
-            push_raw_data_boolean_clause(
-                clauses,
-                vec![operand],
-                vec![left],
-                provenance,
-                false,
-                budget,
-            )?;
-        }
-    }
-    Ok(provenance)
+    Ok(literals)
 }
 
 #[allow(clippy::too_many_arguments)]
