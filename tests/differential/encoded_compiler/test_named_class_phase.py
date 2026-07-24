@@ -6347,6 +6347,58 @@ def test_composite_discarded_data_boolean_keeps_shared_live_literal() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_complemented_reduced_data_booleans_match_scalar_roots() -> None:
+    retained_one_of = (
+        'DataComplementOf(DataIntersectionOf(rdfs:Literal DataOneOf("retained")))'
+    )
+    retained_restriction = (
+        "DataComplementOf(DataUnionOf(DataComplementOf(rdfs:Literal) "
+        "DatatypeRestriction(xsd:string "
+        'xsd:minLength "1"^^xsd:integer)))'
+    )
+    discarded_one_of = (
+        'DataComplementOf(DataUnionOf(rdfs:Literal DataOneOf("discarded")))'
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(DataProperty(:f))",
+            "Declaration(Datatype(:T))",
+            "Declaration(Datatype(:U))",
+            "Declaration(Datatype(:V))",
+            f"DataPropertyRange(:d {retained_one_of})",
+            f"DataPropertyRange(:e {retained_restriction})",
+            f"DataPropertyRange(:f {discarded_one_of})",
+            f"DatatypeDefinition(:T {retained_one_of})",
+            f"DatatypeDefinition(:U {retained_restriction})",
+            f"DatatypeDefinition(:V {discarded_one_of})",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=6,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
+    )
+    assert not any(
+        str(value["display"]).startswith(
+            ("DataIntersectionOf:", "DataUnionOf:")
+        )
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    )
+    assert all(
+        "discarded" not in str(value["display"])
+        for value in cast(list[dict[str, object]], manifest["source_literal_symbols"])
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
     string_datatype = "<http://www.w3.org/2001/XMLSchema#string>"
     snapshot = pyowl_core.load_snapshot(

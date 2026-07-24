@@ -9858,11 +9858,11 @@ fn named_data_range_domain<B: ByteSource>(
             expressions.push(selection.base);
         }
         if selection.negative {
-            budget.claim_owned(size_of::<NodeId>())?;
-            expressions.try_reserve(1).map_err(|_| {
-                EncodedValidationError::resource("data-range selection allocation failed")
-            })?;
-            expressions.push(selection.expression);
+            let base_key =
+                canonical::canonical_node_key(model, selection.base, scope_maps, budget)?;
+            let complement_key = synthetic_data_complement_key(&base_key, budget)?;
+            let seed = data_range_symbol_seed(&complement_key, DATA_COMPLEMENT_OF_TAG, budget)?;
+            push_seeded_data_range_symbol(&mut pending, &seed, budget)?;
         }
     }
     budget.claim_work(sort_work(expressions.len()))?;
@@ -10013,11 +10013,6 @@ fn atomic_data_range_selection_at_depth<B: ByteSource>(
         base = node_field(model, node, 0, "data-complement operand")?;
         negative = !negative;
     }
-    let base_node = model.node(base)?;
-    let base_is_atomic = matches!(
-        base_node.tag(),
-        ENTITY_TAG | DATA_ONE_OF_TAG | DATATYPE_RESTRICTION_TAG
-    );
     let Some(selection) =
         positive_atomic_data_range_selection(model, symbols, base, depth, budget)?
     else {
@@ -10026,11 +10021,10 @@ fn atomic_data_range_selection_at_depth<B: ByteSource>(
     if !negative {
         return Ok(Some(selection));
     }
-    Ok(complement_atomic_data_range_selection(
+    Ok(Some(complement_atomic_data_range_selection(
         selection,
         normalized_complement.unwrap_or(identifier),
-        base_is_atomic,
-    ))
+    )))
 }
 
 fn positive_atomic_data_range_selection<B: ByteSource>(
@@ -10190,19 +10184,15 @@ fn atomic_data_range_selections_match(
 const fn complement_atomic_data_range_selection(
     mut selection: AtomicDataRangeSelection,
     complement_expression: NodeId,
-    base_is_atomic: bool,
-) -> Option<AtomicDataRangeSelection> {
+) -> AtomicDataRangeSelection {
     if selection.negative {
         selection.expression = selection.base;
         selection.negative = false;
-        return Some(selection);
-    }
-    if !base_is_atomic {
-        return None;
+        return selection;
     }
     selection.expression = complement_expression;
     selection.negative = true;
-    Some(selection)
+    selection
 }
 
 #[derive(Debug, Eq, PartialEq)]
