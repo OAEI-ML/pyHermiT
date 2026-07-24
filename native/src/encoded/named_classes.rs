@@ -680,13 +680,33 @@ struct NormalizedObjectQuantifierTerm {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObjectCardinalityKind {
+    Minimum,
+    Maximum,
+}
+
+enum CardinalityNormalization {
+    Quantifier {
+        kind: ObjectQuantifierKind,
+        complement_filler: bool,
+    },
+    Cardinality {
+        kind: ObjectCardinalityKind,
+        cardinality: u32,
+        cardinality_bytes: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ObjectCardinalityDefinition {
+    kind: ObjectCardinalityKind,
     cardinality: u32,
     role_id: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NormalizedObjectCardinalityTerm {
+    kind: ObjectCardinalityKind,
     cardinality: u32,
     cardinality_bytes: Vec<u8>,
     role_id: u32,
@@ -820,6 +840,8 @@ enum ObjectConstraintKind {
     UniversalConsequent,
     MinimumAntecedent,
     MinimumConsequent,
+    MaximumAntecedent,
+    MaximumConsequent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2216,6 +2238,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         predicate_by_object_role,
         predicate_by_negative_object_role,
         at_least_object_predicates,
+        annotated_equality_predicates,
         predicate_by_data_role,
         predicate_by_negative_data_role,
         predicate_by_data_range,
@@ -2282,6 +2305,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &predicate_by_negative_class,
         &predicate_by_object_role,
         &at_least_object_predicates,
+        &annotated_equality_predicates,
         &predicate_by_data_role,
         &predicate_by_data_range,
         &predicate_by_negative_data_range,
@@ -4289,10 +4313,15 @@ fn normalized_class_term<B: ByteSource>(
                 },
             )));
         }
-        if selection.is_none() && node.tag() == OBJECT_MIN_CARDINALITY_TAG && !complemented {
+        if selection.is_none()
+            && matches!(
+                node.tag(),
+                OBJECT_MIN_CARDINALITY_TAG | OBJECT_MAX_CARDINALITY_TAG
+            )
+        {
             if node.field_count() != 3 {
                 return Err(EncodedValidationError::invariant(
-                    "object-minimum definition no longer has schema-1 shape",
+                    "object-cardinality definition no longer has schema-1 shape",
                 ));
             }
             let Some(object_roles) = object_roles else {
@@ -4305,31 +4334,100 @@ fn normalized_class_term<B: ByteSource>(
                 model,
                 node,
                 0,
-                "object-minimum definition cardinality",
+                "object-cardinality definition cardinality",
                 budget,
             )?
             else {
                 return Ok(None);
             };
-            if cardinality <= 1 {
-                return Ok(None);
-            }
-            let property = node_field(model, node, 1, "object-minimum definition role")?;
+            let normalized = match (node.tag(), complemented, cardinality) {
+                (OBJECT_MIN_CARDINALITY_TAG, false, 0 | 1) => return Ok(None),
+                (OBJECT_MIN_CARDINALITY_TAG, false, _) => CardinalityNormalization::Cardinality {
+                    kind: ObjectCardinalityKind::Minimum,
+                    cardinality,
+                    cardinality_bytes,
+                },
+                (OBJECT_MIN_CARDINALITY_TAG, true, 0) => {
+                    return Err(EncodedValidationError::invariant(
+                        "complemented zero minimum did not reduce to a builtin",
+                    ));
+                }
+                (OBJECT_MIN_CARDINALITY_TAG, true, 1) | (OBJECT_MAX_CARDINALITY_TAG, false, 0) => {
+                    CardinalityNormalization::Quantifier {
+                        kind: ObjectQuantifierKind::All,
+                        complement_filler: true,
+                    }
+                }
+                (OBJECT_MIN_CARDINALITY_TAG, true, _) => {
+                    let normalized_cardinality = cardinality.checked_sub(1).ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "complemented object minimum cardinality underflowed",
+                        )
+                    })?;
+                    CardinalityNormalization::Cardinality {
+                        kind: ObjectCardinalityKind::Maximum,
+                        cardinality: normalized_cardinality,
+                        cardinality_bytes: canonical_u32_integer_bytes(
+                            normalized_cardinality,
+                            budget,
+                        )?,
+                    }
+                }
+                (OBJECT_MAX_CARDINALITY_TAG, false, u32::MAX) => return Ok(None),
+                (OBJECT_MAX_CARDINALITY_TAG, false, _) => CardinalityNormalization::Cardinality {
+                    kind: ObjectCardinalityKind::Maximum,
+                    cardinality,
+                    cardinality_bytes,
+                },
+                (OBJECT_MAX_CARDINALITY_TAG, true, _) => {
+                    let Some(normalized_cardinality) = cardinality.checked_add(1) else {
+                        return Ok(None);
+                    };
+                    if normalized_cardinality == 1 {
+                        CardinalityNormalization::Quantifier {
+                            kind: ObjectQuantifierKind::Some,
+                            complement_filler: false,
+                        }
+                    } else {
+                        CardinalityNormalization::Cardinality {
+                            kind: ObjectCardinalityKind::Minimum,
+                            cardinality: normalized_cardinality,
+                            cardinality_bytes: canonical_u32_integer_bytes(
+                                normalized_cardinality,
+                                budget,
+                            )?,
+                        }
+                    }
+                }
+                _ => {
+                    return Err(EncodedValidationError::invariant(
+                        "object-cardinality definition changed constructor",
+                    ));
+                }
+            };
+            let property = node_field(model, node, 1, "object-cardinality definition role")?;
             let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
-            let filler = node_field(model, node, 2, "object-minimum definition filler")?;
+            let filler = node_field(model, node, 2, "object-cardinality definition filler")?;
             let filler_depth =
-                child_expression_depth(depth, "object-minimum filler depth overflowed")?;
+                child_expression_depth(depth, "object-cardinality filler depth overflowed")?;
             PhaseBudget::count(
                 filler_depth,
                 budget.limits.max_canonical_depth,
                 "class-expression depth",
             )?;
+            let complement_filler = matches!(
+                &normalized,
+                CardinalityNormalization::Quantifier {
+                    complement_filler: true,
+                    ..
+                }
+            );
             let Some(filler) = normalized_class_term(
                 model,
                 symbols,
                 Some(object_roles),
                 filler,
-                false,
+                complement_filler,
                 filler_depth,
                 scope_maps,
                 budget,
@@ -4338,26 +4436,57 @@ fn normalized_class_term<B: ByteSource>(
                 return Ok(None);
             };
             let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
-            let key = synthetic_object_cardinality_key(
-                OBJECT_MIN_CARDINALITY_TAG,
-                &cardinality_bytes,
-                &property_key,
-                filler.key(),
-                budget,
-            )?;
-            budget.claim_owned(
-                size_of::<NormalizedObjectCardinalityTerm>() + size_of::<NormalizedClassTerm>(),
-            )?;
-            return Ok(Some(NormalizedClassTerm::ObjectCardinality(
-                NormalizedObjectCardinalityTerm {
+            return match normalized {
+                CardinalityNormalization::Quantifier { kind, .. } => {
+                    let key =
+                        synthetic_object_quantifier_key(kind, &property_key, filler.key(), budget)?;
+                    budget.claim_owned(
+                        size_of::<NormalizedObjectQuantifierTerm>()
+                            + size_of::<NormalizedClassTerm>(),
+                    )?;
+                    Ok(Some(NormalizedClassTerm::ObjectQuantifier(
+                        NormalizedObjectQuantifierTerm {
+                            kind,
+                            role_id,
+                            property_key,
+                            key,
+                            filler: Box::new(filler),
+                        },
+                    )))
+                }
+                CardinalityNormalization::Cardinality {
+                    kind,
                     cardinality,
                     cardinality_bytes,
-                    role_id,
-                    property_key,
-                    key,
-                    filler: Box::new(filler),
-                },
-            )));
+                } => {
+                    let tag = match kind {
+                        ObjectCardinalityKind::Minimum => OBJECT_MIN_CARDINALITY_TAG,
+                        ObjectCardinalityKind::Maximum => OBJECT_MAX_CARDINALITY_TAG,
+                    };
+                    let key = synthetic_object_cardinality_key(
+                        tag,
+                        &cardinality_bytes,
+                        &property_key,
+                        filler.key(),
+                        budget,
+                    )?;
+                    budget.claim_owned(
+                        size_of::<NormalizedObjectCardinalityTerm>()
+                            + size_of::<NormalizedClassTerm>(),
+                    )?;
+                    Ok(Some(NormalizedClassTerm::ObjectCardinality(
+                        NormalizedObjectCardinalityTerm {
+                            kind,
+                            cardinality,
+                            cardinality_bytes,
+                            role_id,
+                            property_key,
+                            key,
+                            filler: Box::new(filler),
+                        },
+                    )))
+                }
+            };
         }
         let Some(mut selection) = selection else {
             return Ok(None);
@@ -4724,6 +4853,7 @@ fn atomize_normalized_object_cardinality(
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<u8>> {
     let NormalizedObjectCardinalityTerm {
+        kind,
         cardinality,
         cardinality_bytes,
         role_id,
@@ -4740,10 +4870,17 @@ fn atomize_normalized_object_cardinality(
             (filler.key, ClassBooleanOperand::Atomic(filler.selection))
         }
         filler => {
+            let filler_polarity = match kind {
+                ObjectCardinalityKind::Minimum => polarity,
+                ObjectCardinalityKind::Maximum => match polarity {
+                    DefinitionPolarity::Positive => DefinitionPolarity::Negative,
+                    DefinitionPolarity::Negative => DefinitionPolarity::Positive,
+                },
+            };
             let generated_key = atomize_normalized_class_term(
                 filler,
                 None,
-                polarity,
+                filler_polarity,
                 namespace,
                 definitions,
                 budget,
@@ -4758,17 +4895,20 @@ fn atomize_normalized_object_cardinality(
             )
         }
     };
-    let source_seed = class_expression_symbol_seed(&key, OBJECT_MIN_CARDINALITY_TAG, budget)?;
+    let expression_tag = match kind {
+        ObjectCardinalityKind::Minimum => OBJECT_MIN_CARDINALITY_TAG,
+        ObjectCardinalityKind::Maximum => OBJECT_MAX_CARDINALITY_TAG,
+    };
+    let source_seed = class_expression_symbol_seed(&key, expression_tag, budget)?;
     push_class_expression_symbol_seed(&mut expression_symbols, source_seed, budget)?;
     let rewritten_key = synthetic_object_cardinality_key(
-        OBJECT_MIN_CARDINALITY_TAG,
+        expression_tag,
         &cardinality_bytes,
         &property_key,
         &filler_key,
         budget,
     )?;
-    let rewritten_seed =
-        class_expression_symbol_seed(&rewritten_key, OBJECT_MIN_CARDINALITY_TAG, budget)?;
+    let rewritten_seed = class_expression_symbol_seed(&rewritten_key, expression_tag, budget)?;
     push_class_expression_symbol_seed(&mut expression_symbols, rewritten_seed, budget)?;
     budget.claim_work(sort_work(expression_symbols.len()))?;
     expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
@@ -4782,14 +4922,14 @@ fn atomize_normalized_object_cardinality(
         budget.claim_owned(size_of::<NodeId>())?;
         expressions.try_reserve_exact(1).map_err(|_| {
             EncodedValidationError::resource(
-                "object-minimum definition expression allocation failed",
+                "object-cardinality definition expression allocation failed",
             )
         })?;
         expressions.push(expression);
     }
     budget.claim_owned(size_of::<ClassBooleanDefinition>() + size_of::<ClassBooleanOperand>())?;
     definitions.try_reserve(1).map_err(|_| {
-        EncodedValidationError::resource("object-minimum definition allocation failed")
+        EncodedValidationError::resource("object-cardinality definition allocation failed")
     })?;
     definitions.push(ClassBooleanDefinition {
         expressions,
@@ -4801,6 +4941,7 @@ fn atomize_normalized_object_cardinality(
         object_self_role_id: None,
         object_quantifier: None,
         object_cardinality: Some(ObjectCardinalityDefinition {
+            kind,
             cardinality,
             role_id,
         }),
@@ -7146,6 +7287,16 @@ fn integer_field_u32_bytes<B: ByteSource>(
             })?;
         cardinality |= u32::from(byte) << shift;
     }
+    Ok(Some((
+        cardinality,
+        canonical_u32_integer_bytes(cardinality, budget)?,
+    )))
+}
+
+fn canonical_u32_integer_bytes(
+    cardinality: u32,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
     let mut remaining = cardinality;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(5).map_err(|_| {
@@ -7163,7 +7314,7 @@ fn integer_field_u32_bytes<B: ByteSource>(
         }
     }
     budget.claim_owned(bytes.len())?;
-    Ok(Some((cardinality, bytes)))
+    Ok(bytes)
 }
 
 fn atomic_class_selection_has_display(
@@ -12199,7 +12350,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 || definition.provenance.is_empty()
             {
                 return Err(EncodedValidationError::invariant(
-                    "generated object-minimum definition changed before emission",
+                    "generated object-cardinality definition changed before emission",
                 ));
             }
             let (filler_class_id, filler_negative) = class_boolean_operand_literal(
@@ -12214,13 +12365,23 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 budget.claim_owned(size_of::<RawObjectConstraint>())?;
                 object_constraints.try_reserve(1).map_err(|_| {
                     EncodedValidationError::resource(
-                        "generated object-minimum clause allocation failed",
+                        "generated object-cardinality clause allocation failed",
                     )
                 })?;
                 object_constraints.push(RawObjectConstraint {
-                    kind: match definition.polarity {
-                        DefinitionPolarity::Positive => ObjectConstraintKind::MinimumConsequent,
-                        DefinitionPolarity::Negative => ObjectConstraintKind::MinimumAntecedent,
+                    kind: match (cardinality.kind, definition.polarity) {
+                        (ObjectCardinalityKind::Minimum, DefinitionPolarity::Positive) => {
+                            ObjectConstraintKind::MinimumConsequent
+                        }
+                        (ObjectCardinalityKind::Minimum, DefinitionPolarity::Negative) => {
+                            ObjectConstraintKind::MinimumAntecedent
+                        }
+                        (ObjectCardinalityKind::Maximum, DefinitionPolarity::Positive) => {
+                            ObjectConstraintKind::MaximumConsequent
+                        }
+                        (ObjectCardinalityKind::Maximum, DefinitionPolarity::Negative) => {
+                            ObjectConstraintKind::MaximumAntecedent
+                        }
                     },
                     role_id: cardinality.role_id,
                     class: generated,
@@ -13684,6 +13845,11 @@ enum PredicateOwner {
         role_id: u32,
         filler: ClassLiteral,
     },
+    AnnotatedEquality {
+        cardinality: u32,
+        role_id: u32,
+        filler: ClassLiteral,
+    },
     DataRole(u32),
     NegatedDataRole(u32),
     DataRange(u32),
@@ -13708,6 +13874,7 @@ struct PendingPredicate {
 type PredicateIndex = Vec<(u32, u32)>;
 type ObjectPredicateIndex = Vec<(u32, u32)>;
 type AtLeastObjectPredicateIndex = Vec<((u32, u32, ClassLiteral), u32)>;
+type AnnotatedEqualityPredicateIndex = Vec<((u32, u32, ClassLiteral), u32)>;
 type GuardPredicateIndex = Vec<([u8; 32], u32, u32)>;
 
 fn nominal_binding(bindings: &[NominalBinding], class_id: u32) -> Option<&NominalBinding> {
@@ -13770,6 +13937,7 @@ type FrozenPredicates = (
     ObjectPredicateIndex,
     ObjectPredicateIndex,
     AtLeastObjectPredicateIndex,
+    AnnotatedEqualityPredicateIndex,
     ObjectPredicateIndex,
     ObjectPredicateIndex,
     PredicateIndex,
@@ -13833,9 +14001,12 @@ fn freeze_predicates(
         || object_characteristics
             .iter()
             .any(|value| value.kind == ObjectCharacteristicKind::Reflexive)
-        || object_constraints
-            .iter()
-            .any(|value| value.kind == ObjectConstraintKind::UniversalAntecedent)
+        || object_constraints.iter().any(|value| {
+            matches!(
+                value.kind,
+                ObjectConstraintKind::UniversalAntecedent | ObjectConstraintKind::MaximumAntecedent
+            )
+        })
     {
         push_u32(&mut class_ids, thing, "predicate class", budget)?;
     }
@@ -13996,10 +14167,12 @@ fn freeze_predicates(
     if !inequalities.is_empty()
         || has_negative_nominals
         || object_constraints.iter().any(|constraint| {
-            matches!(
+            (matches!(
                 constraint.kind,
                 ObjectConstraintKind::MinimumAntecedent | ObjectConstraintKind::MinimumConsequent
-            ) && constraint.cardinality.is_some_and(|value| value > 1)
+            ) && constraint.cardinality.is_some_and(|value| value > 1))
+                || (constraint.kind == ObjectConstraintKind::MaximumAntecedent
+                    && constraint.cardinality.is_some())
         })
     {
         let key = inequality_predicate_key(TermSort::Object);
@@ -14025,7 +14198,12 @@ fn freeze_predicates(
             owner: PredicateOwner::Inequality(TermSort::Data),
         });
     }
-    if !keys.is_empty() {
+    if !keys.is_empty()
+        || object_constraints.iter().any(|constraint| {
+            constraint.kind == ObjectConstraintKind::MaximumConsequent
+                && constraint.cardinality.is_some_and(|value| value > 1)
+        })
+    {
         let key = ordering_predicate_key();
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
@@ -14125,6 +14303,7 @@ fn freeze_predicates(
                 | ObjectConstraintKind::UniversalAntecedent
                 | ObjectConstraintKind::MinimumAntecedent
                 | ObjectConstraintKind::MinimumConsequent
+                | ObjectConstraintKind::MaximumAntecedent
         )
     }) {
         let filler = constraint.filler.ok_or_else(|| {
@@ -14153,6 +14332,19 @@ fn freeze_predicates(
                 }
                 cardinality
             }
+            ObjectConstraintKind::MaximumAntecedent => constraint
+                .cardinality
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-maximum constraint lost its cardinality",
+                    )
+                })?
+                .checked_add(1)
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-maximum antecedent cardinality overflowed",
+                    )
+                })?,
             _ => {
                 return Err(EncodedValidationError::invariant(
                     "non-cardinality object constraint reached at-least collection",
@@ -14178,6 +14370,47 @@ fn freeze_predicates(
         ordered.push(PendingPredicate {
             key,
             owner: PredicateOwner::AtLeastObject {
+                cardinality,
+                role_id,
+                filler,
+            },
+        });
+    }
+    let mut annotated_equalities = Vec::<(u32, u32, ClassLiteral)>::new();
+    for constraint in object_constraints
+        .iter()
+        .filter(|constraint| constraint.kind == ObjectConstraintKind::MaximumConsequent)
+    {
+        let filler = constraint.filler.ok_or_else(|| {
+            EncodedValidationError::invariant("object at-most constraint lost its filler literal")
+        })?;
+        let cardinality = constraint.cardinality.ok_or_else(|| {
+            EncodedValidationError::invariant("object at-most constraint lost its cardinality")
+        })?;
+        if cardinality == 0 {
+            return Err(EncodedValidationError::invariant(
+                "zero object at-most constraint did not normalize to a universal restriction",
+            ));
+        }
+        budget.claim_owned(size_of::<(u32, u32, ClassLiteral)>())?;
+        annotated_equalities.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("annotated-equality predicate allocation failed")
+        })?;
+        annotated_equalities.push((cardinality, constraint.role_id, filler));
+    }
+    budget.claim_work(sort_work(annotated_equalities.len()))?;
+    annotated_equalities.sort_unstable();
+    annotated_equalities.dedup();
+    for (cardinality, role_id, filler) in annotated_equalities {
+        let filler_key = class_literal_predicate_key(nominal_bindings, filler);
+        let key = annotated_equality_predicate_key(cardinality, role_id, &filler_key, budget)?;
+        budget.claim_owned(size_of::<PendingPredicate>() + key.len())?;
+        ordered.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("annotated-equality predicate allocation failed")
+        })?;
+        ordered.push(PendingPredicate {
+            key,
+            owner: PredicateOwner::AnnotatedEquality {
                 cardinality,
                 role_id,
                 filler,
@@ -14521,6 +14754,7 @@ fn freeze_predicates(
     let mut predicate_by_object_role = Vec::new();
     let mut predicate_by_negative_object_role = Vec::new();
     let mut at_least_object_predicates = Vec::new();
+    let mut annotated_equality_predicates = Vec::new();
     let mut predicate_by_data_role = Vec::new();
     let mut predicate_by_negative_data_role = Vec::new();
     let mut predicate_by_data_range = Vec::new();
@@ -14586,6 +14820,21 @@ fn freeze_predicates(
         .try_reserve_exact(ordered.len())
         .map_err(|_| {
             EncodedValidationError::resource("object at-least predicate index allocation failed")
+        })?;
+    budget.claim_owned(
+        ordered
+            .len()
+            .checked_mul(size_of::<((u32, u32, ClassLiteral), u32)>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "annotated-equality predicate index allocation overflowed",
+                )
+            })?,
+    )?;
+    annotated_equality_predicates
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("annotated-equality predicate index allocation failed")
         })?;
     predicate_by_data_role
         .try_reserve_exact(ordered.len())
@@ -14730,6 +14979,34 @@ fn freeze_predicates(
                     internal_key: None,
                 });
                 at_least_object_predicates.push(((cardinality, role_id, filler), predicate_id));
+            }
+            PredicateOwner::AnnotatedEquality {
+                cardinality,
+                role_id,
+                filler,
+            } => {
+                let filler_predicate_id = pending_class_predicates
+                    .binary_search_by_key(&filler, |(literal, _)| *literal)
+                    .ok()
+                    .map(|position| pending_class_predicates[position].1)
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "annotated-equality filler predicate is missing",
+                        )
+                    })?;
+                budget.claim_owned(2 * size_of::<TermSort>())?;
+                predicates.push(DecodedPredicate {
+                    predicate_id,
+                    kind: PredicateKind::AnnotatedEquality,
+                    argument_sorts: vec![TermSort::Object; 3],
+                    symbol_id: None,
+                    role_id: Some(role_id),
+                    cardinality: Some(cardinality),
+                    filler_predicate_id: Some(filler_predicate_id),
+                    annotation: Vec::new(),
+                    internal_key: None,
+                });
+                annotated_equality_predicates.push(((cardinality, role_id, filler), predicate_id));
             }
             PredicateOwner::DataRole(role_id) => {
                 budget.claim_owned(size_of::<TermSort>())?;
@@ -14881,6 +15158,7 @@ fn freeze_predicates(
     predicate_by_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_negative_object_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     at_least_object_predicates.sort_unstable_by_key(|(key, _)| *key);
+    annotated_equality_predicates.sort_unstable_by_key(|(key, _)| *key);
     predicate_by_data_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_negative_data_role.sort_unstable_by_key(|(role_id, _)| *role_id);
     predicate_by_data_range.sort_unstable_by_key(|(range_id, _)| *range_id);
@@ -14893,6 +15171,7 @@ fn freeze_predicates(
         predicate_by_object_role,
         predicate_by_negative_object_role,
         at_least_object_predicates,
+        annotated_equality_predicates,
         predicate_by_data_role,
         predicate_by_negative_data_role,
         predicate_by_data_range,
@@ -14929,6 +15208,7 @@ fn freeze_clauses(
     predicate_by_negative_class: &[(u32, u32)],
     predicate_by_object_role: &[(u32, u32)],
     at_least_object_predicates: &AtLeastObjectPredicateIndex,
+    annotated_equality_predicates: &AnnotatedEqualityPredicateIndex,
     predicate_by_data_role: &[(u32, u32)],
     predicate_by_data_range: &[(u32, u32)],
     predicate_by_negative_data_range: &[(u32, u32)],
@@ -15421,6 +15701,77 @@ fn freeze_clauses(
                     &mut ordered,
                     &body,
                     &head,
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+            ObjectConstraintKind::MaximumAntecedent => {
+                let filler_literal = constraint.filler.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-maximum antecedent lost its filler literal",
+                    )
+                })?;
+                let cardinality = constraint
+                    .cardinality
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "object-maximum antecedent lost its cardinality",
+                        )
+                    })?
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "object-maximum antecedent cardinality overflowed",
+                        )
+                    })?;
+                let at_least = at_least_object_predicate_id(
+                    at_least_object_predicates,
+                    cardinality,
+                    constraint.role_id,
+                    filler_literal,
+                )?;
+                let thing_predicate = predicate_id(predicate_by_class, thing)?;
+                push_clause(
+                    &mut ordered,
+                    &[thing_predicate],
+                    &[at_least, class],
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+            ObjectConstraintKind::MaximumConsequent => {
+                let filler_literal = constraint.filler.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-maximum consequent lost its filler literal",
+                    )
+                })?;
+                let filler_predicate = filler.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-maximum consequent lost its filler predicate",
+                    )
+                })?;
+                let cardinality = constraint.cardinality.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-maximum consequent lost its cardinality",
+                    )
+                })?;
+                let role = object_predicate_id(predicate_by_object_role, constraint.role_id)?;
+                let annotated_equality = annotated_equality_predicate_id(
+                    annotated_equality_predicates,
+                    cardinality,
+                    constraint.role_id,
+                    filler_literal,
+                )?;
+                push_object_at_most_clause(
+                    &mut ordered,
+                    class,
+                    role,
+                    filler_predicate,
+                    annotated_equality,
+                    ordering_predicate,
+                    cardinality,
                     provenance,
                     scalar_predicate_ids,
                     budget,
@@ -16729,7 +17080,8 @@ fn push_object_constraint_clause(
             ));
         }
     };
-    let (body, head) = canonicalize_variable_rule(body, head, &[], scalar_predicate_ids, budget)?;
+    let (body, head) =
+        canonicalize_variable_rule(body, head, &[], &[], scalar_predicate_ids, budget)?;
     let join_order = if body.len() == 1 {
         vec![0]
     } else {
@@ -16768,6 +17120,203 @@ fn push_object_constraint_clause(
             body,
             head,
             provenance_ids: vec![spec.provenance_id],
+            join_order,
+        },
+    ));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_object_at_most_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    class_predicate_id: u32,
+    role_predicate_id: u32,
+    filler_predicate_id: u32,
+    annotated_equality_predicate_id: u32,
+    ordering_predicate_id: Option<u32>,
+    cardinality: u32,
+    provenance_id: u32,
+    scalar_predicate_ids: &[u32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    if cardinality == 0 {
+        return Err(EncodedValidationError::invariant(
+            "zero object at-most did not normalize to a universal restriction",
+        ));
+    }
+    let target_count = usize::try_from(cardinality)
+        .map_err(|_| EncodedValidationError::resource("object at-most cardinality exceeds usize"))?
+        .checked_add(1)
+        .ok_or_else(|| {
+            EncodedValidationError::resource("object at-most target count overflowed")
+        })?;
+    let equality_count = target_count
+        .checked_mul(target_count.checked_sub(1).ok_or_else(|| {
+            EncodedValidationError::invariant("object at-most target count is empty")
+        })?)
+        .and_then(|value| value.checked_div(2))
+        .ok_or_else(|| {
+            EncodedValidationError::resource("object at-most equality count overflowed")
+        })?;
+    let ordering_count = if target_count > 2 {
+        target_count.checked_sub(1).ok_or_else(|| {
+            EncodedValidationError::invariant("object at-most ordering count underflowed")
+        })?
+    } else {
+        0
+    };
+    let body_count = target_count
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(ordering_count))
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| {
+            EncodedValidationError::resource("object at-most body atom count overflowed")
+        })?;
+    let atom_count = body_count
+        .checked_add(equality_count)
+        .ok_or_else(|| EncodedValidationError::resource("object at-most atom count overflowed"))?;
+    let term_count = target_count
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(ordering_count.checked_mul(2)?))
+        .and_then(|value| value.checked_add(equality_count.checked_mul(3)?))
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| EncodedValidationError::resource("object at-most term count overflowed"))?;
+    budget.claim_work(atom_count)?;
+    budget.claim_owned(
+        atom_count
+            .checked_mul(size_of::<DecodedAtom>())
+            .and_then(|value| value.checked_add(term_count.checked_mul(size_of::<DecodedTerm>())?))
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "object at-most temporary clause payload overflowed",
+                )
+            })?,
+    )?;
+
+    let ordering = if ordering_count == 0 {
+        None
+    } else {
+        Some(ordering_predicate_id.ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "object at-most clause lost its ordering-guard predicate",
+            )
+        })?)
+    };
+    let mut body = Vec::new();
+    let mut head = Vec::new();
+    body.try_reserve_exact(body_count)
+        .map_err(|_| EncodedValidationError::resource("object at-most body allocation failed"))?;
+    head.try_reserve_exact(equality_count)
+        .map_err(|_| EncodedValidationError::resource("object at-most head allocation failed"))?;
+    body.push(variable_atom_at(class_predicate_id, 0, TermSort::Object));
+    for offset in 0..target_count {
+        let target = u32::try_from(offset)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("object at-most variable ID exceeds u32")
+            })?;
+        body.push(object_variable_atom(role_predicate_id, 0, target));
+        body.push(variable_atom_at(
+            filler_predicate_id,
+            target,
+            TermSort::Object,
+        ));
+    }
+    if let Some(ordering) = ordering {
+        for offset in 0..ordering_count {
+            let left = u32::try_from(offset)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("object at-most variable ID exceeds u32")
+                })?;
+            let right = left.checked_add(1).ok_or_else(|| {
+                EncodedValidationError::resource("object at-most variable ID exceeds u32")
+            })?;
+            body.push(object_variable_atom(ordering, left, right));
+        }
+    }
+    for left_offset in 0..target_count {
+        let left = u32::try_from(left_offset)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("object at-most variable ID exceeds u32")
+            })?;
+        for right_offset in left_offset.checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("object at-most variable offset overflowed")
+        })?..target_count
+        {
+            let right = u32::try_from(right_offset)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("object at-most variable ID exceeds u32")
+                })?;
+            head.push(DecodedAtom {
+                predicate_id: annotated_equality_predicate_id,
+                arguments: vec![
+                    DecodedTerm::Variable {
+                        index: left,
+                        sort: TermSort::Object,
+                    },
+                    DecodedTerm::Variable {
+                        index: right,
+                        sort: TermSort::Object,
+                    },
+                    DecodedTerm::Variable {
+                        index: 0,
+                        sort: TermSort::Object,
+                    },
+                ],
+            });
+        }
+    }
+
+    let ordering_predicates = ordering.map(|predicate_id| [predicate_id]);
+    let symmetric_predicates = ordering_predicates
+        .as_ref()
+        .map_or(&[][..], |predicates| predicates.as_slice());
+    let annotated_equality_predicates = [annotated_equality_predicate_id];
+    let (body, head) = canonicalize_variable_rule(
+        body,
+        head,
+        symmetric_predicates,
+        &annotated_equality_predicates,
+        scalar_predicate_ids,
+        budget,
+    )?;
+    let join_order = plan_key_join(
+        &body,
+        ordering.unwrap_or(u32::MAX),
+        scalar_predicate_ids,
+        budget,
+    )?;
+    let key = variable_rule_key(&body, &head)?;
+    budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>() + key.len())?;
+    budget.claim_owned(
+        body.len()
+            .checked_add(head.len())
+            .and_then(|value| value.checked_mul(size_of::<DecodedAtom>()))
+            .and_then(|value| value.checked_add(term_count.checked_mul(size_of::<DecodedTerm>())?))
+            .and_then(|value| {
+                value.checked_add(body.len().checked_add(1)?.checked_mul(size_of::<u32>())?)
+            })
+            .ok_or_else(|| {
+                EncodedValidationError::resource("object at-most clause payload overflowed")
+            })?,
+    )?;
+    clauses
+        .try_reserve(1)
+        .map_err(|_| EncodedValidationError::resource("object at-most clause allocation failed"))?;
+    clauses.push((
+        key,
+        DecodedClause {
+            clause_id: 0,
+            body,
+            head,
+            provenance_ids: vec![provenance_id],
             join_order,
         },
     ));
@@ -17090,6 +17639,7 @@ fn push_key_clause(
         body,
         head,
         &symmetric_predicates,
+        &[],
         scalar_predicate_ids,
         budget,
     )?;
@@ -17122,11 +17672,16 @@ fn canonicalize_variable_rule(
     mut body: Vec<DecodedAtom>,
     mut head: Vec<DecodedAtom>,
     symmetric_predicates: &[u32],
+    annotated_equality_predicates: &[u32],
     scalar_predicate_ids: &[u32],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<(Vec<DecodedAtom>, Vec<DecodedAtom>)> {
     for atom in body.iter_mut().chain(&mut head) {
-        canonicalize_symmetric_variable_atom(atom, symmetric_predicates)?;
+        canonicalize_symmetric_variable_atom(
+            atom,
+            symmetric_predicates,
+            annotated_equality_predicates,
+        )?;
     }
     body = sort_atoms_by_alpha_skeleton(body, scalar_predicate_ids, budget)?;
     head = sort_atoms_by_alpha_skeleton(head, scalar_predicate_ids, budget)?;
@@ -17180,6 +17735,7 @@ fn canonicalize_variable_rule(
             &body,
             &mapping,
             symmetric_predicates,
+            annotated_equality_predicates,
             scalar_predicate_ids,
             budget,
         )?;
@@ -17187,6 +17743,7 @@ fn canonicalize_variable_rule(
             &head,
             &mapping,
             symmetric_predicates,
+            annotated_equality_predicates,
             scalar_predicate_ids,
             budget,
         )?;
@@ -17222,6 +17779,7 @@ fn rename_variable_atoms(
     atoms: &[DecodedAtom],
     mapping: &[((u32, TermSort), u32)],
     symmetric_predicates: &[u32],
+    annotated_equality_predicates: &[u32],
     scalar_predicate_ids: &[u32],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<DecodedAtom>> {
@@ -17270,7 +17828,11 @@ fn rename_variable_atoms(
             predicate_id: atom.predicate_id,
             arguments,
         };
-        canonicalize_symmetric_variable_atom(&mut value, symmetric_predicates)?;
+        canonicalize_symmetric_variable_atom(
+            &mut value,
+            symmetric_predicates,
+            annotated_equality_predicates,
+        )?;
         renamed.push(value);
     }
     sort_atoms_by_canonical_key(renamed, scalar_predicate_ids, budget)
@@ -17279,22 +17841,39 @@ fn rename_variable_atoms(
 fn canonicalize_symmetric_variable_atom(
     atom: &mut DecodedAtom,
     symmetric_predicates: &[u32],
+    annotated_equality_predicates: &[u32],
 ) -> EncodedResult<()> {
+    if annotated_equality_predicates.contains(&atom.predicate_id) {
+        let [left, right, _root] = atom.arguments.as_mut_slice() else {
+            return Err(EncodedValidationError::invariant(
+                "annotated-equality atom is not ternary",
+            ));
+        };
+        canonicalize_symmetric_variable_pair(left, right)?;
+        return Ok(());
+    }
     if !symmetric_predicates.contains(&atom.predicate_id) {
         return Ok(());
     }
     let [left, right] = atom.arguments.as_mut_slice() else {
         return Err(EncodedValidationError::invariant(
-            "symmetric has-key atom is not binary",
+            "symmetric variable atom is not binary",
         ));
     };
+    canonicalize_symmetric_variable_pair(left, right)
+}
+
+fn canonicalize_symmetric_variable_pair(
+    left: &mut DecodedTerm,
+    right: &mut DecodedTerm,
+) -> EncodedResult<()> {
     let DecodedTerm::Variable {
         index: left_index,
         sort: left_sort,
     } = left
     else {
         return Err(EncodedValidationError::invariant(
-            "symmetric has-key atom contains a non-variable term",
+            "symmetric variable atom contains a non-variable term",
         ));
     };
     let DecodedTerm::Variable {
@@ -17303,12 +17882,12 @@ fn canonicalize_symmetric_variable_atom(
     } = right
     else {
         return Err(EncodedValidationError::invariant(
-            "symmetric has-key atom contains a non-variable term",
+            "symmetric variable atom contains a non-variable term",
         ));
     };
     if left_sort != right_sort {
         return Err(EncodedValidationError::invariant(
-            "symmetric has-key atom mixes term sorts",
+            "symmetric variable atom mixes term sorts",
         ));
     }
     if right_index < left_index {
@@ -17724,6 +18303,21 @@ fn at_least_object_predicate_id(
         })
 }
 
+fn annotated_equality_predicate_id(
+    index: &AnnotatedEqualityPredicateIndex,
+    cardinality: u32,
+    role_id: u32,
+    filler: ClassLiteral,
+) -> EncodedResult<u32> {
+    index
+        .binary_search_by_key(&(cardinality, role_id, filler), |(candidate, _)| *candidate)
+        .ok()
+        .map(|position| index[position].1)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("annotated-equality predicate index is incomplete")
+        })
+}
+
 fn data_predicate_id(index: &[(u32, u32)], role_id: u32) -> EncodedResult<u32> {
     index
         .binary_search_by_key(&role_id, |(candidate, _)| *candidate)
@@ -18019,6 +18613,7 @@ fn named_predicate_key(
     let unary_data = predicate.argument_sorts == [TermSort::Data];
     let binary_object = predicate.argument_sorts == [TermSort::Object, TermSort::Object];
     let binary_data = predicate.argument_sorts == [TermSort::Object, TermSort::Data];
+    let ternary_object = predicate.argument_sorts == [TermSort::Object; 3];
     let equality_sort = match predicate.argument_sorts.as_slice() {
         [left, right] if left == right => Some(*left),
         _ => None,
@@ -18090,6 +18685,53 @@ fn named_predicate_key(
         return at_least_object_predicate_key(
             predicate.cardinality.ok_or_else(|| {
                 EncodedValidationError::invariant("object at-least predicate lost its cardinality")
+            })?,
+            role_id,
+            &filler_key,
+            budget,
+        );
+    }
+    if predicate.kind == PredicateKind::AnnotatedEquality
+        && ternary_object
+        && predicate.symbol_id.is_none()
+        && predicate.cardinality.is_some_and(|value| value > 0)
+        && predicate.annotation.is_empty()
+        && predicate.internal_key.is_none()
+    {
+        let role_id = predicate.role_id.ok_or_else(|| {
+            EncodedValidationError::invariant("annotated-equality predicate lost its role ID")
+        })?;
+        let filler_id = predicate.filler_predicate_id.ok_or_else(|| {
+            EncodedValidationError::invariant("annotated-equality predicate lost its filler")
+        })?;
+        let filler = predicates
+            .get(usize::try_from(filler_id).map_err(|_| {
+                EncodedValidationError::invariant(
+                    "annotated-equality filler predicate ID exceeds usize",
+                )
+            })?)
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "annotated-equality filler predicate ID is dangling",
+                )
+            })?;
+        if !matches!(
+            filler.kind,
+            PredicateKind::Concept
+                | PredicateKind::NegatedConcept
+                | PredicateKind::Nominal
+                | PredicateKind::NegatedNominal
+        ) {
+            return Err(EncodedValidationError::invariant(
+                "annotated-equality filler is not a class predicate",
+            ));
+        }
+        let filler_key = named_predicate_key(filler, predicates, budget)?;
+        return annotated_equality_predicate_key(
+            predicate.cardinality.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "annotated-equality predicate lost its cardinality",
+                )
             })?,
             role_id,
             &filler_key,
@@ -18268,6 +18910,26 @@ fn at_least_object_predicate_key(
     let filler = crate::model::hex(&filler_digest);
     Ok(format!(
         "{{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":{cardinality},\"filler\":\"{filler}\",\"internal_key\":null,\"kind\":\"at_least_object\",\"role_id\":{role_id},\"symbol_id\":null}}"
+    )
+    .into_bytes())
+}
+
+fn annotated_equality_predicate_key(
+    cardinality: u32,
+    role_id: u32,
+    filler_key: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    if cardinality == 0 {
+        return Err(EncodedValidationError::invariant(
+            "annotated-equality predicate has zero cardinality",
+        ));
+    }
+    budget.claim_work(filler_key.len())?;
+    let filler_digest: [u8; 32] = Sha256::digest(filler_key).into();
+    let filler = crate::model::hex(&filler_digest);
+    Ok(format!(
+        "{{\"annotation\":[],\"argument_sorts\":[\"object\",\"object\",\"object\"],\"cardinality\":{cardinality},\"filler\":\"{filler}\",\"internal_key\":null,\"kind\":\"annotated_equality\",\"role_id\":{role_id},\"symbol_id\":null}}"
     )
     .into_bytes())
 }
@@ -18838,6 +19500,7 @@ fn merge_named_class_phases_impl(
         predicate_by_object_role,
         predicate_by_negative_object_role,
         at_least_object_predicates,
+        annotated_equality_predicates,
         predicate_by_data_role,
         predicate_by_negative_data_role,
         predicate_by_data_range,
@@ -18904,6 +19567,7 @@ fn merge_named_class_phases_impl(
         &predicate_by_negative_class,
         &predicate_by_object_role,
         &at_least_object_predicates,
+        &annotated_equality_predicates,
         &predicate_by_data_role,
         &predicate_by_data_range,
         &predicate_by_negative_data_range,

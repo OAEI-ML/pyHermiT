@@ -259,6 +259,7 @@ def _expected_manifest(
     include_generated_object_quantifier_definitions: bool = False,
     include_generated_object_cardinality_definitions: bool = False,
     include_at_least_object_predicates: bool = False,
+    include_annotated_equality_predicates: bool = False,
     include_data_domains: bool = False,
     include_data_ranges: bool = False,
     include_generated_data_definitions: bool = False,
@@ -319,6 +320,8 @@ def _expected_manifest(
     }
     if include_at_least_object_predicates:
         fragment_kinds.add(PredicateKind.AT_LEAST_OBJECT)
+    if include_annotated_equality_predicates:
+        fragment_kinds.add(PredicateKind.ANNOTATED_EQUALITY)
     constraint_provenance_ids: set[int] = set()
     characteristic_provenance_ids: set[int] = set()
     self_definition_provenance_ids: set[int] = set()
@@ -566,6 +569,13 @@ def _expected_manifest(
         for atom in clause.body + clause.head
         if predicates_by_id[atom.predicate_id].kind is PredicateKind.OBJECT_ROLE
     }
+    cardinality_definition_role_predicates = {
+        atom.predicate_id
+        for clause in program.clauses
+        if clause.clause_id in cardinality_definition_clauses
+        for atom in clause.body + clause.head
+        if predicates_by_id[atom.predicate_id].kind is PredicateKind.OBJECT_ROLE
+    }
     at_least_object_role_ids = (
         {
             value.role_id
@@ -579,6 +589,22 @@ def _expected_manifest(
         value.predicate_id
         for value in program.predicates.predicates
         if value.kind is PredicateKind.OBJECT_ROLE and value.role_id in at_least_object_role_ids
+    }
+    annotated_equality_role_ids = (
+        {
+            value.role_id
+            for value in program.predicates.predicates
+            if value.kind is PredicateKind.ANNOTATED_EQUALITY
+            and value.role_id is not None
+        }
+        if include_annotated_equality_predicates
+        else set()
+    )
+    annotated_equality_role_predicates = {
+        value.predicate_id
+        for value in program.predicates.predicates
+        if value.kind is PredicateKind.OBJECT_ROLE
+        and value.role_id in annotated_equality_role_ids
     }
     data_domain_role_predicates = {
         atom.predicate_id
@@ -685,7 +711,9 @@ def _expected_manifest(
         | characteristic_role_predicates
         | self_definition_role_predicates
         | quantifier_definition_role_predicates
+        | cardinality_definition_role_predicates
         | at_least_object_role_predicates
+        | annotated_equality_role_predicates
         | data_domain_role_predicates
         | data_range_role_predicates
         | data_functionality_role_predicates
@@ -2072,8 +2100,8 @@ def test_unsupported_recursive_quantifier_cardinality_fillers_defer_without_symb
             "SubClassOf(:A ObjectAllValuesFrom(:p ObjectMinCardinality(1 :q :B)))",
             "SubClassOf(ObjectSomeValuesFrom(:p ObjectIntersectionOf("
             "ObjectSomeValuesFrom(:q :A) ObjectMinCardinality(1 :q :B))) :C)",
-            "SubClassOf(ObjectComplementOf(ObjectAllValuesFrom(:p "
-            "ObjectMinCardinality(1 :q :A))) :C)",
+            "SubClassOf(ObjectAllValuesFrom(ObjectInverseOf(:p) "
+            "ObjectMinCardinality(1 :q :A)) :C)",
         ),
         options=OPTIONS,
     )
@@ -2662,6 +2690,202 @@ def test_composite_object_minimum_definitions_reuse_global_identity() -> None:
         if predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
     ]
     assert len(at_least) == 2
+    generated = [
+        value
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+        if value["generated"]
+    ]
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert generated and all(namespace in str(value["display"]) for value in generated)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_object_maximum_definitions_match_scalar_annotated_equalities() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "SubClassOf(:A ObjectMaxCardinality(1 :p :B))",
+            "SubClassOf(ObjectMaxCardinality(2 ObjectInverseOf(:q) :C) :A)",
+            "EquivalentClasses(:B ObjectMaxCardinality(2 :p :C))",
+            "SubClassOf(:C ObjectComplementOf("
+            "ObjectMaxCardinality(1 :q :A)))",
+            "SubClassOf(:A ObjectComplementOf("
+            "ObjectMinCardinality(3 :q :B)))",
+            "SubClassOf(:B ObjectMaxCardinality(0 :p :C))",
+            "SubClassOf(:C ObjectComplementOf("
+            "ObjectMaxCardinality(0 :q :A)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=7,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+    )
+    predicates = cast(list[dict[str, object]], manifest["predicates"])
+    annotated = [
+        predicate
+        for predicate in predicates
+        if predicate["kind"] == PredicateKind.ANNOTATED_EQUALITY.value
+    ]
+    assert {predicate["cardinality"] for predicate in annotated} == {1, 2}
+    assert all(
+        predicate["role_id"] is not None
+        and predicate["filler_predicate_id"] is not None
+        for predicate in annotated
+    )
+    at_least = [
+        predicate
+        for predicate in predicates
+        if predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
+    ]
+    assert {predicate["cardinality"] for predicate in at_least} == {1, 2, 3}
+    assert any(
+        predicate["kind"] == PredicateKind.ORDERING_GUARD.value
+        for predicate in predicates
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_object_maximum_cardinality_overflow_defers_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "SubClassOf(:A ObjectMaxCardinality(4294967295 :p :B))",
+            "SubClassOf(:A ObjectMaxCardinality(4294967296 :p :B))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 2
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith("ObjectMaxCardinality:")
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+    )
+    assert all(
+        predicate["kind"]
+        not in {
+            PredicateKind.ANNOTATED_EQUALITY.value,
+            PredicateKind.AT_LEAST_OBJECT.value,
+            PredicateKind.OBJECT_ROLE.value,
+            PredicateKind.ORDERING_GUARD.value,
+        }
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_object_maximum_definitions_cover_recursive_and_nominal_fillers() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A ObjectMaxCardinality(2 ObjectInverseOf(:p) "
+            "ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
+            'SubClassOf(Annotation(:note "same maximum") :A '
+            "ObjectMaxCardinality(2 ObjectInverseOf(:p) "
+            "ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
+            "SubClassOf(ObjectMaxCardinality(1 :p ObjectUnionOf(:B :C)) :A)",
+            "ClassAssertion(ObjectMaxCardinality(2 ObjectInverseOf(:p) "
+            "ObjectOneOf(:i)) :i)",
+            "DisjointClasses(ObjectMaxCardinality(1 :q "
+            "ObjectComplementOf(:B)) :C)",
+            "ObjectPropertyDomain(:q ObjectMaxCardinality(2 :p "
+            "ObjectSomeValuesFrom(:q :B)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=6,
+        include_object_constraints=True,
+        include_generated_object_self_definitions=True,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+    )
+    predicates = cast(list[dict[str, object]], manifest["predicates"])
+    annotated = [
+        predicate
+        for predicate in predicates
+        if predicate["kind"] == PredicateKind.ANNOTATED_EQUALITY.value
+    ]
+    assert {predicate["cardinality"] for predicate in annotated} == {2}
+    assert all(predicate["filler_predicate_id"] is not None for predicate in annotated)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_object_maximum_definitions_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+    )
+    maximum = "ObjectMaxCardinality(2 :p ObjectIntersectionOf(:B :C))"
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"SubClassOf(:A {maximum})",
+            "SubClassOf(ObjectMaxCardinality(1 :q "
+            "ObjectUnionOf(:B :C)) :A)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(*declarations, f"ObjectPropertyDomain(:q {maximum})"),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=3,
+        include_object_constraints=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+    )
+    annotated = [
+        predicate
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        if predicate["kind"] == PredicateKind.ANNOTATED_EQUALITY.value
+    ]
+    assert len(annotated) == 1
     generated = [
         value
         for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
