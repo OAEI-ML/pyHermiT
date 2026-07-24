@@ -6503,6 +6503,208 @@ def test_annotated_named_object_domain_and_range_clauses_match_scalar_exactly() 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_restriction_bearing_object_property_ranges_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(AnnotationProperty(:note))",
+            "ObjectPropertyRange(:p ObjectSomeValuesFrom(:q "
+            "ObjectIntersectionOf(:A :B)))",
+            'ObjectPropertyRange(Annotation(:note "same range") :p '
+            "ObjectSomeValuesFrom(:q ObjectIntersectionOf(:A :B)))",
+            "ObjectPropertyRange(ObjectInverseOf(:p) "
+            "ObjectExactCardinality(2 ObjectInverseOf(:q) ObjectOneOf(:i)))",
+            "ObjectPropertyRange(:q DataExactCardinality(1 :d "
+            "DataIntersectionOf(xsd:string "
+            "DataUnionOf(xsd:integer xsd:boolean))))",
+            "ObjectPropertyRange(:p ObjectHasValue(:q :i))",
+            'ObjectPropertyRange(:q DataHasValue(:d "value"))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=6,
+        include_object_constraints=True,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_complemented_restriction_object_property_ranges_match_scalar() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "ObjectPropertyRange(ObjectInverseOf(:p) "
+            "ObjectComplementOf(ObjectSomeValuesFrom(:q "
+            "ObjectIntersectionOf(:A :B))))",
+            "ObjectPropertyRange(:p ObjectComplementOf("
+            "ObjectMaxCardinality(0 :q ObjectOneOf(:i))))",
+            "ObjectPropertyRange(:q ObjectComplementOf(ObjectExactCardinality(1 "
+            "ObjectInverseOf(:p) ObjectUnionOf(:A :B))))",
+            "ObjectPropertyRange(:p ObjectComplementOf(ObjectHasValue(:q :i)))",
+            "ObjectPropertyRange(:q ObjectComplementOf(DataSomeValuesFrom(:d "
+            "DataIntersectionOf(xsd:string xsd:integer))))",
+            "ObjectPropertyRange(:p ObjectComplementOf(DataMaxCardinality(0 :e "
+            "DataUnionOf(xsd:boolean xsd:decimal))))",
+            "ObjectPropertyRange(:q ObjectComplementOf(DataExactCardinality(0 :d "
+            "DataIntersectionOf(xsd:string xsd:boolean))))",
+            'ObjectPropertyRange(:p ObjectComplementOf(DataHasValue(:e "value")))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=8,
+        include_object_constraints=True,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_restriction_object_ranges_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+        "Declaration(DataProperty(:d))",
+    )
+    object_restriction = (
+        "ObjectExactCardinality(2 :p "
+        "ObjectIntersectionOf(:A ObjectSomeValuesFrom(:q :B)))"
+    )
+    data_restriction = (
+        "DataExactCardinality(1 :d "
+        "DataIntersectionOf(xsd:string DataUnionOf(xsd:integer xsd:boolean)))"
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"ObjectPropertyRange(ObjectInverseOf(:p) {object_restriction})",
+            f"ObjectPropertyRange(:q {data_restriction})",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"ObjectPropertyRange(ObjectInverseOf(:q) {object_restriction})",
+            f"ObjectPropertyRange(:p {data_restriction})",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    class_namespace = f":class:{composite.logical_fingerprint.hex}:"
+    data_namespace = f":data:{composite.logical_fingerprint.hex}:"
+    assert all(
+        class_namespace in str(value["display"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    )
+    assert all(
+        data_namespace in str(value["display"])
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        if value["generated"]
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_partial_restriction_object_range_defers_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "ObjectPropertyRange(ObjectInverseOf(:p) ObjectIntersectionOf("
+            "ObjectSomeValuesFrom(:q :A) "
+            "ObjectMinCardinality(4294967296 :q :B)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            (
+                "ObjectIntersectionOf:",
+                "ObjectSomeValuesFrom:",
+                "ObjectMinCardinality:",
+            )
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"]
+        not in {
+            PredicateKind.AT_LEAST_OBJECT.value,
+            PredicateKind.OBJECT_ROLE.value,
+        }
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_annotated_object_functionality_and_reflexivity_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
