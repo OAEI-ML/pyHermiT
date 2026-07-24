@@ -12,7 +12,16 @@ from typing import Any, cast
 import pyowl_core
 import pyowl_core.model as owl
 import pytest
+from pyowl_core import (
+    DetectionBasis,
+    DigestKind,
+    DocumentFormat,
+    DocumentProvenance,
+    OntologyDocument,
+    OntologyID,
+)
 from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.extensions import swrl
 
 import pyhermit._native as native
 from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE
@@ -23,7 +32,9 @@ OPTIONS = pyowl_core.LoadOptions(
     imports=pyowl_core.ImportPolicy.IGNORE,
     backend=pyowl_core.BackendPreference.PYTHON,
 )
-RULE_ID = "OWL2_DATA_RANGE_ARITY"
+DATA_RANGE_ARITY_RULE = "OWL2_DATA_RANGE_ARITY"
+EXTENSION_COMPONENT_RULE = "OWL2DL_EXTENSION_COMPONENT"
+PROJECTED_RULES = frozenset((DATA_RANGE_ARITY_RULE, EXTENSION_COMPONENT_RULE))
 
 
 def functional(*body: str, ontology_iri: str = "urn:test:profile") -> bytes:
@@ -92,7 +103,7 @@ def _expected_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
                 cast(str, issue.provenance_sha256),
             )
             for issue in report.issues
-            if issue.rule_id == RULE_ID
+            if issue.rule_id in PROJECTED_RULES
         }
     )
     return {
@@ -100,6 +111,7 @@ def _expected_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
         "family": "owl2_dl_profile",
         "conforms": not projected,
         "axioms_checked": report.axioms_checked,
+        "extensions_checked": report.extensions_checked,
         "ordered_rule_ids": [issue[0] for issue in projected],
         "issues": [
             {
@@ -135,6 +147,40 @@ def _bad_root_posting(snapshot: pyowl_core.OntologyView) -> memoryview:
         ):
             return memoryview(struct.pack("<I", index))
     raise AssertionError("profile fixture has no invalid data existential")
+
+
+def _extension_snapshot(label: str) -> pyowl_core.OntologyView:
+    class_a = owl.Class(owl.IRI("urn:test:profile#A"))
+    variable = swrl.Variable(owl.IRI("urn:test:profile#x"))
+    rule = swrl.SWRLRule(
+        owl.CanonicalSet((swrl.ClassAtom(class_a, variable),)),
+        owl.CanonicalSet((swrl.ClassAtom(class_a, variable),)),
+    )
+    provenance = DocumentProvenance(
+        hashlib.sha256(f"profile-extension:{label}".encode()).digest(),
+        DigestKind.EXACT_BYTES,
+        0,
+        0,
+        None,
+        None,
+        DocumentFormat.FUNCTIONAL,
+        DetectionBasis.EXPLICIT,
+    )
+    document = OntologyDocument(
+        OntologyID(owl.IRI(f"urn:test:profile:extension:{label}")),
+        None,
+        (),
+        owl.CanonicalSet(),
+        owl.CanonicalSet((owl.Declaration(class_a),)),
+        owl.CanonicalSet((rule,)),
+        provenance,
+    )
+    return pyowl_core.load_snapshot(document, options=OPTIONS)
+
+
+def _extension_root_posting(snapshot: pyowl_core.OntologyView) -> memoryview:
+    root_kinds = bytes(_buffers(snapshot)["root_kinds"])
+    return memoryview(struct.pack("<I", root_kinds.index(3) + 1))
 
 
 def test_valid_unary_data_restrictions_match_scalar_projection() -> None:
@@ -173,8 +219,35 @@ def test_multi_property_diagnostics_order_and_provenance_match_scalar_exactly() 
         "DataSomeValuesFrom",
     ]
     assert all(len(cast(str, issue["provenance_sha256"])) == 64 for issue in issues)
-    assert all(issue.document_keys for issue in scalar.issues if issue.rule_id == RULE_ID)
+    assert all(
+        issue.document_keys
+        for issue in scalar.issues
+        if issue.rule_id == DATA_RANGE_ARITY_RULE
+    )
     assert all("document_keys" not in issue for issue in issues)
+
+
+def test_extension_component_diagnostic_and_count_match_scalar_exactly() -> None:
+    snapshot = _extension_snapshot("single")
+    scalar = validate_owl2_dl_view(snapshot)
+    extension = next(snapshot.iter_extensions())
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    assert actual["axioms_checked"] == 1
+    assert actual["extensions_checked"] == 1
+    assert actual["ordered_rule_ids"] == [EXTENSION_COMPONENT_RULE]
+    issue = cast(list[dict[str, object]], actual["issues"])[0]
+    assert issue["constructor"] == "SWRLRule"
+    assert issue["provenance_sha256"] == hashlib.sha256(
+        extension.canonical_bytes()
+    ).hexdigest()
+    scalar_issue = next(
+        item for item in scalar.issues if item.rule_id == EXTENSION_COMPONENT_RULE
+    )
+    assert scalar_issue.document_keys
+    assert "document_keys" not in issue
 
 
 def test_duplicate_bad_nodes_in_one_axiom_collapse_by_scalar_issue_identity() -> None:
@@ -194,7 +267,7 @@ def test_duplicate_bad_nodes_in_one_axiom_collapse_by_scalar_issue_identity() ->
     actual = _native_manifest(snapshot)
 
     assert actual == _expected_manifest(snapshot)
-    assert actual["ordered_rule_ids"] == [RULE_ID]
+    assert actual["ordered_rule_ids"] == [DATA_RANGE_ARITY_RULE]
     assert len(cast(list[object], actual["issues"])) == 1
 
 
@@ -224,7 +297,50 @@ def test_include_and_equivalent_exclude_selection_are_byte_identical() -> None:
     assert included == excluded
     manifest = cast(dict[str, object], json.loads(included))
     assert manifest["axioms_checked"] == 1
-    assert manifest["ordered_rule_ids"] == [RULE_ID]
+    assert manifest["ordered_rule_ids"] == [DATA_RANGE_ARITY_RULE]
+
+
+def test_extension_selection_and_composite_deduplication_are_canonical() -> None:
+    snapshot = _extension_snapshot("selection")
+    extension = _extension_root_posting(snapshot)
+    root_count = len(bytes(_buffers(snapshot)["root_kinds"]))
+    extension_id = struct.unpack("<I", extension)[0]
+    complement = memoryview(
+        b"".join(
+            struct.pack("<I", index)
+            for index in range(1, root_count + 1)
+            if index != extension_id
+        )
+    )
+
+    included = native._encoded_profile_slices_manifest_v1(
+        slices=(_slice_record(snapshot, posting_mode=1, postings=extension),)
+    )
+    excluded = native._encoded_profile_slices_manifest_v1(
+        slices=(_slice_record(snapshot, posting_mode=2, postings=complement),)
+    )
+
+    assert included == excluded
+    selected = cast(dict[str, object], json.loads(included))
+    assert selected["axioms_checked"] == 0
+    assert selected["extensions_checked"] == 1
+    assert selected["ordered_rule_ids"] == [EXTENSION_COMPONENT_RULE]
+
+    left = _extension_snapshot("left")
+    right = _extension_snapshot("right")
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
+    sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
+    records = tuple(
+        _slice_record(source, member_tokens=(token,))
+        for token, source in sources_by_token
+    )
+    forward = native._encoded_profile_slices_manifest_v1(slices=records)
+    reverse = native._encoded_profile_slices_manifest_v1(slices=tuple(reversed(records)))
+
+    assert forward == reverse
+    assert json.loads(forward) == _expected_manifest(composite)
+    assert json.loads(forward)["extensions_checked"] == 1
 
 
 def test_composite_merge_deduplicates_axioms_and_is_slice_order_independent() -> None:

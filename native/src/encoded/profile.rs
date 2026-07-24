@@ -2,9 +2,9 @@
 //!
 //! Profile violations are successful semantic output. Malformed columns,
 //! resource exhaustion, and cancellation remain distinct operational failures.
-//! This first private phase owns the exact `OWL2_DATA_RANGE_ARITY` projection;
+//! This first private phase owns exact data-arity and extension projections;
 //! structural-columns schema 1 does not carry document-origin rows, so the
-//! manifest deliberately exposes canonical axiom provenance without inventing
+//! manifest deliberately exposes canonical root provenance without inventing
 //! `ProfileIssue.document_keys`. Issue ordering and deduplication therefore use
 //! the exact projected field tuple published by this phase.
 // SPDX-License-Identifier: LGPL-3.0-or-later
@@ -27,9 +27,13 @@ const POSTINGS_INCLUDE: u8 = 1;
 const POSTINGS_EXCLUDE: u8 = 2;
 const DATA_SOME_VALUES_FROM_TAG: u16 = 41;
 const DATA_ALL_VALUES_FROM_TAG: u16 = 42;
+const SWRL_RULE_TAG: u16 = 148;
 const DATA_RANGE_ARITY_RULE: &str = "OWL2_DATA_RANGE_ARITY";
 const DATA_RANGE_ARITY_MESSAGE: &str =
     "OWL 2 defines only unary data ranges, so the restriction must use exactly one data property";
+const EXTENSION_COMPONENT_RULE: &str = "OWL2DL_EXTENSION_COMPONENT";
+const EXTENSION_COMPONENT_MESSAGE: &str =
+    "extension components such as SWRL are outside the OWL 2 DL reasoner scope";
 const PROFILE_MANIFEST_BASE_BOUND: usize = 256;
 const PROFILE_MANIFEST_ISSUE_BOUND: usize = 640;
 
@@ -37,6 +41,7 @@ const PROFILE_MANIFEST_ISSUE_BOUND: usize = 640;
 pub struct ProfilePhaseLimits {
     pub max_slices: usize,
     pub max_axioms: usize,
+    pub max_extensions: usize,
     pub max_issues: usize,
     pub max_owned_bytes: usize,
     pub max_work: u64,
@@ -50,6 +55,7 @@ impl Default for ProfilePhaseLimits {
         Self {
             max_slices: 32_769,
             max_axioms: 10_000_000,
+            max_extensions: 10_000_000,
             max_issues: 10_000_000,
             max_owned_bytes: 512 * 1024 * 1024,
             max_work: 2_000_000_000,
@@ -76,9 +82,11 @@ pub struct ProfilePhase {
     pub issues: Vec<ProfileIssue>,
     pub conforms: bool,
     pub axioms_checked: usize,
+    pub extensions_checked: usize,
     pub work: u64,
     pub owned_bytes: usize,
     axiom_keys: Vec<Vec<u8>>,
+    extension_keys: Vec<Vec<u8>>,
     manifest_limit: usize,
 }
 
@@ -125,6 +133,7 @@ impl ProfilePhase {
             family: "owl2_dl_profile",
             conforms: self.conforms,
             axioms_checked: self.axioms_checked,
+            extensions_checked: self.extensions_checked,
             ordered_rule_ids,
             issues,
         })
@@ -144,6 +153,7 @@ struct ProfileManifest<'a> {
     family: &'static str,
     conforms: bool,
     axioms_checked: usize,
+    extensions_checked: usize,
     ordered_rule_ids: Vec<&'a str>,
     issues: Vec<ProfileIssueManifest<'a>>,
 }
@@ -224,6 +234,16 @@ impl PhaseBudget {
         if following > self.limits.max_axioms {
             Err(EncodedValidationError::resource(
                 "profile axiom count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn claim_extension(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_extensions {
+            Err(EncodedValidationError::resource(
+                "profile extension count exceeds its limit",
             ))
         } else {
             Ok(())
@@ -479,6 +499,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         "profile canonical axiom allocation failed",
     )
     .map_err(ProfilePhaseError::Encoded)?;
+    let mut extension_keys = Vec::new();
     let mut issues = Vec::new();
     let mut epoch = 0_u32;
 
@@ -499,8 +520,65 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                     "validated profile root row disappeared",
                 ))
             })?;
-        if root.kind() != RootKind::Axiom {
-            continue;
+        match root.kind() {
+            RootKind::OntologyAnnotation => continue,
+            RootKind::Axiom => {}
+            RootKind::Extension => {
+                budget
+                    .claim_extension(extension_keys.len().checked_add(1).ok_or_else(|| {
+                        EncodedValidationError::resource("profile extension count overflowed")
+                    })?)
+                    .map_err(ProfilePhaseError::Encoded)?;
+                let node = model
+                    .node(root.node())
+                    .map_err(ProfilePhaseError::Encoded)?;
+                if node.tag() != SWRL_RULE_TAG {
+                    return Err(ProfilePhaseError::Encoded(
+                        EncodedValidationError::invariant(
+                            "validated profile extension root is not a SWRL rule",
+                        ),
+                    ));
+                }
+                poll(control, "profile-extension-provenance")?;
+                let key =
+                    canonical::canonical_node_key(model, root.node(), scope_maps, &mut budget)
+                        .map_err(ProfilePhaseError::Encoded)?;
+                budget
+                    .claim_work(key.len())
+                    .map_err(ProfilePhaseError::Encoded)?;
+                let provenance_sha256: [u8; 32] = Sha256::digest(&key).into();
+                budget
+                    .claim_owned(size_of::<Vec<u8>>())
+                    .map_err(ProfilePhaseError::Encoded)?;
+                reserve_one(
+                    &mut extension_keys,
+                    "profile canonical extension allocation failed",
+                )
+                .map_err(ProfilePhaseError::Encoded)?;
+                extension_keys.push(key);
+
+                let following = issues.len().checked_add(1).ok_or_else(|| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                        "profile issue count overflowed",
+                    ))
+                })?;
+                budget
+                    .claim_issue(following)
+                    .map_err(ProfilePhaseError::Encoded)?;
+                budget
+                    .claim_owned(size_of::<ProfileIssue>())
+                    .map_err(ProfilePhaseError::Encoded)?;
+                reserve_one(&mut issues, "profile issue allocation failed")
+                    .map_err(ProfilePhaseError::Encoded)?;
+                issues.push(ProfileIssue {
+                    rule_id: EXTENSION_COMPONENT_RULE,
+                    severity: "error",
+                    message: EXTENSION_COMPONENT_MESSAGE,
+                    constructor: "SWRLRule",
+                    provenance_sha256,
+                });
+                continue;
+            }
         }
         budget
             .claim_axiom(axiom_keys.len().checked_add(1).ok_or_else(|| {
@@ -609,13 +687,20 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         .map_err(ProfilePhaseError::Encoded)?;
     axiom_keys.sort();
     axiom_keys.dedup();
+    budget
+        .claim_work(sort_work(extension_keys.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    extension_keys.sort();
+    extension_keys.dedup();
     let phase = ProfilePhase {
         conforms: issues.is_empty(),
         axioms_checked: axiom_keys.len(),
+        extensions_checked: extension_keys.len(),
         issues,
         work: budget.work,
         owned_bytes: budget.owned_bytes,
         axiom_keys,
+        extension_keys,
         manifest_limit: limits.max_manifest_bytes,
     };
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
@@ -663,6 +748,13 @@ pub fn merge_profile_phases_controlled<E>(
             EncodedValidationError::resource("merged profile axiom count overflowed")
         })
     })?;
+    let extension_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total
+            .checked_add(phase.extension_keys.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("merged profile extension count overflowed")
+            })
+    })?;
     if issue_count > limits.max_issues {
         return Err(EncodedValidationError::resource(
             "merged profile issue count exceeds its limit",
@@ -672,6 +764,12 @@ pub fn merge_profile_phases_controlled<E>(
     if axiom_count > limits.max_axioms {
         return Err(EncodedValidationError::resource(
             "merged profile axiom count exceeds its limit",
+        )
+        .into());
+    }
+    if extension_count > limits.max_extensions {
+        return Err(EncodedValidationError::resource(
+            "merged profile extension count exceeds its limit",
         )
         .into());
     }
@@ -709,6 +807,22 @@ pub fn merge_profile_phases_controlled<E>(
                 })?,
         )
         .map_err(ProfilePhaseError::Encoded)?;
+    let mut extension_keys = Vec::new();
+    reserve_exact(
+        &mut extension_keys,
+        extension_count,
+        "merged profile extension allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            extension_count
+                .checked_mul(size_of::<Vec<u8>>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("merged profile extension size overflowed")
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
 
     for mut phase in phases {
         validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
@@ -720,6 +834,7 @@ pub fn merge_profile_phases_controlled<E>(
             .map_err(ProfilePhaseError::Encoded)?;
         issues.append(&mut phase.issues);
         axiom_keys.append(&mut phase.axiom_keys);
+        extension_keys.append(&mut phase.extension_keys);
         poll(control, "profile-merge-source")?;
     }
     budget
@@ -732,13 +847,20 @@ pub fn merge_profile_phases_controlled<E>(
         .map_err(ProfilePhaseError::Encoded)?;
     axiom_keys.sort();
     axiom_keys.dedup();
+    budget
+        .claim_work(sort_work(extension_keys.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    extension_keys.sort();
+    extension_keys.dedup();
     let phase = ProfilePhase {
         conforms: issues.is_empty(),
         axioms_checked: axiom_keys.len(),
+        extensions_checked: extension_keys.len(),
         issues,
         work: budget.work,
         owned_bytes: budget.owned_bytes,
         axiom_keys,
+        extension_keys,
         manifest_limit: limits.max_manifest_bytes,
     };
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
@@ -800,6 +922,11 @@ fn validate_phase(phase: &ProfilePhase) -> EncodedResult<()> {
             "profile checked-axiom count diverges from its canonical keys",
         ));
     }
+    if phase.extensions_checked != phase.extension_keys.len() {
+        return Err(EncodedValidationError::invariant(
+            "profile checked-extension count diverges from its canonical keys",
+        ));
+    }
     if phase.issues.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(EncodedValidationError::invariant(
             "profile issues are not canonical sorted unique",
@@ -808,6 +935,15 @@ fn validate_phase(phase: &ProfilePhase) -> EncodedResult<()> {
     if phase.axiom_keys.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(EncodedValidationError::invariant(
             "profile axiom keys are not canonical sorted unique",
+        ));
+    }
+    if phase
+        .extension_keys
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile extension keys are not canonical sorted unique",
         ));
     }
     Ok(())
@@ -969,6 +1105,22 @@ mod tests {
         }
     }
 
+    fn extension_columns() -> OwnedColumns {
+        OwnedColumns {
+            root_kinds: vec![3],
+            root_ids: le32(&[1]),
+            node_tags: le16(&[SWRL_RULE_TAG]),
+            node_field_offsets: le64(&[0, 3]),
+            field_kinds: vec![6, 6, 6],
+            field_values: le64(&[0, 0, 0]),
+            field_lengths: le64(&[0, 0, 0]),
+            item_kinds: Vec::new(),
+            item_values: Vec::new(),
+            item_lengths: Vec::new(),
+            scalar_bytes: Vec::new(),
+        }
+    }
+
     fn model(columns: &OwnedColumns) -> EncodedResult<ValidatedModel<Bytes<'_>>> {
         ValidatedModel::new(columns.borrowed(), EncodedLimits::default())
     }
@@ -979,6 +1131,7 @@ mod tests {
         let phase = compile_profile_phase(&model(&columns)?, &[], ProfilePhaseLimits::default())?;
         assert!(!phase.conforms);
         assert_eq!(phase.axioms_checked, 4);
+        assert_eq!(phase.extensions_checked, 0);
         assert_eq!(phase.issues.len(), 1);
         assert_eq!(phase.issues[0].rule_id, DATA_RANGE_ARITY_RULE);
         assert_eq!(phase.issues[0].constructor, "DataSomeValuesFrom");
@@ -990,6 +1143,40 @@ mod tests {
             .map_err(|_| EncodedValidationError::invariant("profile manifest is not JSON"))?;
         assert_eq!(manifest["family"], "owl2_dl_profile");
         assert_eq!(manifest["ordered_rule_ids"][0], DATA_RANGE_ARITY_RULE);
+        Ok(())
+    }
+
+    #[test]
+    fn extension_issue_provenance_and_count_are_exact() -> EncodedResult<()> {
+        let columns = extension_columns();
+        let phase = compile_profile_phase(&model(&columns)?, &[], ProfilePhaseLimits::default())?;
+        assert!(!phase.conforms);
+        assert_eq!(phase.axioms_checked, 0);
+        assert_eq!(phase.extensions_checked, 1);
+        assert_eq!(phase.issues.len(), 1);
+        assert_eq!(phase.issues[0].rule_id, EXTENSION_COMPONENT_RULE);
+        assert_eq!(phase.issues[0].constructor, "SWRLRule");
+
+        let manifest: serde_json::Value = serde_json::from_slice(&phase.canonical_manifest_json()?)
+            .map_err(|_| EncodedValidationError::invariant("profile manifest is not JSON"))?;
+        assert_eq!(manifest["extensions_checked"], 1);
+        assert_eq!(manifest["ordered_rule_ids"][0], EXTENSION_COMPONENT_RULE);
+
+        let merged =
+            merge_profile_phases(vec![phase.clone(), phase], ProfilePhaseLimits::default())?;
+        assert_eq!(merged.extensions_checked, 1);
+        assert_eq!(merged.issues.len(), 1);
+
+        let limited = ProfilePhaseLimits {
+            max_extensions: 0,
+            ..ProfilePhaseLimits::default()
+        };
+        let error = compile_profile_phase(&model(&columns)?, &[], limited)
+            .err()
+            .ok_or_else(|| {
+                EncodedValidationError::invariant("profile extension limit unexpectedly succeeded")
+            })?;
+        assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
         Ok(())
     }
 
@@ -1007,6 +1194,7 @@ mod tests {
             &mut control,
         ))?;
         assert_eq!(included.axioms_checked, 1);
+        assert_eq!(included.extensions_checked, 0);
         assert_eq!(included.issues.len(), 1);
         let excluded = into_encoded(compile_profile_phase_selected_controlled(
             &model,
@@ -1031,6 +1219,7 @@ mod tests {
             reversed.canonical_manifest_json()?
         );
         assert_eq!(merged.axioms_checked, 4);
+        assert_eq!(merged.extensions_checked, 0);
         assert_eq!(merged.issues.len(), 1);
         Ok(())
     }
