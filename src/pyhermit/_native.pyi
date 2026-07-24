@@ -103,11 +103,13 @@ def _encoded_profile_manifest_v1(
     item_values: memoryview,
     item_lengths: memoryview,
     scalar_bytes: memoryview,
+    unsupported_datatypes: str = ...,
     cancellation: CancellationHandle | None = ...,
 ) -> bytes: ...
 def _encoded_profile_slices_manifest_v1(
     *,
     slices: tuple[tuple[object, ...], ...],
+    unsupported_datatypes: str = ...,
     cancellation: CancellationHandle | None = ...,
 ) -> bytes: ...
 def _encoded_symbol_manifest_v1(

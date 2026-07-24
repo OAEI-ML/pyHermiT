@@ -573,6 +573,20 @@ fn encoded_profile_error(error: encoded::profile::ProfilePhaseError<NativeError>
     }
 }
 
+fn encoded_profile_unsupported_datatype_policy(
+    value: &str,
+) -> NativeResult<encoded::profile::ProfileUnsupportedDatatypePolicy> {
+    match value {
+        "error" => Ok(encoded::profile::ProfileUnsupportedDatatypePolicy::Error),
+        "ignore_with_warning" => {
+            Ok(encoded::profile::ProfileUnsupportedDatatypePolicy::IgnoreWithWarning)
+        }
+        _ => Err(encoded_slice_invalid(
+            "encoded profile unsupported-datatype policy is not recognized",
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn borrowed_encoded_columns<'a, 'py>(
     root_kinds: &'a Bound<'py, PyAny>,
@@ -2376,6 +2390,7 @@ fn debug_validate_encoded_slices_cancel_v1(
 
 fn compile_encoded_profile_slices_controlled(
     slices: &Bound<'_, PyAny>,
+    unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<encoded::profile::ProfilePhase> {
     if !slices.is_exact_instance_of::<PyTuple>() {
@@ -2495,7 +2510,7 @@ fn compile_encoded_profile_slices_controlled(
         )?;
         let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
             .map_err(encoded_validation_error)?;
-        let phase = encoded::profile::compile_profile_phase_selected_controlled(
+        let phase = encoded::profile::compile_profile_phase_selected_controlled_with_policy(
             &model,
             &scope_maps,
             encoded::profile::ProfilePhaseLimits {
@@ -2505,6 +2520,7 @@ fn compile_encoded_profile_slices_controlled(
             },
             posting_mode,
             postings,
+            unsupported_datatypes,
             poll,
         )
         .map_err(encoded_profile_error)?;
@@ -2520,15 +2536,21 @@ fn compile_encoded_profile_slices_controlled(
         })?;
         phases.push(phase);
     }
-    encoded::profile::merge_profile_phases_controlled(phases, limits, poll)
-        .map_err(encoded_profile_error)
+    encoded::profile::merge_profile_phases_controlled_with_policy(
+        phases,
+        limits,
+        unsupported_datatypes,
+        poll,
+    )
+    .map_err(encoded_profile_error)
 }
 
 #[pyfunction(name = "_encoded_profile_slices_manifest_v1")]
-#[pyo3(signature = (*, slices, cancellation=None))]
+#[pyo3(signature = (*, slices, unsupported_datatypes="error", cancellation=None))]
 fn encoded_profile_slices_manifest_v1(
     py: Python<'_>,
     slices: &Bound<'_, PyAny>,
+    unsupported_datatypes: &str,
     cancellation: Option<PyRef<'_, CancellationHandle>>,
 ) -> PyResult<Vec<u8>> {
     let cancellation = cancellation.map(|handle| handle.state());
@@ -2537,14 +2559,16 @@ fn encoded_profile_slices_manifest_v1(
             Some(state) => state.poll(),
             None => Ok(()),
         };
-        compile_encoded_profile_slices_controlled(slices, &mut poll)?
+        let unsupported_datatypes =
+            encoded_profile_unsupported_datatype_policy(unsupported_datatypes)?;
+        compile_encoded_profile_slices_controlled(slices, unsupported_datatypes, &mut poll)?
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
     })
 }
 
 #[pyfunction(name = "_encoded_profile_manifest_v1")]
-#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes, cancellation=None))]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes, unsupported_datatypes="error", cancellation=None))]
 #[allow(clippy::too_many_arguments)]
 fn encoded_profile_manifest_v1(
     py: Python<'_>,
@@ -2559,6 +2583,7 @@ fn encoded_profile_manifest_v1(
     item_values: &Bound<'_, PyAny>,
     item_lengths: &Bound<'_, PyAny>,
     scalar_bytes: &Bound<'_, PyAny>,
+    unsupported_datatypes: &str,
     cancellation: Option<PyRef<'_, CancellationHandle>>,
 ) -> PyResult<Vec<u8>> {
     let cancellation = cancellation.map(|handle| handle.state());
@@ -2568,6 +2593,8 @@ fn encoded_profile_manifest_v1(
             None => Ok(()),
         };
         poll("profile-program-preflight")?;
+        let unsupported_datatypes =
+            encoded_profile_unsupported_datatype_policy(unsupported_datatypes)?;
         let columns = borrowed_encoded_columns(
             root_kinds,
             root_ids,
@@ -2583,10 +2610,11 @@ fn encoded_profile_manifest_v1(
         )?;
         let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
             .map_err(encoded_validation_error)?;
-        encoded::profile::compile_profile_phase_controlled(
+        encoded::profile::compile_profile_phase_controlled_with_policy(
             &model,
             &[],
             encoded::profile::ProfilePhaseLimits::default(),
+            unsupported_datatypes,
             &mut poll,
         )
         .map_err(encoded_profile_error)?

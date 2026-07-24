@@ -116,6 +116,9 @@ const UNSUPPORTED_DATATYPE_MESSAGE: &str =
     "datatype is outside the implemented OWL 2 map and has no definition";
 const UNSUPPORTED_LITERAL_DATATYPE_MESSAGE: &str =
     "datatype is outside the implemented OWL 2 datatype map";
+const UNSUPPORTED_DATATYPE_OPAQUE_RULE: &str = "UNSUPPORTED_DATATYPE_OPAQUE";
+const UNSUPPORTED_DATATYPE_OPAQUE_MESSAGE_PREFIX: &str =
+    "unsupported datatype is treated as opaque: ";
 const RECURSIVE_DATATYPE_DEFINITION_RULE: &str = "RECURSIVE_DATATYPE_DEFINITION";
 const RECURSIVE_DATATYPE_DEFINITION_MESSAGE: &str =
     "custom datatype definitions must form an acyclic graph";
@@ -231,6 +234,14 @@ const XSD_LENGTH_IRI: &str = "http://www.w3.org/2001/XMLSchema#length";
 const XSD_MIN_LENGTH_IRI: &str = "http://www.w3.org/2001/XMLSchema#minLength";
 const XSD_MAX_LENGTH_IRI: &str = "http://www.w3.org/2001/XMLSchema#maxLength";
 const XSD_PATTERN_IRI: &str = "http://www.w3.org/2001/XMLSchema#pattern";
+
+/// Scalar-compatible handling for datatypes outside the implemented OWL 2 map.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProfileUnsupportedDatatypePolicy {
+    #[default]
+    Error,
+    IgnoreWithWarning,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProfilePhaseLimits {
@@ -398,6 +409,14 @@ struct ProfileLiteralFact {
     canonical_key: Vec<u8>,
     datatype_iri: Vec<u8>,
     failure: Option<ProfileDatatypeFailure>,
+}
+
+#[derive(Clone, Copy)]
+struct ProfileDatatypeFacts<'a> {
+    uses: &'a [ProfileEntityIdentity],
+    definitions: &'a [ProfileDatatypeDefinition],
+    range_failures: &'a [ProfileDatatypeRangeFailure],
+    literals: &'a [ProfileLiteralFact],
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -914,11 +933,29 @@ pub fn compile_profile_phase_controlled<B: ByteSource, E>(
     limits: ProfilePhaseLimits,
     control: &mut impl FnMut(&'static str) -> Result<(), E>,
 ) -> ControlledResult<ProfilePhase, E> {
+    compile_profile_phase_controlled_with_policy(
+        model,
+        scope_maps,
+        limits,
+        ProfileUnsupportedDatatypePolicy::Error,
+        control,
+    )
+}
+
+/// Compile all roots with scalar-compatible unsupported-datatype handling.
+pub fn compile_profile_phase_controlled_with_policy<B: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    scope_maps: &[AnonymousScopeMap],
+    limits: ProfilePhaseLimits,
+    unsupported_datatypes: ProfileUnsupportedDatatypePolicy,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<ProfilePhase, E> {
     compile_profile_phase_with_selection(
         model,
         scope_maps,
         limits,
         RootSelection::<&[u8]>::All,
+        unsupported_datatypes,
         control,
     )
 }
@@ -930,6 +967,27 @@ pub fn compile_profile_phase_selected_controlled<B: ByteSource, S: ByteSource, E
     limits: ProfilePhaseLimits,
     posting_mode: u8,
     postings: S,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<ProfilePhase, E> {
+    compile_profile_phase_selected_controlled_with_policy(
+        model,
+        scope_maps,
+        limits,
+        posting_mode,
+        postings,
+        ProfileUnsupportedDatatypePolicy::Error,
+        control,
+    )
+}
+
+/// Compile one selected source with scalar-compatible unsupported-datatype handling.
+pub fn compile_profile_phase_selected_controlled_with_policy<B: ByteSource, S: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    scope_maps: &[AnonymousScopeMap],
+    limits: ProfilePhaseLimits,
+    posting_mode: u8,
+    postings: S,
+    unsupported_datatypes: ProfileUnsupportedDatatypePolicy,
     control: &mut impl FnMut(&'static str) -> Result<(), E>,
 ) -> ControlledResult<ProfilePhase, E> {
     let selection = match posting_mode {
@@ -955,7 +1013,14 @@ pub fn compile_profile_phase_selected_controlled<B: ByteSource, S: ByteSource, E
             .into());
         }
     };
-    compile_profile_phase_with_selection(model, scope_maps, limits, selection, control)
+    compile_profile_phase_with_selection(
+        model,
+        scope_maps,
+        limits,
+        selection,
+        unsupported_datatypes,
+        control,
+    )
 }
 
 fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
@@ -963,6 +1028,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     scope_maps: &[AnonymousScopeMap],
     limits: ProfilePhaseLimits,
     mut selection: RootSelection<S>,
+    unsupported_datatypes: ProfileUnsupportedDatatypePolicy,
     control: &mut impl FnMut(&'static str) -> Result<(), E>,
 ) -> ControlledResult<ProfilePhase, E> {
     poll(control, "profile-preflight")?;
@@ -1580,10 +1646,13 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     literals.sort();
     literals.dedup();
     append_datatype_issues(
-        &entity_uses,
-        &datatype_definitions,
-        &datatype_range_failures,
-        &literals,
+        ProfileDatatypeFacts {
+            uses: &entity_uses,
+            definitions: &datatype_definitions,
+            range_failures: &datatype_range_failures,
+            literals: &literals,
+        },
+        unsupported_datatypes,
         &mut issues,
         &mut budget,
         control,
@@ -1636,7 +1705,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     extension_keys.sort();
     extension_keys.dedup();
     let phase = ProfilePhase {
-        conforms: issues.is_empty(),
+        conforms: profile_issues_conform(&issues),
         axioms_checked: axiom_keys.len(),
         extensions_checked: extension_keys.len(),
         issues,
@@ -1678,6 +1747,21 @@ pub fn merge_profile_phases(
 pub fn merge_profile_phases_controlled<E>(
     phases: Vec<ProfilePhase>,
     limits: ProfilePhaseLimits,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<ProfilePhase, E> {
+    merge_profile_phases_controlled_with_policy(
+        phases,
+        limits,
+        ProfileUnsupportedDatatypePolicy::Error,
+        control,
+    )
+}
+
+/// Merge profile facts with scalar-compatible unsupported-datatype handling.
+pub fn merge_profile_phases_controlled_with_policy<E>(
+    phases: Vec<ProfilePhase>,
+    limits: ProfilePhaseLimits,
+    unsupported_datatypes: ProfileUnsupportedDatatypePolicy,
     control: &mut impl FnMut(&'static str) -> Result<(), E>,
 ) -> ControlledResult<ProfilePhase, E> {
     if phases.is_empty() {
@@ -2227,10 +2311,13 @@ pub fn merge_profile_phases_controlled<E>(
     literals.sort();
     literals.dedup();
     append_datatype_issues(
-        &entity_uses,
-        &datatype_definitions,
-        &datatype_range_failures,
-        &literals,
+        ProfileDatatypeFacts {
+            uses: &entity_uses,
+            definitions: &datatype_definitions,
+            range_failures: &datatype_range_failures,
+            literals: &literals,
+        },
+        unsupported_datatypes,
         &mut issues,
         &mut budget,
         control,
@@ -2283,7 +2370,7 @@ pub fn merge_profile_phases_controlled<E>(
     extension_keys.sort();
     extension_keys.dedup();
     let phase = ProfilePhase {
-        conforms: issues.is_empty(),
+        conforms: profile_issues_conform(&issues),
         axioms_checked: axiom_keys.len(),
         extensions_checked: extension_keys.len(),
         issues,
@@ -4019,14 +4106,18 @@ fn retain_simple_role_requirements_for_node<B: ByteSource, E>(
 }
 
 fn append_datatype_issues<E>(
-    uses: &[ProfileEntityIdentity],
-    definitions: &[ProfileDatatypeDefinition],
-    range_failures: &[ProfileDatatypeRangeFailure],
-    literals: &[ProfileLiteralFact],
+    facts: ProfileDatatypeFacts<'_>,
+    unsupported_datatypes: ProfileUnsupportedDatatypePolicy,
     issues: &mut Vec<ProfileIssue>,
     budget: &mut PhaseBudget,
     control: &mut impl FnMut(&'static str) -> Result<(), E>,
 ) -> ControlledResult<(), E> {
+    let ProfileDatatypeFacts {
+        uses,
+        definitions,
+        range_failures,
+        literals,
+    } = facts;
     poll(control, "profile-datatype-preflight")?;
     let mut definitions_by_head = profile_reserved_vec(
         definitions.len(),
@@ -4100,6 +4191,54 @@ fn append_datatype_issues<E>(
     );
     defined_datatypes.dedup();
 
+    let mut unsupported_iris = profile_reserved_vec(
+        uses.len(),
+        "profile unsupported datatype allocation failed",
+        budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for identity in uses {
+        poll(control, "profile-datatype-use")?;
+        if identity.kind != ProfileEntityKind::Datatype {
+            continue;
+        }
+        budget
+            .claim_work(search_work(defined_datatypes.len()))
+            .map_err(ProfilePhaseError::Encoded)?;
+        if !is_supported_profile_datatype(&identity.iri, budget)
+            .map_err(ProfilePhaseError::Encoded)?
+            && defined_datatypes
+                .binary_search_by(|candidate| (*candidate).cmp(&identity.iri))
+                .is_err()
+        {
+            unsupported_iris.push(identity.iri.as_slice());
+        }
+    }
+    budget
+        .claim_work(sort_work(unsupported_iris.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    unsupported_iris.sort_unstable();
+    unsupported_iris.dedup();
+    if unsupported_datatypes == ProfileUnsupportedDatatypePolicy::IgnoreWithWarning {
+        for iri in &unsupported_iris {
+            poll(control, "profile-datatype-opaque-warning")?;
+            let iri = std::str::from_utf8(iri).map_err(|_| {
+                ProfilePhaseError::Encoded(EncodedValidationError::invariant(
+                    "validated unsupported datatype IRI is not UTF-8",
+                ))
+            })?;
+            push_dynamic_profile_issue_with_severity_and_constructor(
+                issues,
+                UNSUPPORTED_DATATYPE_OPAQUE_RULE,
+                "warning",
+                &[UNSUPPORTED_DATATYPE_OPAQUE_MESSAGE_PREFIX, iri],
+                Some("Datatype"),
+                budget,
+            )
+            .map_err(ProfilePhaseError::Encoded)?;
+        }
+    }
+
     let semantic_error = match (builtin_statement, duplicate_statement) {
         (Some(builtin), Some(duplicate)) if builtin < duplicate => Some((
             BUILTIN_DATATYPE_REDEFINITION_RULE,
@@ -4114,23 +4253,17 @@ fn append_datatype_issues<E>(
             BUILTIN_DATATYPE_REDEFINITION_MESSAGE,
         )),
         (None, None) => {
-            let mut unsupported = false;
-            for identity in uses {
-                poll(control, "profile-datatype-use")?;
-                if identity.kind != ProfileEntityKind::Datatype {
-                    continue;
+            let unsupported = match unsupported_datatypes {
+                ProfileUnsupportedDatatypePolicy::Error => !unsupported_iris.is_empty(),
+                ProfileUnsupportedDatatypePolicy::IgnoreWithWarning => {
+                    profile_definitions_reference_unsupported_datatype(
+                        definitions,
+                        &defined_datatypes,
+                        budget,
+                        control,
+                    )?
                 }
-                budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
-                if !is_supported_profile_datatype(&identity.iri, budget)
-                    .map_err(ProfilePhaseError::Encoded)?
-                    && defined_datatypes
-                        .binary_search_by(|candidate| (*candidate).cmp(&identity.iri))
-                        .is_err()
-                {
-                    unsupported = true;
-                    break;
-                }
-            }
+            };
             if unsupported {
                 Some((UNSUPPORTED_DATATYPE_RULE, UNSUPPORTED_DATATYPE_MESSAGE))
             } else if profile_datatype_definitions_have_cycle(
@@ -4208,18 +4341,20 @@ fn append_datatype_issues<E>(
                 .map_err(ProfilePhaseError::Encoded)?;
             }
             Some(ProfileDatatypeFailure::UnsupportedLiteral) => {
-                push_profile_issue(
-                    issues,
-                    ProfileIssue {
-                        rule_id: UNSUPPORTED_DATATYPE_RULE,
-                        severity: "error",
-                        message: Cow::Borrowed(UNSUPPORTED_LITERAL_DATATYPE_MESSAGE),
-                        constructor: Some("Literal"),
-                        provenance_sha256: None,
-                    },
-                    budget,
-                )
-                .map_err(ProfilePhaseError::Encoded)?;
+                if unsupported_datatypes == ProfileUnsupportedDatatypePolicy::Error {
+                    push_profile_issue(
+                        issues,
+                        ProfileIssue {
+                            rule_id: UNSUPPORTED_DATATYPE_RULE,
+                            severity: "error",
+                            message: Cow::Borrowed(UNSUPPORTED_LITERAL_DATATYPE_MESSAGE),
+                            constructor: Some("Literal"),
+                            provenance_sha256: None,
+                        },
+                        budget,
+                    )
+                    .map_err(ProfilePhaseError::Encoded)?;
+                }
             }
             None => {}
             Some(_) => {
@@ -4275,6 +4410,31 @@ fn is_supported_profile_datatype(iri: &[u8], budget: &mut PhaseBudget) -> Encode
         budget.claim_work(1)?;
         if iri == *builtin {
             return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn profile_definitions_reference_unsupported_datatype<E>(
+    definitions: &[ProfileDatatypeDefinition],
+    defined_datatypes: &[&[u8]],
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<bool, E> {
+    for definition in definitions {
+        for reference in &definition.references {
+            poll(control, "profile-datatype-definition-reference")?;
+            budget
+                .claim_work(search_work(defined_datatypes.len()))
+                .map_err(ProfilePhaseError::Encoded)?;
+            if !is_supported_profile_datatype(reference, budget)
+                .map_err(ProfilePhaseError::Encoded)?
+                && defined_datatypes
+                    .binary_search_by(|candidate| (*candidate).cmp(reference))
+                    .is_err()
+            {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
@@ -5620,6 +5780,24 @@ fn push_dynamic_profile_issue_with_constructor(
     constructor: Option<&'static str>,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
+    push_dynamic_profile_issue_with_severity_and_constructor(
+        issues,
+        rule_id,
+        "error",
+        message_parts,
+        constructor,
+        budget,
+    )
+}
+
+fn push_dynamic_profile_issue_with_severity_and_constructor(
+    issues: &mut Vec<ProfileIssue>,
+    rule_id: &'static str,
+    severity: &'static str,
+    message_parts: &[&str],
+    constructor: Option<&'static str>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
     let length = message_parts.iter().try_fold(0_usize, |total, part| {
         total
             .checked_add(part.len())
@@ -5637,7 +5815,7 @@ fn push_dynamic_profile_issue_with_constructor(
         issues,
         ProfileIssue {
             rule_id,
-            severity: "error",
+            severity,
             message: Cow::Owned(message),
             constructor,
             provenance_sha256: None,
@@ -6042,6 +6220,7 @@ fn is_recomputed_profile_rule(rule_id: &str) -> bool {
             | BUILTIN_DATATYPE_REDEFINITION_RULE
             | DUPLICATE_DATATYPE_DEFINITION_RULE
             | UNSUPPORTED_DATATYPE_RULE
+            | UNSUPPORTED_DATATYPE_OPAQUE_RULE
             | RECURSIVE_DATATYPE_DEFINITION_RULE
             | CUSTOM_DATATYPE_LITERAL_RULE
             | INVALID_LITERAL_RULE
@@ -6067,6 +6246,10 @@ fn push_profile_issue(
     reserve_profile_one(issues, budget, "profile issue allocation failed")?;
     issues.push(issue);
     Ok(())
+}
+
+fn profile_issues_conform(issues: &[ProfileIssue]) -> bool {
+    issues.iter().all(|issue| issue.severity != "error")
 }
 
 fn clone_profile_bytes(
@@ -6313,9 +6496,18 @@ fn enqueue_node(
 }
 
 fn validate_phase(phase: &ProfilePhase) -> EncodedResult<()> {
-    if phase.conforms != phase.issues.is_empty() {
+    if phase.conforms != profile_issues_conform(&phase.issues) {
         return Err(EncodedValidationError::invariant(
             "profile conformance flag diverges from its issues",
+        ));
+    }
+    if phase
+        .issues
+        .iter()
+        .any(|issue| !matches!(issue.severity, "error" | "warning"))
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile issue severity is not recognized",
         ));
     }
     if phase.axioms_checked != phase.axiom_keys.len() {
@@ -7046,10 +7238,13 @@ mod tests {
         let mut control = |_phase| Ok::<(), Infallible>(());
 
         into_encoded(append_datatype_issues(
-            &uses,
-            &definitions,
-            &[],
-            &literals,
+            ProfileDatatypeFacts {
+                uses: &uses,
+                definitions: &definitions,
+                range_failures: &[],
+                literals: &literals,
+            },
+            ProfileUnsupportedDatatypePolicy::Error,
             &mut issues,
             &mut budget,
             &mut control,
@@ -7080,10 +7275,13 @@ mod tests {
         }];
         let mut validation_issues = Vec::new();
         into_encoded(append_datatype_issues(
-            &[],
-            &[],
-            &range_failures,
-            &invalid_literals,
+            ProfileDatatypeFacts {
+                uses: &[],
+                definitions: &[],
+                range_failures: &range_failures,
+                literals: &invalid_literals,
+            },
+            ProfileUnsupportedDatatypePolicy::Error,
             &mut validation_issues,
             &mut PhaseBudget::new(ProfilePhaseLimits::default()),
             &mut control,
@@ -7099,6 +7297,87 @@ mod tests {
                 (ILLEGAL_DATATYPE_FACET_RULE, Some("DataRange")),
                 (INVALID_LITERAL_RULE, Some("Literal")),
             ])
+        );
+
+        let opaque_uses = vec![datatype("urn:opaque")];
+        let opaque_literals = vec![ProfileLiteralFact {
+            canonical_key: vec![4],
+            datatype_iri: b"urn:opaque".to_vec(),
+            failure: Some(ProfileDatatypeFailure::UnsupportedLiteral),
+        }];
+        let mut opaque_issues = Vec::new();
+        into_encoded(append_datatype_issues(
+            ProfileDatatypeFacts {
+                uses: &opaque_uses,
+                definitions: &[],
+                range_failures: &[],
+                literals: &opaque_literals,
+            },
+            ProfileUnsupportedDatatypePolicy::IgnoreWithWarning,
+            &mut opaque_issues,
+            &mut PhaseBudget::new(ProfilePhaseLimits::default()),
+            &mut control,
+        ))?;
+        assert_eq!(
+            opaque_issues,
+            vec![ProfileIssue {
+                rule_id: UNSUPPORTED_DATATYPE_OPAQUE_RULE,
+                severity: "warning",
+                message: Cow::Owned(
+                    "unsupported datatype is treated as opaque: urn:opaque".to_owned()
+                ),
+                constructor: Some("Datatype"),
+                provenance_sha256: None,
+            }]
+        );
+        assert!(profile_issues_conform(&opaque_issues));
+
+        let opaque_definition = vec![ProfileDatatypeDefinition {
+            statement_order_key: vec![5],
+            datatype_iri: b"urn:defined".to_vec(),
+            references: vec![b"urn:opaque".to_vec()],
+            failure: None,
+        }];
+        let mut opaque_definition_issues = Vec::new();
+        into_encoded(append_datatype_issues(
+            ProfileDatatypeFacts {
+                uses: &opaque_uses,
+                definitions: &opaque_definition,
+                range_failures: &[],
+                literals: &[],
+            },
+            ProfileUnsupportedDatatypePolicy::IgnoreWithWarning,
+            &mut opaque_definition_issues,
+            &mut PhaseBudget::new(ProfilePhaseLimits::default()),
+            &mut control,
+        ))?;
+        assert!(opaque_definition_issues
+            .iter()
+            .any(|issue| issue.rule_id == UNSUPPORTED_DATATYPE_RULE));
+
+        let opaque_cancelled = append_datatype_issues(
+            ProfileDatatypeFacts {
+                uses: &opaque_uses,
+                definitions: &[],
+                range_failures: &[],
+                literals: &opaque_literals,
+            },
+            ProfileUnsupportedDatatypePolicy::IgnoreWithWarning,
+            &mut Vec::new(),
+            &mut PhaseBudget::new(ProfilePhaseLimits::default()),
+            &mut |phase| {
+                if phase == "profile-datatype-opaque-warning" {
+                    Err("injected opaque warning cancellation")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(
+            opaque_cancelled,
+            Err(ProfilePhaseError::Control(
+                "injected opaque warning cancellation"
+            ))
         );
 
         let pattern_cancelled = profile_facet_failure(
@@ -7128,10 +7407,13 @@ mod tests {
 
         let mut cancelled_issues = Vec::new();
         let cancelled = append_datatype_issues(
-            &uses,
-            &definitions,
-            &[],
-            &literals,
+            ProfileDatatypeFacts {
+                uses: &uses,
+                definitions: &definitions,
+                range_failures: &[],
+                literals: &literals,
+            },
+            ProfileUnsupportedDatatypePolicy::Error,
             &mut cancelled_issues,
             &mut PhaseBudget::new(ProfilePhaseLimits::default()),
             &mut |phase| {
@@ -7149,10 +7431,13 @@ mod tests {
         assert!(cancelled_issues.is_empty());
 
         let limited = append_datatype_issues(
-            &uses,
-            &definitions,
-            &[],
-            &literals,
+            ProfileDatatypeFacts {
+                uses: &uses,
+                definitions: &definitions,
+                range_failures: &[],
+                literals: &literals,
+            },
+            ProfileUnsupportedDatatypePolicy::Error,
             &mut Vec::new(),
             &mut PhaseBudget::new(ProfilePhaseLimits {
                 max_owned_bytes: 0,

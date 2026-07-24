@@ -24,6 +24,7 @@ from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
 from pyowl_core.extensions import swrl
 
 import pyhermit._native as native
+from pyhermit.config import UnsupportedDatatypePolicy
 from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE
 from pyhermit.exceptions import BackendMismatchError, ReasonerInterruptedError
 from pyhermit.profile import validate_owl2_dl_view
@@ -54,6 +55,7 @@ INVALID_FACET_VALUE_RULE = "INVALID_FACET_VALUE"
 INVALID_LITERAL_RULE = "INVALID_LITERAL"
 RECURSIVE_DATATYPE_DEFINITION_RULE = "RECURSIVE_DATATYPE_DEFINITION"
 UNSUPPORTED_DATATYPE_RULE = "UNSUPPORTED_DATATYPE"
+UNSUPPORTED_DATATYPE_OPAQUE_RULE = "UNSUPPORTED_DATATYPE_OPAQUE"
 RIA_DEPENDENCY_CYCLE_RULE = "RIA_DEPENDENCY_CYCLE"
 RIA_INVERSE_RECURSION_RULE = "RIA_INVERSE_RECURSION"
 RIA_NON_REGULAR_RECURSION_RULE = "RIA_NON_REGULAR_RECURSION"
@@ -92,6 +94,7 @@ PROJECTED_RULES = frozenset(
         RIA_INVERSE_RECURSION_RULE,
         RIA_NON_REGULAR_RECURSION_RULE,
         TOP_DATA_PROPERTY_RULE,
+        UNSUPPORTED_DATATYPE_OPAQUE_RULE,
         UNSUPPORTED_DATATYPE_RULE,
     )
 )
@@ -137,22 +140,46 @@ def _slice_record(
     )
 
 
-def _native_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
+def _native_manifest(
+    snapshot: pyowl_core.OntologyView,
+    *,
+    unsupported_datatypes: UnsupportedDatatypePolicy = UnsupportedDatatypePolicy.ERROR,
+) -> dict[str, object]:
     return cast(
         dict[str, object],
-        json.loads(native._encoded_profile_manifest_v1(**_buffers(snapshot))),
+        json.loads(
+            native._encoded_profile_manifest_v1(
+                **_buffers(snapshot),
+                unsupported_datatypes=unsupported_datatypes.value,
+            )
+        ),
     )
 
 
-def _native_slices_manifest(*records: tuple[object, ...]) -> dict[str, object]:
+def _native_slices_manifest(
+    *records: tuple[object, ...],
+    unsupported_datatypes: UnsupportedDatatypePolicy = UnsupportedDatatypePolicy.ERROR,
+) -> dict[str, object]:
     return cast(
         dict[str, object],
-        json.loads(native._encoded_profile_slices_manifest_v1(slices=records)),
+        json.loads(
+            native._encoded_profile_slices_manifest_v1(
+                slices=records,
+                unsupported_datatypes=unsupported_datatypes.value,
+            )
+        ),
     )
 
 
-def _expected_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
-    report = validate_owl2_dl_view(snapshot)
+def _expected_manifest(
+    snapshot: pyowl_core.OntologyView,
+    *,
+    unsupported_datatypes: UnsupportedDatatypePolicy = UnsupportedDatatypePolicy.ERROR,
+) -> dict[str, object]:
+    report = validate_owl2_dl_view(
+        snapshot,
+        unsupported_datatypes=unsupported_datatypes,
+    )
     projected = sorted(
         {
             (
@@ -169,7 +196,7 @@ def _expected_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
     return {
         "schema_version": 1,
         "family": "owl2_dl_profile",
-        "conforms": not projected,
+        "conforms": all(issue[1] != "error" for issue in projected),
         "axioms_checked": report.axioms_checked,
         "extensions_checked": report.extensions_checked,
         "ordered_rule_ids": [issue[0] for issue in projected],
@@ -577,6 +604,134 @@ def test_global_datatype_definition_errors_match_scalar_exactly(
         for rule in cast(list[str], actual["ordered_rule_ids"])
         if rule in datatype_rules
     ] == [expected_rule]
+
+
+def test_opaque_datatype_policy_matches_scalar_warning_and_conformance() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:opaque))",
+            "Declaration(DataProperty(:value))",
+            "DataPropertyRange(:value DataUnionOf(:opaque xsd:string))",
+            'DataPropertyAssertion(:value :individual "value"^^:opaque)',
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(
+        snapshot,
+        unsupported_datatypes=UnsupportedDatatypePolicy.IGNORE_WITH_WARNING,
+    )
+
+    assert actual == _expected_manifest(
+        snapshot,
+        unsupported_datatypes=UnsupportedDatatypePolicy.IGNORE_WITH_WARNING,
+    )
+    assert actual["conforms"] is True
+    assert actual["ordered_rule_ids"] == [UNSUPPORTED_DATATYPE_OPAQUE_RULE]
+    assert actual["issues"] == [
+        {
+            "rule_id": UNSUPPORTED_DATATYPE_OPAQUE_RULE,
+            "severity": "warning",
+            "message": (
+                "unsupported datatype is treated as opaque: "
+                "urn:test:profile#opaque"
+            ),
+            "constructor": "Datatype",
+            "provenance_sha256": None,
+        }
+    ]
+    assert UNSUPPORTED_DATATYPE_RULE in _native_manifest(snapshot)["ordered_rule_ids"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        (
+            "Declaration(Datatype(:opaque))",
+            "Declaration(DataProperty(:value))",
+            (
+                "DataPropertyRange(:value DatatypeRestriction(:opaque "
+                'xsd:minLength "2"^^xsd:integer))'
+            ),
+        ),
+        (
+            "Declaration(Datatype(:custom))",
+            "Declaration(Datatype(:opaque))",
+            "DatatypeDefinition(:custom :opaque)",
+        ),
+        (
+            "Declaration(Datatype(:opaque))",
+            "Declaration(DataProperty(:value))",
+            'DataPropertyRange(:value DataOneOf("value"^^:opaque))',
+        ),
+    ),
+)
+def test_opaque_policy_keeps_unsupported_range_boundaries(
+    body: tuple[str, ...],
+) -> None:
+    snapshot = pyowl_core.load_snapshot(functional(*body), options=OPTIONS)
+
+    actual = _native_manifest(
+        snapshot,
+        unsupported_datatypes=UnsupportedDatatypePolicy.IGNORE_WITH_WARNING,
+    )
+
+    assert actual == _expected_manifest(
+        snapshot,
+        unsupported_datatypes=UnsupportedDatatypePolicy.IGNORE_WITH_WARNING,
+    )
+    issues = cast(list[dict[str, object]], actual["issues"])
+    assert {issue["rule_id"] for issue in issues} == {
+        UNSUPPORTED_DATATYPE_OPAQUE_RULE,
+        UNSUPPORTED_DATATYPE_RULE,
+    }
+    assert [
+        issue["constructor"]
+        for issue in issues
+        if issue["rule_id"] == UNSUPPORTED_DATATYPE_RULE
+    ] == ["DataRange"]
+
+
+def test_opaque_datatype_warnings_recompute_across_slices() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:opaque))",
+            "Declaration(DataProperty(:value))",
+            ontology_iri="urn:test:profile:opaque:left",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            'DataPropertyAssertion(:value :individual "value"^^:opaque)',
+            ontology_iri="urn:test:profile:opaque:right",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
+    sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
+    records = tuple(
+        _slice_record(source, member_tokens=(token,))
+        for token, source in sources_by_token
+    )
+
+    forward = _native_slices_manifest(
+        *records,
+        unsupported_datatypes=UnsupportedDatatypePolicy.IGNORE_WITH_WARNING,
+    )
+    reverse = _native_slices_manifest(
+        *reversed(records),
+        unsupported_datatypes=UnsupportedDatatypePolicy.IGNORE_WITH_WARNING,
+    )
+
+    assert forward == reverse
+    assert forward == _expected_manifest(
+        composite,
+        unsupported_datatypes=UnsupportedDatatypePolicy.IGNORE_WITH_WARNING,
+    )
+    assert forward["conforms"] is True
+    assert forward["ordered_rule_ids"] == [UNSUPPORTED_DATATYPE_OPAQUE_RULE]
 
 
 def test_custom_datatype_literal_message_matches_scalar_exactly() -> None:
@@ -1475,6 +1630,23 @@ def test_hostile_columns_fail_transactionally_and_valid_retry_is_unchanged() -> 
 
     with pytest.raises(BackendMismatchError, match="node_field_offsets"):
         native._encoded_profile_manifest_v1(**hostile)
+
+    assert native._encoded_profile_manifest_v1(**buffers) == baseline
+
+
+def test_unknown_unsupported_datatype_policy_fails_before_profile_publication() -> None:
+    snapshot = pyowl_core.load_snapshot(functional(*_invalid_body()), options=OPTIONS)
+    buffers = _buffers(snapshot)
+    baseline = native._encoded_profile_manifest_v1(**buffers)
+
+    with pytest.raises(
+        BackendMismatchError,
+        match="unsupported-datatype policy is not recognized",
+    ):
+        native._encoded_profile_manifest_v1(
+            **buffers,
+            unsupported_datatypes="opaque",
+        )
 
     assert native._encoded_profile_manifest_v1(**buffers) == baseline
 
