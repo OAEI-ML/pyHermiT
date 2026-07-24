@@ -599,7 +599,7 @@ enum NominalUsage {
     Negative,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum AtomicClassSource {
     Entity(u32),
     Nominal(NodeId),
@@ -610,6 +610,7 @@ struct AtomicClassSelection {
     source: AtomicClassSource,
     expression: NodeId,
     negative: bool,
+    synthetic_complement: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -7883,6 +7884,7 @@ fn class_signature<B: ByteSource>(
     }
 
     let mut selected_expressions = Vec::<NodeId>::new();
+    let mut synthetic_complements = Vec::<AtomicClassSource>::new();
     for definition in definitions {
         push_class_boolean_definition_selections(&mut selected_expressions, definition, budget)?;
     }
@@ -7899,7 +7901,12 @@ fn class_signature<B: ByteSource>(
                 )?;
                 if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
-                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                    push_atomic_class_selection(
+                        &mut selected_expressions,
+                        &mut synthetic_complements,
+                        selection,
+                        budget,
+                    )?;
                 } else if let Some(definition) =
                     class_boolean_definition(definitions, expression, DefinitionPolarity::Positive)
                 {
@@ -7942,7 +7949,12 @@ fn class_signature<B: ByteSource>(
                     }
                 }
                 if let Some(selection) = sub_selection {
-                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                    push_atomic_class_selection(
+                        &mut selected_expressions,
+                        &mut synthetic_complements,
+                        selection,
+                        budget,
+                    )?;
                 }
                 if let Some(definition) = sub_definition {
                     push_class_boolean_definition_selections(
@@ -7952,7 +7964,12 @@ fn class_signature<B: ByteSource>(
                     )?;
                 }
                 if let Some(selection) = super_selection {
-                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                    push_atomic_class_selection(
+                        &mut selected_expressions,
+                        &mut synthetic_complements,
+                        selection,
+                        budget,
+                    )?;
                 }
                 if let Some(definition) = super_definition {
                     push_class_boolean_definition_selections(
@@ -8010,7 +8027,12 @@ fn class_signature<B: ByteSource>(
                     if let Some(selection) =
                         atomic_class_selection(model, symbols, identifier, budget)?
                     {
-                        push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                        push_atomic_class_selection(
+                            &mut selected_expressions,
+                            &mut synthetic_complements,
+                            selection,
+                            budget,
+                        )?;
                     } else {
                         for polarity in [DefinitionPolarity::Negative, DefinitionPolarity::Positive]
                         {
@@ -8091,7 +8113,12 @@ fn class_signature<B: ByteSource>(
                     if let Some(selection) =
                         atomic_class_selection(model, symbols, identifier, budget)?
                     {
-                        push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                        push_atomic_class_selection(
+                            &mut selected_expressions,
+                            &mut synthetic_complements,
+                            selection,
+                            budget,
+                        )?;
                     }
                 }
             }
@@ -8136,7 +8163,12 @@ fn class_signature<B: ByteSource>(
                 if !reducible && !generated {
                     continue;
                 }
-                push_atomic_class_selection(&mut selected_expressions, defined_selection, budget)?;
+                push_atomic_class_selection(
+                    &mut selected_expressions,
+                    &mut synthetic_complements,
+                    defined_selection,
+                    budget,
+                )?;
                 for item_index in expressions.items() {
                     budget.claim_work(1)?;
                     let item =
@@ -8149,7 +8181,12 @@ fn class_signature<B: ByteSource>(
                     if let Some(selection) =
                         atomic_class_selection(model, symbols, identifier, budget)?
                     {
-                        push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                        push_atomic_class_selection(
+                            &mut selected_expressions,
+                            &mut synthetic_complements,
+                            selection,
+                            budget,
+                        )?;
                     } else if class_boolean_definition(
                         definitions,
                         identifier,
@@ -8172,7 +8209,12 @@ fn class_signature<B: ByteSource>(
                 )?;
                 if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
-                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                    push_atomic_class_selection(
+                        &mut selected_expressions,
+                        &mut synthetic_complements,
+                        selection,
+                        budget,
+                    )?;
                 } else if let Some(definition) =
                     class_boolean_definition(definitions, expression, DefinitionPolarity::Positive)
                 {
@@ -8188,7 +8230,12 @@ fn class_signature<B: ByteSource>(
                     node_field(model, root_node, 1, "data-property domain class expression")?;
                 if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
-                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                    push_atomic_class_selection(
+                        &mut selected_expressions,
+                        &mut synthetic_complements,
+                        selection,
+                        budget,
+                    )?;
                 } else if let Some(definition) =
                     class_boolean_definition(definitions, expression, DefinitionPolarity::Positive)
                 {
@@ -8229,7 +8276,12 @@ fn class_signature<B: ByteSource>(
                 let expression = node_field(model, root_node, 0, "has-key class expression")?;
                 if let Some(selection) = atomic_class_selection(model, symbols, expression, budget)?
                 {
-                    push_atomic_class_selection(&mut selected_expressions, selection, budget)?;
+                    push_atomic_class_selection(
+                        &mut selected_expressions,
+                        &mut synthetic_complements,
+                        selection,
+                        budget,
+                    )?;
                 } else if let Some(definition) =
                     class_boolean_definition(definitions, expression, DefinitionPolarity::Negative)
                 {
@@ -8284,6 +8336,37 @@ fn class_signature<B: ByteSource>(
             },
             entity: None,
         });
+    }
+    budget.claim_work(sort_work(synthetic_complements.len()))?;
+    synthetic_complements.sort_unstable();
+    synthetic_complements.dedup();
+    for source in synthetic_complements {
+        let base_key = match source {
+            AtomicClassSource::Entity(entity_id) => {
+                let entity = symbols
+                    .entity_domain
+                    .values
+                    .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "synthetic class-complement entity ID is dangling",
+                        )
+                    })?;
+                if !entity.display.starts_with("class:") {
+                    return Err(EncodedValidationError::invariant(
+                        "synthetic class-complement entity changed kind",
+                    ));
+                }
+                budget.claim_owned(entity.key.len())?;
+                entity.key.clone()
+            }
+            AtomicClassSource::Nominal(base) => {
+                canonical::canonical_node_key(model, base, scope_maps, budget)?
+            }
+        };
+        let key = synthetic_class_complement_key(&base_key, budget)?;
+        let seed = class_expression_symbol_seed(&key, OBJECT_COMPLEMENT_OF_TAG, budget)?;
+        push_seeded_class_expression_symbol(&mut pending, &seed, budget)?;
     }
 
     for definition in definitions {
@@ -8768,6 +8851,7 @@ fn positive_atomic_class_selection<B: ByteSource>(
             source: AtomicClassSource::Entity(entity_id),
             expression: identifier,
             negative: false,
+            synthetic_complement: false,
         }));
     }
     if node.tag() == OBJECT_ONE_OF_TAG {
@@ -8778,6 +8862,7 @@ fn positive_atomic_class_selection<B: ByteSource>(
             source: AtomicClassSource::Nominal(identifier),
             expression: identifier,
             negative: false,
+            synthetic_complement: false,
         }));
     }
     match node.tag() {
@@ -9259,6 +9344,7 @@ fn builtin_atomic_class_selection(
         source: AtomicClassSource::Entity(class_id_by_display(&symbols.entity_domain, display)?),
         expression,
         negative: false,
+        synthetic_complement: false,
     })
 }
 
@@ -9506,35 +9592,46 @@ fn complement_atomic_class_selection<B: ByteSource>(
             NOTHING_DISPLAY,
         )?);
         selection.negative = false;
+        selection.synthetic_complement = false;
         return Ok(Some(selection));
     }
     if atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)? {
         selection.source =
             AtomicClassSource::Entity(class_id_by_display(&symbols.entity_domain, THING_DISPLAY)?);
         selection.negative = false;
+        selection.synthetic_complement = false;
         return Ok(Some(selection));
     }
     if selection.negative {
-        let node = model.node(selection.expression)?;
-        if node.tag() != OBJECT_COMPLEMENT_OF_TAG || node.field_count() != 1 {
-            return Err(EncodedValidationError::invariant(
-                "normalized negative class literal lost its complement expression",
-            ));
+        if selection.synthetic_complement {
+            selection.synthetic_complement = false;
+        } else {
+            let node = model.node(selection.expression)?;
+            if node.tag() != OBJECT_COMPLEMENT_OF_TAG || node.field_count() != 1 {
+                return Err(EncodedValidationError::invariant(
+                    "normalized negative class literal lost its complement expression",
+                ));
+            }
+            selection.expression =
+                node_field(model, node, 0, "normalized class-complement operand")?;
         }
-        selection.expression = node_field(model, node, 0, "normalized class-complement operand")?;
         selection.negative = false;
         return Ok(Some(selection));
     }
     if !base_is_atomic {
-        return Ok(None);
+        selection.negative = true;
+        selection.synthetic_complement = true;
+        return Ok(Some(selection));
     }
     selection.expression = complement_expression;
     selection.negative = true;
+    selection.synthetic_complement = false;
     Ok(Some(selection))
 }
 
 fn push_atomic_class_selection(
     expressions: &mut Vec<NodeId>,
+    synthetic_complements: &mut Vec<AtomicClassSource>,
     selection: AtomicClassSelection,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
@@ -9542,7 +9639,17 @@ fn push_atomic_class_selection(
         push_class_expression_selection(expressions, base, budget)?;
     }
     if selection.negative {
-        push_class_expression_selection(expressions, selection.expression, budget)?;
+        if selection.synthetic_complement {
+            budget.claim_owned(size_of::<AtomicClassSource>())?;
+            synthetic_complements.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource(
+                    "synthetic class-complement selection allocation failed",
+                )
+            })?;
+            synthetic_complements.push(selection.source);
+        } else {
+            push_class_expression_selection(expressions, selection.expression, budget)?;
+        }
     }
     Ok(())
 }
@@ -12778,15 +12885,8 @@ fn named_disjoint_classes<B: ByteSource>(
             return Ok(None);
         };
         let literal = ClassLiteral { class_id, negative };
-        let key = if let Some(selection) = selection {
-            normalized_class_literal_key(
-                model,
-                class_domain,
-                literal,
-                selection.expression,
-                scope_maps,
-                budget,
-            )?
+        let key = if selection.is_some() {
+            normalized_class_literal_key(class_domain, literal, budget)?
         } else {
             let definition =
                 class_boolean_definition(definitions, identifier, DefinitionPolarity::Negative)
@@ -12948,20 +13048,11 @@ fn normalize_disjoint_class_literals(
         provenance,
     })
 }
-#[allow(clippy::too_many_arguments)]
-fn normalized_class_literal_key<B: ByteSource>(
-    model: &ValidatedModel<B>,
+fn normalized_class_literal_key(
     class_domain: &DecodedSymbolDomain,
     literal: ClassLiteral,
-    expression: NodeId,
-    scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<u8>> {
-    if literal.negative {
-        let key = canonical::canonical_node_key(model, expression, scope_maps, budget)?;
-        budget.claim_owned(key.len())?;
-        return Ok(key);
-    }
     let source = &class_domain
         .values
         .get(usize::try_from(literal.class_id).unwrap_or(usize::MAX))
@@ -12969,6 +13060,9 @@ fn normalized_class_literal_key<B: ByteSource>(
             EncodedValidationError::invariant("normalized class literal ID is dangling")
         })?
         .key;
+    if literal.negative {
+        return synthetic_class_complement_key(source, budget);
+    }
     budget.claim_owned(source.len())?;
     let mut key = Vec::new();
     key.try_reserve_exact(source.len()).map_err(|_| {
@@ -13110,7 +13204,6 @@ fn named_disjoint_union<B: ByteSource>(
                 "disjoint-union member did not resolve to a node",
             ));
         };
-        let selection = atomic_class_selection(model, symbols, identifier, budget)?;
         let Some((class_id, negative)) = class_expression_literal_with_definitions(
             model,
             symbols,
@@ -13134,14 +13227,7 @@ fn named_disjoint_union<B: ByteSource>(
             generated: false,
         });
         let literal = ClassLiteral { class_id, negative };
-        let key = normalized_class_literal_key(
-            model,
-            class_domain,
-            literal,
-            selection.map_or(identifier, |selection| selection.expression),
-            scope_maps,
-            budget,
-        )?;
+        let key = normalized_class_literal_key(class_domain, literal, budget)?;
         members.push((literal, key));
     }
     let mut output =

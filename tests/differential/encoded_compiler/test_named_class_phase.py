@@ -6399,6 +6399,60 @@ def test_complemented_reduced_data_booleans_match_scalar_roots() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_complemented_reduced_atomic_class_booleans_match_scalar_contexts() -> None:
+    expressions = (
+        "ObjectComplementOf(ObjectIntersectionOf("
+        "owl:Thing ObjectOneOf(:i)))",
+        "ObjectComplementOf(ObjectUnionOf(owl:Nothing :A))",
+    )
+    contexts = (
+        "SubClassOf({} :Z)",
+        "SubClassOf(:Z {})",
+        "EquivalentClasses(:Z {})",
+        "DisjointClasses(:Z {})",
+        "ClassAssertion({} :i)",
+        "ObjectPropertyDomain(:p {})",
+        "ObjectPropertyRange(:p {})",
+        "DataPropertyDomain(:d {})",
+        "HasKey({} (:p) (:d))",
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:Z))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:i))",
+            *(
+                context.format(expression)
+                for expression in expressions
+                for context in contexts
+            ),
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=18,
+        include_object_constraints=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    assert not any(
+        str(value["display"]).startswith(
+            ("ObjectIntersectionOf:", "ObjectUnionOf:")
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
     string_datatype = "<http://www.w3.org/2001/XMLSchema#string>"
     snapshot = pyowl_core.load_snapshot(
