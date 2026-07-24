@@ -34,7 +34,10 @@ OPTIONS = pyowl_core.LoadOptions(
 )
 DATA_RANGE_ARITY_RULE = "OWL2_DATA_RANGE_ARITY"
 EXTENSION_COMPONENT_RULE = "OWL2DL_EXTENSION_COMPONENT"
-PROJECTED_RULES = frozenset((DATA_RANGE_ARITY_RULE, EXTENSION_COMPONENT_RULE))
+TOP_DATA_PROPERTY_RULE = "OWL2DL_TOP_DATA_PROPERTY_POSITION"
+PROJECTED_RULES = frozenset(
+    (DATA_RANGE_ARITY_RULE, EXTENSION_COMPONENT_RULE, TOP_DATA_PROPERTY_RULE)
+)
 
 
 def functional(*body: str, ontology_iri: str = "urn:test:profile") -> bytes:
@@ -149,6 +152,16 @@ def _bad_root_posting(snapshot: pyowl_core.OntologyView) -> memoryview:
     raise AssertionError("profile fixture has no invalid data existential")
 
 
+def _top_data_root_posting(snapshot: pyowl_core.OntologyView) -> memoryview:
+    for index, axiom in enumerate(snapshot.iter_axioms(), 1):
+        if (
+            isinstance(axiom, owl.FunctionalDataProperty)
+            and axiom.property.iri == owl.OWL_TOP_DATA_PROPERTY.iri
+        ):
+            return memoryview(struct.pack("<I", index))
+    raise AssertionError("profile fixture has no invalid top-data-property root")
+
+
 def _extension_snapshot(label: str) -> pyowl_core.OntologyView:
     class_a = owl.Class(owl.IRI("urn:test:profile#A"))
     variable = swrl.Variable(owl.IRI("urn:test:profile#x"))
@@ -227,6 +240,50 @@ def test_multi_property_diagnostics_order_and_provenance_match_scalar_exactly() 
     assert all("document_keys" not in issue for issue in issues)
 
 
+def test_top_data_property_positions_match_scalar_exactly() -> None:
+    allowed = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "SubDataPropertyOf(:p owl:topDataProperty)",
+        ),
+        options=OPTIONS,
+    )
+    invalid = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "FunctionalDataProperty(owl:topDataProperty)",
+            "SubDataPropertyOf(owl:topDataProperty owl:topDataProperty)",
+            "SubClassOf(:A DataSomeValuesFrom(owl:topDataProperty xsd:string))",
+        ),
+        options=OPTIONS,
+    )
+
+    allowed_manifest = _native_manifest(allowed)
+    scalar = validate_owl2_dl_view(invalid)
+    actual = _native_manifest(invalid)
+
+    assert allowed_manifest == _expected_manifest(allowed)
+    assert allowed_manifest["conforms"] is True
+    assert actual == _expected_manifest(invalid)
+    issues = cast(list[dict[str, object]], actual["issues"])
+    top_issues = [
+        issue for issue in issues if issue["rule_id"] == TOP_DATA_PROPERTY_RULE
+    ]
+    assert {issue["constructor"] for issue in top_issues} == {
+        "FunctionalDataProperty",
+        "SubClassOf",
+        "SubDataPropertyOf",
+    }
+    assert len(top_issues) == 3
+    assert all(len(cast(str, issue["provenance_sha256"])) == 64 for issue in top_issues)
+    assert all(
+        issue.document_keys
+        for issue in scalar.issues
+        if issue.rule_id == TOP_DATA_PROPERTY_RULE
+    )
+    assert all("document_keys" not in issue for issue in top_issues)
+
+
 def test_extension_component_diagnostic_and_count_match_scalar_exactly() -> None:
     snapshot = _extension_snapshot("single")
     scalar = validate_owl2_dl_view(snapshot)
@@ -298,6 +355,67 @@ def test_include_and_equivalent_exclude_selection_are_byte_identical() -> None:
     manifest = cast(dict[str, object], json.loads(included))
     assert manifest["axioms_checked"] == 1
     assert manifest["ordered_rule_ids"] == [DATA_RANGE_ARITY_RULE]
+
+
+def test_top_data_property_selection_and_composite_deduplication_are_canonical() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "FunctionalDataProperty(owl:topDataProperty)",
+            "SubDataPropertyOf(:p owl:topDataProperty)",
+        ),
+        options=OPTIONS,
+    )
+    invalid = _top_data_root_posting(snapshot)
+    root_count = len(tuple(snapshot.iter_axioms()))
+    invalid_id = struct.unpack("<I", invalid)[0]
+    complement = memoryview(
+        b"".join(
+            struct.pack("<I", index)
+            for index in range(1, root_count + 1)
+            if index != invalid_id
+        )
+    )
+
+    included = native._encoded_profile_slices_manifest_v1(
+        slices=(_slice_record(snapshot, posting_mode=1, postings=invalid),)
+    )
+    excluded = native._encoded_profile_slices_manifest_v1(
+        slices=(_slice_record(snapshot, posting_mode=2, postings=complement),)
+    )
+
+    assert included == excluded
+    selected = cast(dict[str, object], json.loads(included))
+    assert selected["axioms_checked"] == 1
+    assert selected["ordered_rule_ids"] == [TOP_DATA_PROPERTY_RULE]
+
+    left = pyowl_core.load_snapshot(
+        functional(
+            "FunctionalDataProperty(owl:topDataProperty)",
+            ontology_iri="urn:test:profile:top:left",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "FunctionalDataProperty(owl:topDataProperty)",
+            ontology_iri="urn:test:profile:top:right",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
+    sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
+    records = tuple(
+        _slice_record(source, member_tokens=(token,))
+        for token, source in sources_by_token
+    )
+    forward = native._encoded_profile_slices_manifest_v1(slices=records)
+    reverse = native._encoded_profile_slices_manifest_v1(slices=tuple(reversed(records)))
+
+    assert forward == reverse
+    assert json.loads(forward) == _expected_manifest(composite)
+    assert json.loads(forward)["axioms_checked"] == 1
 
 
 def test_extension_selection_and_composite_deduplication_are_canonical() -> None:

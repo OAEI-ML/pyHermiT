@@ -148,7 +148,7 @@ pub enum RootHandler {
 }
 
 impl RootHandler {
-    fn from_root(kind: RootKind, tag: u16) -> EncodedResult<Self> {
+    pub(crate) fn from_root(kind: RootKind, tag: u16) -> EncodedResult<Self> {
         let handler = match (kind, tag) {
             (RootKind::OntologyAnnotation, 5) => Self::OntologyAnnotation,
             (RootKind::Axiom, 60) => Self::Declaration,

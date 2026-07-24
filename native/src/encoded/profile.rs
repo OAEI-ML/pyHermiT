@@ -2,9 +2,9 @@
 //!
 //! Profile violations are successful semantic output. Malformed columns,
 //! resource exhaustion, and cancellation remain distinct operational failures.
-//! This first private phase owns exact data-arity and extension projections;
-//! structural-columns schema 1 does not carry document-origin rows, so the
-//! manifest deliberately exposes canonical root provenance without inventing
+//! This first private phase owns exact data-arity, top-data-property, and
+//! extension projections. Structural-columns schema 1 does not carry
+//! document-origin rows, so the manifest exposes canonical root provenance without inventing
 //! `ProfileIssue.document_keys`. Issue ordering and deduplication therefore use
 //! the exact projected field tuple published by this phase.
 // SPDX-License-Identifier: LGPL-3.0-or-later
@@ -19,18 +19,26 @@ use sha2::{Digest, Sha256};
 
 use super::canonical::{self, AnonymousScopeMap, CanonicalBudget};
 use super::model::{ComponentKind, ComponentRef, ComponentValue, NodeId, RootKind, ValidatedModel};
+use super::symbols::RootHandler;
 use super::{u32_at, ByteSource, EncodedResult, EncodedValidationError};
 
 const PROFILE_PHASE_SCHEMA_VERSION: u16 = 1;
 const POSTINGS_ALL: u8 = 0;
 const POSTINGS_INCLUDE: u8 = 1;
 const POSTINGS_EXCLUDE: u8 = 2;
+const IRI_TAG: u16 = 1;
+const ENTITY_TAG: u16 = 2;
 const DATA_SOME_VALUES_FROM_TAG: u16 = 41;
 const DATA_ALL_VALUES_FROM_TAG: u16 = 42;
+const SUB_DATA_PROPERTY_TAG: u16 = 90;
 const SWRL_RULE_TAG: u16 = 148;
+const TOP_DATA_PROPERTY_IRI: &[u8] = b"http://www.w3.org/2002/07/owl#topDataProperty";
 const DATA_RANGE_ARITY_RULE: &str = "OWL2_DATA_RANGE_ARITY";
 const DATA_RANGE_ARITY_MESSAGE: &str =
     "OWL 2 defines only unary data ranges, so the restriction must use exactly one data property";
+const TOP_DATA_PROPERTY_RULE: &str = "OWL2DL_TOP_DATA_PROPERTY_POSITION";
+const TOP_DATA_PROPERTY_MESSAGE: &str =
+    "owl:topDataProperty may occur only as the super-property of a data subproperty axiom";
 const EXTENSION_COMPONENT_RULE: &str = "OWL2DL_EXTENSION_COMPONENT";
 const EXTENSION_COMPONENT_MESSAGE: &str =
     "extension components such as SWRL are outside the OWL 2 DL reasoner scope";
@@ -585,6 +593,15 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                 EncodedValidationError::resource("profile axiom count overflowed")
             })?)
             .map_err(ProfilePhaseError::Encoded)?;
+        let axiom_tag = model
+            .node(root.node())
+            .map_err(ProfilePhaseError::Encoded)?
+            .tag();
+        let axiom_constructor = RootHandler::from_root(RootKind::Axiom, axiom_tag)
+            .map_err(ProfilePhaseError::Encoded)?
+            .as_str();
+        let top_data_property_allowed = allows_top_data_property(model, root.node(), &mut budget)
+            .map_err(ProfilePhaseError::Encoded)?;
 
         poll(control, "profile-provenance")?;
         let key = canonical::canonical_node_key(model, root.node(), scope_maps, &mut budget)
@@ -602,10 +619,17 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         })?;
         enqueue_node(root.node(), &mut marks, epoch, &mut stack)
             .map_err(ProfilePhaseError::Encoded)?;
+        let mut top_data_property_occurs = false;
         while let Some(identifier) = stack.pop() {
             poll(control, "profile-node")?;
             budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
             let node = model.node(identifier).map_err(ProfilePhaseError::Encoded)?;
+            if node.tag() == ENTITY_TAG
+                && is_top_data_property(model, identifier, &mut budget)
+                    .map_err(ProfilePhaseError::Encoded)?
+            {
+                top_data_property_occurs = true;
+            }
             if matches!(
                 node.tag(),
                 DATA_SOME_VALUES_FROM_TAG | DATA_ALL_VALUES_FROM_TAG
@@ -673,6 +697,28 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                 enqueue_component(model, component, &mut marks, epoch, &mut stack, &mut budget)
                     .map_err(ProfilePhaseError::Encoded)?;
             }
+        }
+        if top_data_property_occurs && !top_data_property_allowed {
+            let following = issues.len().checked_add(1).ok_or_else(|| {
+                ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                    "profile issue count overflowed",
+                ))
+            })?;
+            budget
+                .claim_issue(following)
+                .map_err(ProfilePhaseError::Encoded)?;
+            budget
+                .claim_owned(size_of::<ProfileIssue>())
+                .map_err(ProfilePhaseError::Encoded)?;
+            reserve_one(&mut issues, "profile issue allocation failed")
+                .map_err(ProfilePhaseError::Encoded)?;
+            issues.push(ProfileIssue {
+                rule_id: TOP_DATA_PROPERTY_RULE,
+                severity: "error",
+                message: TOP_DATA_PROPERTY_MESSAGE,
+                constructor: axiom_constructor,
+                provenance_sha256,
+            });
         }
     }
 
@@ -866,6 +912,102 @@ pub fn merge_profile_phases_controlled<E>(
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
     poll(control, "profile-merge-complete")?;
     Ok(phase)
+}
+
+fn allows_top_data_property<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<bool> {
+    budget.claim_work(1)?;
+    let node = model.node(identifier)?;
+    if node.tag() != SUB_DATA_PROPERTY_TAG {
+        return Ok(false);
+    }
+    if node.field_count() != 3 {
+        return Err(EncodedValidationError::invariant(
+            "validated data subproperty axiom lost its schema-1 shape",
+        ));
+    }
+    let fields = node.fields();
+    let sub_property = required_node(model, fields.start, "profile data subproperty expression")?;
+    let super_field = fields
+        .start
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("profile field index overflowed"))?;
+    let super_property =
+        required_node(model, super_field, "profile data super-property expression")?;
+    if !is_top_data_property(model, super_property, budget)? {
+        return Ok(false);
+    }
+    Ok(!is_top_data_property(model, sub_property, budget)?)
+}
+
+fn is_top_data_property<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<bool> {
+    budget.claim_work(5)?;
+    let entity = model.node(identifier)?;
+    if entity.tag() != ENTITY_TAG || entity.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity lost its schema-1 shape",
+        ));
+    }
+    let fields = entity.fields();
+    let kind_component = required_component(model.field(fields.start)?, "profile entity kind")?;
+    let ComponentValue::Scalar(kind) = model.resolve(kind_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity kind is not scalar",
+        ));
+    };
+    if kind.kind() != ComponentKind::Enum {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity kind is not an enum",
+        ));
+    }
+    if !kind.bytes_equal(b"data_property") {
+        return Ok(false);
+    }
+    let iri_field = fields
+        .start
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("profile entity field index overflowed"))?;
+    let iri_identifier = required_node(model, iri_field, "profile entity IRI")?;
+    let iri = model.node(iri_identifier)?;
+    if iri.tag() != IRI_TAG || iri.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity IRI lost its schema-1 shape",
+        ));
+    }
+    let text_component =
+        required_component(model.field(iri.fields().start)?, "profile entity IRI text")?;
+    let ComponentValue::Scalar(text) = model.resolve(text_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity IRI text is not scalar",
+        ));
+    };
+    if text.kind() != ComponentKind::Text {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity IRI is not text",
+        ));
+    }
+    Ok(text.bytes_equal(TOP_DATA_PROPERTY_IRI))
+}
+
+fn required_node<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    field_index: usize,
+    name: &'static str,
+) -> EncodedResult<NodeId> {
+    let component = required_component(model.field(field_index)?, name)?;
+    let ComponentValue::Node(identifier) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated encoded {name} is not a node"
+        )));
+    };
+    Ok(identifier)
 }
 
 fn enqueue_component<B: ByteSource>(
@@ -1105,6 +1247,56 @@ mod tests {
         }
     }
 
+    fn invalid_top_data_property_columns() -> OwnedColumns {
+        OwnedColumns {
+            root_kinds: vec![2],
+            root_ids: le32(&[3]),
+            node_tags: le16(&[IRI_TAG, ENTITY_TAG, 95]),
+            node_field_offsets: le64(&[0, 1, 3, 5]),
+            field_kinds: vec![2, 5, 1, 1, 6],
+            field_values: le64(&[0, 45, 1, 2, 0]),
+            field_lengths: le64(&[45, 13, 0, 0, 0]),
+            item_kinds: Vec::new(),
+            item_values: Vec::new(),
+            item_lengths: Vec::new(),
+            scalar_bytes: concat!(
+                "http://www.w3.org/2002/07/owl#topDataProperty",
+                "data_property",
+            )
+            .as_bytes()
+            .to_vec(),
+        }
+    }
+
+    fn allowed_top_data_property_columns() -> OwnedColumns {
+        OwnedColumns {
+            root_kinds: vec![2],
+            root_ids: le32(&[5]),
+            node_tags: le16(&[
+                IRI_TAG,
+                IRI_TAG,
+                ENTITY_TAG,
+                ENTITY_TAG,
+                SUB_DATA_PROPERTY_TAG,
+            ]),
+            node_field_offsets: le64(&[0, 1, 2, 4, 6, 9]),
+            field_kinds: vec![2, 2, 5, 1, 5, 1, 1, 1, 6],
+            field_values: le64(&[0, 10, 55, 1, 68, 2, 3, 4, 0]),
+            field_lengths: le64(&[10, 45, 13, 0, 13, 0, 0, 0, 0]),
+            item_kinds: Vec::new(),
+            item_values: Vec::new(),
+            item_lengths: Vec::new(),
+            scalar_bytes: concat!(
+                "urn:test#p",
+                "http://www.w3.org/2002/07/owl#topDataProperty",
+                "data_property",
+                "data_property",
+            )
+            .as_bytes()
+            .to_vec(),
+        }
+    }
+
     fn extension_columns() -> OwnedColumns {
         OwnedColumns {
             root_kinds: vec![3],
@@ -1143,6 +1335,30 @@ mod tests {
             .map_err(|_| EncodedValidationError::invariant("profile manifest is not JSON"))?;
         assert_eq!(manifest["family"], "owl2_dl_profile");
         assert_eq!(manifest["ordered_rule_ids"][0], DATA_RANGE_ARITY_RULE);
+        Ok(())
+    }
+
+    #[test]
+    fn top_data_property_position_is_exact_and_preserves_the_valid_super_position(
+    ) -> EncodedResult<()> {
+        let invalid = invalid_top_data_property_columns();
+        let phase = compile_profile_phase(&model(&invalid)?, &[], ProfilePhaseLimits::default())?;
+        assert!(!phase.conforms);
+        assert_eq!(phase.axioms_checked, 1);
+        assert_eq!(phase.issues.len(), 1);
+        assert_eq!(phase.issues[0].rule_id, TOP_DATA_PROPERTY_RULE);
+        assert_eq!(phase.issues[0].constructor, "FunctionalDataProperty");
+        assert_eq!(
+            crate::model::hex(&phase.issues[0].provenance_sha256),
+            "721e62a719bbd8248bd2494e9eb90cc60408328ad18fb008d082902082eb6a4d"
+        );
+
+        let allowed = allowed_top_data_property_columns();
+        let allowed_phase =
+            compile_profile_phase(&model(&allowed)?, &[], ProfilePhaseLimits::default())?;
+        assert!(allowed_phase.conforms);
+        assert_eq!(allowed_phase.axioms_checked, 1);
+        assert!(allowed_phase.issues.is_empty());
         Ok(())
     }
 
