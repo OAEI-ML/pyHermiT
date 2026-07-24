@@ -633,13 +633,30 @@ struct ClassExpressionSymbolSeed {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ClassBooleanOperand {
     Atomic(AtomicClassSelection),
-    Generated { key: Vec<u8>, negative: bool },
+    Nominal {
+        key: Vec<u8>,
+        individual_entity_ids: Vec<u32>,
+        negative: bool,
+    },
+    Generated {
+        key: Vec<u8>,
+        negative: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NormalizedAtomicClassTerm {
     selection: AtomicClassSelection,
     key: Vec<u8>,
+    symbols: Vec<ClassExpressionSymbolSeed>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedNominalClassTerm {
+    base_key: Vec<u8>,
+    key: Vec<u8>,
+    individual_entity_ids: Vec<u32>,
+    negative: bool,
     symbols: Vec<ClassExpressionSymbolSeed>,
 }
 
@@ -718,6 +735,7 @@ struct NormalizedObjectCardinalityTerm {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NormalizedClassTerm {
     Atomic(NormalizedAtomicClassTerm),
+    Nominal(NormalizedNominalClassTerm),
     Boolean(NormalizedClassBooleanTerm),
     ObjectSelf(NormalizedObjectSelfTerm),
     ObjectQuantifier(NormalizedObjectQuantifierTerm),
@@ -728,6 +746,7 @@ impl NormalizedClassTerm {
     fn key(&self) -> &[u8] {
         match self {
             Self::Atomic(term) => &term.key,
+            Self::Nominal(term) => &term.key,
             Self::Boolean(term) => &term.key,
             Self::ObjectSelf(term) => &term.key,
             Self::ObjectQuantifier(term) => &term.key,
@@ -1324,6 +1343,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         symbols,
         &class_domain,
         &individual_signature,
+        &definitions,
         scope_maps,
         &mut budget,
     )?;
@@ -3973,7 +3993,10 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
         else {
             return Ok(());
         };
-        if !matches!(term, NormalizedClassTerm::Atomic(_)) {
+        if !matches!(
+            term,
+            NormalizedClassTerm::Atomic(_) | NormalizedClassTerm::Nominal(_)
+        ) {
             let _generated_key = atomize_normalized_class_term(
                 term.clone(),
                 Some(identifier),
@@ -4164,7 +4187,10 @@ fn class_boolean_definition_candidates<B: ByteSource>(
     else {
         return Ok(None);
     };
-    if matches!(term, NormalizedClassTerm::Atomic(_)) {
+    if matches!(
+        term,
+        NormalizedClassTerm::Atomic(_) | NormalizedClassTerm::Nominal(_)
+    ) {
         return Ok(None);
     }
     let mut definitions = Vec::new();
@@ -4242,6 +4268,106 @@ fn normalized_class_term<B: ByteSource>(
                     base_key,
                     key,
                     complemented,
+                },
+            )));
+        }
+        if selection.is_none() && node.tag() == OBJECT_HAS_VALUE_TAG {
+            if node.field_count() != 2 {
+                return Err(EncodedValidationError::invariant(
+                    "object-has-value definition no longer has schema-1 shape",
+                ));
+            }
+            let Some(object_roles) = object_roles else {
+                return Ok(None);
+            };
+            if !reduction_inputs_are_retained(model, symbols, base, depth, budget)? {
+                return Ok(None);
+            }
+            let property = node_field(model, node, 0, "object-has-value definition role")?;
+            let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
+            let individual = node_field(model, node, 1, "object-has-value definition individual")?;
+            if model.node(individual)?.tag() != ENTITY_TAG {
+                return Ok(None);
+            }
+            let individual_entity_id =
+                symbols.entity_symbol_for_node(individual).ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-has-value individual is absent from the reachable entity mapping",
+                    )
+                })?;
+            let individual_entity = symbols
+                .entity_domain
+                .values
+                .get(usize::try_from(individual_entity_id).map_err(|_| {
+                    EncodedValidationError::invariant(
+                        "object-has-value individual entity ID exceeds usize",
+                    )
+                })?)
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-has-value individual entity ID is dangling",
+                    )
+                })?;
+            if !individual_entity
+                .display
+                .starts_with(NAMED_INDIVIDUAL_PREFIX)
+            {
+                return Ok(None);
+            }
+            let base_key = synthetic_boolean_key(
+                OBJECT_ONE_OF_TAG,
+                std::iter::once(individual_entity.key.as_slice()),
+                1,
+                budget,
+            )?;
+            let mut symbols_seed = Vec::new();
+            let nominal_seed = class_expression_symbol_seed(&base_key, OBJECT_ONE_OF_TAG, budget)?;
+            push_class_expression_symbol_seed(&mut symbols_seed, nominal_seed, budget)?;
+            let key = if complemented {
+                let key = synthetic_class_complement_key(&base_key, budget)?;
+                let complement_seed =
+                    class_expression_symbol_seed(&key, OBJECT_COMPLEMENT_OF_TAG, budget)?;
+                push_class_expression_symbol_seed(&mut symbols_seed, complement_seed, budget)?;
+                key
+            } else {
+                budget.claim_owned(base_key.len())?;
+                base_key.clone()
+            };
+            let mut individual_entity_ids = Vec::new();
+            budget.claim_owned(size_of::<u32>())?;
+            individual_entity_ids.try_reserve_exact(1).map_err(|_| {
+                EncodedValidationError::resource(
+                    "object-has-value nominal individual allocation failed",
+                )
+            })?;
+            individual_entity_ids.push(individual_entity_id);
+            budget.claim_owned(
+                size_of::<NormalizedNominalClassTerm>() + size_of::<NormalizedClassTerm>(),
+            )?;
+            let filler = NormalizedClassTerm::Nominal(NormalizedNominalClassTerm {
+                base_key,
+                key,
+                individual_entity_ids,
+                negative: complemented,
+                symbols: symbols_seed,
+            });
+            let kind = if complemented {
+                ObjectQuantifierKind::All
+            } else {
+                ObjectQuantifierKind::Some
+            };
+            let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
+            let key = synthetic_object_quantifier_key(kind, &property_key, filler.key(), budget)?;
+            budget.claim_owned(
+                size_of::<NormalizedObjectQuantifierTerm>() + size_of::<NormalizedClassTerm>(),
+            )?;
+            return Ok(Some(NormalizedClassTerm::ObjectQuantifier(
+                NormalizedObjectQuantifierTerm {
+                    kind,
+                    role_id,
+                    property_key,
+                    key,
+                    filler: Box::new(filler),
                 },
             )));
         }
@@ -4653,29 +4779,52 @@ fn normalized_class_term<B: ByteSource>(
                 return Ok(None);
             }
         }
-        let base_key = match selection.source {
-            AtomicClassSource::Entity(entity_id) => {
-                let entity = symbols
-                    .entity_domain
-                    .values
-                    .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
-                    .ok_or_else(|| {
-                        EncodedValidationError::invariant(
-                            "normalized class literal entity ID is dangling",
-                        )
-                    })?;
-                budget.claim_owned(entity.key.len())?;
-                entity.key.clone()
-            }
-            AtomicClassSource::Nominal(nominal) => {
-                canonical::canonical_node_key(model, nominal, scope_maps, budget)?
-            }
-        };
-        let mut expression_symbols = Vec::new();
-        if matches!(selection.source, AtomicClassSource::Nominal(_)) {
-            let seed = class_expression_symbol_seed(&base_key, OBJECT_ONE_OF_TAG, budget)?;
-            push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
+        if let AtomicClassSource::Nominal(nominal) = selection.source {
+            let base_key = canonical::canonical_node_key(model, nominal, scope_maps, budget)?;
+            let individual_entity_ids = named_nominal_entity_ids(model, symbols, nominal, budget)?;
+            let mut expression_symbols = Vec::new();
+            let nominal_seed = class_expression_symbol_seed(&base_key, OBJECT_ONE_OF_TAG, budget)?;
+            push_class_expression_symbol_seed(&mut expression_symbols, nominal_seed, budget)?;
+            let key = if selection.negative {
+                let key = synthetic_class_complement_key(&base_key, budget)?;
+                let complement_seed =
+                    class_expression_symbol_seed(&key, OBJECT_COMPLEMENT_OF_TAG, budget)?;
+                push_class_expression_symbol_seed(
+                    &mut expression_symbols,
+                    complement_seed,
+                    budget,
+                )?;
+                key
+            } else {
+                budget.claim_owned(base_key.len())?;
+                base_key.clone()
+            };
+            budget.claim_owned(size_of::<NormalizedNominalClassTerm>())?;
+            return Ok(Some(NormalizedClassTerm::Nominal(
+                NormalizedNominalClassTerm {
+                    base_key,
+                    key,
+                    individual_entity_ids,
+                    negative: selection.negative,
+                    symbols: expression_symbols,
+                },
+            )));
         }
+        let AtomicClassSource::Entity(entity_id) = selection.source else {
+            return Err(EncodedValidationError::invariant(
+                "normalized atomic class source changed kind",
+            ));
+        };
+        let entity = symbols
+            .entity_domain
+            .values
+            .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+            .ok_or_else(|| {
+                EncodedValidationError::invariant("normalized class literal entity ID is dangling")
+            })?;
+        budget.claim_owned(entity.key.len())?;
+        let base_key = entity.key.clone();
+        let mut expression_symbols = Vec::new();
         let key = if selection.negative {
             let key = synthetic_class_complement_key(&base_key, budget)?;
             let seed = class_expression_symbol_seed(&key, OBJECT_COMPLEMENT_OF_TAG, budget)?;
@@ -5037,6 +5186,9 @@ fn atomize_normalized_class_term(
         NormalizedClassTerm::Atomic(_) => Err(EncodedValidationError::invariant(
             "atomic class term reached generated-definition atomization",
         )),
+        NormalizedClassTerm::Nominal(_) => Err(EncodedValidationError::invariant(
+            "nominal class term reached generated-definition atomization",
+        )),
         NormalizedClassTerm::Boolean(term) => atomize_normalized_class_boolean(
             term,
             source_expression,
@@ -5096,6 +5248,19 @@ fn atomize_normalized_object_cardinality(
                 push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
             }
             (filler.key, ClassBooleanOperand::Atomic(filler.selection))
+        }
+        NormalizedClassTerm::Nominal(filler) => {
+            for seed in filler.symbols {
+                push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
+            }
+            (
+                filler.key,
+                ClassBooleanOperand::Nominal {
+                    key: filler.base_key,
+                    individual_entity_ids: filler.individual_entity_ids,
+                    negative: filler.negative,
+                },
+            )
         }
         filler => {
             let filler_polarity = match kind {
@@ -5208,6 +5373,19 @@ fn atomize_normalized_object_quantifier(
                 push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
             }
             (filler.key, ClassBooleanOperand::Atomic(filler.selection))
+        }
+        NormalizedClassTerm::Nominal(filler) => {
+            for seed in filler.symbols {
+                push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
+            }
+            (
+                filler.key,
+                ClassBooleanOperand::Nominal {
+                    key: filler.base_key,
+                    individual_entity_ids: filler.individual_entity_ids,
+                    negative: filler.negative,
+                },
+            )
         }
         filler => {
             let generated_key = atomize_normalized_class_term(
@@ -5437,6 +5615,19 @@ fn atomize_normalized_class_boolean(
                     push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
                 }
                 keyed.push((operand.key, ClassBooleanOperand::Atomic(operand.selection)));
+            }
+            NormalizedClassTerm::Nominal(operand) => {
+                for seed in operand.symbols {
+                    push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
+                }
+                keyed.push((
+                    operand.key,
+                    ClassBooleanOperand::Nominal {
+                        key: operand.base_key,
+                        individual_entity_ids: operand.individual_entity_ids,
+                        negative: operand.negative,
+                    },
+                ));
             }
             operand => {
                 let generated_key = atomize_normalized_class_term(
@@ -6786,6 +6977,83 @@ fn is_named_nominal<B: ByteSource>(
     Ok(true)
 }
 
+fn named_nominal_entity_ids<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u32>> {
+    let node = model.node(identifier)?;
+    if node.tag() != OBJECT_ONE_OF_TAG || node.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "selected object nominal no longer has schema-1 shape",
+        ));
+    }
+    let component = required_component(
+        model.field(node.fields().start)?,
+        "selected object nominal individuals",
+    )?;
+    let ComponentValue::Collection(individuals) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(
+            "selected object nominal individuals changed shape",
+        ));
+    };
+    budget.claim_owned(
+        individuals
+            .len()
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("selected object nominal entity IDs overflowed")
+            })?,
+    )?;
+    let mut entity_ids = Vec::new();
+    entity_ids
+        .try_reserve_exact(individuals.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("selected object nominal entity ID allocation failed")
+        })?;
+    for item_index in individuals.items() {
+        budget.claim_work(1)?;
+        let item = required_component(model.item(item_index)?, "selected object nominal member")?;
+        let ComponentValue::Node(individual) = model.resolve(item)? else {
+            return Err(EncodedValidationError::invariant(
+                "selected object nominal member changed shape",
+            ));
+        };
+        if model.node(individual)?.tag() != ENTITY_TAG {
+            return Err(EncodedValidationError::invariant(
+                "selected object nominal contains a non-named individual",
+            ));
+        }
+        let entity_id = symbols.entity_symbol_for_node(individual).ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "selected object nominal member is absent from the reachable entity mapping",
+            )
+        })?;
+        let entity = symbols
+            .entity_domain
+            .values
+            .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "selected object nominal member entity ID is dangling",
+                )
+            })?;
+        if !entity.display.starts_with(NAMED_INDIVIDUAL_PREFIX) {
+            return Err(EncodedValidationError::invariant(
+                "selected object nominal member changed entity kind",
+            ));
+        }
+        entity_ids.push(entity_id);
+    }
+    if entity_ids.is_empty() || !entity_ids.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(EncodedValidationError::invariant(
+            "selected object nominal entity IDs are not canonical",
+        ));
+    }
+    Ok(entity_ids)
+}
+
 fn atomic_class_selection<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
@@ -7660,6 +7928,7 @@ fn nominal_bindings<B: ByteSource>(
     symbols: &SymbolPhase,
     class_domain: &DecodedSymbolDomain,
     individual_signature: &[IndividualSignatureBinding],
+    definitions: &[ClassBooleanDefinition],
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<NominalBinding>> {
@@ -7737,6 +8006,84 @@ fn nominal_bindings<B: ByteSource>(
             })?,
             individual_ids,
         });
+    }
+    for definition in definitions {
+        for operand in &definition.operands {
+            let ClassBooleanOperand::Nominal {
+                key,
+                individual_entity_ids,
+                ..
+            } = operand
+            else {
+                continue;
+            };
+            if individual_entity_ids.is_empty()
+                || !individual_entity_ids
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+            {
+                return Err(EncodedValidationError::invariant(
+                    "normalized object nominal entity IDs are not canonical",
+                ));
+            }
+            budget.claim_work(binary_search_work(class_domain.values.len()))?;
+            let class_index = class_domain
+                .values
+                .binary_search_by(|candidate| candidate.key.cmp(key))
+                .map_err(|_| {
+                    EncodedValidationError::invariant(
+                        "normalized object nominal is absent from the class-expression domain",
+                    )
+                })?;
+            budget.claim_owned(
+                individual_entity_ids
+                    .len()
+                    .checked_mul(size_of::<u32>())
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "normalized object nominal individual IDs overflowed",
+                        )
+                    })?,
+            )?;
+            let mut individual_ids = Vec::new();
+            individual_ids
+                .try_reserve_exact(individual_entity_ids.len())
+                .map_err(|_| {
+                    EncodedValidationError::resource(
+                        "normalized object nominal individual ID allocation failed",
+                    )
+                })?;
+            for entity_id in individual_entity_ids {
+                budget.claim_work(binary_search_work(individual_signature.len()))?;
+                let binding_index = individual_signature
+                    .binary_search_by_key(entity_id, |binding| binding.entity_id)
+                    .map_err(|_| {
+                        EncodedValidationError::invariant(
+                            "normalized object nominal member is absent from the individual signature",
+                        )
+                    })?;
+                individual_ids.push(individual_signature[binding_index].individual_id);
+            }
+            if !individual_ids.windows(2).all(|pair| pair[0] < pair[1]) {
+                return Err(EncodedValidationError::invariant(
+                    "normalized object nominal individual IDs are not canonical",
+                ));
+            }
+            budget.claim_owned(size_of::<NominalBinding>())?;
+            bindings.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource(
+                    "normalized object nominal binding allocation failed",
+                )
+            })?;
+            bindings.push(NominalBinding {
+                class_id: u32::try_from(class_index).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "normalized object nominal class ID exceeds u32",
+                    )
+                })?,
+                individual_ids,
+            });
+        }
     }
     budget.claim_work(sort_work(bindings.len()))?;
     bindings.sort();
@@ -12772,6 +13119,21 @@ fn class_boolean_operand_literal<B: ByteSource>(
             scope_maps,
             budget,
         ),
+        ClassBooleanOperand::Nominal { key, negative, .. } => {
+            budget.claim_work(binary_search_work(class_domain.values.len()))?;
+            let index = class_domain
+                .values
+                .binary_search_by(|candidate| candidate.key.cmp(key))
+                .map_err(|_| {
+                    EncodedValidationError::invariant("normalized object nominal disappeared")
+                })?;
+            Ok((
+                u32::try_from(index).map_err(|_| {
+                    EncodedValidationError::resource("normalized object nominal ID exceeds u32")
+                })?,
+                *negative,
+            ))
+        }
         ClassBooleanOperand::Generated { key, negative } => {
             budget.claim_work(binary_search_work(class_domain.values.len()))?;
             let index = class_domain
