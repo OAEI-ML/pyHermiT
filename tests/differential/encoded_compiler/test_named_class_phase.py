@@ -2897,6 +2897,214 @@ def test_composite_object_maximum_definitions_reuse_global_identity() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_object_exact_definitions_match_scalar_minimum_maximum_expansion() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "SubClassOf(:A ObjectExactCardinality(2 :p :B))",
+            "SubClassOf(ObjectExactCardinality(3 ObjectInverseOf(:q) :C) :A)",
+            "EquivalentClasses(:B ObjectExactCardinality(2 :p :C))",
+            "SubClassOf(:C ObjectComplementOf("
+            "ObjectExactCardinality(2 :q :A)))",
+            "SubClassOf(:A ObjectExactCardinality(1 :q :B))",
+            "SubClassOf(:B ObjectComplementOf("
+            "ObjectExactCardinality(1 :p :C)))",
+            "SubClassOf(:B ObjectExactCardinality(0 :p :C))",
+            "SubClassOf(:C ObjectComplementOf("
+            "ObjectExactCardinality(0 :q :A)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=8,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+    )
+    predicates = cast(list[dict[str, object]], manifest["predicates"])
+    annotated = [
+        predicate
+        for predicate in predicates
+        if predicate["kind"] == PredicateKind.ANNOTATED_EQUALITY.value
+    ]
+    assert {predicate["cardinality"] for predicate in annotated} == {1, 2}
+    at_least = [
+        predicate
+        for predicate in predicates
+        if predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
+    ]
+    assert {predicate["cardinality"] for predicate in at_least} == {1, 2, 3, 4}
+    assert not any(
+        str(value["display"]).startswith("ObjectExactCardinality:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_object_exact_cardinality_overflow_defers_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "SubClassOf(:A ObjectExactCardinality(4294967295 :p :B))",
+            "SubClassOf(:A ObjectComplementOf("
+            "ObjectExactCardinality(4294967295 :p :B)))",
+            "SubClassOf(:A ObjectExactCardinality(4294967296 :p :B))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 3
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            (
+                "ObjectIntersectionOf:",
+                "ObjectUnionOf:",
+                "ObjectMinCardinality:",
+                "ObjectMaxCardinality:",
+                "ObjectExactCardinality:",
+            )
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"]
+        not in {
+            PredicateKind.ANNOTATED_EQUALITY.value,
+            PredicateKind.AT_LEAST_OBJECT.value,
+            PredicateKind.OBJECT_ROLE.value,
+            PredicateKind.ORDERING_GUARD.value,
+            PredicateKind.INEQUALITY.value,
+        }
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_object_exact_definitions_cover_recursive_and_nominal_fillers() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A ObjectExactCardinality(2 ObjectInverseOf(:p) "
+            "ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
+            'SubClassOf(Annotation(:note "same exact") :A '
+            "ObjectExactCardinality(2 ObjectInverseOf(:p) "
+            "ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
+            "SubClassOf(ObjectExactCardinality(1 :p "
+            "ObjectUnionOf(:B :C)) :A)",
+            "ClassAssertion(ObjectExactCardinality(2 ObjectInverseOf(:p) "
+            "ObjectOneOf(:i)) :i)",
+            "DisjointClasses(ObjectComplementOf(ObjectExactCardinality(2 :q "
+            "ObjectComplementOf(:B))) :C)",
+            "ObjectPropertyDomain(:q ObjectExactCardinality(3 :p "
+            "ObjectSomeValuesFrom(:q :B)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=6,
+        include_object_constraints=True,
+        include_generated_object_self_definitions=True,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+    )
+    annotated = [
+        predicate
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        if predicate["kind"] == PredicateKind.ANNOTATED_EQUALITY.value
+    ]
+    assert {predicate["cardinality"] for predicate in annotated} == {2, 3}
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_object_exact_definitions_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+    )
+    exact = "ObjectExactCardinality(2 :p ObjectIntersectionOf(:B :C))"
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"SubClassOf(:A {exact})",
+            "SubClassOf(ObjectComplementOf(ObjectExactCardinality(3 :q "
+            "ObjectUnionOf(:B :C))) :A)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(*declarations, f"ObjectPropertyDomain(:q {exact})"),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=3,
+        include_object_constraints=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+    )
+    annotated = [
+        predicate
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        if predicate["kind"] == PredicateKind.ANNOTATED_EQUALITY.value
+    ]
+    assert len(annotated) == 1
+    generated = [
+        value
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ]
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert generated and all(namespace in str(value["display"]) for value in generated)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_partial_object_self_equivalence_defers_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(

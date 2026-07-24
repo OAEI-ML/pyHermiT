@@ -4313,6 +4313,150 @@ fn normalized_class_term<B: ByteSource>(
                 },
             )));
         }
+        if selection.is_none() && node.tag() == OBJECT_EXACT_CARDINALITY_TAG {
+            if node.field_count() != 3 {
+                return Err(EncodedValidationError::invariant(
+                    "object-exact-cardinality definition no longer has schema-1 shape",
+                ));
+            }
+            let Some(object_roles) = object_roles else {
+                return Ok(None);
+            };
+            if !reduction_inputs_are_retained(model, symbols, base, depth, budget)? {
+                return Ok(None);
+            }
+            let Some((cardinality, cardinality_bytes)) = integer_field_u32_bytes(
+                model,
+                node,
+                0,
+                "object-exact-cardinality definition cardinality",
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            let property = node_field(model, node, 1, "object-exact-cardinality definition role")?;
+            let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
+            let filler = node_field(model, node, 2, "object-exact-cardinality definition filler")?;
+            let filler_depth =
+                child_expression_depth(depth, "object-exact-cardinality filler depth overflowed")?;
+            PhaseBudget::count(
+                filler_depth,
+                budget.limits.max_canonical_depth,
+                "class-expression depth",
+            )?;
+
+            if cardinality == 0 {
+                let normalization = if complemented {
+                    CardinalityNormalization::Quantifier {
+                        kind: ObjectQuantifierKind::Some,
+                        complement_filler: false,
+                    }
+                } else {
+                    CardinalityNormalization::Quantifier {
+                        kind: ObjectQuantifierKind::All,
+                        complement_filler: true,
+                    }
+                };
+                return normalized_object_restriction_term(
+                    model,
+                    symbols,
+                    object_roles,
+                    property,
+                    role_id,
+                    filler,
+                    filler_depth,
+                    normalization,
+                    scope_maps,
+                    budget,
+                );
+            }
+
+            let (intersection, first, second) = if complemented {
+                let Some(upper_cardinality) = cardinality.checked_add(1) else {
+                    return Ok(None);
+                };
+                let lower = if cardinality == 1 {
+                    CardinalityNormalization::Quantifier {
+                        kind: ObjectQuantifierKind::All,
+                        complement_filler: true,
+                    }
+                } else {
+                    let lower_cardinality = cardinality.checked_sub(1).ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "complemented object exact cardinality underflowed",
+                        )
+                    })?;
+                    CardinalityNormalization::Cardinality {
+                        kind: ObjectCardinalityKind::Maximum,
+                        cardinality: lower_cardinality,
+                        cardinality_bytes: canonical_u32_integer_bytes(lower_cardinality, budget)?,
+                    }
+                };
+                let upper = CardinalityNormalization::Cardinality {
+                    kind: ObjectCardinalityKind::Minimum,
+                    cardinality: upper_cardinality,
+                    cardinality_bytes: canonical_u32_integer_bytes(upper_cardinality, budget)?,
+                };
+                (false, lower, upper)
+            } else {
+                if cardinality == u32::MAX {
+                    return Ok(None);
+                }
+                let minimum = if cardinality == 1 {
+                    CardinalityNormalization::Quantifier {
+                        kind: ObjectQuantifierKind::Some,
+                        complement_filler: false,
+                    }
+                } else {
+                    CardinalityNormalization::Cardinality {
+                        kind: ObjectCardinalityKind::Minimum,
+                        cardinality,
+                        cardinality_bytes: canonical_u32_integer_bytes(cardinality, budget)?,
+                    }
+                };
+                let maximum = CardinalityNormalization::Cardinality {
+                    kind: ObjectCardinalityKind::Maximum,
+                    cardinality,
+                    cardinality_bytes,
+                };
+                (true, minimum, maximum)
+            };
+            let Some(first) = normalized_object_restriction_term(
+                model,
+                symbols,
+                object_roles,
+                property,
+                role_id,
+                filler,
+                filler_depth,
+                first,
+                scope_maps,
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(second) = normalized_object_restriction_term(
+                model,
+                symbols,
+                object_roles,
+                property,
+                role_id,
+                filler,
+                filler_depth,
+                second,
+                scope_maps,
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            let mut terms = Vec::new();
+            push_normalized_class_term(&mut terms, first, budget)?;
+            push_normalized_class_term(&mut terms, second, budget)?;
+            return normalized_class_boolean_term(symbols, terms, intersection, budget);
+        }
         if selection.is_none()
             && matches!(
                 node.tag(),
@@ -4666,6 +4810,90 @@ fn normalized_class_boolean_term(
             operands,
         },
     )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalized_object_restriction_term<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    object_roles: &ObjectRolePhase,
+    property: NodeId,
+    role_id: u32,
+    filler: NodeId,
+    filler_depth: usize,
+    normalization: CardinalityNormalization,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<NormalizedClassTerm>> {
+    let complement_filler = matches!(
+        &normalization,
+        CardinalityNormalization::Quantifier {
+            complement_filler: true,
+            ..
+        }
+    );
+    let Some(filler) = normalized_class_term(
+        model,
+        symbols,
+        Some(object_roles),
+        filler,
+        complement_filler,
+        filler_depth,
+        scope_maps,
+        budget,
+    )?
+    else {
+        return Ok(None);
+    };
+    let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
+    match normalization {
+        CardinalityNormalization::Quantifier { kind, .. } => {
+            let key = synthetic_object_quantifier_key(kind, &property_key, filler.key(), budget)?;
+            budget.claim_owned(
+                size_of::<NormalizedObjectQuantifierTerm>() + size_of::<NormalizedClassTerm>(),
+            )?;
+            Ok(Some(NormalizedClassTerm::ObjectQuantifier(
+                NormalizedObjectQuantifierTerm {
+                    kind,
+                    role_id,
+                    property_key,
+                    key,
+                    filler: Box::new(filler),
+                },
+            )))
+        }
+        CardinalityNormalization::Cardinality {
+            kind,
+            cardinality,
+            cardinality_bytes,
+        } => {
+            let tag = match kind {
+                ObjectCardinalityKind::Minimum => OBJECT_MIN_CARDINALITY_TAG,
+                ObjectCardinalityKind::Maximum => OBJECT_MAX_CARDINALITY_TAG,
+            };
+            let key = synthetic_object_cardinality_key(
+                tag,
+                &cardinality_bytes,
+                &property_key,
+                filler.key(),
+                budget,
+            )?;
+            budget.claim_owned(
+                size_of::<NormalizedObjectCardinalityTerm>() + size_of::<NormalizedClassTerm>(),
+            )?;
+            Ok(Some(NormalizedClassTerm::ObjectCardinality(
+                NormalizedObjectCardinalityTerm {
+                    kind,
+                    cardinality,
+                    cardinality_bytes,
+                    role_id,
+                    property_key,
+                    key,
+                    filler: Box::new(filler),
+                },
+            )))
+        }
+    }
 }
 
 fn push_normalized_class_term(
