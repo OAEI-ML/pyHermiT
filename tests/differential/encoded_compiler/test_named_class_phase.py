@@ -257,6 +257,7 @@ def _expected_manifest(
     include_object_characteristics: bool = False,
     include_generated_object_self_definitions: bool = False,
     include_generated_object_quantifier_definitions: bool = False,
+    include_generated_object_cardinality_definitions: bool = False,
     include_at_least_object_predicates: bool = False,
     include_data_domains: bool = False,
     include_data_ranges: bool = False,
@@ -322,6 +323,7 @@ def _expected_manifest(
     characteristic_provenance_ids: set[int] = set()
     self_definition_provenance_ids: set[int] = set()
     quantifier_definition_provenance_ids: set[int] = set()
+    cardinality_definition_provenance_ids: set[int] = set()
     data_domain_provenance_ids: set[int] = set()
     data_range_provenance_ids: set[int] = set()
     generated_data_definition_provenance_ids: set[int] = set()
@@ -337,6 +339,7 @@ def _expected_manifest(
         or include_object_characteristics
         or include_generated_object_self_definitions
         or include_generated_object_quantifier_definitions
+        or include_generated_object_cardinality_definitions
         or include_data_domains
         or include_data_ranges
         or include_generated_data_definitions
@@ -399,6 +402,23 @@ def _expected_manifest(
                 or isinstance(
                     record.statement.super_class,
                     (owl.ObjectSomeValuesFrom, owl.ObjectAllValuesFrom),
+                )
+            )
+        }
+    if include_generated_object_cardinality_definitions:
+        cardinality_definition_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if record.generated
+            and isinstance(record.statement, owl.SubClassOf)
+            and (
+                isinstance(
+                    record.statement.sub_class,
+                    (owl.ObjectMinCardinality, owl.ObjectMaxCardinality),
+                )
+                or isinstance(
+                    record.statement.super_class,
+                    (owl.ObjectMinCardinality, owl.ObjectMaxCardinality),
                 )
             )
         }
@@ -482,6 +502,11 @@ def _expected_manifest(
         clause.clause_id
         for clause in program.clauses
         if quantifier_definition_provenance_ids.intersection(clause.provenance_ids)
+    }
+    cardinality_definition_clauses = {
+        clause.clause_id
+        for clause in program.clauses
+        if cardinality_definition_provenance_ids.intersection(clause.provenance_ids)
     }
     data_domain_clauses = {
         clause.clause_id
@@ -731,6 +756,7 @@ def _expected_manifest(
             and clause.clause_id not in characteristic_clauses
             and clause.clause_id not in self_definition_clauses
             and clause.clause_id not in quantifier_definition_clauses
+            and clause.clause_id not in cardinality_definition_clauses
             and clause.clause_id not in data_domain_clauses
             and clause.clause_id not in data_range_clauses
             and clause.clause_id not in generated_data_definition_clauses
@@ -2468,6 +2494,181 @@ def test_composite_recursive_object_self_definitions_reuse_global_identity() -> 
     assert len(generated) == 5
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(namespace in str(value["display"]) for value in generated)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_object_minimum_definitions_match_scalar_at_least_predicates() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "SubClassOf(:A ObjectMinCardinality(2 :p :B))",
+            "SubClassOf(ObjectMinCardinality(3 ObjectInverseOf(:q) :C) :A)",
+            "EquivalentClasses(:B ObjectMinCardinality(4 :p :C))",
+            "SubClassOf(:C ObjectMinCardinality(4294967295 :q :A))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+    )
+    at_least = [
+        predicate
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        if predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
+    ]
+    assert {predicate["cardinality"] for predicate in at_least} == {
+        2,
+        3,
+        4,
+        4294967295,
+    }
+    assert all(predicate["filler_predicate_id"] is not None for predicate in at_least)
+    assert any(
+        predicate["kind"] == PredicateKind.INEQUALITY.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_object_minimum_cardinality_above_u32_defers_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "SubClassOf(:A ObjectMinCardinality(4294967296 :p :B))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 1
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith("ObjectMinCardinality:")
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+    )
+    assert all(
+        predicate["kind"]
+        not in {
+            PredicateKind.AT_LEAST_OBJECT.value,
+            PredicateKind.OBJECT_ROLE.value,
+            PredicateKind.INEQUALITY.value,
+        }
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_object_minimum_definitions_cover_recursive_and_nominal_fillers() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A ObjectMinCardinality(2 :p "
+            "ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
+            'SubClassOf(Annotation(:note "same minimum") :A '
+            "ObjectMinCardinality(2 :p "
+            "ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
+            "SubClassOf(ObjectMinCardinality(3 :p ObjectUnionOf(:B :C)) :A)",
+            "ClassAssertion(ObjectMinCardinality(4 ObjectInverseOf(:p) "
+            "ObjectOneOf(:i)) :i)",
+            "DisjointClasses(ObjectMinCardinality(2 :q "
+            "ObjectComplementOf(:B)) :C)",
+            "ObjectPropertyDomain(:q ObjectMinCardinality(3 :p "
+            "ObjectSomeValuesFrom(:q :B)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=6,
+        include_object_constraints=True,
+        include_generated_object_self_definitions=True,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+    )
+    at_least = [
+        predicate
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        if predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
+    ]
+    assert {predicate["cardinality"] for predicate in at_least} == {1, 2, 3, 4}
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_object_minimum_definitions_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+    )
+    minimum = "ObjectMinCardinality(2 :p ObjectIntersectionOf(:B :C))"
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"SubClassOf(:A {minimum})",
+            "SubClassOf(ObjectMinCardinality(3 :q ObjectUnionOf(:B :C)) :A)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(*declarations, f"ObjectPropertyDomain(:q {minimum})"),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=3,
+        include_object_constraints=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+    )
+    at_least = [
+        predicate
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        if predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
+    ]
+    assert len(at_least) == 2
+    generated = [
+        value
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+        if value["generated"]
+    ]
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert generated and all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 

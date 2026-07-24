@@ -616,6 +616,7 @@ struct ClassBooleanDefinition {
     operands: Vec<ClassBooleanOperand>,
     object_self_role_id: Option<u32>,
     object_quantifier: Option<ObjectQuantifierDefinition>,
+    object_cardinality: Option<ObjectCardinalityDefinition>,
     complement: bool,
     polarity: DefinitionPolarity,
     generated_key: Vec<u8>,
@@ -678,12 +679,29 @@ struct NormalizedObjectQuantifierTerm {
     filler: Box<NormalizedClassTerm>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObjectCardinalityDefinition {
+    cardinality: u32,
+    role_id: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedObjectCardinalityTerm {
+    cardinality: u32,
+    cardinality_bytes: Vec<u8>,
+    role_id: u32,
+    property_key: Vec<u8>,
+    key: Vec<u8>,
+    filler: Box<NormalizedClassTerm>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NormalizedClassTerm {
     Atomic(NormalizedAtomicClassTerm),
     Boolean(NormalizedClassBooleanTerm),
     ObjectSelf(NormalizedObjectSelfTerm),
     ObjectQuantifier(NormalizedObjectQuantifierTerm),
+    ObjectCardinality(NormalizedObjectCardinalityTerm),
 }
 
 impl NormalizedClassTerm {
@@ -693,6 +711,7 @@ impl NormalizedClassTerm {
             Self::Boolean(term) => &term.key,
             Self::ObjectSelf(term) => &term.key,
             Self::ObjectQuantifier(term) => &term.key,
+            Self::ObjectCardinality(term) => &term.key,
         }
     }
 }
@@ -799,6 +818,8 @@ enum ObjectConstraintKind {
     ExistentialConsequent,
     UniversalAntecedent,
     UniversalConsequent,
+    MinimumAntecedent,
+    MinimumConsequent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -807,6 +828,7 @@ struct RawObjectConstraint {
     role_id: u32,
     class: ClassLiteral,
     filler: Option<ClassLiteral>,
+    cardinality: Option<u32>,
     provenance: [u8; 32],
     generated: bool,
 }
@@ -817,6 +839,7 @@ struct NormalizedObjectConstraint {
     role_id: u32,
     class: ClassLiteral,
     filler: Option<ClassLiteral>,
+    cardinality: Option<u32>,
     provenance: Vec<[u8; 32]>,
     generated: bool,
 }
@@ -4266,6 +4289,76 @@ fn normalized_class_term<B: ByteSource>(
                 },
             )));
         }
+        if selection.is_none() && node.tag() == OBJECT_MIN_CARDINALITY_TAG && !complemented {
+            if node.field_count() != 3 {
+                return Err(EncodedValidationError::invariant(
+                    "object-minimum definition no longer has schema-1 shape",
+                ));
+            }
+            let Some(object_roles) = object_roles else {
+                return Ok(None);
+            };
+            if !reduction_inputs_are_retained(model, symbols, base, depth, budget)? {
+                return Ok(None);
+            }
+            let Some((cardinality, cardinality_bytes)) = integer_field_u32_bytes(
+                model,
+                node,
+                0,
+                "object-minimum definition cardinality",
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            if cardinality <= 1 {
+                return Ok(None);
+            }
+            let property = node_field(model, node, 1, "object-minimum definition role")?;
+            let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
+            let filler = node_field(model, node, 2, "object-minimum definition filler")?;
+            let filler_depth =
+                child_expression_depth(depth, "object-minimum filler depth overflowed")?;
+            PhaseBudget::count(
+                filler_depth,
+                budget.limits.max_canonical_depth,
+                "class-expression depth",
+            )?;
+            let Some(filler) = normalized_class_term(
+                model,
+                symbols,
+                Some(object_roles),
+                filler,
+                false,
+                filler_depth,
+                scope_maps,
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
+            let key = synthetic_object_cardinality_key(
+                OBJECT_MIN_CARDINALITY_TAG,
+                &cardinality_bytes,
+                &property_key,
+                filler.key(),
+                budget,
+            )?;
+            budget.claim_owned(
+                size_of::<NormalizedObjectCardinalityTerm>() + size_of::<NormalizedClassTerm>(),
+            )?;
+            return Ok(Some(NormalizedClassTerm::ObjectCardinality(
+                NormalizedObjectCardinalityTerm {
+                    cardinality,
+                    cardinality_bytes,
+                    role_id,
+                    property_key,
+                    key,
+                    filler: Box::new(filler),
+                },
+            )));
+        }
         let Some(mut selection) = selection else {
             return Ok(None);
         };
@@ -4497,6 +4590,34 @@ fn synthetic_object_quantifier_key(
     Ok(key)
 }
 
+fn synthetic_object_cardinality_key(
+    tag: u16,
+    cardinality_bytes: &[u8],
+    property_key: &[u8],
+    filler_key: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    if !matches!(
+        tag,
+        OBJECT_MIN_CARDINALITY_TAG | OBJECT_MAX_CARDINALITY_TAG | OBJECT_EXACT_CARDINALITY_TAG
+    ) {
+        return Err(EncodedValidationError::invariant(
+            "synthetic object cardinality has an unsupported constructor",
+        ));
+    }
+    let mut key = Vec::new();
+    push_generated_varint(&mut key, u64::from(tag), budget)?;
+    push_generated_byte(&mut key, 4, budget)?;
+    for byte in cardinality_bytes {
+        push_generated_byte(&mut key, *byte, budget)?;
+    }
+    push_generated_byte(&mut key, 1, budget)?;
+    push_generated_frame(&mut key, property_key, budget)?;
+    push_generated_byte(&mut key, 1, budget)?;
+    push_generated_frame(&mut key, filler_key, budget)?;
+    Ok(key)
+}
+
 fn class_expression_symbol_seed(
     key: &[u8],
     tag: u16,
@@ -4583,7 +4704,113 @@ fn atomize_normalized_class_term(
             definitions,
             budget,
         ),
+        NormalizedClassTerm::ObjectCardinality(term) => atomize_normalized_object_cardinality(
+            term,
+            source_expression,
+            polarity,
+            namespace,
+            definitions,
+            budget,
+        ),
     }
+}
+
+fn atomize_normalized_object_cardinality(
+    term: NormalizedObjectCardinalityTerm,
+    source_expression: Option<NodeId>,
+    polarity: DefinitionPolarity,
+    namespace: [u8; 32],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let NormalizedObjectCardinalityTerm {
+        cardinality,
+        cardinality_bytes,
+        role_id,
+        property_key,
+        key,
+        filler,
+    } = term;
+    let mut expression_symbols = Vec::new();
+    let (filler_key, filler_operand) = match *filler {
+        NormalizedClassTerm::Atomic(filler) => {
+            for seed in filler.symbols {
+                push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
+            }
+            (filler.key, ClassBooleanOperand::Atomic(filler.selection))
+        }
+        filler => {
+            let generated_key = atomize_normalized_class_term(
+                filler,
+                None,
+                polarity,
+                namespace,
+                definitions,
+                budget,
+            )?;
+            budget.claim_owned(generated_key.len())?;
+            (
+                generated_key.clone(),
+                ClassBooleanOperand::Generated {
+                    key: generated_key,
+                    negative: false,
+                },
+            )
+        }
+    };
+    let source_seed = class_expression_symbol_seed(&key, OBJECT_MIN_CARDINALITY_TAG, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, source_seed, budget)?;
+    let rewritten_key = synthetic_object_cardinality_key(
+        OBJECT_MIN_CARDINALITY_TAG,
+        &cardinality_bytes,
+        &property_key,
+        &filler_key,
+        budget,
+    )?;
+    let rewritten_seed =
+        class_expression_symbol_seed(&rewritten_key, OBJECT_MIN_CARDINALITY_TAG, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, rewritten_seed, budget)?;
+    budget.claim_work(sort_work(expression_symbols.len()))?;
+    expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
+    expression_symbols.dedup_by(|left, right| left.key == right.key);
+    let (generated_key, generated_display) =
+        generated_class_symbol(namespace, &key, polarity, budget)?;
+    budget.claim_owned(generated_key.len())?;
+    let returned_key = generated_key.clone();
+    let mut expressions = Vec::new();
+    if let Some(expression) = source_expression {
+        budget.claim_owned(size_of::<NodeId>())?;
+        expressions.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "object-minimum definition expression allocation failed",
+            )
+        })?;
+        expressions.push(expression);
+    }
+    budget.claim_owned(size_of::<ClassBooleanDefinition>() + size_of::<ClassBooleanOperand>())?;
+    definitions.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("object-minimum definition allocation failed")
+    })?;
+    definitions.push(ClassBooleanDefinition {
+        expressions,
+        roots: Vec::new(),
+        expression_key: key,
+        expression_symbols,
+        intersection: false,
+        operands: vec![filler_operand],
+        object_self_role_id: None,
+        object_quantifier: None,
+        object_cardinality: Some(ObjectCardinalityDefinition {
+            cardinality,
+            role_id,
+        }),
+        complement: false,
+        polarity,
+        generated_key,
+        generated_display,
+        provenance: Vec::new(),
+    });
+    Ok(returned_key)
 }
 
 fn atomize_normalized_object_quantifier(
@@ -4667,6 +4894,7 @@ fn atomize_normalized_object_quantifier(
         operands: vec![filler_operand],
         object_self_role_id: None,
         object_quantifier: Some(ObjectQuantifierDefinition { kind, role_id }),
+        object_cardinality: None,
         complement: false,
         polarity,
         generated_key,
@@ -4751,6 +4979,7 @@ fn atomize_normalized_object_self(
             }],
             object_self_role_id: None,
             object_quantifier: None,
+            object_cardinality: None,
             complement: true,
             polarity,
             generated_key,
@@ -4792,6 +5021,7 @@ fn atomize_normalized_object_self(
         operands: Vec::new(),
         object_self_role_id: Some(role_id),
         object_quantifier: None,
+        object_cardinality: None,
         complement: false,
         polarity,
         generated_key,
@@ -4920,6 +5150,7 @@ fn atomize_normalized_class_boolean(
         operands,
         object_self_role_id: None,
         object_quantifier: None,
+        object_cardinality: None,
         complement: false,
         polarity,
         generated_key,
@@ -6015,6 +6246,9 @@ fn class_expression_prefix(tag: u16) -> EncodedResult<&'static str> {
         OBJECT_SOME_VALUES_FROM_TAG => Ok("ObjectSomeValuesFrom:"),
         OBJECT_ALL_VALUES_FROM_TAG => Ok("ObjectAllValuesFrom:"),
         OBJECT_HAS_SELF_TAG => Ok("ObjectHasSelf:"),
+        OBJECT_MIN_CARDINALITY_TAG => Ok("ObjectMinCardinality:"),
+        OBJECT_MAX_CARDINALITY_TAG => Ok("ObjectMaxCardinality:"),
+        OBJECT_EXACT_CARDINALITY_TAG => Ok("ObjectExactCardinality:"),
         _ => Err(EncodedValidationError::invariant(
             "selected class expression has an unsupported constructor",
         )),
@@ -6865,6 +7099,71 @@ fn integer_field_is_zero<B: ByteSource>(
         )));
     }
     Ok(value.len() == 1 && value.byte(0) == Some(0))
+}
+
+fn integer_field_u32_bytes<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    node: NodeRef,
+    offset: usize,
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<(u32, Vec<u8>)>> {
+    let field_index = node
+        .fields()
+        .start
+        .checked_add(offset)
+        .ok_or_else(|| EncodedValidationError::invariant(format!("{name} index overflowed")))?;
+    let component = required_component(model.field(field_index)?, name)?;
+    let ComponentValue::Scalar(value) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(format!(
+            "{name} is not an integer scalar"
+        )));
+    };
+    if value.kind() != ComponentKind::Integer {
+        return Err(EncodedValidationError::invariant(format!(
+            "{name} changed component kind"
+        )));
+    }
+    budget.claim_work(value.len())?;
+    if value.is_empty() {
+        return Err(EncodedValidationError::invariant(
+            "object cardinality scalar is empty",
+        ));
+    }
+    if value.len() > size_of::<u32>() {
+        return Ok(None);
+    }
+    let mut cardinality = 0_u32;
+    for index in 0..value.len() {
+        let byte = value.byte(index).ok_or_else(|| {
+            EncodedValidationError::invariant("object cardinality scalar became truncated")
+        })?;
+        let shift = u32::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_mul(8))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("object cardinality shift overflowed")
+            })?;
+        cardinality |= u32::from(byte) << shift;
+    }
+    let mut remaining = cardinality;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(5).map_err(|_| {
+        EncodedValidationError::resource("object cardinality scalar allocation failed")
+    })?;
+    loop {
+        budget.claim_work(1)?;
+        let chunk = u8::try_from(remaining & 0x7f).map_err(|_| {
+            EncodedValidationError::invariant("object cardinality chunk exceeds u8")
+        })?;
+        remaining >>= 7;
+        bytes.push(chunk | if remaining == 0 { 0 } else { 0x80 });
+        if remaining == 0 {
+            break;
+        }
+    }
+    budget.claim_owned(bytes.len())?;
+    Ok(Some((cardinality, bytes)))
 }
 
 fn atomic_class_selection_has_display(
@@ -10386,6 +10685,7 @@ fn named_object_constraint<B: ByteSource>(
         role_id,
         class: ClassLiteral { class_id, negative },
         filler: None,
+        cardinality: None,
         provenance,
         generated: false,
     }))
@@ -11806,6 +12106,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             if definition.complement
                 || !definition.operands.is_empty()
                 || definition.object_quantifier.is_some()
+                || definition.object_cardinality.is_some()
                 || definition.provenance.is_empty()
             {
                 return Err(EncodedValidationError::invariant(
@@ -11827,6 +12128,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                     role_id,
                     class: generated,
                     filler: None,
+                    cardinality: None,
                     provenance: *provenance,
                     generated: true,
                 });
@@ -11836,6 +12138,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
         if let Some(quantifier) = definition.object_quantifier {
             if definition.complement
                 || definition.object_self_role_id.is_some()
+                || definition.object_cardinality.is_some()
                 || definition.operands.len() != 1
                 || definition.provenance.is_empty()
             {
@@ -11881,6 +12184,51 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                         class_id: filler_class_id,
                         negative: filler_negative,
                     }),
+                    cardinality: None,
+                    provenance: *provenance,
+                    generated: true,
+                });
+            }
+            continue;
+        }
+        if let Some(cardinality) = definition.object_cardinality {
+            if definition.complement
+                || definition.object_self_role_id.is_some()
+                || definition.object_quantifier.is_some()
+                || definition.operands.len() != 1
+                || definition.provenance.is_empty()
+            {
+                return Err(EncodedValidationError::invariant(
+                    "generated object-minimum definition changed before emission",
+                ));
+            }
+            let (filler_class_id, filler_negative) = class_boolean_operand_literal(
+                model,
+                class_domain,
+                signature,
+                &definition.operands[0],
+                scope_maps,
+                budget,
+            )?;
+            for provenance in &definition.provenance {
+                budget.claim_owned(size_of::<RawObjectConstraint>())?;
+                object_constraints.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "generated object-minimum clause allocation failed",
+                    )
+                })?;
+                object_constraints.push(RawObjectConstraint {
+                    kind: match definition.polarity {
+                        DefinitionPolarity::Positive => ObjectConstraintKind::MinimumConsequent,
+                        DefinitionPolarity::Negative => ObjectConstraintKind::MinimumAntecedent,
+                    },
+                    role_id: cardinality.role_id,
+                    class: generated,
+                    filler: Some(ClassLiteral {
+                        class_id: filler_class_id,
+                        negative: filler_negative,
+                    }),
+                    cardinality: Some(cardinality.cardinality),
                     provenance: *provenance,
                     generated: true,
                 });
@@ -11953,6 +12301,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
         if operands.len() < 2
             || definition.object_self_role_id.is_some()
             || definition.object_quantifier.is_some()
+            || definition.object_cardinality.is_some()
             || definition.provenance.is_empty()
         {
             return Err(EncodedValidationError::invariant(
@@ -12559,6 +12908,7 @@ fn normalize_object_constraints(
                 && previous.role_id == constraint.role_id
                 && previous.class == constraint.class
                 && previous.filler == constraint.filler
+                && previous.cardinality == constraint.cardinality
                 && previous.generated == constraint.generated
             {
                 if previous.provenance.last() != Some(&constraint.provenance) {
@@ -12591,6 +12941,7 @@ fn normalize_object_constraints(
             role_id: constraint.role_id,
             class: constraint.class,
             filler: constraint.filler,
+            cardinality: constraint.cardinality,
             provenance,
             generated: constraint.generated,
         });
@@ -13329,6 +13680,7 @@ enum PredicateOwner {
     ObjectRole(u32),
     NegatedObjectRole(u32),
     AtLeastObject {
+        cardinality: u32,
         role_id: u32,
         filler: ClassLiteral,
     },
@@ -13355,7 +13707,7 @@ struct PendingPredicate {
 
 type PredicateIndex = Vec<(u32, u32)>;
 type ObjectPredicateIndex = Vec<(u32, u32)>;
-type AtLeastObjectPredicateIndex = Vec<((u32, ClassLiteral), u32)>;
+type AtLeastObjectPredicateIndex = Vec<((u32, u32, ClassLiteral), u32)>;
 type GuardPredicateIndex = Vec<([u8; 32], u32, u32)>;
 
 fn nominal_binding(bindings: &[NominalBinding], class_id: u32) -> Option<&NominalBinding> {
@@ -13641,7 +13993,15 @@ fn freeze_predicates(
             owner: PredicateOwner::Equality(TermSort::Data),
         });
     }
-    if !inequalities.is_empty() || has_negative_nominals {
+    if !inequalities.is_empty()
+        || has_negative_nominals
+        || object_constraints.iter().any(|constraint| {
+            matches!(
+                constraint.kind,
+                ObjectConstraintKind::MinimumAntecedent | ObjectConstraintKind::MinimumConsequent
+            ) && constraint.cardinality.is_some_and(|value| value > 1)
+        })
+    {
         let key = inequality_predicate_key(TermSort::Object);
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
@@ -13757,35 +14117,71 @@ fn freeze_predicates(
             }),
         });
     }
-    let mut at_least_objects = Vec::<(u32, ClassLiteral)>::new();
+    let mut at_least_objects = Vec::<(u32, u32, ClassLiteral)>::new();
     for constraint in object_constraints.iter().filter(|constraint| {
         matches!(
             constraint.kind,
-            ObjectConstraintKind::ExistentialConsequent | ObjectConstraintKind::UniversalAntecedent
+            ObjectConstraintKind::ExistentialConsequent
+                | ObjectConstraintKind::UniversalAntecedent
+                | ObjectConstraintKind::MinimumAntecedent
+                | ObjectConstraintKind::MinimumConsequent
         )
     }) {
         let filler = constraint.filler.ok_or_else(|| {
             EncodedValidationError::invariant("object at-least constraint lost its filler literal")
         })?;
-        budget.claim_owned(size_of::<(u32, ClassLiteral)>())?;
+        let cardinality = match constraint.kind {
+            ObjectConstraintKind::ExistentialConsequent
+            | ObjectConstraintKind::UniversalAntecedent => {
+                if constraint.cardinality.is_some() {
+                    return Err(EncodedValidationError::invariant(
+                        "object quantifier unexpectedly carries cardinality metadata",
+                    ));
+                }
+                1
+            }
+            ObjectConstraintKind::MinimumAntecedent | ObjectConstraintKind::MinimumConsequent => {
+                let cardinality = constraint.cardinality.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-minimum constraint lost its cardinality",
+                    )
+                })?;
+                if cardinality <= 1 {
+                    return Err(EncodedValidationError::invariant(
+                        "object-minimum constraint did not retain a nontrivial cardinality",
+                    ));
+                }
+                cardinality
+            }
+            _ => {
+                return Err(EncodedValidationError::invariant(
+                    "non-cardinality object constraint reached at-least collection",
+                ));
+            }
+        };
+        budget.claim_owned(size_of::<(u32, u32, ClassLiteral)>())?;
         at_least_objects.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("object at-least predicate allocation failed")
         })?;
-        at_least_objects.push((constraint.role_id, filler));
+        at_least_objects.push((cardinality, constraint.role_id, filler));
     }
     budget.claim_work(sort_work(at_least_objects.len()))?;
     at_least_objects.sort_unstable();
     at_least_objects.dedup();
-    for (role_id, filler) in at_least_objects {
+    for (cardinality, role_id, filler) in at_least_objects {
         let filler_key = class_literal_predicate_key(nominal_bindings, filler);
-        let key = at_least_object_predicate_key(role_id, &filler_key, budget)?;
+        let key = at_least_object_predicate_key(cardinality, role_id, &filler_key, budget)?;
         budget.claim_owned(size_of::<PendingPredicate>() + key.len())?;
         ordered.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("object at-least predicate allocation failed")
         })?;
         ordered.push(PendingPredicate {
             key,
-            owner: PredicateOwner::AtLeastObject { role_id, filler },
+            owner: PredicateOwner::AtLeastObject {
+                cardinality,
+                role_id,
+                filler,
+            },
         });
     }
     let mut object_role_ids = Vec::new();
@@ -14179,7 +14575,7 @@ fn freeze_predicates(
     budget.claim_owned(
         ordered
             .len()
-            .checked_mul(size_of::<((u32, ClassLiteral), u32)>())
+            .checked_mul(size_of::<((u32, u32, ClassLiteral), u32)>())
             .ok_or_else(|| {
                 EncodedValidationError::resource(
                     "object at-least predicate index allocation overflowed",
@@ -14308,7 +14704,11 @@ fn freeze_predicates(
                 });
                 predicate_by_negative_object_role.push((role_id, predicate_id));
             }
-            PredicateOwner::AtLeastObject { role_id, filler } => {
+            PredicateOwner::AtLeastObject {
+                cardinality,
+                role_id,
+                filler,
+            } => {
                 let filler_predicate_id = pending_class_predicates
                     .binary_search_by_key(&filler, |(literal, _)| *literal)
                     .ok()
@@ -14324,12 +14724,12 @@ fn freeze_predicates(
                     argument_sorts: vec![TermSort::Object],
                     symbol_id: None,
                     role_id: Some(role_id),
-                    cardinality: Some(1),
+                    cardinality: Some(cardinality),
                     filler_predicate_id: Some(filler_predicate_id),
                     annotation: Vec::new(),
                     internal_key: None,
                 });
-                at_least_object_predicates.push(((role_id, filler), predicate_id));
+                at_least_object_predicates.push(((cardinality, role_id, filler), predicate_id));
             }
             PredicateOwner::DataRole(role_id) => {
                 budget.claim_owned(size_of::<TermSort>())?;
@@ -14956,6 +15356,7 @@ fn freeze_clauses(
                 })?;
                 let at_least = at_least_object_predicate_id(
                     at_least_object_predicates,
+                    1,
                     constraint.role_id,
                     filler_literal,
                 )?;
@@ -14976,6 +15377,7 @@ fn freeze_clauses(
                 })?;
                 let at_least = at_least_object_predicate_id(
                     at_least_object_predicates,
+                    1,
                     constraint.role_id,
                     filler_literal,
                 )?;
@@ -14984,6 +15386,41 @@ fn freeze_clauses(
                     &mut ordered,
                     &[thing_predicate],
                     &[at_least, class],
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+            ObjectConstraintKind::MinimumAntecedent | ObjectConstraintKind::MinimumConsequent => {
+                let filler_literal = constraint.filler.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-minimum constraint lost its filler literal",
+                    )
+                })?;
+                let cardinality = constraint.cardinality.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "object-minimum constraint lost its cardinality",
+                    )
+                })?;
+                let at_least = at_least_object_predicate_id(
+                    at_least_object_predicates,
+                    cardinality,
+                    constraint.role_id,
+                    filler_literal,
+                )?;
+                let (body, head) = match constraint.kind {
+                    ObjectConstraintKind::MinimumAntecedent => ([at_least], [class]),
+                    ObjectConstraintKind::MinimumConsequent => ([class], [at_least]),
+                    _ => {
+                        return Err(EncodedValidationError::invariant(
+                            "non-minimum constraint reached object-minimum clausification",
+                        ));
+                    }
+                };
+                push_clause(
+                    &mut ordered,
+                    &body,
+                    &head,
                     provenance,
                     scalar_predicate_ids,
                     budget,
@@ -15270,17 +15707,15 @@ fn freeze_positive_facts(
             ));
         }
     };
-    let inequality_predicate = match (
-        inequalities.is_empty() && nominal_usage != NominalUsage::Negative,
-        inequality_predicate,
-    ) {
-        (true, None) => None,
-        (false, Some(identifier)) => Some(identifier),
-        _ => {
-            return Err(EncodedValidationError::invariant(
+    let inequality_predicate = if inequalities.is_empty() && nominal_usage != NominalUsage::Negative
+    {
+        None
+    } else {
+        Some(inequality_predicate.ok_or_else(|| {
+            EncodedValidationError::invariant(
                 "inequality predicate presence disagrees with inequality facts",
-            ));
-        }
+            )
+        })?)
     };
     let positive_class_facts = facts.iter().filter(|fact| !fact.negative).count();
     let expected = individual_domain
@@ -17276,11 +17711,12 @@ fn object_predicate_id(index: &[(u32, u32)], role_id: u32) -> EncodedResult<u32>
 
 fn at_least_object_predicate_id(
     index: &AtLeastObjectPredicateIndex,
+    cardinality: u32,
     role_id: u32,
     filler: ClassLiteral,
 ) -> EncodedResult<u32> {
     index
-        .binary_search_by_key(&(role_id, filler), |(candidate, _)| *candidate)
+        .binary_search_by_key(&(cardinality, role_id, filler), |(candidate, _)| *candidate)
         .ok()
         .map(|position| index[position].1)
         .ok_or_else(|| {
@@ -17620,7 +18056,7 @@ fn named_predicate_key(
     if predicate.kind == PredicateKind::AtLeastObject
         && unary_object
         && predicate.symbol_id.is_none()
-        && predicate.cardinality == Some(1)
+        && predicate.cardinality.is_some_and(|value| value > 0)
         && predicate.annotation.is_empty()
         && predicate.internal_key.is_none()
     {
@@ -17651,7 +18087,14 @@ fn named_predicate_key(
             ));
         }
         let filler_key = named_predicate_key(filler, predicates, budget)?;
-        return at_least_object_predicate_key(role_id, &filler_key, budget);
+        return at_least_object_predicate_key(
+            predicate.cardinality.ok_or_else(|| {
+                EncodedValidationError::invariant("object at-least predicate lost its cardinality")
+            })?,
+            role_id,
+            &filler_key,
+            budget,
+        );
     }
     if predicate.role_id.is_some()
         || predicate.cardinality.is_some()
@@ -17810,15 +18253,21 @@ fn class_literal_predicate_key(
 }
 
 fn at_least_object_predicate_key(
+    cardinality: u32,
     role_id: u32,
     filler_key: &[u8],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<u8>> {
+    if cardinality == 0 {
+        return Err(EncodedValidationError::invariant(
+            "object at-least predicate has zero cardinality",
+        ));
+    }
     budget.claim_work(filler_key.len())?;
     let filler_digest: [u8; 32] = Sha256::digest(filler_key).into();
     let filler = crate::model::hex(&filler_digest);
     Ok(format!(
-        "{{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":1,\"filler\":\"{filler}\",\"internal_key\":null,\"kind\":\"at_least_object\",\"role_id\":{role_id},\"symbol_id\":null}}"
+        "{{\"annotation\":[],\"argument_sorts\":[\"object\"],\"cardinality\":{cardinality},\"filler\":\"{filler}\",\"internal_key\":null,\"kind\":\"at_least_object\",\"role_id\":{role_id},\"symbol_id\":null}}"
     )
     .into_bytes())
 }
@@ -19371,6 +19820,7 @@ fn merge_normalized_sources(
                                 })
                             })
                             .transpose()?,
+                        cardinality: constraint.cardinality,
                         provenance: *provenance,
                         generated: constraint.generated,
                     });
