@@ -79,7 +79,16 @@ def _validate_encoded_selection_v1(
     item_lengths: memoryview,
     scalar_bytes: memoryview,
 ) -> None: ...
-def _validate_encoded_slices_v1(*, slices: tuple[tuple[object, ...], ...]) -> None: ...
+def _validate_encoded_slices_v1(
+    *,
+    slices: tuple[tuple[object, ...], ...],
+    cancellation: CancellationHandle | None = ...,
+) -> None: ...
+def _debug_validate_encoded_slices_cancel_v1(
+    *,
+    slices: tuple[tuple[object, ...], ...],
+    cancel_at_checkpoint: int,
+) -> None: ...
 def _debug_encoded_selection_panic_v1() -> None: ...
 def _encoded_symbol_manifest_v1(
     *,

@@ -17,7 +17,7 @@ from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
 
 import pyhermit._native as native
 from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE
-from pyhermit.exceptions import BackendPoisonedError
+from pyhermit.exceptions import BackendPoisonedError, ReasonerInterruptedError
 
 _OPTIONS = pyowl_core.LoadOptions(
     imports=pyowl_core.ImportPolicy.IGNORE,
@@ -146,6 +146,82 @@ def test_contextual_multi_slice_call_releases_every_borrow_after_return() -> Non
             scope_map.release()
         if not context_mapping.closed:
             context_mapping.close()
+
+
+def test_contextual_multi_slice_cancellation_is_transactional_and_reusable() -> None:
+    encoded, columns = _direct_columns()
+    record = _slice_record(columns, member_tokens=(b"t" * 32,))
+    slices = (record, record)
+    baseline = native._encoded_role_clause_slices_manifest_v1(slices=slices)
+
+    cancellation = native.CancellationHandle()
+    assert cancellation.interrupt("cancel encoded composite")
+    with pytest.raises(
+        ReasonerInterruptedError,
+        match="cancel encoded composite",
+    ) as interrupted:
+        native._validate_encoded_slices_v1(
+            slices=slices,
+            cancellation=cancellation,
+        )
+    assert interrupted.value.code == "REASONER_INTERRUPTED"
+
+    cancellation.reset()
+    assert native._validate_encoded_slices_v1(slices=slices, cancellation=cancellation) is None
+
+    source_phases = (
+        "source-object-role",
+        "source-data-role",
+        "source-data-inclusion",
+        "source-simple-role",
+        "source-complex-role",
+        "source-role-characteristic",
+        "source-named-class",
+        "source-slice",
+    )
+    expected_phases = (
+        "program-preflight",
+        "source-symbol",
+        "source-symbol",
+        "source-declaration-proof",
+        *source_phases,
+        *source_phases,
+        "merged-object-role",
+        "merged-data-role",
+        "merged-named-class",
+        "merged-data-inclusion",
+        "merged-data-hierarchy",
+        "merged-simple-role",
+        "merged-complex-role",
+        "merged-role-characteristic",
+        "merged-object-role-hierarchy",
+        "merged-role-semantics",
+        "merged-role-automata",
+        "merged-role-model",
+        "merged-role-clause-publication",
+    )
+    for checkpoint, expected_phase in enumerate(expected_phases, start=1):
+        with pytest.raises(ReasonerInterruptedError) as injected:
+            native._debug_validate_encoded_slices_cancel_v1(
+                slices=slices,
+                cancel_at_checkpoint=checkpoint,
+            )
+        assert injected.value.code == "REASONER_INTERRUPTED"
+        assert injected.value.context == {
+            "checkpoint": str(checkpoint),
+            "phase": expected_phase,
+        }
+
+    assert (
+        native._debug_validate_encoded_slices_cancel_v1(
+            slices=slices,
+            cancel_at_checkpoint=len(expected_phases) + 1,
+        )
+        is None
+    )
+    assert native._encoded_role_clause_slices_manifest_v1(slices=slices) == baseline
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert encoded.owner is not None
 
 
 def test_shared_immutable_columns_are_safe_across_python_threads() -> None:

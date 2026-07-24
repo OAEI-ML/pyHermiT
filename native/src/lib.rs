@@ -1124,6 +1124,7 @@ struct EncodedSliceProgram {
 fn compile_encoded_slice_symbol_phases(
     slices: &Bound<'_, PyTuple>,
     limits: encoded::named_classes::NamedClassPhaseLimits,
+    poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<Vec<encoded::symbols::SymbolPhase>> {
     let mut phases = Vec::new();
     phases.try_reserve_exact(slices.len()).map_err(|_| {
@@ -1237,6 +1238,7 @@ fn compile_encoded_slice_symbol_phases(
         })?;
         phases.push(phase);
         catalogs.push(catalog);
+        poll("source-symbol")?;
     }
     let proof_limits = encoded::symbols::SymbolPhaseLimits {
         max_owned_bytes: limits
@@ -1256,6 +1258,7 @@ fn compile_encoded_slice_symbol_phases(
     };
     encoded::symbols::install_source_declaration_proof(&mut phases, &mut catalogs, proof_limits)
         .map_err(encoded_validation_error)?;
+    poll("source-declaration-proof")?;
     Ok(phases)
 }
 
@@ -1266,6 +1269,15 @@ fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<Enco
 fn compile_encoded_slice_program_with_namespace(
     slices: &Bound<'_, PyAny>,
     definition_namespace: Option<[u8; 32]>,
+) -> NativeResult<EncodedSliceProgram> {
+    let mut poll = |_phase| Ok(());
+    compile_encoded_slice_program_controlled(slices, definition_namespace, &mut poll)
+}
+
+fn compile_encoded_slice_program_controlled(
+    slices: &Bound<'_, PyAny>,
+    definition_namespace: Option<[u8; 32]>,
+    poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<EncodedSliceProgram> {
     if !slices.is_exact_instance_of::<PyTuple>() {
         return Err(encoded_slice_invalid(
@@ -1288,7 +1300,8 @@ fn compile_encoded_slice_program_with_namespace(
             ),
         ));
     }
-    let symbol_phases = compile_encoded_slice_symbol_phases(slices, limits)?;
+    poll("program-preflight")?;
+    let symbol_phases = compile_encoded_slice_symbol_phases(slices, limits, poll)?;
     let mut symbol_phases = symbol_phases.into_iter();
     let mut phases = Vec::new();
     phases.try_reserve_exact(slices.len()).map_err(|_| {
@@ -1429,6 +1442,7 @@ fn compile_encoded_slice_program_with_namespace(
         let object_roles =
             encoded::object_roles::compile_object_role_phase(&symbols, object_role_limits)
                 .map_err(encoded_validation_error)?;
+        poll("source-object-role")?;
         let after_object_role_work = after_symbol_work
             .checked_add(object_roles.work)
             .ok_or_else(|| {
@@ -1464,6 +1478,7 @@ fn compile_encoded_slice_program_with_namespace(
         };
         let data_roles = encoded::data_roles::compile_data_role_phase(&symbols, data_role_limits)
             .map_err(encoded_validation_error)?;
+        poll("source-data-role")?;
         let after_data_role_work = after_object_role_work
             .checked_add(data_roles.work)
             .ok_or_else(|| {
@@ -1504,6 +1519,7 @@ fn compile_encoded_slice_program_with_namespace(
             data_inclusion_limits,
         )
         .map_err(encoded_validation_error)?;
+        poll("source-data-inclusion")?;
         let after_data_inclusion_work = after_data_role_work
             .checked_add(data_inclusions.work)
             .ok_or_else(|| {
@@ -1544,6 +1560,7 @@ fn compile_encoded_slice_program_with_namespace(
             simple_role_limits,
         )
         .map_err(encoded_validation_error)?;
+        poll("source-simple-role")?;
         let after_simple_role_work = after_data_inclusion_work
             .checked_add(simple_roles.work)
             .ok_or_else(|| {
@@ -1584,6 +1601,7 @@ fn compile_encoded_slice_program_with_namespace(
             complex_role_limits,
         )
         .map_err(encoded_validation_error)?;
+        poll("source-complex-role")?;
         let after_complex_role_work = after_simple_role_work
             .checked_add(complex_roles.work)
             .ok_or_else(|| {
@@ -1677,6 +1695,7 @@ fn compile_encoded_slice_program_with_namespace(
                 role_characteristic_limits,
             )
             .map_err(encoded_validation_error)?;
+        poll("source-role-characteristic")?;
         let after_role_characteristic_work = after_complex_role_work
             .checked_add(role_characteristics.work)
             .ok_or_else(|| {
@@ -1736,6 +1755,7 @@ fn compile_encoded_slice_program_with_namespace(
             ),
         }
         .map_err(encoded_validation_error)?;
+        poll("source-named-class")?;
         drop(scope_maps);
         source_work = after_role_characteristic_work
             .checked_add(named.work)
@@ -1765,6 +1785,7 @@ fn compile_encoded_slice_program_with_namespace(
         simple_role_phases.push(simple_roles);
         complex_role_phases.push(complex_roles);
         role_characteristic_phases.push(role_characteristics);
+        poll("source-slice")?;
     }
     if symbol_phases.next().is_some() {
         return Err(NativeError::new(
@@ -1781,6 +1802,7 @@ fn compile_encoded_slice_program_with_namespace(
     let object_roles =
         encoded::object_roles::merge_object_role_phases(&object_role_phases, object_role_limits)
             .map_err(encoded_validation_error)?;
+    poll("merged-object-role")?;
     let data_role_limits = encoded::data_roles::DataRolePhaseLimits {
         max_owned_bytes: limits
             .max_owned_bytes
@@ -1803,6 +1825,7 @@ fn compile_encoded_slice_program_with_namespace(
     let data_roles =
         encoded::data_roles::merge_data_role_phases(&data_role_phases, data_role_limits)
             .map_err(encoded_validation_error)?;
+    poll("merged-data-role")?;
     let merged_role_domain_owned = object_roles
         .owned_bytes
         .checked_add(data_roles.owned_bytes)
@@ -1848,6 +1871,7 @@ fn compile_encoded_slice_program_with_namespace(
         named_limits,
     )
     .map_err(encoded_validation_error)?;
+    poll("merged-named-class")?;
     let merged_role_owned = merged_role_domain_owned
         .checked_add(named_classes.owned_bytes)
         .ok_or_else(|| {
@@ -1888,6 +1912,7 @@ fn compile_encoded_slice_program_with_namespace(
         data_inclusion_limits,
     )
     .map_err(encoded_validation_error)?;
+    poll("merged-data-inclusion")?;
     let merged_role_owned = merged_role_owned
         .checked_add(data_inclusions.owned_bytes)
         .ok_or_else(|| {
@@ -1927,6 +1952,7 @@ fn compile_encoded_slice_program_with_namespace(
         data_hierarchy_limits,
     )
     .map_err(encoded_validation_error)?;
+    poll("merged-data-hierarchy")?;
     let merged_role_owned = merged_role_owned
         .checked_add(data_role_hierarchy.owned_bytes)
         .ok_or_else(|| {
@@ -1967,6 +1993,7 @@ fn compile_encoded_slice_program_with_namespace(
         simple_role_limits,
     )
     .map_err(encoded_validation_error)?;
+    poll("merged-simple-role")?;
     let merged_simple_owned = merged_role_owned
         .checked_add(simple_roles.owned_bytes)
         .ok_or_else(|| {
@@ -2007,6 +2034,7 @@ fn compile_encoded_slice_program_with_namespace(
         complex_role_limits,
     )
     .map_err(encoded_validation_error)?;
+    poll("merged-complex-role")?;
     let merged_complex_owned = merged_simple_owned
         .checked_add(complex_roles.owned_bytes)
         .ok_or_else(|| {
@@ -2049,6 +2077,7 @@ fn compile_encoded_slice_program_with_namespace(
         role_characteristic_limits,
     )
     .map_err(encoded_validation_error)?;
+    poll("merged-role-characteristic")?;
     let merged_characteristic_owned = merged_complex_owned
         .checked_add(role_characteristics.owned_bytes)
         .ok_or_else(|| {
@@ -2089,6 +2118,7 @@ fn compile_encoded_slice_program_with_namespace(
             hierarchy_limits,
         )
         .map_err(encoded_validation_error)?;
+    poll("merged-object-role-hierarchy")?;
     let merged_hierarchy_owned = merged_characteristic_owned
         .checked_add(object_role_hierarchy.owned_bytes)
         .ok_or_else(|| {
@@ -2130,6 +2160,7 @@ fn compile_encoded_slice_program_with_namespace(
         semantics_limits,
     )
     .map_err(encoded_validation_error)?;
+    poll("merged-role-semantics")?;
     let merged_semantics_owned = merged_hierarchy_owned
         .checked_add(role_semantics.owned_bytes)
         .ok_or_else(|| {
@@ -2172,6 +2203,7 @@ fn compile_encoded_slice_program_with_namespace(
         automata_limits,
     )
     .map_err(encoded_validation_error)?;
+    poll("merged-role-automata")?;
     let merged_automata_owned = merged_semantics_owned
         .checked_add(role_automata.owned_bytes)
         .ok_or_else(|| {
@@ -2217,6 +2249,7 @@ fn compile_encoded_slice_program_with_namespace(
         role_model_limits,
     )
     .map_err(encoded_validation_error)?;
+    poll("merged-role-model")?;
     let merged_role_model_owned = merged_automata_owned
         .checked_add(role_model.owned_bytes)
         .ok_or_else(|| {
@@ -2261,6 +2294,8 @@ fn compile_encoded_slice_program_with_namespace(
         role_clause_limits,
     )
     .map_err(encoded_validation_error)?;
+    // Nothing escapes the coarse call before this final publication checkpoint.
+    poll("merged-role-clause-publication")?;
     Ok(EncodedSliceProgram {
         named_classes,
         object_roles,
@@ -2279,9 +2314,57 @@ fn compile_encoded_slice_program_with_namespace(
 }
 
 #[pyfunction(name = "_validate_encoded_slices_v1")]
-#[pyo3(signature = (*, slices))]
-fn validate_encoded_slices_v1(py: Python<'_>, slices: &Bound<'_, PyAny>) -> PyResult<()> {
-    contain_encoded_selection(py, || compile_encoded_slice_program(slices).map(drop))
+#[pyo3(signature = (*, slices, cancellation=None))]
+fn validate_encoded_slices_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+    cancellation: Option<PyRef<'_, CancellationHandle>>,
+) -> PyResult<()> {
+    let cancellation = cancellation.map(|handle| handle.state());
+    contain_encoded_selection(py, || {
+        let mut poll = |_phase| match cancellation.as_ref() {
+            Some(state) => state.poll(),
+            None => Ok(()),
+        };
+        compile_encoded_slice_program_controlled(slices, None, &mut poll).map(drop)
+    })
+}
+
+/// Deterministically inject cancellation at each private orchestration checkpoint.
+///
+/// This is test-only evidence for transactional disposal and is not an encoded compiler
+/// capability. Production cancellation uses `CancellationHandle` above.
+#[pyfunction(name = "_debug_validate_encoded_slices_cancel_v1")]
+#[pyo3(signature = (*, slices, cancel_at_checkpoint))]
+fn debug_validate_encoded_slices_cancel_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+    cancel_at_checkpoint: u64,
+) -> PyResult<()> {
+    contain_encoded_selection(py, || {
+        if cancel_at_checkpoint == 0 {
+            return Err(encoded_slice_invalid(
+                "encoded cancellation checkpoint must be positive",
+            ));
+        }
+        let mut checkpoint = 0_u64;
+        let mut poll = |phase: &'static str| {
+            checkpoint = checkpoint
+                .checked_add(1)
+                .ok_or_else(|| NativeError::invariant("encoded checkpoint count overflowed"))?;
+            if checkpoint == cancel_at_checkpoint {
+                return Err(NativeError::new(
+                    ErrorKind::Cancelled,
+                    "REASONER_INTERRUPTED",
+                    "native encoded compilation was interrupted at a test checkpoint",
+                )
+                .with_context("checkpoint", checkpoint.to_string())
+                .with_context("phase", phase));
+            }
+            Ok(())
+        };
+        compile_encoded_slice_program_controlled(slices, None, &mut poll).map(drop)
+    })
 }
 
 #[pyfunction(name = "_encoded_named_class_slices_manifest_v1")]
@@ -3791,6 +3874,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(validate_encoded_columns_v1, module)?)?;
     module.add_function(wrap_pyfunction!(validate_encoded_selection_v1, module)?)?;
     module.add_function(wrap_pyfunction!(validate_encoded_slices_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        debug_validate_encoded_slices_cancel_v1,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(debug_encoded_selection_panic_v1, module)?)?;
     module.add_function(wrap_pyfunction!(encoded_symbol_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(encoded_object_role_manifest_v1, module)?)?;
