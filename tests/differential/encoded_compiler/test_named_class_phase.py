@@ -5935,6 +5935,184 @@ def test_recursive_disjoint_unions_remap_composite_slices_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_restriction_bearing_disjoint_unions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:U))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(AnnotationProperty(:note))",
+            "DisjointUnion(:U "
+            "ObjectSomeValuesFrom(:p ObjectIntersectionOf(:A ObjectHasSelf(:q))) "
+            "ObjectAllValuesFrom(ObjectInverseOf(:q) ObjectUnionOf(:A :B)) "
+            "ObjectMinCardinality(1 :p ObjectOneOf(:i)) "
+            "ObjectMaxCardinality(1 :q ObjectComplementOf(:A)) "
+            "ObjectExactCardinality(2 :p :B) "
+            "ObjectHasValue(:q :i) "
+            "DataSomeValuesFrom(:d DataIntersectionOf(xsd:string xsd:integer)) "
+            "DataAllValuesFrom(:e DataUnionOf(xsd:boolean xsd:decimal)) "
+            "DataMinCardinality(1 :d DataUnionOf(xsd:string xsd:decimal)) "
+            "DataMaxCardinality(1 :e "
+            "DataIntersectionOf(xsd:boolean xsd:integer)) "
+            "DataExactCardinality(1 :d DataUnionOf(xsd:string xsd:integer)) "
+            'DataHasValue(:e "value"))',
+            'DisjointUnion(Annotation(:note "same restrictions") :U '
+            "ObjectSomeValuesFrom(:p ObjectIntersectionOf(:A ObjectHasSelf(:q))) "
+            "ObjectAllValuesFrom(ObjectInverseOf(:q) ObjectUnionOf(:A :B)) "
+            "ObjectMinCardinality(1 :p ObjectOneOf(:i)) "
+            "ObjectMaxCardinality(1 :q ObjectComplementOf(:A)) "
+            "ObjectExactCardinality(2 :p :B) "
+            "ObjectHasValue(:q :i) "
+            "DataSomeValuesFrom(:d DataIntersectionOf(xsd:string xsd:integer)) "
+            "DataAllValuesFrom(:e DataUnionOf(xsd:boolean xsd:decimal)) "
+            "DataMinCardinality(1 :d DataUnionOf(xsd:string xsd:decimal)) "
+            "DataMaxCardinality(1 :e "
+            "DataIntersectionOf(xsd:boolean xsd:integer)) "
+            "DataExactCardinality(1 :d DataUnionOf(xsd:string xsd:integer)) "
+            'DataHasValue(:e "value"))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=2,
+        include_generated_object_self_definitions=True,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_complemented_restriction_disjoint_union_members_match_scalar() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:V))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "DisjointUnion(:V "
+            "ObjectComplementOf(ObjectSomeValuesFrom(:p "
+            "ObjectIntersectionOf(:A :B))) "
+            "ObjectComplementOf(ObjectMaxCardinality(0 :q ObjectOneOf(:i))) "
+            "ObjectComplementOf(ObjectExactCardinality(1 "
+            "ObjectInverseOf(:q) ObjectUnionOf(:A :B))) "
+            "ObjectComplementOf(ObjectHasValue(:p :i)) "
+            "ObjectComplementOf(DataSomeValuesFrom(:d "
+            "DataIntersectionOf(xsd:string xsd:integer))) "
+            "ObjectComplementOf(DataMaxCardinality(0 :e "
+            "DataUnionOf(xsd:boolean xsd:decimal))) "
+            "ObjectComplementOf(DataExactCardinality(0 :d "
+            "DataIntersectionOf(xsd:string xsd:boolean))) "
+            'ObjectComplementOf(DataHasValue(:e "value")) '
+            ":A)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=1,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_restriction_disjoint_unions_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:U))",
+        "Declaration(Class(:V))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+        "Declaration(DataProperty(:d))",
+    )
+    object_restriction = (
+        "ObjectExactCardinality(2 :p "
+        "ObjectIntersectionOf(:A ObjectSomeValuesFrom(:q :B)))"
+    )
+    data_restriction = (
+        "DataExactCardinality(1 :d "
+        "DataIntersectionOf(xsd:string DataUnionOf(xsd:integer xsd:boolean)))"
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"DisjointUnion(:U {object_restriction} {data_restriction} :A)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"DisjointUnion(:V {object_restriction} {data_restriction} :B)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    class_namespace = f":class:{composite.logical_fingerprint.hex}:"
+    data_namespace = f":data:{composite.logical_fingerprint.hex}:"
+    assert all(
+        class_namespace in str(value["display"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    )
+    assert all(
+        data_namespace in str(value["display"])
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        if value["generated"]
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
