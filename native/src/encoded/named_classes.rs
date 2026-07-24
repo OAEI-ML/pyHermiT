@@ -620,6 +620,7 @@ struct ClassBooleanDefinition {
     object_quantifier: Option<ObjectQuantifierDefinition>,
     object_cardinality: Option<ObjectCardinalityDefinition>,
     data_quantifier: Option<DataQuantifierDefinition>,
+    data_cardinality: Option<DataCardinalityDefinition>,
     complement: bool,
     polarity: DefinitionPolarity,
     generated_key: Vec<u8>,
@@ -757,6 +758,23 @@ struct NormalizedDataQuantifierTerm {
     filler: NormalizedAtomicDataTerm,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DataCardinalityDefinition {
+    cardinality: u32,
+    role_id: u32,
+    filler: AtomicDataRangeSelection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedDataCardinalityTerm {
+    cardinality: u32,
+    cardinality_bytes: Vec<u8>,
+    role_id: u32,
+    property_key: Vec<u8>,
+    key: Vec<u8>,
+    filler: NormalizedAtomicDataTerm,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NormalizedClassTerm {
     Atomic(NormalizedAtomicClassTerm),
@@ -766,6 +784,7 @@ enum NormalizedClassTerm {
     ObjectQuantifier(NormalizedObjectQuantifierTerm),
     ObjectCardinality(NormalizedObjectCardinalityTerm),
     DataQuantifier(NormalizedDataQuantifierTerm),
+    DataCardinality(NormalizedDataCardinalityTerm),
 }
 
 impl NormalizedClassTerm {
@@ -778,6 +797,7 @@ impl NormalizedClassTerm {
             Self::ObjectQuantifier(term) => &term.key,
             Self::ObjectCardinality(term) => &term.key,
             Self::DataQuantifier(term) => &term.key,
+            Self::DataCardinality(term) => &term.key,
         }
     }
 }
@@ -918,6 +938,8 @@ enum DataConstraintKind {
     ExistentialConsequent,
     UniversalAntecedent,
     UniversalConsequent,
+    MinimumAntecedent,
+    MinimumConsequent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -926,6 +948,7 @@ struct RawDataConstraint {
     role_id: u32,
     class: ClassLiteral,
     filler: DataRangeLiteral,
+    cardinality: Option<u32>,
     provenance: [u8; 32],
     generated: bool,
 }
@@ -936,6 +959,7 @@ struct NormalizedDataConstraint {
     role_id: u32,
     class: ClassLiteral,
     filler: DataRangeLiteral,
+    cardinality: Option<u32>,
     provenance: Vec<[u8; 32]>,
     generated: bool,
 }
@@ -4618,6 +4642,79 @@ fn normalized_class_term<B: ByteSource>(
                 },
             )));
         }
+        if selection.is_none() && node.tag() == DATA_MIN_CARDINALITY_TAG && !complemented {
+            if node.field_count() != 3 {
+                return Err(EncodedValidationError::invariant(
+                    "data-minimum definition no longer has schema-1 shape",
+                ));
+            }
+            let Some(data_roles) = data_roles else {
+                return Ok(None);
+            };
+            let Some((cardinality, cardinality_bytes)) = integer_field_u32_bytes(
+                model,
+                node,
+                0,
+                "data-minimum definition cardinality",
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            if cardinality <= 1 {
+                return Ok(None);
+            }
+            let property = node_field(model, node, 1, "data-minimum definition role")?;
+            if !reduction_inputs_are_retained(model, symbols, property, depth, budget)? {
+                return Ok(None);
+            }
+            let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
+            let filler = node_field(model, node, 2, "data-minimum definition filler")?;
+            let filler_depth =
+                child_expression_depth(depth, "data-minimum filler depth overflowed")?;
+            PhaseBudget::count(
+                filler_depth,
+                budget.limits.max_canonical_depth,
+                "class-expression depth",
+            )?;
+            let Some(filler) = normalized_data_term(
+                model,
+                symbols,
+                filler,
+                false,
+                filler_depth,
+                scope_maps,
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            let NormalizedDataTerm::Atomic(filler) = filler else {
+                return Ok(None);
+            };
+            if atomic_data_range_selection_is_bottom(model, symbols, filler.selection)? {
+                return Ok(None);
+            }
+            let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
+            let key = synthetic_data_cardinality_key(
+                DATA_MIN_CARDINALITY_TAG,
+                &cardinality_bytes,
+                &property_key,
+                &filler.key,
+                budget,
+            )?;
+            budget.claim_owned(size_of::<NormalizedDataCardinalityTerm>())?;
+            return Ok(Some(NormalizedClassTerm::DataCardinality(
+                NormalizedDataCardinalityTerm {
+                    cardinality,
+                    cardinality_bytes,
+                    role_id,
+                    property_key,
+                    key,
+                    filler,
+                },
+            )));
+        }
         if selection.is_none() && node.tag() == OBJECT_EXACT_CARDINALITY_TAG {
             if node.field_count() != 3 {
                 return Err(EncodedValidationError::invariant(
@@ -5303,6 +5400,34 @@ fn synthetic_data_quantifier_key(
     Ok(key)
 }
 
+fn synthetic_data_cardinality_key(
+    tag: u16,
+    cardinality_bytes: &[u8],
+    property_key: &[u8],
+    filler_key: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    if !matches!(
+        tag,
+        DATA_MIN_CARDINALITY_TAG | DATA_MAX_CARDINALITY_TAG | DATA_EXACT_CARDINALITY_TAG
+    ) {
+        return Err(EncodedValidationError::invariant(
+            "synthetic data cardinality has an unsupported constructor",
+        ));
+    }
+    let mut key = Vec::new();
+    push_generated_varint(&mut key, u64::from(tag), budget)?;
+    push_generated_byte(&mut key, 4, budget)?;
+    for byte in cardinality_bytes {
+        push_generated_byte(&mut key, *byte, budget)?;
+    }
+    push_generated_byte(&mut key, 1, budget)?;
+    push_generated_frame(&mut key, property_key, budget)?;
+    push_generated_byte(&mut key, 1, budget)?;
+    push_generated_frame(&mut key, filler_key, budget)?;
+    Ok(key)
+}
+
 fn synthetic_object_cardinality_key(
     tag: u16,
     cardinality_bytes: &[u8],
@@ -5436,6 +5561,14 @@ fn atomize_normalized_class_term(
             definitions,
             budget,
         ),
+        NormalizedClassTerm::DataCardinality(term) => atomize_normalized_data_cardinality(
+            term,
+            source_expression,
+            polarity,
+            namespace,
+            definitions,
+            budget,
+        ),
     }
 }
 
@@ -5503,6 +5636,86 @@ fn atomize_normalized_data_quantifier(
         object_cardinality: None,
         data_quantifier: Some(DataQuantifierDefinition {
             kind,
+            role_id,
+            filler: selection,
+        }),
+        data_cardinality: None,
+        complement: false,
+        polarity,
+        generated_key,
+        generated_display,
+        provenance: Vec::new(),
+    });
+    Ok(returned_key)
+}
+
+fn atomize_normalized_data_cardinality(
+    term: NormalizedDataCardinalityTerm,
+    source_expression: Option<NodeId>,
+    polarity: DefinitionPolarity,
+    namespace: [u8; 32],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let NormalizedDataCardinalityTerm {
+        cardinality,
+        cardinality_bytes,
+        role_id,
+        property_key,
+        key,
+        filler,
+    } = term;
+    let NormalizedAtomicDataTerm {
+        selection,
+        key: filler_key,
+        symbols: data_expression_symbols,
+    } = filler;
+    let mut expression_symbols = Vec::new();
+    let source_seed = class_expression_symbol_seed(&key, DATA_MIN_CARDINALITY_TAG, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, source_seed, budget)?;
+    let rewritten_key = synthetic_data_cardinality_key(
+        DATA_MIN_CARDINALITY_TAG,
+        &cardinality_bytes,
+        &property_key,
+        &filler_key,
+        budget,
+    )?;
+    let rewritten_seed =
+        class_expression_symbol_seed(&rewritten_key, DATA_MIN_CARDINALITY_TAG, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, rewritten_seed, budget)?;
+    budget.claim_work(sort_work(expression_symbols.len()))?;
+    expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
+    expression_symbols.dedup_by(|left, right| left.key == right.key);
+    let (generated_key, generated_display) =
+        generated_class_symbol(namespace, &key, polarity, budget)?;
+    budget.claim_owned(generated_key.len())?;
+    let returned_key = generated_key.clone();
+    let mut expressions = Vec::new();
+    if let Some(expression) = source_expression {
+        budget.claim_owned(size_of::<NodeId>())?;
+        expressions.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource("data-minimum definition expression allocation failed")
+        })?;
+        expressions.push(expression);
+    }
+    budget.claim_owned(size_of::<ClassBooleanDefinition>())?;
+    definitions.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("data-minimum definition allocation failed")
+    })?;
+    definitions.push(ClassBooleanDefinition {
+        expressions,
+        roots: Vec::new(),
+        expression_key: key,
+        expression_symbols,
+        data_expression_symbols,
+        intersection: false,
+        operands: Vec::new(),
+        object_self_role_id: None,
+        object_quantifier: None,
+        object_cardinality: None,
+        data_quantifier: None,
+        data_cardinality: Some(DataCardinalityDefinition {
+            cardinality,
             role_id,
             filler: selection,
         }),
@@ -5631,6 +5844,7 @@ fn atomize_normalized_object_cardinality(
             role_id,
         }),
         data_quantifier: None,
+        data_cardinality: None,
         complement: false,
         polarity,
         generated_key,
@@ -5737,6 +5951,7 @@ fn atomize_normalized_object_quantifier(
         object_quantifier: Some(ObjectQuantifierDefinition { kind, role_id }),
         object_cardinality: None,
         data_quantifier: None,
+        data_cardinality: None,
         complement: false,
         polarity,
         generated_key,
@@ -5824,6 +6039,7 @@ fn atomize_normalized_object_self(
             object_quantifier: None,
             object_cardinality: None,
             data_quantifier: None,
+            data_cardinality: None,
             complement: true,
             polarity,
             generated_key,
@@ -5868,6 +6084,7 @@ fn atomize_normalized_object_self(
         object_quantifier: None,
         object_cardinality: None,
         data_quantifier: None,
+        data_cardinality: None,
         complement: false,
         polarity,
         generated_key,
@@ -6012,6 +6229,7 @@ fn atomize_normalized_class_boolean(
         object_quantifier: None,
         object_cardinality: None,
         data_quantifier: None,
+        data_cardinality: None,
         complement: false,
         polarity,
         generated_key,
@@ -6036,6 +6254,7 @@ fn retain_class_boolean_definition(
             || known.object_quantifier != definition.object_quantifier
             || known.object_cardinality != definition.object_cardinality
             || known.data_quantifier != definition.data_quantifier
+            || known.data_cardinality != definition.data_cardinality
             || known.complement != definition.complement
             || known.expression_symbols != definition.expression_symbols
             || known.data_expression_symbols != definition.data_expression_symbols
@@ -7115,6 +7334,9 @@ fn class_expression_prefix(tag: u16) -> EncodedResult<&'static str> {
         OBJECT_EXACT_CARDINALITY_TAG => Ok("ObjectExactCardinality:"),
         DATA_SOME_VALUES_FROM_TAG => Ok("DataSomeValuesFrom:"),
         DATA_ALL_VALUES_FROM_TAG => Ok("DataAllValuesFrom:"),
+        DATA_MIN_CARDINALITY_TAG => Ok("DataMinCardinality:"),
+        DATA_MAX_CARDINALITY_TAG => Ok("DataMaxCardinality:"),
+        DATA_EXACT_CARDINALITY_TAG => Ok("DataExactCardinality:"),
         _ => Err(EncodedValidationError::invariant(
             "selected class expression has an unsupported constructor",
         )),
@@ -13150,6 +13372,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 || definition.object_quantifier.is_some()
                 || definition.object_cardinality.is_some()
                 || definition.data_quantifier.is_some()
+                || definition.data_cardinality.is_some()
                 || !definition.data_expression_symbols.is_empty()
                 || definition.provenance.is_empty()
             {
@@ -13184,6 +13407,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 || definition.object_self_role_id.is_some()
                 || definition.object_cardinality.is_some()
                 || definition.data_quantifier.is_some()
+                || definition.data_cardinality.is_some()
                 || !definition.data_expression_symbols.is_empty()
                 || definition.operands.len() != 1
                 || definition.provenance.is_empty()
@@ -13242,6 +13466,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 || definition.object_self_role_id.is_some()
                 || definition.object_quantifier.is_some()
                 || definition.data_quantifier.is_some()
+                || definition.data_cardinality.is_some()
                 || !definition.data_expression_symbols.is_empty()
                 || definition.operands.len() != 1
                 || definition.provenance.is_empty()
@@ -13298,6 +13523,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                 || definition.object_self_role_id.is_some()
                 || definition.object_quantifier.is_some()
                 || definition.object_cardinality.is_some()
+                || definition.data_cardinality.is_some()
                 || !definition.operands.is_empty()
                 || definition.provenance.is_empty()
             {
@@ -13340,6 +13566,50 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                     role_id: quantifier.role_id,
                     class: generated,
                     filler,
+                    cardinality: None,
+                    provenance: *provenance,
+                    generated: true,
+                });
+            }
+            continue;
+        }
+        if let Some(cardinality) = definition.data_cardinality {
+            if definition.complement
+                || definition.object_self_role_id.is_some()
+                || definition.object_quantifier.is_some()
+                || definition.object_cardinality.is_some()
+                || definition.data_quantifier.is_some()
+                || !definition.operands.is_empty()
+                || definition.provenance.is_empty()
+            {
+                return Err(EncodedValidationError::invariant(
+                    "generated data-minimum definition changed before emission",
+                ));
+            }
+            let filler = atomic_data_range_selection_literal(
+                model,
+                symbols,
+                data_range_domain,
+                cardinality.filler,
+                scope_maps,
+                budget,
+            )?;
+            for provenance in &definition.provenance {
+                budget.claim_owned(size_of::<RawDataConstraint>())?;
+                data_constraints.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "generated data-minimum clause allocation failed",
+                    )
+                })?;
+                data_constraints.push(RawDataConstraint {
+                    kind: match definition.polarity {
+                        DefinitionPolarity::Positive => DataConstraintKind::MinimumConsequent,
+                        DefinitionPolarity::Negative => DataConstraintKind::MinimumAntecedent,
+                    },
+                    role_id: cardinality.role_id,
+                    class: generated,
+                    filler,
+                    cardinality: Some(cardinality.cardinality),
                     provenance: *provenance,
                     generated: true,
                 });
@@ -13414,6 +13684,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             || definition.object_quantifier.is_some()
             || definition.object_cardinality.is_some()
             || definition.data_quantifier.is_some()
+            || definition.data_cardinality.is_some()
             || !definition.data_expression_symbols.is_empty()
             || definition.provenance.is_empty()
         {
@@ -14091,6 +14362,7 @@ fn normalize_data_constraints(
                 && previous.role_id == constraint.role_id
                 && previous.class == constraint.class
                 && previous.filler == constraint.filler
+                && previous.cardinality == constraint.cardinality
                 && previous.generated == constraint.generated
             {
                 if previous.provenance.last() != Some(&constraint.provenance) {
@@ -14123,6 +14395,7 @@ fn normalize_data_constraints(
             role_id: constraint.role_id,
             class: constraint.class,
             filler: constraint.filler,
+            cardinality: constraint.cardinality,
             provenance,
             generated: constraint.generated,
         });
@@ -15255,7 +15528,15 @@ fn freeze_predicates(
             owner: PredicateOwner::Inequality(TermSort::Object),
         });
     }
-    if !negative_data_facts.is_empty() || keys.iter().any(|key| !key.data_role_ids.is_empty()) {
+    if !negative_data_facts.is_empty()
+        || keys.iter().any(|key| !key.data_role_ids.is_empty())
+        || data_constraints.iter().any(|constraint| {
+            matches!(
+                constraint.kind,
+                DataConstraintKind::MinimumAntecedent | DataConstraintKind::MinimumConsequent
+            ) && constraint.cardinality.is_some_and(|value| value > 1)
+        })
+    {
         let key = inequality_predicate_key(TermSort::Data);
         budget.claim_owned(size_of::<PendingPredicate>())?;
         budget.claim_owned(key.len())?;
@@ -15449,14 +15730,45 @@ fn freeze_predicates(
     for constraint in data_constraints.iter().filter(|constraint| {
         matches!(
             constraint.kind,
-            DataConstraintKind::ExistentialConsequent | DataConstraintKind::UniversalAntecedent
+            DataConstraintKind::ExistentialConsequent
+                | DataConstraintKind::UniversalAntecedent
+                | DataConstraintKind::MinimumAntecedent
+                | DataConstraintKind::MinimumConsequent
         )
     }) {
+        let cardinality = match constraint.kind {
+            DataConstraintKind::ExistentialConsequent | DataConstraintKind::UniversalAntecedent => {
+                if constraint.cardinality.is_some() {
+                    return Err(EncodedValidationError::invariant(
+                        "data quantifier unexpectedly carries cardinality metadata",
+                    ));
+                }
+                1
+            }
+            DataConstraintKind::MinimumAntecedent | DataConstraintKind::MinimumConsequent => {
+                let cardinality = constraint.cardinality.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "data-minimum constraint lost its cardinality",
+                    )
+                })?;
+                if cardinality <= 1 {
+                    return Err(EncodedValidationError::invariant(
+                        "data-minimum constraint did not retain a nontrivial cardinality",
+                    ));
+                }
+                cardinality
+            }
+            _ => {
+                return Err(EncodedValidationError::invariant(
+                    "non-cardinality data constraint reached at-least collection",
+                ));
+            }
+        };
         budget.claim_owned(size_of::<(u32, u32, DataRangeLiteral)>())?;
         at_least_data.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("data at-least predicate allocation failed")
         })?;
-        at_least_data.push((1, constraint.role_id, constraint.filler));
+        at_least_data.push((cardinality, constraint.role_id, constraint.filler));
     }
     budget.claim_work(sort_work(at_least_data.len()))?;
     at_least_data.sort_unstable();
@@ -17076,6 +17388,36 @@ fn freeze_clauses(
                     &mut ordered,
                     &[thing_predicate],
                     &[at_least, class],
+                    provenance,
+                    scalar_predicate_ids,
+                    budget,
+                )?;
+            }
+            DataConstraintKind::MinimumAntecedent | DataConstraintKind::MinimumConsequent => {
+                let cardinality = constraint.cardinality.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "data-minimum constraint lost its cardinality",
+                    )
+                })?;
+                let at_least = at_least_data_predicate_id(
+                    at_least_data_predicates,
+                    cardinality,
+                    constraint.role_id,
+                    constraint.filler,
+                )?;
+                let (body, head) = match constraint.kind {
+                    DataConstraintKind::MinimumAntecedent => ([at_least], [class]),
+                    DataConstraintKind::MinimumConsequent => ([class], [at_least]),
+                    _ => {
+                        return Err(EncodedValidationError::invariant(
+                            "non-minimum constraint reached data-minimum clausification",
+                        ));
+                    }
+                };
+                push_clause(
+                    &mut ordered,
+                    &body,
+                    &head,
                     provenance,
                     scalar_predicate_ids,
                     budget,
@@ -22013,6 +22355,7 @@ fn merge_normalized_sources(
                         role_id,
                         class,
                         filler,
+                        cardinality: constraint.cardinality,
                         provenance: *provenance,
                         generated: constraint.generated,
                     });
