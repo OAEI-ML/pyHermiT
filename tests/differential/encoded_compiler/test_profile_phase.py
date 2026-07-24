@@ -40,6 +40,20 @@ ANONYMOUS_CLASS_EXPRESSION_RULE = "OWL2DL_ANONYMOUS_CLASS_EXPRESSION"
 ANONYMOUS_GRAPH_CYCLE_RULE = "OWL2DL_ANONYMOUS_GRAPH_CYCLE"
 ANONYMOUS_PARALLEL_EDGE_RULE = "OWL2DL_ANONYMOUS_PARALLEL_EDGE"
 ANONYMOUS_TREE_ROOT_RULE = "OWL2DL_ANONYMOUS_TREE_ROOT"
+PROPERTY_PUNNING_RULE = "OWL2DL_PROPERTY_PUNNING"
+CLASS_DATATYPE_PUNNING_RULE = "OWL2DL_CLASS_DATATYPE_PUNNING"
+RESERVED_VOCABULARY_RULE = "OWL2DL_RESERVED_VOCABULARY"
+BUILTIN_ENTITY_KIND_RULE = "OWL2DL_BUILTIN_ENTITY_KIND"
+MISSING_DECLARATION_RULE = "OWL2DL_MISSING_DECLARATION"
+ENTITY_RULES = frozenset(
+    (
+        BUILTIN_ENTITY_KIND_RULE,
+        CLASS_DATATYPE_PUNNING_RULE,
+        MISSING_DECLARATION_RULE,
+        PROPERTY_PUNNING_RULE,
+        RESERVED_VOCABULARY_RULE,
+    )
+)
 PROJECTED_RULES = frozenset(
     (
         ANONYMOUS_AXIOM_POSITION_RULE,
@@ -47,8 +61,13 @@ PROJECTED_RULES = frozenset(
         ANONYMOUS_GRAPH_CYCLE_RULE,
         ANONYMOUS_PARALLEL_EDGE_RULE,
         ANONYMOUS_TREE_ROOT_RULE,
+        BUILTIN_ENTITY_KIND_RULE,
+        CLASS_DATATYPE_PUNNING_RULE,
         DATA_RANGE_ARITY_RULE,
         EXTENSION_COMPONENT_RULE,
+        MISSING_DECLARATION_RULE,
+        PROPERTY_PUNNING_RULE,
+        RESERVED_VOCABULARY_RULE,
         TOP_DATA_PROPERTY_RULE,
     )
 )
@@ -195,6 +214,23 @@ def _anonymous_graph_snapshot() -> pyowl_core.OntologyView:
             "ObjectPropertyAssertion(:q _:e _:d)",
             "ObjectPropertyAssertion(:p _:f :first)",
             "ObjectPropertyAssertion(:p :second _:f)",
+        ),
+        options=OPTIONS,
+    )
+
+
+def _entity_profile_snapshot() -> pyowl_core.OntologyView:
+    return pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:shared))",
+            "Declaration(DataProperty(:shared))",
+            "Declaration(Class(:dual))",
+            "Declaration(Datatype(:dual))",
+            "Declaration(Class("
+            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#custom>))",
+            "Declaration(Class(owl:real))",
+            "SubClassOf(:Missing owl:Thing)",
+            'Annotation(:annotationMissing "value")',
         ),
         options=OPTIONS,
     )
@@ -415,6 +451,58 @@ def test_anonymous_forest_diagnostics_match_scalar_exactly() -> None:
     assert all("document_keys" not in issue for issue in graph_issues)
 
 
+def test_global_entity_diagnostics_match_scalar_exactly_with_null_origin_fields() -> None:
+    snapshot = _entity_profile_snapshot()
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    issues = cast(list[dict[str, object]], actual["issues"])
+    entity_issues = [
+        issue
+        for issue in issues
+        if issue["rule_id"] in ENTITY_RULES
+    ]
+    assert {issue["rule_id"] for issue in entity_issues} == {
+        PROPERTY_PUNNING_RULE,
+        CLASS_DATATYPE_PUNNING_RULE,
+        RESERVED_VOCABULARY_RULE,
+        BUILTIN_ENTITY_KIND_RULE,
+        MISSING_DECLARATION_RULE,
+    }
+    assert all(issue["constructor"] is None for issue in entity_issues)
+    assert all(issue["provenance_sha256"] is None for issue in entity_issues)
+    assert all("document_keys" not in issue for issue in entity_issues)
+    assert sum(
+        issue["rule_id"] == MISSING_DECLARATION_RULE for issue in entity_issues
+    ) == 2
+
+
+def test_legal_builtin_entity_kinds_match_scalar_without_global_issues() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(owl:Thing))",
+            "Declaration(ObjectProperty(owl:bottomObjectProperty))",
+            "Declaration(DataProperty(owl:bottomDataProperty))",
+            "Declaration(AnnotationProperty("
+            "<http://www.w3.org/2000/01/rdf-schema#label>))",
+            "Declaration(Datatype(xsd:string))",
+            "Declaration(Datatype(owl:rational))",
+            "Declaration(Datatype("
+            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral>))",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    assert not any(
+        issue["rule_id"] in ENTITY_RULES
+        for issue in cast(list[dict[str, object]], actual["issues"])
+    )
+
+
 def test_extension_component_diagnostic_and_count_match_scalar_exactly() -> None:
     snapshot = _extension_snapshot("single")
     scalar = validate_owl2_dl_view(snapshot)
@@ -485,7 +573,12 @@ def test_include_and_equivalent_exclude_selection_are_byte_identical() -> None:
     assert included == excluded
     manifest = cast(dict[str, object], json.loads(included))
     assert manifest["axioms_checked"] == 1
-    assert manifest["ordered_rule_ids"] == [DATA_RANGE_ARITY_RULE]
+    assert cast(list[str], manifest["ordered_rule_ids"]).count(
+        MISSING_DECLARATION_RULE
+    ) == 4
+    assert cast(list[str], manifest["ordered_rule_ids"]).count(
+        DATA_RANGE_ARITY_RULE
+    ) == 1
 
 
 def test_top_data_property_selection_and_composite_deduplication_are_canonical() -> None:
@@ -617,6 +710,37 @@ def test_anonymous_forest_is_recomputed_across_selected_slices() -> None:
 
     assert forward == reverse == direct
     assert json.loads(forward) == _expected_manifest(snapshot)
+
+
+def test_entity_rules_are_recomputed_across_one_root_slices() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:shared))",
+            "Declaration(DataProperty(:shared))",
+            "Declaration(Class(:declared))",
+            "SubClassOf(:declared owl:Thing)",
+        ),
+        options=OPTIONS,
+    )
+    root_count = len(bytes(_buffers(snapshot)["root_kinds"]))
+    records = tuple(
+        _slice_record(
+            snapshot,
+            posting_mode=1,
+            postings=memoryview(struct.pack("<I", index)),
+        )
+        for index in range(1, root_count + 1)
+    )
+
+    direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
+    forward = native._encoded_profile_slices_manifest_v1(slices=records)
+    reverse = native._encoded_profile_slices_manifest_v1(
+        slices=tuple(reversed(records))
+    )
+
+    assert forward == reverse == direct
+    assert json.loads(forward) == _expected_manifest(snapshot)
+    assert json.loads(forward)["ordered_rule_ids"] == [PROPERTY_PUNNING_RULE]
 
 
 def test_extension_selection_and_composite_deduplication_are_canonical() -> None:

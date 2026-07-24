@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::mem::size_of;
 
@@ -20,7 +21,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::canonical::{self, AnonymousScopeMap, CanonicalBudget};
-use super::model::{ComponentKind, ComponentRef, ComponentValue, NodeId, RootKind, ValidatedModel};
+use super::model::{
+    ComponentKind, ComponentRef, ComponentValue, NodeId, RootKind, ScalarRef, ValidatedModel,
+};
 use super::symbols::RootHandler;
 use super::{u32_at, ByteSource, EncodedResult, EncodedValidationError};
 
@@ -35,6 +38,7 @@ const OBJECT_ONE_OF_TAG: u16 = 33;
 const OBJECT_HAS_VALUE_TAG: u16 = 36;
 const DATA_SOME_VALUES_FROM_TAG: u16 = 41;
 const DATA_ALL_VALUES_FROM_TAG: u16 = 42;
+const DECLARATION_TAG: u16 = 60;
 const SUB_DATA_PROPERTY_TAG: u16 = 90;
 const SAME_INDIVIDUAL_TAG: u16 = 110;
 const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
@@ -64,11 +68,81 @@ const ANONYMOUS_PARALLEL_EDGE_MESSAGE: &str =
 const ANONYMOUS_TREE_ROOT_RULE: &str = "OWL2DL_ANONYMOUS_TREE_ROOT";
 const ANONYMOUS_TREE_ROOT_MESSAGE: &str =
     "each anonymous-individual tree must contain a vertex connected by at most one assertion to named individuals";
+const PROPERTY_PUNNING_RULE: &str = "OWL2DL_PROPERTY_PUNNING";
+const CLASS_DATATYPE_PUNNING_RULE: &str = "OWL2DL_CLASS_DATATYPE_PUNNING";
+const RESERVED_VOCABULARY_RULE: &str = "OWL2DL_RESERVED_VOCABULARY";
+const BUILTIN_ENTITY_KIND_RULE: &str = "OWL2DL_BUILTIN_ENTITY_KIND";
+const MISSING_DECLARATION_RULE: &str = "OWL2DL_MISSING_DECLARATION";
 const EXTENSION_COMPONENT_RULE: &str = "OWL2DL_EXTENSION_COMPONENT";
 const EXTENSION_COMPONENT_MESSAGE: &str =
     "extension components such as SWRL are outside the OWL 2 DL reasoner scope";
 const PROFILE_MANIFEST_BASE_BOUND: usize = 256;
 const PROFILE_MANIFEST_ISSUE_BOUND: usize = 640;
+const RESERVED_PREFIXES: &[&[u8]] = &[
+    b"http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    b"http://www.w3.org/2000/01/rdf-schema#",
+    b"http://www.w3.org/2001/XMLSchema#",
+    b"http://www.w3.org/2002/07/owl#",
+];
+const BUILTIN_CLASSES: &[&[u8]] = &[
+    b"http://www.w3.org/2002/07/owl#Thing",
+    b"http://www.w3.org/2002/07/owl#Nothing",
+];
+const BUILTIN_OBJECT_PROPERTIES: &[&[u8]] = &[
+    b"http://www.w3.org/2002/07/owl#topObjectProperty",
+    b"http://www.w3.org/2002/07/owl#bottomObjectProperty",
+];
+const BUILTIN_DATA_PROPERTIES: &[&[u8]] = &[
+    b"http://www.w3.org/2002/07/owl#topDataProperty",
+    b"http://www.w3.org/2002/07/owl#bottomDataProperty",
+];
+const BUILTIN_ANNOTATION_PROPERTIES: &[&[u8]] = &[
+    b"http://www.w3.org/2000/01/rdf-schema#label",
+    b"http://www.w3.org/2000/01/rdf-schema#comment",
+    b"http://www.w3.org/2000/01/rdf-schema#seeAlso",
+    b"http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
+    b"http://www.w3.org/2002/07/owl#deprecated",
+    b"http://www.w3.org/2002/07/owl#versionInfo",
+    b"http://www.w3.org/2002/07/owl#priorVersion",
+    b"http://www.w3.org/2002/07/owl#backwardCompatibleWith",
+    b"http://www.w3.org/2002/07/owl#incompatibleWith",
+];
+const BUILTIN_DATATYPES: &[&[u8]] = &[
+    b"http://www.w3.org/2002/07/owl#real",
+    b"http://www.w3.org/2002/07/owl#rational",
+    b"http://www.w3.org/2001/XMLSchema#decimal",
+    b"http://www.w3.org/2001/XMLSchema#integer",
+    b"http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+    b"http://www.w3.org/2001/XMLSchema#positiveInteger",
+    b"http://www.w3.org/2001/XMLSchema#nonPositiveInteger",
+    b"http://www.w3.org/2001/XMLSchema#negativeInteger",
+    b"http://www.w3.org/2001/XMLSchema#long",
+    b"http://www.w3.org/2001/XMLSchema#int",
+    b"http://www.w3.org/2001/XMLSchema#short",
+    b"http://www.w3.org/2001/XMLSchema#byte",
+    b"http://www.w3.org/2001/XMLSchema#unsignedLong",
+    b"http://www.w3.org/2001/XMLSchema#unsignedInt",
+    b"http://www.w3.org/2001/XMLSchema#unsignedShort",
+    b"http://www.w3.org/2001/XMLSchema#unsignedByte",
+    b"http://www.w3.org/2001/XMLSchema#boolean",
+    b"http://www.w3.org/2001/XMLSchema#float",
+    b"http://www.w3.org/2001/XMLSchema#double",
+    b"http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral",
+    b"http://www.w3.org/2001/XMLSchema#string",
+    b"http://www.w3.org/2001/XMLSchema#normalizedString",
+    b"http://www.w3.org/2001/XMLSchema#token",
+    b"http://www.w3.org/2001/XMLSchema#language",
+    b"http://www.w3.org/2001/XMLSchema#Name",
+    b"http://www.w3.org/2001/XMLSchema#NCName",
+    b"http://www.w3.org/2001/XMLSchema#NMTOKEN",
+    b"http://www.w3.org/2001/XMLSchema#hexBinary",
+    b"http://www.w3.org/2001/XMLSchema#base64Binary",
+    b"http://www.w3.org/2001/XMLSchema#anyURI",
+    b"http://www.w3.org/2001/XMLSchema#dateTime",
+    b"http://www.w3.org/2001/XMLSchema#dateTimeStamp",
+    b"http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral",
+    b"http://www.w3.org/2000/01/rdf-schema#Literal",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProfilePhaseLimits {
@@ -78,6 +152,8 @@ pub struct ProfilePhaseLimits {
     pub max_issues: usize,
     pub max_anonymous_vertices: usize,
     pub max_anonymous_assertions: usize,
+    pub max_entity_uses: usize,
+    pub max_entity_declarations: usize,
     pub max_owned_bytes: usize,
     pub max_work: u64,
     pub max_manifest_bytes: usize,
@@ -94,6 +170,8 @@ impl Default for ProfilePhaseLimits {
             max_issues: 10_000_000,
             max_anonymous_vertices: 10_000_000,
             max_anonymous_assertions: 10_000_000,
+            max_entity_uses: 10_000_000,
+            max_entity_declarations: 10_000_000,
             max_owned_bytes: 512 * 1024 * 1024,
             max_work: 2_000_000_000,
             max_manifest_bytes: 512 * 1024 * 1024,
@@ -108,9 +186,9 @@ impl Default for ProfilePhaseLimits {
 pub struct ProfileIssue {
     pub rule_id: &'static str,
     pub severity: &'static str,
-    pub message: &'static str,
-    pub constructor: &'static str,
-    pub provenance_sha256: [u8; 32],
+    pub message: Cow<'static, str>,
+    pub constructor: Option<&'static str>,
+    pub provenance_sha256: Option<[u8; 32]>,
 }
 
 type AnonymousKey = [u8; 64];
@@ -121,6 +199,67 @@ struct AnonymousAssertion {
     provenance_sha256: [u8; 32],
     source: Option<AnonymousKey>,
     target: Option<AnonymousKey>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ProfileEntityKind {
+    AnnotationProperty,
+    Class,
+    DataProperty,
+    Datatype,
+    NamedIndividual,
+    ObjectProperty,
+}
+
+impl ProfileEntityKind {
+    fn from_scalar<B: ByteSource>(value: ScalarRef<B>) -> EncodedResult<Self> {
+        if value.kind() != ComponentKind::Enum {
+            return Err(EncodedValidationError::invariant(
+                "validated profile entity kind is not an enum",
+            ));
+        }
+        if value.bytes_equal(b"annotation_property") {
+            Ok(Self::AnnotationProperty)
+        } else if value.bytes_equal(b"class") {
+            Ok(Self::Class)
+        } else if value.bytes_equal(b"data_property") {
+            Ok(Self::DataProperty)
+        } else if value.bytes_equal(b"datatype") {
+            Ok(Self::Datatype)
+        } else if value.bytes_equal(b"named_individual") {
+            Ok(Self::NamedIndividual)
+        } else if value.bytes_equal(b"object_property") {
+            Ok(Self::ObjectProperty)
+        } else {
+            Err(EncodedValidationError::invariant(
+                "validated profile entity kind is no longer recognized",
+            ))
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AnnotationProperty => "annotation_property",
+            Self::Class => "class",
+            Self::DataProperty => "data_property",
+            Self::Datatype => "datatype",
+            Self::NamedIndividual => "named_individual",
+            Self::ObjectProperty => "object_property",
+        }
+    }
+
+    const fn is_property(self) -> bool {
+        matches!(
+            self,
+            Self::AnnotationProperty | Self::DataProperty | Self::ObjectProperty
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProfileEntityIdentity {
+    iri: Vec<u8>,
+    kind: ProfileEntityKind,
 }
 
 /// Transactional profile result. Violations never use the error channel.
@@ -136,6 +275,8 @@ pub struct ProfilePhase {
     extension_keys: Vec<Vec<u8>>,
     anonymous_vertices: Vec<AnonymousKey>,
     anonymous_assertions: Vec<AnonymousAssertion>,
+    entity_uses: Vec<ProfileEntityIdentity>,
+    entity_declarations: Vec<ProfileEntityIdentity>,
     manifest_limit: usize,
 }
 
@@ -143,11 +284,19 @@ impl ProfilePhase {
     /// Canonical private manifest used for exact scalar differential checks.
     pub fn canonical_manifest_json(&self) -> EncodedResult<Vec<u8>> {
         validate_phase(self)?;
-        let manifest_bound = self
-            .issues
-            .len()
-            .checked_mul(PROFILE_MANIFEST_ISSUE_BOUND)
-            .and_then(|issues| issues.checked_add(PROFILE_MANIFEST_BASE_BOUND))
+        let issue_bound = self.issues.iter().try_fold(0_usize, |total, issue| {
+            issue
+                .message
+                .len()
+                .checked_mul(6)
+                .and_then(|message| message.checked_add(PROFILE_MANIFEST_ISSUE_BOUND))
+                .and_then(|issue| total.checked_add(issue))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("profile manifest size bound overflowed")
+                })
+        })?;
+        let manifest_bound = issue_bound
+            .checked_add(PROFILE_MANIFEST_BASE_BOUND)
             .ok_or_else(|| {
                 EncodedValidationError::resource("profile manifest size bound overflowed")
             })?;
@@ -170,12 +319,16 @@ impl ProfilePhase {
             self.issues.len(),
             "profile issue manifest allocation failed",
         )?;
-        issues.extend(self.issues.iter().map(|issue| ProfileIssueManifest {
-            rule_id: issue.rule_id,
-            severity: issue.severity,
-            message: issue.message,
-            constructor: issue.constructor,
-            provenance_sha256: crate::model::hex(&issue.provenance_sha256),
+        issues.extend(self.issues.iter().map(|issue| {
+            ProfileIssueManifest {
+                rule_id: issue.rule_id,
+                severity: issue.severity,
+                message: issue.message.as_ref(),
+                constructor: issue.constructor,
+                provenance_sha256: issue
+                    .provenance_sha256
+                    .map(|value| crate::model::hex(&value)),
+            }
         }));
         let encoded = serde_json::to_vec(&ProfileManifest {
             schema_version: PROFILE_PHASE_SCHEMA_VERSION,
@@ -212,8 +365,8 @@ struct ProfileIssueManifest<'a> {
     rule_id: &'a str,
     severity: &'a str,
     message: &'a str,
-    constructor: &'a str,
-    provenance_sha256: String,
+    constructor: Option<&'a str>,
+    provenance_sha256: Option<String>,
 }
 
 /// Separates encoded operational failures from caller-owned cancellation.
@@ -323,6 +476,26 @@ impl PhaseBudget {
         if following > self.limits.max_anonymous_assertions {
             Err(EncodedValidationError::resource(
                 "profile anonymous assertion count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn claim_entity_use(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_entity_uses {
+            Err(EncodedValidationError::resource(
+                "profile entity use count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn claim_entity_declaration(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_entity_declarations {
+            Err(EncodedValidationError::resource(
+                "profile entity declaration count exceeds its limit",
             ))
         } else {
             Ok(())
@@ -552,6 +725,17 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     )
     .map_err(ProfilePhaseError::Encoded)?;
     anonymous_seen.resize(node_count, 0_u8);
+    budget
+        .claim_owned(node_count)
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut entity_seen = Vec::new();
+    reserve_exact(
+        &mut entity_seen,
+        node_count,
+        "profile entity-node mark allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    entity_seen.resize(node_count, 0_u8);
     let mut stack = Vec::new();
     reserve_exact(
         &mut stack,
@@ -583,6 +767,8 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     let mut issues = Vec::new();
     let mut anonymous_vertices = Vec::new();
     let mut anonymous_assertions = Vec::new();
+    let mut entity_uses = Vec::new();
+    let mut entity_declarations = Vec::new();
     let mut epoch = 0_u32;
 
     for root_index in 0..summary.root_count {
@@ -603,7 +789,50 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                 ))
             })?;
         match root.kind() {
-            RootKind::OntologyAnnotation => continue,
+            RootKind::OntologyAnnotation => {
+                epoch = epoch.checked_add(1).ok_or_else(|| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                        "profile traversal epoch overflowed",
+                    ))
+                })?;
+                enqueue_node(root.node(), &mut marks, epoch, &mut stack)
+                    .map_err(ProfilePhaseError::Encoded)?;
+                while let Some(identifier) = stack.pop() {
+                    poll(control, "profile-node")?;
+                    budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+                    let node = model.node(identifier).map_err(ProfilePhaseError::Encoded)?;
+                    if node.tag() == ENTITY_TAG {
+                        retain_entity_use(
+                            model,
+                            identifier,
+                            &mut entity_seen,
+                            &mut entity_uses,
+                            &mut budget,
+                        )
+                        .map_err(ProfilePhaseError::Encoded)?;
+                    }
+                    for field_index in node.fields() {
+                        budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+                        let component = required_component(
+                            model
+                                .field(field_index)
+                                .map_err(ProfilePhaseError::Encoded)?,
+                            "profile ontology annotation field",
+                        )
+                        .map_err(ProfilePhaseError::Encoded)?;
+                        enqueue_component(
+                            model,
+                            component,
+                            &mut marks,
+                            epoch,
+                            &mut stack,
+                            &mut budget,
+                        )
+                        .map_err(ProfilePhaseError::Encoded)?;
+                    }
+                }
+                continue;
+            }
             RootKind::Axiom => {}
             RootKind::Extension => {
                 budget
@@ -655,9 +884,9 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                 issues.push(ProfileIssue {
                     rule_id: EXTENSION_COMPONENT_RULE,
                     severity: "error",
-                    message: EXTENSION_COMPONENT_MESSAGE,
-                    constructor: "SWRLRule",
-                    provenance_sha256,
+                    message: Cow::Borrowed(EXTENSION_COMPONENT_MESSAGE),
+                    constructor: Some("SWRLRule"),
+                    provenance_sha256: Some(provenance_sha256),
                 });
                 continue;
             }
@@ -674,6 +903,12 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         let axiom_constructor = RootHandler::from_root(RootKind::Axiom, axiom_tag)
             .map_err(ProfilePhaseError::Encoded)?
             .as_str();
+        if axiom_tag == DECLARATION_TAG {
+            let identity = declaration_entity(model, root.node(), &mut budget)
+                .map_err(ProfilePhaseError::Encoded)?;
+            retain_entity_declaration(identity, &mut entity_declarations, &mut budget)
+                .map_err(ProfilePhaseError::Encoded)?;
+        }
         let anonymous_axiom_forbidden = matches!(
             axiom_tag,
             SAME_INDIVIDUAL_TAG
@@ -772,6 +1007,16 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                     *seen = 1;
                 }
             }
+            if node.tag() == ENTITY_TAG {
+                retain_entity_use(
+                    model,
+                    identifier,
+                    &mut entity_seen,
+                    &mut entity_uses,
+                    &mut budget,
+                )
+                .map_err(ProfilePhaseError::Encoded)?;
+            }
             let anonymous_expression =
                 if matches!(node.tag(), OBJECT_ONE_OF_TAG | OBJECT_HAS_VALUE_TAG) {
                     forbidden_anonymous_expression(model, identifier, &mut budget)
@@ -796,9 +1041,9 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                 issues.push(ProfileIssue {
                     rule_id: ANONYMOUS_CLASS_EXPRESSION_RULE,
                     severity: "error",
-                    message: ANONYMOUS_CLASS_EXPRESSION_MESSAGE,
-                    constructor,
-                    provenance_sha256,
+                    message: Cow::Borrowed(ANONYMOUS_CLASS_EXPRESSION_MESSAGE),
+                    constructor: Some(constructor),
+                    provenance_sha256: Some(provenance_sha256),
                 });
             }
             if node.tag() == ENTITY_TAG
@@ -852,13 +1097,13 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                     issues.push(ProfileIssue {
                         rule_id: DATA_RANGE_ARITY_RULE,
                         severity: "error",
-                        message: DATA_RANGE_ARITY_MESSAGE,
-                        constructor: if node.tag() == DATA_SOME_VALUES_FROM_TAG {
+                        message: Cow::Borrowed(DATA_RANGE_ARITY_MESSAGE),
+                        constructor: Some(if node.tag() == DATA_SOME_VALUES_FROM_TAG {
                             "DataSomeValuesFrom"
                         } else {
                             "DataAllValuesFrom"
-                        },
-                        provenance_sha256,
+                        }),
+                        provenance_sha256: Some(provenance_sha256),
                     });
                 }
             }
@@ -892,9 +1137,9 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
             issues.push(ProfileIssue {
                 rule_id: ANONYMOUS_AXIOM_POSITION_RULE,
                 severity: "error",
-                message: ANONYMOUS_AXIOM_POSITION_MESSAGE,
-                constructor: axiom_constructor,
-                provenance_sha256,
+                message: Cow::Borrowed(ANONYMOUS_AXIOM_POSITION_MESSAGE),
+                constructor: Some(axiom_constructor),
+                provenance_sha256: Some(provenance_sha256),
             });
         }
         if top_data_property_occurs && !top_data_property_allowed {
@@ -914,9 +1159,9 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
             issues.push(ProfileIssue {
                 rule_id: TOP_DATA_PROPERTY_RULE,
                 severity: "error",
-                message: TOP_DATA_PROPERTY_MESSAGE,
-                constructor: axiom_constructor,
-                provenance_sha256,
+                message: Cow::Borrowed(TOP_DATA_PROPERTY_MESSAGE),
+                constructor: Some(axiom_constructor),
+                provenance_sha256: Some(provenance_sha256),
             });
         }
     }
@@ -935,6 +1180,23 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     append_anonymous_graph_issues(
         &anonymous_vertices,
         &anonymous_assertions,
+        &mut issues,
+        &mut budget,
+        control,
+    )?;
+    budget
+        .claim_work(sort_work(entity_uses.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    entity_uses.sort();
+    entity_uses.dedup();
+    budget
+        .claim_work(sort_work(entity_declarations.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    entity_declarations.sort();
+    entity_declarations.dedup();
+    append_entity_issues(
+        &entity_uses,
+        &entity_declarations,
         &mut issues,
         &mut budget,
         control,
@@ -965,6 +1227,8 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         extension_keys,
         anonymous_vertices,
         anonymous_assertions,
+        entity_uses,
+        entity_declarations,
         manifest_limit: limits.max_manifest_bytes,
     };
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
@@ -1006,7 +1270,7 @@ pub fn merge_profile_phases_controlled<E>(
         let local = phase
             .issues
             .iter()
-            .filter(|issue| !is_anonymous_graph_rule(issue.rule_id))
+            .filter(|issue| !is_recomputed_profile_rule(issue.rule_id))
             .count();
         total.checked_add(local).ok_or_else(|| {
             EncodedValidationError::resource("merged profile issue count overflowed")
@@ -1040,6 +1304,20 @@ pub fn merge_profile_phases_controlled<E>(
                 )
             })
     })?;
+    let entity_use_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total.checked_add(phase.entity_uses.len()).ok_or_else(|| {
+            EncodedValidationError::resource("merged profile entity use count overflowed")
+        })
+    })?;
+    let entity_declaration_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total
+            .checked_add(phase.entity_declarations.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "merged profile entity declaration count overflowed",
+                )
+            })
+    })?;
     if issue_count > limits.max_issues {
         return Err(EncodedValidationError::resource(
             "merged profile issue count exceeds its limit",
@@ -1067,6 +1345,18 @@ pub fn merge_profile_phases_controlled<E>(
     if anonymous_assertion_count > limits.max_anonymous_assertions {
         return Err(EncodedValidationError::resource(
             "merged profile anonymous assertion count exceeds its limit",
+        )
+        .into());
+    }
+    if entity_use_count > limits.max_entity_uses {
+        return Err(EncodedValidationError::resource(
+            "merged profile entity use count exceeds its limit",
+        )
+        .into());
+    }
+    if entity_declaration_count > limits.max_entity_declarations {
+        return Err(EncodedValidationError::resource(
+            "merged profile entity declaration count exceeds its limit",
         )
         .into());
     }
@@ -1156,6 +1446,40 @@ pub fn merge_profile_phases_controlled<E>(
                 })?,
         )
         .map_err(ProfilePhaseError::Encoded)?;
+    let mut entity_uses = Vec::new();
+    reserve_exact(
+        &mut entity_uses,
+        entity_use_count,
+        "merged profile entity use allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            entity_use_count
+                .checked_mul(size_of::<ProfileEntityIdentity>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("merged profile entity use size overflowed")
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut entity_declarations = Vec::new();
+    reserve_exact(
+        &mut entity_declarations,
+        entity_declaration_count,
+        "merged profile entity declaration allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            entity_declaration_count
+                .checked_mul(size_of::<ProfileEntityIdentity>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "merged profile entity declaration size overflowed",
+                    )
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
 
     for mut phase in phases {
         validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
@@ -1169,12 +1493,14 @@ pub fn merge_profile_phases_controlled<E>(
             phase
                 .issues
                 .drain(..)
-                .filter(|issue| !is_anonymous_graph_rule(issue.rule_id)),
+                .filter(|issue| !is_recomputed_profile_rule(issue.rule_id)),
         );
         axiom_keys.append(&mut phase.axiom_keys);
         extension_keys.append(&mut phase.extension_keys);
         anonymous_vertices.append(&mut phase.anonymous_vertices);
         anonymous_assertions.append(&mut phase.anonymous_assertions);
+        entity_uses.append(&mut phase.entity_uses);
+        entity_declarations.append(&mut phase.entity_declarations);
         poll(control, "profile-merge-source")?;
     }
     budget
@@ -1190,6 +1516,23 @@ pub fn merge_profile_phases_controlled<E>(
     append_anonymous_graph_issues(
         &anonymous_vertices,
         &anonymous_assertions,
+        &mut issues,
+        &mut budget,
+        control,
+    )?;
+    budget
+        .claim_work(sort_work(entity_uses.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    entity_uses.sort();
+    entity_uses.dedup();
+    budget
+        .claim_work(sort_work(entity_declarations.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    entity_declarations.sort();
+    entity_declarations.dedup();
+    append_entity_issues(
+        &entity_uses,
+        &entity_declarations,
         &mut issues,
         &mut budget,
         control,
@@ -1220,11 +1563,317 @@ pub fn merge_profile_phases_controlled<E>(
         extension_keys,
         anonymous_vertices,
         anonymous_assertions,
+        entity_uses,
+        entity_declarations,
         manifest_limit: limits.max_manifest_bytes,
     };
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
     poll(control, "profile-merge-complete")?;
     Ok(phase)
+}
+
+fn declaration_entity<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<ProfileEntityIdentity> {
+    budget.claim_work(1)?;
+    let node = model.node(identifier)?;
+    if node.tag() != DECLARATION_TAG || node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "validated declaration lost its schema-1 shape",
+        ));
+    }
+    let entity = required_node(model, node.fields().start, "profile declared entity")?;
+    profile_entity_identity(model, entity, budget)
+}
+
+fn retain_entity_use<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    seen: &mut [u8],
+    uses: &mut Vec<ProfileEntityIdentity>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let index = usize::try_from(identifier.get() - 1).map_err(|_| {
+        EncodedValidationError::invariant("profile entity node index exceeds the platform width")
+    })?;
+    let retained = seen.get_mut(index).ok_or_else(|| {
+        EncodedValidationError::invariant("profile entity node identifier is out of range")
+    })?;
+    if *retained != 0 {
+        return Ok(());
+    }
+    let following = uses
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("profile entity use count overflowed"))?;
+    budget.claim_entity_use(following)?;
+    let identity = profile_entity_identity(model, identifier, budget)?;
+    reserve_profile_one(uses, budget, "profile entity use allocation failed")?;
+    uses.push(identity);
+    *retained = 1;
+    Ok(())
+}
+
+fn retain_entity_declaration(
+    identity: ProfileEntityIdentity,
+    declarations: &mut Vec<ProfileEntityIdentity>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let following = declarations.len().checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("profile entity declaration count overflowed")
+    })?;
+    budget.claim_entity_declaration(following)?;
+    reserve_profile_one(
+        declarations,
+        budget,
+        "profile entity declaration allocation failed",
+    )?;
+    declarations.push(identity);
+    Ok(())
+}
+
+fn profile_entity_identity<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<ProfileEntityIdentity> {
+    budget.claim_work(1)?;
+    let entity = model.node(identifier)?;
+    if entity.tag() != ENTITY_TAG || entity.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity lost its schema-1 shape",
+        ));
+    }
+    let fields = entity.fields();
+    let kind_component = required_component(model.field(fields.start)?, "profile entity kind")?;
+    let ComponentValue::Scalar(kind_value) = model.resolve(kind_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity kind is not scalar",
+        ));
+    };
+    budget.claim_work(kind_value.len())?;
+    let kind = ProfileEntityKind::from_scalar(kind_value)?;
+    let iri_field = fields
+        .start
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("profile entity field index overflowed"))?;
+    let iri_identifier = required_node(model, iri_field, "profile entity IRI")?;
+    let iri_node = model.node(iri_identifier)?;
+    if iri_node.tag() != IRI_TAG || iri_node.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity IRI lost its schema-1 shape",
+        ));
+    }
+    let iri_component = required_component(
+        model.field(iri_node.fields().start)?,
+        "profile entity IRI text",
+    )?;
+    let ComponentValue::Scalar(iri_value) = model.resolve(iri_component)? else {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity IRI text is not scalar",
+        ));
+    };
+    if iri_value.kind() != ComponentKind::Text {
+        return Err(EncodedValidationError::invariant(
+            "validated profile entity IRI is not text",
+        ));
+    }
+    let iri = clone_profile_scalar(iri_value, budget, "profile entity IRI allocation failed")?;
+    std::str::from_utf8(&iri).map_err(|_| {
+        EncodedValidationError::invariant("validated profile entity IRI is no longer UTF-8")
+    })?;
+    Ok(ProfileEntityIdentity { iri, kind })
+}
+
+fn clone_profile_scalar<B: ByteSource>(
+    value: ScalarRef<B>,
+    budget: &mut PhaseBudget,
+    message: &'static str,
+) -> EncodedResult<Vec<u8>> {
+    budget.claim_work(value.len())?;
+    budget.claim_owned(value.len())?;
+    let mut owned = Vec::new();
+    owned
+        .try_reserve_exact(value.len())
+        .map_err(|_| EncodedValidationError::resource(message))?;
+    for index in 0..value.len() {
+        owned.push(value.byte(index).ok_or_else(|| {
+            EncodedValidationError::invariant("validated profile scalar disappeared")
+        })?);
+    }
+    Ok(owned)
+}
+
+fn append_entity_issues<E>(
+    uses: &[ProfileEntityIdentity],
+    declarations: &[ProfileEntityIdentity],
+    issues: &mut Vec<ProfileIssue>,
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
+    if uses.is_empty() {
+        return Ok(());
+    }
+    poll(control, "profile-entity-preflight")?;
+    let mut start = 0_usize;
+    while start < uses.len() {
+        poll(control, "profile-entity-iri")?;
+        let mut end = start + 1;
+        while end < uses.len() && uses[end].iri == uses[start].iri {
+            budget.claim_work(1)?;
+            end += 1;
+        }
+        let group = &uses[start..end];
+        let iri_bytes = &group[0].iri;
+        let iri = std::str::from_utf8(iri_bytes).map_err(|_| {
+            EncodedValidationError::invariant("validated profile entity IRI is no longer UTF-8")
+        })?;
+        let property_kinds = group
+            .iter()
+            .filter(|identity| identity.kind.is_property())
+            .count();
+        budget.claim_work(group.len())?;
+        if property_kinds > 1 {
+            push_dynamic_profile_issue(
+                issues,
+                PROPERTY_PUNNING_RULE,
+                &["IRI is used for more than one property kind: ", iri],
+                budget,
+            )?;
+        }
+        budget.claim_work(group.len().saturating_mul(2))?;
+        if group
+            .iter()
+            .any(|identity| identity.kind == ProfileEntityKind::Class)
+            && group
+                .iter()
+                .any(|identity| identity.kind == ProfileEntityKind::Datatype)
+        {
+            push_dynamic_profile_issue(
+                issues,
+                CLASS_DATATYPE_PUNNING_RULE,
+                &["IRI is used as both class and datatype: ", iri],
+                budget,
+            )?;
+        }
+
+        let reserved = reserved_iri(iri_bytes, budget)?;
+        let builtin = if reserved {
+            builtin_entity_kind(iri_bytes, budget)?
+        } else {
+            None
+        };
+        if reserved {
+            if let Some(expected) = builtin {
+                budget.claim_work(group.len())?;
+                if group.iter().any(|identity| identity.kind != expected) {
+                    push_dynamic_profile_issue(
+                        issues,
+                        BUILTIN_ENTITY_KIND_RULE,
+                        &["built-in IRI is used with an illegal entity kind: ", iri],
+                        budget,
+                    )?;
+                }
+            } else {
+                push_dynamic_profile_issue(
+                    issues,
+                    RESERVED_VOCABULARY_RULE,
+                    &[
+                        "reserved vocabulary IRI is not an OWL 2 built-in entity: ",
+                        iri,
+                    ],
+                    budget,
+                )?;
+            }
+        }
+
+        if builtin.is_none() {
+            for identity in group {
+                budget.claim_work(search_work(declarations.len()))?;
+                if identity.kind != ProfileEntityKind::NamedIndividual
+                    && declarations.binary_search(identity).is_err()
+                {
+                    push_dynamic_profile_issue(
+                        issues,
+                        MISSING_DECLARATION_RULE,
+                        &["used ", identity.kind.as_str(), " is not declared: ", iri],
+                        budget,
+                    )?;
+                }
+            }
+        }
+        start = end;
+    }
+    poll(control, "profile-entity-complete")?;
+    Ok(())
+}
+
+fn push_dynamic_profile_issue(
+    issues: &mut Vec<ProfileIssue>,
+    rule_id: &'static str,
+    message_parts: &[&str],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let length = message_parts.iter().try_fold(0_usize, |total, part| {
+        total
+            .checked_add(part.len())
+            .ok_or_else(|| EncodedValidationError::resource("profile issue message overflowed"))
+    })?;
+    budget.claim_owned(length)?;
+    let mut message = String::new();
+    message
+        .try_reserve_exact(length)
+        .map_err(|_| EncodedValidationError::resource("profile issue message allocation failed"))?;
+    for part in message_parts {
+        message.push_str(part);
+    }
+    push_profile_issue(
+        issues,
+        ProfileIssue {
+            rule_id,
+            severity: "error",
+            message: Cow::Owned(message),
+            constructor: None,
+            provenance_sha256: None,
+        },
+        budget,
+    )
+}
+
+fn reserved_iri(iri: &[u8], budget: &mut PhaseBudget) -> EncodedResult<bool> {
+    for prefix in RESERVED_PREFIXES {
+        budget.claim_work(1)?;
+        if iri.starts_with(prefix) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn builtin_entity_kind(
+    iri: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<ProfileEntityKind>> {
+    for (kind, values) in [
+        (ProfileEntityKind::Class, BUILTIN_CLASSES),
+        (ProfileEntityKind::ObjectProperty, BUILTIN_OBJECT_PROPERTIES),
+        (ProfileEntityKind::DataProperty, BUILTIN_DATA_PROPERTIES),
+        (
+            ProfileEntityKind::AnnotationProperty,
+            BUILTIN_ANNOTATION_PROPERTIES,
+        ),
+        (ProfileEntityKind::Datatype, BUILTIN_DATATYPES),
+    ] {
+        for value in values {
+            budget.claim_work(1)?;
+            if iri == *value {
+                return Ok(Some(kind));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn anonymous_assertion_endpoints<B: ByteSource>(
@@ -1410,9 +2059,9 @@ fn append_anonymous_graph_issues<E>(
                         ProfileIssue {
                             rule_id: ANONYMOUS_GRAPH_CYCLE_RULE,
                             severity: "error",
-                            message: ANONYMOUS_GRAPH_CYCLE_MESSAGE,
-                            constructor: "ObjectPropertyAssertion",
-                            provenance_sha256: assertion.provenance_sha256,
+                            message: Cow::Borrowed(ANONYMOUS_GRAPH_CYCLE_MESSAGE),
+                            constructor: Some("ObjectPropertyAssertion"),
+                            provenance_sha256: Some(assertion.provenance_sha256),
                         },
                         budget,
                     )?;
@@ -1464,9 +2113,9 @@ fn append_anonymous_graph_issues<E>(
                 ProfileIssue {
                     rule_id: ANONYMOUS_PARALLEL_EDGE_RULE,
                     severity: "error",
-                    message: ANONYMOUS_PARALLEL_EDGE_MESSAGE,
-                    constructor: "ObjectPropertyAssertion",
-                    provenance_sha256: assertion.provenance_sha256,
+                    message: Cow::Borrowed(ANONYMOUS_PARALLEL_EDGE_MESSAGE),
+                    constructor: Some("ObjectPropertyAssertion"),
+                    provenance_sha256: Some(assertion.provenance_sha256),
                 },
                 budget,
             )?;
@@ -1523,9 +2172,9 @@ fn append_anonymous_graph_issues<E>(
                 ProfileIssue {
                     rule_id: ANONYMOUS_TREE_ROOT_RULE,
                     severity: "error",
-                    message: ANONYMOUS_TREE_ROOT_MESSAGE,
-                    constructor: "ObjectPropertyAssertion",
-                    provenance_sha256: assertion.provenance_sha256,
+                    message: Cow::Borrowed(ANONYMOUS_TREE_ROOT_MESSAGE),
+                    constructor: Some("ObjectPropertyAssertion"),
+                    provenance_sha256: Some(assertion.provenance_sha256),
                 },
                 budget,
             )?;
@@ -1575,10 +2224,17 @@ fn anonymous_root(
     Ok(root)
 }
 
-fn is_anonymous_graph_rule(rule_id: &str) -> bool {
+fn is_recomputed_profile_rule(rule_id: &str) -> bool {
     matches!(
         rule_id,
-        ANONYMOUS_GRAPH_CYCLE_RULE | ANONYMOUS_PARALLEL_EDGE_RULE | ANONYMOUS_TREE_ROOT_RULE
+        ANONYMOUS_GRAPH_CYCLE_RULE
+            | ANONYMOUS_PARALLEL_EDGE_RULE
+            | ANONYMOUS_TREE_ROOT_RULE
+            | PROPERTY_PUNNING_RULE
+            | CLASS_DATATYPE_PUNNING_RULE
+            | RESERVED_VOCABULARY_RULE
+            | BUILTIN_ENTITY_KIND_RULE
+            | MISSING_DECLARATION_RULE
     )
 }
 
@@ -1893,6 +2549,20 @@ fn validate_phase(phase: &ProfilePhase) -> EncodedResult<()> {
             "profile anonymous assertions are not canonical sorted unique",
         ));
     }
+    if phase.entity_uses.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(EncodedValidationError::invariant(
+            "profile entity uses are not canonical sorted unique",
+        ));
+    }
+    if phase
+        .entity_declarations
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile entity declarations are not canonical sorted unique",
+        ));
+    }
     Ok(())
 }
 
@@ -2164,10 +2834,13 @@ mod tests {
         assert_eq!(phase.extensions_checked, 0);
         assert_eq!(phase.issues.len(), 1);
         assert_eq!(phase.issues[0].rule_id, DATA_RANGE_ARITY_RULE);
-        assert_eq!(phase.issues[0].constructor, "DataSomeValuesFrom");
+        assert_eq!(phase.issues[0].constructor, Some("DataSomeValuesFrom"));
         assert_eq!(
-            crate::model::hex(&phase.issues[0].provenance_sha256),
-            "6a1bfbadd77d1f86ac453a99501c3f363d5b71f420e67ade72d564f590a16aa7"
+            phase.issues[0]
+                .provenance_sha256
+                .map(|value| crate::model::hex(&value))
+                .as_deref(),
+            Some("6a1bfbadd77d1f86ac453a99501c3f363d5b71f420e67ade72d564f590a16aa7")
         );
         let manifest: serde_json::Value = serde_json::from_slice(&phase.canonical_manifest_json()?)
             .map_err(|_| EncodedValidationError::invariant("profile manifest is not JSON"))?;
@@ -2185,18 +2858,22 @@ mod tests {
         assert_eq!(phase.axioms_checked, 1);
         assert_eq!(phase.issues.len(), 1);
         assert_eq!(phase.issues[0].rule_id, TOP_DATA_PROPERTY_RULE);
-        assert_eq!(phase.issues[0].constructor, "FunctionalDataProperty");
+        assert_eq!(phase.issues[0].constructor, Some("FunctionalDataProperty"));
         assert_eq!(
-            crate::model::hex(&phase.issues[0].provenance_sha256),
-            "721e62a719bbd8248bd2494e9eb90cc60408328ad18fb008d082902082eb6a4d"
+            phase.issues[0]
+                .provenance_sha256
+                .map(|value| crate::model::hex(&value))
+                .as_deref(),
+            Some("721e62a719bbd8248bd2494e9eb90cc60408328ad18fb008d082902082eb6a4d")
         );
 
         let allowed = allowed_top_data_property_columns();
         let allowed_phase =
             compile_profile_phase(&model(&allowed)?, &[], ProfilePhaseLimits::default())?;
-        assert!(allowed_phase.conforms);
+        assert!(!allowed_phase.conforms);
         assert_eq!(allowed_phase.axioms_checked, 1);
-        assert!(allowed_phase.issues.is_empty());
+        assert_eq!(allowed_phase.issues.len(), 1);
+        assert_eq!(allowed_phase.issues[0].rule_id, MISSING_DECLARATION_RULE);
         Ok(())
     }
 
@@ -2209,7 +2886,7 @@ mod tests {
         assert_eq!(phase.axioms_checked, 1);
         assert_eq!(phase.issues.len(), 1);
         assert_eq!(phase.issues[0].rule_id, ANONYMOUS_AXIOM_POSITION_RULE);
-        assert_eq!(phase.issues[0].constructor, "DifferentIndividuals");
+        assert_eq!(phase.issues[0].constructor, Some("DifferentIndividuals"));
 
         let scope_maps = vec![vec![canonical::AnonymousScopeReplacement {
             source: [0x11; 32],
@@ -2270,7 +2947,7 @@ mod tests {
             issues
                 .iter()
                 .filter(|issue| issue.rule_id == ANONYMOUS_GRAPH_CYCLE_RULE)
-                .map(|issue| issue.provenance_sha256[0])
+                .filter_map(|issue| issue.provenance_sha256.map(|value| value[0]))
                 .collect::<Vec<_>>(),
             vec![3, 5]
         );
@@ -2278,14 +2955,14 @@ mod tests {
             issues
                 .iter()
                 .find(|issue| issue.rule_id == ANONYMOUS_PARALLEL_EDGE_RULE)
-                .map(|issue| issue.provenance_sha256[0]),
+                .and_then(|issue| issue.provenance_sha256.map(|value| value[0])),
             Some(4)
         );
         assert_eq!(
             issues
                 .iter()
                 .find(|issue| issue.rule_id == ANONYMOUS_TREE_ROOT_RULE)
-                .map(|issue| issue.provenance_sha256[0]),
+                .and_then(|issue| issue.provenance_sha256.map(|value| value[0])),
             Some(6)
         );
 
@@ -2333,6 +3010,100 @@ mod tests {
     }
 
     #[test]
+    fn global_entity_rules_use_merged_kind_and_declaration_facts() -> EncodedResult<()> {
+        let identity = |iri: &str, kind| ProfileEntityIdentity {
+            iri: iri.as_bytes().to_vec(),
+            kind,
+        };
+        let mut uses = vec![
+            identity(
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#custom",
+                ProfileEntityKind::Class,
+            ),
+            identity(
+                "http://www.w3.org/2002/07/owl#real",
+                ProfileEntityKind::Class,
+            ),
+            identity("urn:annotation", ProfileEntityKind::AnnotationProperty),
+            identity("urn:dual", ProfileEntityKind::Class),
+            identity("urn:dual", ProfileEntityKind::Datatype),
+            identity("urn:missing", ProfileEntityKind::Class),
+            identity("urn:named", ProfileEntityKind::NamedIndividual),
+            identity("urn:shared", ProfileEntityKind::DataProperty),
+            identity("urn:shared", ProfileEntityKind::ObjectProperty),
+        ];
+        uses.sort();
+        let mut declarations = vec![
+            uses[0].clone(),
+            uses[1].clone(),
+            identity("urn:dual", ProfileEntityKind::Class),
+            identity("urn:dual", ProfileEntityKind::Datatype),
+            identity("urn:shared", ProfileEntityKind::DataProperty),
+            identity("urn:shared", ProfileEntityKind::ObjectProperty),
+        ];
+        declarations.sort();
+        let mut issues = Vec::new();
+        let mut budget = PhaseBudget::new(ProfilePhaseLimits::default());
+        let mut control = |_phase| Ok::<(), Infallible>(());
+
+        into_encoded(append_entity_issues(
+            &uses,
+            &declarations,
+            &mut issues,
+            &mut budget,
+            &mut control,
+        ))?;
+        issues.sort();
+
+        assert_eq!(issues.len(), 6);
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.rule_id == MISSING_DECLARATION_RULE)
+                .count(),
+            2
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| issue.rule_id)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                BUILTIN_ENTITY_KIND_RULE,
+                CLASS_DATATYPE_PUNNING_RULE,
+                MISSING_DECLARATION_RULE,
+                PROPERTY_PUNNING_RULE,
+                RESERVED_VOCABULARY_RULE,
+            ])
+        );
+        assert!(issues
+            .iter()
+            .all(|issue| issue.constructor.is_none() && issue.provenance_sha256.is_none()));
+
+        let mut cancelled_issues = Vec::new();
+        let mut cancelled_budget = PhaseBudget::new(ProfilePhaseLimits::default());
+        let cancelled = append_entity_issues(
+            &uses,
+            &declarations,
+            &mut cancelled_issues,
+            &mut cancelled_budget,
+            &mut |phase| {
+                if phase == "profile-entity-iri" {
+                    Err("injected entity cancellation")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(
+            cancelled,
+            Err(ProfilePhaseError::Control("injected entity cancellation"))
+        );
+        assert!(cancelled_issues.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn extension_issue_provenance_and_count_are_exact() -> EncodedResult<()> {
         let columns = extension_columns();
         let phase = compile_profile_phase(&model(&columns)?, &[], ProfilePhaseLimits::default())?;
@@ -2341,7 +3112,7 @@ mod tests {
         assert_eq!(phase.extensions_checked, 1);
         assert_eq!(phase.issues.len(), 1);
         assert_eq!(phase.issues[0].rule_id, EXTENSION_COMPONENT_RULE);
-        assert_eq!(phase.issues[0].constructor, "SWRLRule");
+        assert_eq!(phase.issues[0].constructor, Some("SWRLRule"));
 
         let manifest: serde_json::Value = serde_json::from_slice(&phase.canonical_manifest_json()?)
             .map_err(|_| EncodedValidationError::invariant("profile manifest is not JSON"))?;
@@ -2381,7 +3152,23 @@ mod tests {
         ))?;
         assert_eq!(included.axioms_checked, 1);
         assert_eq!(included.extensions_checked, 0);
-        assert_eq!(included.issues.len(), 1);
+        assert_eq!(included.issues.len(), 4);
+        assert_eq!(
+            included
+                .issues
+                .iter()
+                .filter(|issue| issue.rule_id == DATA_RANGE_ARITY_RULE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            included
+                .issues
+                .iter()
+                .filter(|issue| issue.rule_id == MISSING_DECLARATION_RULE)
+                .count(),
+            3
+        );
         let excluded = into_encoded(compile_profile_phase_selected_controlled(
             &model,
             &[],
@@ -2481,6 +3268,26 @@ mod tests {
             EncodedValidationError::invariant("profile manifest limit unexpectedly succeeded")
         })?;
         assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
+
+        for limited in [
+            ProfilePhaseLimits {
+                max_entity_uses: 0,
+                ..ProfilePhaseLimits::default()
+            },
+            ProfilePhaseLimits {
+                max_entity_declarations: 0,
+                ..ProfilePhaseLimits::default()
+            },
+        ] {
+            let error = compile_profile_phase(&model(&columns)?, &[], limited)
+                .err()
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "profile entity fact limit unexpectedly succeeded",
+                    )
+                })?;
+            assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
+        }
         Ok(())
     }
 }
