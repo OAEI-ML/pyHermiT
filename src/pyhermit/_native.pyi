@@ -90,6 +90,26 @@ def _debug_validate_encoded_slices_cancel_v1(
     cancel_at_checkpoint: int,
 ) -> None: ...
 def _debug_encoded_selection_panic_v1() -> None: ...
+def _encoded_profile_manifest_v1(
+    *,
+    root_kinds: memoryview,
+    root_ids: memoryview,
+    node_tags: memoryview,
+    node_field_offsets: memoryview,
+    field_kinds: memoryview,
+    field_values: memoryview,
+    field_lengths: memoryview,
+    item_kinds: memoryview,
+    item_values: memoryview,
+    item_lengths: memoryview,
+    scalar_bytes: memoryview,
+    cancellation: CancellationHandle | None = ...,
+) -> bytes: ...
+def _encoded_profile_slices_manifest_v1(
+    *,
+    slices: tuple[tuple[object, ...], ...],
+    cancellation: CancellationHandle | None = ...,
+) -> bytes: ...
 def _encoded_symbol_manifest_v1(
     *,
     root_kinds: memoryview,

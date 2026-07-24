@@ -566,6 +566,13 @@ fn encoded_validation_error(error: encoded::EncodedValidationError) -> NativeErr
     }
 }
 
+fn encoded_profile_error(error: encoded::profile::ProfilePhaseError<NativeError>) -> NativeError {
+    match error {
+        encoded::profile::ProfilePhaseError::Encoded(error) => encoded_validation_error(error),
+        encoded::profile::ProfilePhaseError::Control(error) => error,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn borrowed_encoded_columns<'a, 'py>(
     root_kinds: &'a Bound<'py, PyAny>,
@@ -2367,6 +2374,227 @@ fn debug_validate_encoded_slices_cancel_v1(
     })
 }
 
+fn compile_encoded_profile_slices_controlled(
+    slices: &Bound<'_, PyAny>,
+    poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
+) -> NativeResult<encoded::profile::ProfilePhase> {
+    if !slices.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded profile slice program is not an exact tuple",
+        ));
+    }
+    let slices = slices
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("encoded profile slice program changed type"))?;
+    let limits = encoded::profile::ProfilePhaseLimits::default();
+    if slices.is_empty() {
+        return Err(encoded_slice_invalid(
+            "encoded profile slice program requires at least one slice",
+        ));
+    }
+    if slices.len() > limits.max_slices {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "encoded profile slice program exceeds its slice limit",
+            ),
+        ));
+    }
+    poll("profile-program-preflight")?;
+    let mut phases = Vec::new();
+    phases.try_reserve_exact(slices.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded profile slice transaction allocation failed",
+        ))
+    })?;
+    let mut source_work = 0_u64;
+    let mut source_owned = 0_usize;
+    let mut context_bytes = 0_usize;
+    for slice_index in 0..slices.len() {
+        let record = tuple_item(slices, slice_index, "profile record")?;
+        if !record.is_exact_instance_of::<PyTuple>() {
+            return Err(encoded_slice_invalid(
+                "encoded profile slice record is not an exact tuple",
+            ));
+        }
+        let record = record
+            .cast::<PyTuple>()
+            .map_err(|_| encoded_slice_invalid("encoded profile slice record changed type"))?;
+        if record.len() != ENCODED_SLICE_RECORD_LEN {
+            return Err(encoded_slice_invalid(
+                "encoded profile slice record has the wrong field count",
+            ));
+        }
+        context_bytes = context_bytes
+            .checked_add(validate_encoded_slice_context(record)?)
+            .ok_or_else(|| encoded_slice_invalid("encoded profile slice context overflowed"))?;
+        if context_bytes > limits.max_owned_bytes {
+            return Err(encoded_validation_error(
+                encoded::EncodedValidationError::resource(
+                    "encoded profile slice contexts exceed their byte limit",
+                ),
+            ));
+        }
+
+        let posting_mode = tuple_item(record, 0, "profile posting mode")?;
+        if !posting_mode.is_exact_instance_of::<PyInt>() {
+            return Err(encoded_slice_invalid(
+                "encoded profile slice posting mode is not an exact integer",
+            ));
+        }
+        let posting_mode = posting_mode.extract::<u8>().map_err(|_| {
+            encoded_slice_invalid("encoded profile slice posting mode is outside u8")
+        })?;
+        let postings = tuple_item(record, 1, "profile postings")?;
+        let postings = borrowed_py_bytes(&postings, "profile root postings")?;
+        let remaining_before_scope = limits
+            .max_owned_bytes
+            .checked_sub(source_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded profile slice ownership exceeded its aggregate limit",
+                ))
+            })?;
+        let (scope_maps, scope_owned) = decode_encoded_scope_maps(record, remaining_before_scope)?;
+        let phase_owned_limit =
+            remaining_before_scope
+                .checked_sub(scope_owned)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded profile scope maps exceed the remaining owned-byte limit",
+                    ))
+                })?;
+        let phase_work_limit = limits.max_work.checked_sub(source_work).ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded profile slice work exceeded its aggregate limit",
+            ))
+        })?;
+
+        let root_kinds = tuple_item(record, 4, "profile root_kinds")?;
+        let root_ids = tuple_item(record, 5, "profile root_ids")?;
+        let node_tags = tuple_item(record, 6, "profile node_tags")?;
+        let node_field_offsets = tuple_item(record, 7, "profile node_field_offsets")?;
+        let field_kinds = tuple_item(record, 8, "profile field_kinds")?;
+        let field_values = tuple_item(record, 9, "profile field_values")?;
+        let field_lengths = tuple_item(record, 10, "profile field_lengths")?;
+        let item_kinds = tuple_item(record, 11, "profile item_kinds")?;
+        let item_values = tuple_item(record, 12, "profile item_values")?;
+        let item_lengths = tuple_item(record, 13, "profile item_lengths")?;
+        let scalar_bytes = tuple_item(record, 14, "profile scalar_bytes")?;
+        let columns = borrowed_encoded_columns(
+            &root_kinds,
+            &root_ids,
+            &node_tags,
+            &node_field_offsets,
+            &field_kinds,
+            &field_values,
+            &field_lengths,
+            &item_kinds,
+            &item_values,
+            &item_lengths,
+            &scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        let phase = encoded::profile::compile_profile_phase_selected_controlled(
+            &model,
+            &scope_maps,
+            encoded::profile::ProfilePhaseLimits {
+                max_owned_bytes: phase_owned_limit,
+                max_work: phase_work_limit,
+                ..limits
+            },
+            posting_mode,
+            postings,
+            poll,
+        )
+        .map_err(encoded_profile_error)?;
+        source_work = source_work.checked_add(phase.work).ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded profile slice work overflowed",
+            ))
+        })?;
+        source_owned = source_owned.checked_add(phase.owned_bytes).ok_or_else(|| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded profile slice ownership overflowed",
+            ))
+        })?;
+        phases.push(phase);
+    }
+    encoded::profile::merge_profile_phases_controlled(phases, limits, poll)
+        .map_err(encoded_profile_error)
+}
+
+#[pyfunction(name = "_encoded_profile_slices_manifest_v1")]
+#[pyo3(signature = (*, slices, cancellation=None))]
+fn encoded_profile_slices_manifest_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+    cancellation: Option<PyRef<'_, CancellationHandle>>,
+) -> PyResult<Vec<u8>> {
+    let cancellation = cancellation.map(|handle| handle.state());
+    contain_encoded_selection(py, || {
+        let mut poll = |_phase| match cancellation.as_ref() {
+            Some(state) => state.poll(),
+            None => Ok(()),
+        };
+        compile_encoded_profile_slices_controlled(slices, &mut poll)?
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
+#[pyfunction(name = "_encoded_profile_manifest_v1")]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes, cancellation=None))]
+#[allow(clippy::too_many_arguments)]
+fn encoded_profile_manifest_v1(
+    py: Python<'_>,
+    root_kinds: &Bound<'_, PyAny>,
+    root_ids: &Bound<'_, PyAny>,
+    node_tags: &Bound<'_, PyAny>,
+    node_field_offsets: &Bound<'_, PyAny>,
+    field_kinds: &Bound<'_, PyAny>,
+    field_values: &Bound<'_, PyAny>,
+    field_lengths: &Bound<'_, PyAny>,
+    item_kinds: &Bound<'_, PyAny>,
+    item_values: &Bound<'_, PyAny>,
+    item_lengths: &Bound<'_, PyAny>,
+    scalar_bytes: &Bound<'_, PyAny>,
+    cancellation: Option<PyRef<'_, CancellationHandle>>,
+) -> PyResult<Vec<u8>> {
+    let cancellation = cancellation.map(|handle| handle.state());
+    contain_encoded_selection(py, || {
+        let mut poll = |_phase| match cancellation.as_ref() {
+            Some(state) => state.poll(),
+            None => Ok(()),
+        };
+        poll("profile-program-preflight")?;
+        let columns = borrowed_encoded_columns(
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        )?;
+        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
+            .map_err(encoded_validation_error)?;
+        encoded::profile::compile_profile_phase_controlled(
+            &model,
+            &[],
+            encoded::profile::ProfilePhaseLimits::default(),
+            &mut poll,
+        )
+        .map_err(encoded_profile_error)?
+        .canonical_manifest_json()
+        .map_err(encoded_validation_error)
+    })
+}
+
 #[pyfunction(name = "_encoded_named_class_slices_manifest_v1")]
 #[pyo3(signature = (*, slices, logical_fingerprint=None))]
 fn encoded_named_class_slices_manifest_v1(
@@ -3879,6 +4107,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(debug_encoded_selection_panic_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(encoded_profile_manifest_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_profile_slices_manifest_v1,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(encoded_symbol_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(encoded_object_role_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(

@@ -17,6 +17,7 @@ pub mod model;
 pub mod named_classes;
 pub mod object_role_hierarchy;
 pub mod object_roles;
+pub mod profile;
 pub mod role_automata;
 pub mod role_characteristics;
 pub mod role_clauses;
