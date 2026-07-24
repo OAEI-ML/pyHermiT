@@ -783,7 +783,7 @@ fn decode_reference(value: &str) -> EncodedResult<char> {
     }
 }
 
-fn contains_forbidden_declaration(value: &str) -> bool {
+pub(super) fn contains_forbidden_declaration(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut index = 0_usize;
     while index + 2 <= bytes.len() {

@@ -15,16 +15,23 @@
 #![forbid(unsafe_code)]
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::convert::Infallible;
 use std::mem::size_of;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::datatypes::{DatatypeControl, DatatypeError, DatatypeErrorKind, RegexLimits, XsdRegex};
+
 use super::canonical::{self, AnonymousScopeMap, CanonicalBudget};
 use super::model::{
     CollectionRef, ComponentKind, ComponentRef, ComponentValue, NodeId, NodeRef, RootKind,
     ScalarRef, ValidatedModel,
+};
+use super::named_classes::{
+    self, NamedClassPhaseLimits, PhaseBudget as LiteralPhaseBudget, ProfileLiteralInvalid,
+    ProfileLiteralSemantics, ProfileLiteralValidation,
 };
 use super::symbols::RootHandler;
 use super::{u32_at, ByteSource, EncodedResult, EncodedValidationError};
@@ -39,6 +46,7 @@ const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
 const LITERAL_TAG: u16 = 4;
 const OBJECT_INVERSE_OF_TAG: u16 = 10;
 const OBJECT_PROPERTY_CHAIN_TAG: u16 = 11;
+const FACET_RESTRICTION_TAG: u16 = 20;
 const DATA_INTERSECTION_OF_TAG: u16 = 21;
 const DATA_UNION_OF_TAG: u16 = 22;
 const DATA_COMPLEMENT_OF_TAG: u16 = 23;
@@ -114,6 +122,16 @@ const RECURSIVE_DATATYPE_DEFINITION_MESSAGE: &str =
 const CUSTOM_DATATYPE_LITERAL_RULE: &str = "CUSTOM_DATATYPE_LITERAL";
 const CUSTOM_DATATYPE_LITERAL_MESSAGE_PREFIX: &str =
     "a datatype defined in the ontology has no lexical space and cannot be used on a literal: ";
+const INVALID_LITERAL_RULE: &str = "INVALID_LITERAL";
+const INVALID_LITERAL_MESSAGE: &str = "literal lexical form is outside the datatype lexical space";
+const INVALID_XML_LITERAL_MESSAGE: &str = "rdf:XMLLiteral is not a well-formed XML fragment";
+const FORBIDDEN_XML_LITERAL_MESSAGE: &str = "rdf:XMLLiteral forbids DTD and entity declarations";
+const ILLEGAL_DATATYPE_FACET_RULE: &str = "ILLEGAL_DATATYPE_FACET";
+const ILLEGAL_DATATYPE_FACET_MESSAGE: &str = "facet is not legal for the restricted OWL 2 datatype";
+const INVALID_FACET_VALUE_RULE: &str = "INVALID_FACET_VALUE";
+const INVALID_FACET_VALUE_MESSAGE: &str = "facet literal has the wrong datatype or value domain";
+const INVALID_LANGUAGE_RANGE_MESSAGE: &str =
+    "rdf:langRange requires an RFC 4647 basic language range";
 const RIA_INVERSE_RECURSION_RULE: &str = "RIA_INVERSE_RECURSION";
 const RIA_INVERSE_RECURSION_MESSAGE: &str =
     "a complex subproperty chain contains the inverse of its super role";
@@ -198,6 +216,21 @@ const BUILTIN_DATATYPES: &[&[u8]] = &[
 ];
 const TOP_OBJECT_PROPERTY_IRI: &[u8] = b"http://www.w3.org/2002/07/owl#topObjectProperty";
 const BOTTOM_OBJECT_PROPERTY_IRI: &[u8] = b"http://www.w3.org/2002/07/owl#bottomObjectProperty";
+const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema#";
+const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
+const RDF_XML_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral";
+const RDF_LANG_RANGE_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langRange";
+const RDFS_LITERAL_IRI: &str = "http://www.w3.org/2000/01/rdf-schema#Literal";
+const OWL_REAL_IRI: &str = "http://www.w3.org/2002/07/owl#real";
+const OWL_RATIONAL_IRI: &str = "http://www.w3.org/2002/07/owl#rational";
+const XSD_MIN_INCLUSIVE_IRI: &str = "http://www.w3.org/2001/XMLSchema#minInclusive";
+const XSD_MIN_EXCLUSIVE_IRI: &str = "http://www.w3.org/2001/XMLSchema#minExclusive";
+const XSD_MAX_INCLUSIVE_IRI: &str = "http://www.w3.org/2001/XMLSchema#maxInclusive";
+const XSD_MAX_EXCLUSIVE_IRI: &str = "http://www.w3.org/2001/XMLSchema#maxExclusive";
+const XSD_LENGTH_IRI: &str = "http://www.w3.org/2001/XMLSchema#length";
+const XSD_MIN_LENGTH_IRI: &str = "http://www.w3.org/2001/XMLSchema#minLength";
+const XSD_MAX_LENGTH_IRI: &str = "http://www.w3.org/2001/XMLSchema#maxLength";
+const XSD_PATTERN_IRI: &str = "http://www.w3.org/2001/XMLSchema#pattern";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProfilePhaseLimits {
@@ -211,6 +244,7 @@ pub struct ProfilePhaseLimits {
     pub max_entity_declarations: usize,
     pub max_datatype_definitions: usize,
     pub max_datatype_references: usize,
+    pub max_datatype_failures: usize,
     pub max_literal_datatypes: usize,
     pub max_role_inclusions: usize,
     pub max_complex_role_inclusions: usize,
@@ -237,6 +271,7 @@ impl Default for ProfilePhaseLimits {
             max_entity_declarations: 10_000_000,
             max_datatype_definitions: 10_000_000,
             max_datatype_references: 100_000_000,
+            max_datatype_failures: 10_000_000,
             max_literal_datatypes: 10_000_000,
             max_role_inclusions: 100_000_000,
             max_complex_role_inclusions: 1_000_000,
@@ -338,6 +373,31 @@ struct ProfileDatatypeDefinition {
     statement_order_key: Vec<u8>,
     datatype_iri: Vec<u8>,
     references: Vec<Vec<u8>>,
+    failure: Option<ProfileDatatypeFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ProfileDatatypeFailure {
+    InvalidLiteral(ProfileLiteralInvalid),
+    UnsupportedRange,
+    UnsupportedLiteral,
+    IllegalFacet,
+    InvalidFacetValue,
+    InvalidLanguageRange,
+    Suppressed,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProfileDatatypeRangeFailure {
+    canonical_key: Vec<u8>,
+    failure: ProfileDatatypeFailure,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProfileLiteralFact {
+    canonical_key: Vec<u8>,
+    datatype_iri: Vec<u8>,
+    failure: Option<ProfileDatatypeFailure>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -398,7 +458,8 @@ pub struct ProfilePhase {
     entity_uses: Vec<ProfileEntityIdentity>,
     entity_declarations: Vec<ProfileEntityIdentity>,
     datatype_definitions: Vec<ProfileDatatypeDefinition>,
-    literal_datatypes: Vec<Vec<u8>>,
+    datatype_range_failures: Vec<ProfileDatatypeRangeFailure>,
+    literals: Vec<ProfileLiteralFact>,
     role_inclusions: Vec<ProfileRoleInclusion>,
     complex_role_inclusions: Vec<ProfileComplexRoleInclusion>,
     non_simple_role_seeds: Vec<ProfileObjectRole>,
@@ -657,6 +718,16 @@ impl PhaseBudget {
         }
     }
 
+    fn claim_datatype_failure(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_datatype_failures {
+            Err(EncodedValidationError::resource(
+                "profile datatype failure count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     fn claim_literal_datatype(&self, following: usize) -> EncodedResult<()> {
         if following > self.limits.max_literal_datatypes {
             Err(EncodedValidationError::resource(
@@ -897,6 +968,11 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     poll(control, "profile-preflight")?;
     let summary = model.summary();
     let mut budget = PhaseBudget::new(limits);
+    let mut literal_budget = LiteralPhaseBudget::new(NamedClassPhaseLimits {
+        max_work: limits.max_work,
+        max_owned_bytes: limits.max_owned_bytes,
+        ..NamedClassPhaseLimits::default()
+    });
     canonical::validate_scope_maps(scope_maps, &mut budget).map_err(ProfilePhaseError::Encoded)?;
     budget
         .claim_work(selection.validation_work())
@@ -975,7 +1051,8 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     let mut entity_uses = Vec::new();
     let mut entity_declarations = Vec::new();
     let mut datatype_definitions = Vec::new();
-    let mut literal_datatypes = Vec::new();
+    let mut datatype_range_failures = Vec::new();
+    let mut literals = Vec::new();
     let mut role_inclusions = Vec::new();
     let mut complex_role_inclusions = Vec::new();
     let mut non_simple_role_seeds = Vec::new();
@@ -1023,13 +1100,26 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                         .map_err(ProfilePhaseError::Encoded)?;
                     }
                     if node.tag() == LITERAL_TAG {
-                        retain_profile_literal_datatype(
+                        retain_profile_literal(
                             model,
                             identifier,
-                            &mut literal_datatypes,
+                            scope_maps,
+                            &mut literals,
                             &mut budget,
-                        )
-                        .map_err(ProfilePhaseError::Encoded)?;
+                            &mut literal_budget,
+                            control,
+                        )?;
+                    }
+                    if is_profile_complex_data_range(node.tag()) {
+                        retain_profile_datatype_range_failure(
+                            model,
+                            identifier,
+                            scope_maps,
+                            &mut datatype_range_failures,
+                            &mut budget,
+                            &mut literal_budget,
+                            control,
+                        )?;
                     }
                     for field_index in node.fields() {
                         budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
@@ -1153,6 +1243,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                 &key,
                 &mut datatype_definitions,
                 &mut budget,
+                &mut literal_budget,
                 control,
             )?;
         }
@@ -1268,13 +1359,26 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                 .map_err(ProfilePhaseError::Encoded)?;
             }
             if node.tag() == LITERAL_TAG {
-                retain_profile_literal_datatype(
+                retain_profile_literal(
                     model,
                     identifier,
-                    &mut literal_datatypes,
+                    scope_maps,
+                    &mut literals,
                     &mut budget,
-                )
-                .map_err(ProfilePhaseError::Encoded)?;
+                    &mut literal_budget,
+                    control,
+                )?;
+            }
+            if is_profile_complex_data_range(node.tag()) {
+                retain_profile_datatype_range_failure(
+                    model,
+                    identifier,
+                    scope_maps,
+                    &mut datatype_range_failures,
+                    &mut budget,
+                    &mut literal_budget,
+                    control,
+                )?;
             }
             let anonymous_expression =
                 if matches!(node.tag(), OBJECT_ONE_OF_TAG | OBJECT_HAS_VALUE_TAG) {
@@ -1466,14 +1570,20 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     datatype_definitions.sort();
     datatype_definitions.dedup();
     budget
-        .claim_work(sort_work(literal_datatypes.len()))
+        .claim_work(sort_work(datatype_range_failures.len()))
         .map_err(ProfilePhaseError::Encoded)?;
-    literal_datatypes.sort();
-    literal_datatypes.dedup();
+    datatype_range_failures.sort();
+    datatype_range_failures.dedup();
+    budget
+        .claim_work(sort_work(literals.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    literals.sort();
+    literals.dedup();
     append_datatype_issues(
         &entity_uses,
         &datatype_definitions,
-        &literal_datatypes,
+        &datatype_range_failures,
+        &literals,
         &mut issues,
         &mut budget,
         control,
@@ -1539,7 +1649,8 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         entity_uses,
         entity_declarations,
         datatype_definitions,
-        literal_datatypes,
+        datatype_range_failures,
+        literals,
         role_inclusions,
         complex_role_inclusions,
         non_simple_role_seeds,
@@ -1656,12 +1767,17 @@ pub fn merge_profile_phases_controlled<E>(
                     })
             })
     })?;
-    let literal_datatype_count = phases.iter().try_fold(0_usize, |total, phase| {
+    let datatype_failure_count = phases.iter().try_fold(0_usize, |total, phase| {
         total
-            .checked_add(phase.literal_datatypes.len())
+            .checked_add(phase.datatype_range_failures.len())
             .ok_or_else(|| {
-                EncodedValidationError::resource("merged profile literal datatype count overflowed")
+                EncodedValidationError::resource("merged profile datatype failure count overflowed")
             })
+    })?;
+    let literal_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total.checked_add(phase.literals.len()).ok_or_else(|| {
+            EncodedValidationError::resource("merged profile literal count overflowed")
+        })
     })?;
     let role_inclusion_count = phases.iter().try_fold(0_usize, |total, phase| {
         total
@@ -1751,9 +1867,15 @@ pub fn merge_profile_phases_controlled<E>(
         )
         .into());
     }
-    if literal_datatype_count > limits.max_literal_datatypes {
+    if datatype_failure_count > limits.max_datatype_failures {
         return Err(EncodedValidationError::resource(
-            "merged profile literal datatype count exceeds its limit",
+            "merged profile datatype failure count exceeds its limit",
+        )
+        .into());
+    }
+    if literal_count > limits.max_literal_datatypes {
+        return Err(EncodedValidationError::resource(
+            "merged profile literal count exceeds its limit",
         )
         .into());
     }
@@ -1919,21 +2041,37 @@ pub fn merge_profile_phases_controlled<E>(
                 })?,
         )
         .map_err(ProfilePhaseError::Encoded)?;
-    let mut literal_datatypes = Vec::new();
+    let mut datatype_range_failures = Vec::new();
     reserve_exact(
-        &mut literal_datatypes,
-        literal_datatype_count,
-        "merged profile literal datatype allocation failed",
+        &mut datatype_range_failures,
+        datatype_failure_count,
+        "merged profile datatype failure allocation failed",
     )
     .map_err(ProfilePhaseError::Encoded)?;
     budget
         .claim_owned(
-            literal_datatype_count
-                .checked_mul(size_of::<Vec<u8>>())
+            datatype_failure_count
+                .checked_mul(size_of::<ProfileDatatypeRangeFailure>())
                 .ok_or_else(|| {
                     EncodedValidationError::resource(
-                        "merged profile literal datatype size overflowed",
+                        "merged profile datatype failure size overflowed",
                     )
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut literals = Vec::new();
+    reserve_exact(
+        &mut literals,
+        literal_count,
+        "merged profile literal allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            literal_count
+                .checked_mul(size_of::<ProfileLiteralFact>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("merged profile literal size overflowed")
                 })?,
         )
         .map_err(ProfilePhaseError::Encoded)?;
@@ -2031,7 +2169,8 @@ pub fn merge_profile_phases_controlled<E>(
         entity_uses.append(&mut phase.entity_uses);
         entity_declarations.append(&mut phase.entity_declarations);
         datatype_definitions.append(&mut phase.datatype_definitions);
-        literal_datatypes.append(&mut phase.literal_datatypes);
+        datatype_range_failures.append(&mut phase.datatype_range_failures);
+        literals.append(&mut phase.literals);
         role_inclusions.append(&mut phase.role_inclusions);
         complex_role_inclusions.append(&mut phase.complex_role_inclusions);
         non_simple_role_seeds.append(&mut phase.non_simple_role_seeds);
@@ -2078,14 +2217,20 @@ pub fn merge_profile_phases_controlled<E>(
     datatype_definitions.sort();
     datatype_definitions.dedup();
     budget
-        .claim_work(sort_work(literal_datatypes.len()))
+        .claim_work(sort_work(datatype_range_failures.len()))
         .map_err(ProfilePhaseError::Encoded)?;
-    literal_datatypes.sort();
-    literal_datatypes.dedup();
+    datatype_range_failures.sort();
+    datatype_range_failures.dedup();
+    budget
+        .claim_work(sort_work(literals.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    literals.sort();
+    literals.dedup();
     append_datatype_issues(
         &entity_uses,
         &datatype_definitions,
-        &literal_datatypes,
+        &datatype_range_failures,
+        &literals,
         &mut issues,
         &mut budget,
         control,
@@ -2151,7 +2296,8 @@ pub fn merge_profile_phases_controlled<E>(
         entity_uses,
         entity_declarations,
         datatype_definitions,
-        literal_datatypes,
+        datatype_range_failures,
+        literals,
         role_inclusions,
         complex_role_inclusions,
         non_simple_role_seeds,
@@ -2225,19 +2371,62 @@ fn retain_entity_declaration(
     Ok(())
 }
 
-fn retain_profile_literal_datatype<B: ByteSource>(
+fn retain_profile_literal<B: ByteSource, E>(
     model: &ValidatedModel<B>,
     identifier: NodeId,
-    target: &mut Vec<Vec<u8>>,
+    scope_maps: &[AnonymousScopeMap],
+    target: &mut Vec<ProfileLiteralFact>,
     budget: &mut PhaseBudget,
-) -> EncodedResult<()> {
+    literal_budget: &mut LiteralPhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
+    poll(control, "profile-literal")?;
+    let (datatype_iri, validation) =
+        classify_profile_literal(model, identifier, budget, literal_budget, control)?;
+    let canonical_key = canonical::canonical_node_key(model, identifier, scope_maps, budget)
+        .map_err(ProfilePhaseError::Encoded)?;
+    let failure = match validation {
+        ProfileLiteralValidation::Valid(_) => None,
+        ProfileLiteralValidation::Invalid(invalid) => {
+            Some(ProfileDatatypeFailure::InvalidLiteral(invalid))
+        }
+        ProfileLiteralValidation::Unsupported => Some(ProfileDatatypeFailure::UnsupportedLiteral),
+    };
+    let following = target.len().checked_add(1).ok_or_else(|| {
+        ProfilePhaseError::Encoded(EncodedValidationError::resource(
+            "profile literal count overflowed",
+        ))
+    })?;
+    budget
+        .claim_literal_datatype(following)
+        .map_err(ProfilePhaseError::Encoded)?;
+    reserve_profile_one(target, budget, "profile literal allocation failed")
+        .map_err(ProfilePhaseError::Encoded)?;
+    target.push(ProfileLiteralFact {
+        canonical_key,
+        datatype_iri,
+        failure,
+    });
+    Ok(())
+}
+
+fn classify_profile_literal<B: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+    literal_budget: &mut LiteralPhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(Vec<u8>, ProfileLiteralValidation), E> {
     budget.claim_work(1)?;
     let literal = model.node(identifier)?;
     if literal.tag() != LITERAL_TAG || literal.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
             "validated profile literal lost its schema-1 shape",
-        ));
+        )
+        .into());
     }
+    let fields = literal.fields();
+    let lexical = profile_text_field(model, fields.start, "profile literal lexical form", budget)?;
     let datatype_field = literal
         .fields()
         .start
@@ -2248,15 +2437,54 @@ fn retain_profile_literal_datatype<B: ByteSource>(
     if identity.kind != ProfileEntityKind::Datatype {
         return Err(EncodedValidationError::invariant(
             "validated profile literal datatype is not a datatype entity",
-        ));
+        )
+        .into());
     }
-    let following = target.len().checked_add(1).ok_or_else(|| {
-        EncodedValidationError::resource("profile literal datatype count overflowed")
+    let language_field = fields
+        .start
+        .checked_add(2)
+        .ok_or_else(|| EncodedValidationError::resource("profile literal field overflowed"))?;
+    let language_component =
+        required_component(model.field(language_field)?, "profile literal language")?;
+    let language = match model.resolve(language_component)? {
+        ComponentValue::None => None,
+        ComponentValue::Scalar(value) => Some(profile_text_scalar(
+            value,
+            "profile literal language",
+            budget,
+        )?),
+        ComponentValue::Node(_) | ComponentValue::Collection(_) => {
+            return Err(EncodedValidationError::invariant(
+                "validated profile literal language is not optional text",
+            )
+            .into());
+        }
+    };
+    let datatype_iri = std::str::from_utf8(&identity.iri).map_err(|_| {
+        EncodedValidationError::invariant("validated profile datatype IRI is not UTF-8")
     })?;
-    budget.claim_literal_datatype(following)?;
-    reserve_profile_one(target, budget, "profile literal datatype allocation failed")?;
-    target.push(identity.iri);
-    Ok(())
+    poll(control, "profile-literal-compile")?;
+    let before = literal_budget.usage();
+    let validation = named_classes::profile_literal_validation(
+        &lexical,
+        datatype_iri,
+        language.as_deref(),
+        literal_budget,
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    let after = literal_budget.usage();
+    budget
+        .claim_work_u64(after.0.checked_sub(before.0).ok_or_else(|| {
+            EncodedValidationError::invariant("profile literal work counter moved backwards")
+        })?)
+        .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(after.1.checked_sub(before.1).ok_or_else(|| {
+            EncodedValidationError::invariant("profile literal ownership counter moved backwards")
+        })?)
+        .map_err(ProfilePhaseError::Encoded)?;
+    poll(control, "profile-literal-compiled")?;
+    Ok((identity.iri, validation))
 }
 
 fn retain_profile_datatype_definition<B: ByteSource, E>(
@@ -2265,6 +2493,7 @@ fn retain_profile_datatype_definition<B: ByteSource, E>(
     statement_order_key: &[u8],
     target: &mut Vec<ProfileDatatypeDefinition>,
     budget: &mut PhaseBudget,
+    literal_budget: &mut LiteralPhaseBudget,
     control: &mut impl FnMut(&'static str) -> Result<(), E>,
 ) -> ControlledResult<(), E> {
     budget.claim_work(1)?;
@@ -2298,6 +2527,7 @@ fn retain_profile_datatype_definition<B: ByteSource, E>(
         "profile datatype definition data range",
     )?;
     let references = collect_profile_datatype_references(model, data_range, budget, control)?;
+    let failure = profile_data_range_failure(model, data_range, budget, literal_budget, control)?;
     let following = target.len().checked_add(1).ok_or_else(|| {
         ProfilePhaseError::Encoded(EncodedValidationError::resource(
             "profile datatype definition count overflowed",
@@ -2322,6 +2552,7 @@ fn retain_profile_datatype_definition<B: ByteSource, E>(
         statement_order_key,
         datatype_iri: identity.iri,
         references,
+        failure,
     });
     Ok(())
 }
@@ -2481,6 +2712,540 @@ fn collect_profile_datatype_references<B: ByteSource, E>(
     Ok(references)
 }
 
+const fn is_profile_complex_data_range(tag: u16) -> bool {
+    matches!(
+        tag,
+        DATA_INTERSECTION_OF_TAG
+            | DATA_UNION_OF_TAG
+            | DATA_COMPLEMENT_OF_TAG
+            | DATA_ONE_OF_TAG
+            | DATATYPE_RESTRICTION_TAG
+    )
+}
+
+fn retain_profile_datatype_range_failure<B: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    target: &mut Vec<ProfileDatatypeRangeFailure>,
+    budget: &mut PhaseBudget,
+    literal_budget: &mut LiteralPhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
+    let Some(failure) =
+        profile_data_range_failure(model, identifier, budget, literal_budget, control)?
+    else {
+        return Ok(());
+    };
+    let following = target.len().checked_add(1).ok_or_else(|| {
+        ProfilePhaseError::Encoded(EncodedValidationError::resource(
+            "profile datatype failure count overflowed",
+        ))
+    })?;
+    budget
+        .claim_datatype_failure(following)
+        .map_err(ProfilePhaseError::Encoded)?;
+    let canonical_key = canonical::canonical_node_key(model, identifier, scope_maps, budget)
+        .map_err(ProfilePhaseError::Encoded)?;
+    reserve_profile_one(target, budget, "profile datatype failure allocation failed")
+        .map_err(ProfilePhaseError::Encoded)?;
+    target.push(ProfileDatatypeRangeFailure {
+        canonical_key,
+        failure,
+    });
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ProfileFacetValue {
+    iri: String,
+    semantics: ProfileLiteralSemantics,
+}
+
+struct ProfilePatternControl<'a, E, F> {
+    control: RefCell<&'a mut F>,
+    error: RefCell<Option<E>>,
+}
+
+impl<'a, E, F> ProfilePatternControl<'a, E, F> {
+    const fn new(control: &'a mut F) -> Self {
+        Self {
+            control: RefCell::new(control),
+            error: RefCell::new(None),
+        }
+    }
+
+    fn into_error(self) -> Option<E> {
+        self.error.into_inner()
+    }
+}
+
+impl<E, F> DatatypeControl for ProfilePatternControl<'_, E, F>
+where
+    F: FnMut(&'static str) -> Result<(), E>,
+{
+    fn poll(&self) -> Result<(), DatatypeError> {
+        if self.error.borrow().is_some() {
+            return Err(DatatypeError::cancelled(
+                "profile datatype pattern validation was interrupted",
+            ));
+        }
+        let result = {
+            let mut control = self.control.borrow_mut();
+            (**control)("profile-datatype-pattern-work")
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                *self.error.borrow_mut() = Some(error);
+                Err(DatatypeError::cancelled(
+                    "profile datatype pattern validation was interrupted",
+                ))
+            }
+        }
+    }
+}
+
+fn profile_data_range_failure<B: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+    literal_budget: &mut LiteralPhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<Option<ProfileDatatypeFailure>, E> {
+    poll(control, "profile-datatype-range")?;
+    budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+    let node = model.node(identifier)?;
+    match node.tag() {
+        ENTITY_TAG => {
+            let identity = profile_entity_identity(model, identifier, budget)?;
+            if identity.kind != ProfileEntityKind::Datatype {
+                return Err(EncodedValidationError::invariant(
+                    "validated data range entity is not a datatype",
+                )
+                .into());
+            }
+            Ok(None)
+        }
+        DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG => {
+            if node.field_count() != 1 {
+                return Err(EncodedValidationError::invariant(
+                    "validated datatype Boolean lost its schema-1 shape",
+                )
+                .into());
+            }
+            let operands = profile_node_collection(
+                model,
+                node.fields().start,
+                ComponentKind::Set,
+                "profile datatype Boolean operands",
+            )?;
+            if operands.len() < 2 {
+                return Err(EncodedValidationError::invariant(
+                    "validated datatype Boolean has fewer than two operands",
+                )
+                .into());
+            }
+            for item_index in operands.items() {
+                poll(control, "profile-datatype-range-member")?;
+                let operand =
+                    required_item_node(model, item_index, "profile datatype Boolean operand")?;
+                if let Some(failure) =
+                    profile_data_range_failure(model, operand, budget, literal_budget, control)?
+                {
+                    return Ok(Some(failure));
+                }
+            }
+            Ok(None)
+        }
+        DATA_COMPLEMENT_OF_TAG => {
+            if node.field_count() != 1 {
+                return Err(EncodedValidationError::invariant(
+                    "validated datatype complement lost its schema-1 shape",
+                )
+                .into());
+            }
+            let operand = required_node(
+                model,
+                node.fields().start,
+                "profile datatype complement operand",
+            )?;
+            profile_data_range_failure(model, operand, budget, literal_budget, control)
+        }
+        DATA_ONE_OF_TAG => {
+            if node.field_count() != 1 {
+                return Err(EncodedValidationError::invariant(
+                    "validated data enumeration lost its schema-1 shape",
+                )
+                .into());
+            }
+            let values = profile_node_collection(
+                model,
+                node.fields().start,
+                ComponentKind::Set,
+                "profile data enumeration values",
+            )?;
+            if values.is_empty() {
+                return Err(EncodedValidationError::invariant(
+                    "validated data enumeration is empty",
+                )
+                .into());
+            }
+            for item_index in values.items() {
+                poll(control, "profile-datatype-enumeration-literal")?;
+                let literal =
+                    required_item_node(model, item_index, "profile data enumeration literal")?;
+                let (_, validation) =
+                    classify_profile_literal(model, literal, budget, literal_budget, control)?;
+                if let Some(failure) = profile_literal_failure(validation) {
+                    return Ok(Some(failure));
+                }
+            }
+            Ok(None)
+        }
+        DATATYPE_RESTRICTION_TAG => {
+            profile_datatype_restriction_failure(model, node, budget, literal_budget, control)
+        }
+        _ => Err(EncodedValidationError::invariant(
+            "profile datatype traversal reached a non-data-range node",
+        )
+        .into()),
+    }
+}
+
+fn profile_datatype_restriction_failure<B: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    restriction: NodeRef,
+    budget: &mut PhaseBudget,
+    literal_budget: &mut LiteralPhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<Option<ProfileDatatypeFailure>, E> {
+    if restriction.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "validated datatype restriction lost its schema-1 shape",
+        )
+        .into());
+    }
+    let fields = restriction.fields();
+    let datatype = required_node(model, fields.start, "profile restricted datatype")?;
+    let identity = profile_entity_identity(model, datatype, budget)?;
+    if identity.kind != ProfileEntityKind::Datatype {
+        return Err(EncodedValidationError::invariant(
+            "validated restricted datatype is not a datatype entity",
+        )
+        .into());
+    }
+    if !is_supported_profile_datatype(&identity.iri, budget).map_err(ProfilePhaseError::Encoded)? {
+        return Ok(Some(ProfileDatatypeFailure::UnsupportedRange));
+    }
+    let datatype_iri = std::str::from_utf8(&identity.iri).map_err(|_| {
+        EncodedValidationError::invariant("validated restricted datatype IRI is not UTF-8")
+    })?;
+    let facets_field = fields.start.checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("profile datatype restriction field overflowed")
+    })?;
+    let facets = profile_node_collection(
+        model,
+        facets_field,
+        ComponentKind::Set,
+        "profile datatype restriction facets",
+    )?;
+    if facets.is_empty() {
+        return Err(EncodedValidationError::invariant(
+            "validated datatype restriction has no facets",
+        )
+        .into());
+    }
+    budget
+        .claim_owned(
+            facets
+                .len()
+                .checked_mul(size_of::<ProfileFacetValue>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("profile datatype facet value size overflowed")
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut values = Vec::new();
+    reserve_exact(
+        &mut values,
+        facets.len(),
+        "profile datatype facet value allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for item_index in facets.items() {
+        poll(control, "profile-datatype-facet-literal")?;
+        let facet = required_item_node(model, item_index, "profile datatype facet")?;
+        let facet_node = model.node(facet)?;
+        if facet_node.tag() != FACET_RESTRICTION_TAG || facet_node.field_count() != 2 {
+            return Err(EncodedValidationError::invariant(
+                "validated facet restriction lost its schema-1 shape",
+            )
+            .into());
+        }
+        let facet_fields = facet_node.fields();
+        let iri_node = required_node(model, facet_fields.start, "profile datatype facet IRI")?;
+        let iri = profile_iri_text(model, iri_node, budget)?;
+        let literal_field = facet_fields.start.checked_add(1).ok_or_else(|| {
+            EncodedValidationError::resource("profile datatype facet field overflowed")
+        })?;
+        let literal = required_node(model, literal_field, "profile datatype facet literal")?;
+        let (_, validation) =
+            classify_profile_literal(model, literal, budget, literal_budget, control)?;
+        match validation {
+            ProfileLiteralValidation::Valid(semantics) => {
+                values.push(ProfileFacetValue { iri, semantics });
+            }
+            ProfileLiteralValidation::Invalid(invalid) => {
+                return Ok(Some(ProfileDatatypeFailure::InvalidLiteral(invalid)));
+            }
+            ProfileLiteralValidation::Unsupported => {
+                return Ok(Some(ProfileDatatypeFailure::UnsupportedLiteral));
+            }
+        }
+    }
+    for value in &values {
+        poll(control, "profile-datatype-facet")?;
+        if let Some(failure) = profile_facet_failure(datatype_iri, value, budget, control)? {
+            return Ok(Some(failure));
+        }
+    }
+    Ok(None)
+}
+
+fn profile_facet_failure<E>(
+    datatype_iri: &str,
+    facet: &ProfileFacetValue,
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<Option<ProfileDatatypeFailure>, E> {
+    budget
+        .claim_work(facet.iri.len())
+        .map_err(ProfilePhaseError::Encoded)?;
+    let bound = matches!(
+        facet.iri.as_str(),
+        XSD_MIN_INCLUSIVE_IRI
+            | XSD_MIN_EXCLUSIVE_IRI
+            | XSD_MAX_INCLUSIVE_IRI
+            | XSD_MAX_EXCLUSIVE_IRI
+    );
+    let length = matches!(
+        facet.iri.as_str(),
+        XSD_LENGTH_IRI | XSD_MIN_LENGTH_IRI | XSD_MAX_LENGTH_IRI
+    );
+    if is_profile_numeric_datatype(datatype_iri) {
+        if !bound {
+            return Ok(Some(ProfileDatatypeFailure::IllegalFacet));
+        }
+        return Ok(
+            (!matches!(facet.semantics, ProfileLiteralSemantics::Numeric { .. }))
+                .then_some(ProfileDatatypeFailure::InvalidFacetValue),
+        );
+    }
+    if matches!(
+        datatype_iri,
+        "http://www.w3.org/2001/XMLSchema#float" | "http://www.w3.org/2001/XMLSchema#double"
+    ) {
+        if !bound {
+            return Ok(Some(ProfileDatatypeFailure::IllegalFacet));
+        }
+        let valid = matches!(
+            (datatype_iri, &facet.semantics),
+            (
+                "http://www.w3.org/2001/XMLSchema#float",
+                ProfileLiteralSemantics::Ieee32
+            ) | (
+                "http://www.w3.org/2001/XMLSchema#double",
+                ProfileLiteralSemantics::Ieee64
+            )
+        );
+        return Ok((!valid).then_some(ProfileDatatypeFailure::InvalidFacetValue));
+    }
+    if matches!(
+        datatype_iri,
+        "http://www.w3.org/2001/XMLSchema#dateTime"
+            | "http://www.w3.org/2001/XMLSchema#dateTimeStamp"
+    ) {
+        if !bound {
+            return Ok(Some(ProfileDatatypeFailure::IllegalFacet));
+        }
+        return Ok(
+            (!matches!(facet.semantics, ProfileLiteralSemantics::DateTime))
+                .then_some(ProfileDatatypeFailure::InvalidFacetValue),
+        );
+    }
+    if matches!(
+        datatype_iri,
+        "http://www.w3.org/2001/XMLSchema#hexBinary"
+            | "http://www.w3.org/2001/XMLSchema#base64Binary"
+    ) {
+        if !length {
+            return Ok(Some(ProfileDatatypeFailure::IllegalFacet));
+        }
+        return Ok((!matches!(
+            facet.semantics,
+            ProfileLiteralSemantics::Numeric {
+                nonnegative_integer: true
+            }
+        ))
+        .then_some(ProfileDatatypeFailure::InvalidFacetValue));
+    }
+    if is_profile_string_datatype(datatype_iri) {
+        let allowed = length
+            || facet.iri == XSD_PATTERN_IRI
+            || (datatype_iri == RDF_PLAIN_LITERAL_IRI && facet.iri == RDF_LANG_RANGE_IRI);
+        if !allowed {
+            return Ok(Some(ProfileDatatypeFailure::IllegalFacet));
+        }
+        return profile_text_facet_failure(facet, length, budget, control);
+    }
+    if datatype_iri == "http://www.w3.org/2001/XMLSchema#anyURI" {
+        if !length && facet.iri != XSD_PATTERN_IRI {
+            return Ok(Some(ProfileDatatypeFailure::IllegalFacet));
+        }
+        return profile_text_facet_failure(facet, length, budget, control);
+    }
+    if matches!(
+        datatype_iri,
+        "http://www.w3.org/2001/XMLSchema#boolean" | RDF_XML_LITERAL_IRI | RDFS_LITERAL_IRI
+    ) {
+        return Ok(Some(ProfileDatatypeFailure::IllegalFacet));
+    }
+    Err(
+        EncodedValidationError::invariant("supported profile datatype has no facet dispatch")
+            .into(),
+    )
+}
+
+fn profile_text_facet_failure<E>(
+    facet: &ProfileFacetValue,
+    length: bool,
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<Option<ProfileDatatypeFailure>, E> {
+    if length {
+        return Ok((!matches!(
+            facet.semantics,
+            ProfileLiteralSemantics::Numeric {
+                nonnegative_integer: true
+            }
+        ))
+        .then_some(ProfileDatatypeFailure::InvalidFacetValue));
+    }
+    let ProfileLiteralSemantics::String {
+        ref text,
+        tagged: false,
+    } = facet.semantics
+    else {
+        return Ok(Some(ProfileDatatypeFailure::InvalidFacetValue));
+    };
+    if facet.iri == RDF_LANG_RANGE_IRI {
+        return Ok((!valid_profile_language_range(text))
+            .then_some(ProfileDatatypeFailure::InvalidLanguageRange));
+    }
+    poll(control, "profile-datatype-pattern")?;
+    budget
+        .claim_work(text.len())
+        .map_err(ProfilePhaseError::Encoded)?;
+    let pattern_control = ProfilePatternControl::new(control);
+    let result = XsdRegex::compile(text, RegexLimits::default(), &pattern_control);
+    let interrupted = pattern_control.into_error();
+    if let Some(error) = interrupted {
+        return Err(ProfilePhaseError::Control(error));
+    }
+    poll(control, "profile-datatype-pattern-complete")?;
+    match result {
+        Ok(_) => Ok(None),
+        Err(error) if error.kind == DatatypeErrorKind::Invalid => {
+            Ok(Some(ProfileDatatypeFailure::Suppressed))
+        }
+        Err(error) if error.kind == DatatypeErrorKind::Resource => {
+            Err(EncodedValidationError::resource(format!(
+                "profile datatype pattern resource limit: {}",
+                error.message
+            ))
+            .into())
+        }
+        Err(error) => Err(EncodedValidationError::invariant(format!(
+            "profile datatype pattern validation failed unexpectedly: {}",
+            error.message
+        ))
+        .into()),
+    }
+}
+
+fn profile_literal_failure(validation: ProfileLiteralValidation) -> Option<ProfileDatatypeFailure> {
+    match validation {
+        ProfileLiteralValidation::Valid(_) => None,
+        ProfileLiteralValidation::Invalid(invalid) => {
+            Some(ProfileDatatypeFailure::InvalidLiteral(invalid))
+        }
+        ProfileLiteralValidation::Unsupported => Some(ProfileDatatypeFailure::UnsupportedLiteral),
+    }
+}
+
+fn is_profile_numeric_datatype(datatype_iri: &str) -> bool {
+    datatype_iri == OWL_REAL_IRI
+        || datatype_iri == OWL_RATIONAL_IRI
+        || datatype_iri
+            .strip_prefix(XSD_NAMESPACE)
+            .is_some_and(|local| {
+                matches!(
+                    local,
+                    "decimal"
+                        | "integer"
+                        | "nonNegativeInteger"
+                        | "positiveInteger"
+                        | "nonPositiveInteger"
+                        | "negativeInteger"
+                        | "long"
+                        | "int"
+                        | "short"
+                        | "byte"
+                        | "unsignedLong"
+                        | "unsignedInt"
+                        | "unsignedShort"
+                        | "unsignedByte"
+                )
+            })
+}
+
+fn is_profile_string_datatype(datatype_iri: &str) -> bool {
+    datatype_iri == RDF_PLAIN_LITERAL_IRI
+        || datatype_iri
+            .strip_prefix(XSD_NAMESPACE)
+            .is_some_and(|local| {
+                matches!(
+                    local,
+                    "string"
+                        | "normalizedString"
+                        | "token"
+                        | "language"
+                        | "Name"
+                        | "NCName"
+                        | "NMTOKEN"
+                )
+            })
+}
+
+fn valid_profile_language_range(value: &str) -> bool {
+    if value == "*" {
+        return true;
+    }
+    let mut parts = value.split('-');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    (1..=8).contains(&first.len())
+        && first.is_ascii()
+        && first.bytes().all(|byte| byte.is_ascii_alphabetic())
+        && parts.all(|part| {
+            (1..=8).contains(&part.len())
+                && part.is_ascii()
+                && part.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
 fn profile_entity_identity<B: ByteSource>(
     model: &ValidatedModel<B>,
     identifier: NodeId,
@@ -2551,6 +3316,84 @@ fn clone_profile_scalar<B: ByteSource>(
         })?);
     }
     Ok(owned)
+}
+
+fn profile_text_field<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    field_index: usize,
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<String> {
+    let component = required_component(model.field(field_index)?, name)?;
+    let ComponentValue::Scalar(value) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated {name} is not scalar"
+        )));
+    };
+    profile_text_scalar(value, name, budget)
+}
+
+fn profile_text_scalar<B: ByteSource>(
+    value: ScalarRef<B>,
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<String> {
+    if value.kind() != ComponentKind::Text {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated {name} is not text"
+        )));
+    }
+    let bytes = clone_profile_scalar(value, budget, "profile text allocation failed")?;
+    String::from_utf8(bytes)
+        .map_err(|_| EncodedValidationError::invariant(format!("validated {name} is not UTF-8")))
+}
+
+fn profile_iri_text<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<String> {
+    let iri = model.node(identifier)?;
+    if iri.tag() != IRI_TAG || iri.field_count() != 1 {
+        return Err(EncodedValidationError::invariant(
+            "validated profile IRI lost its schema-1 shape",
+        ));
+    }
+    profile_text_field(model, iri.fields().start, "profile IRI text", budget)
+}
+
+fn profile_node_collection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    field_index: usize,
+    expected_kind: ComponentKind,
+    name: &'static str,
+) -> EncodedResult<CollectionRef> {
+    let component = required_component(model.field(field_index)?, name)?;
+    let ComponentValue::Collection(collection) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated {name} is not a collection"
+        )));
+    };
+    if collection.kind() != expected_kind {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated {name} changed collection kind"
+        )));
+    }
+    Ok(collection)
+}
+
+fn required_item_node<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    item_index: usize,
+    name: &'static str,
+) -> EncodedResult<NodeId> {
+    let component = required_component(model.item(item_index)?, name)?;
+    let ComponentValue::Node(identifier) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated {name} is not a node"
+        )));
+    };
+    Ok(identifier)
 }
 
 fn profile_object_role<B: ByteSource>(
@@ -3178,7 +4021,8 @@ fn retain_simple_role_requirements_for_node<B: ByteSource, E>(
 fn append_datatype_issues<E>(
     uses: &[ProfileEntityIdentity],
     definitions: &[ProfileDatatypeDefinition],
-    literal_datatypes: &[Vec<u8>],
+    range_failures: &[ProfileDatatypeRangeFailure],
+    literals: &[ProfileLiteralFact],
     issues: &mut Vec<ProfileIssue>,
     budget: &mut PhaseBudget,
     control: &mut impl FnMut(&'static str) -> Result<(), E>,
@@ -3300,7 +4144,11 @@ fn append_datatype_issues<E>(
                     RECURSIVE_DATATYPE_DEFINITION_MESSAGE,
                 ))
             } else {
-                None
+                let first_failure = definitions_by_head
+                    .iter()
+                    .find_map(|definition| definition.failure)
+                    .or_else(|| range_failures.first().map(|failure| failure.failure));
+                first_failure.and_then(profile_datatype_failure_issue)
             }
         }
     };
@@ -3319,16 +4167,16 @@ fn append_datatype_issues<E>(
         .map_err(ProfilePhaseError::Encoded)?;
     }
 
-    for datatype in literal_datatypes {
+    for literal in literals {
         poll(control, "profile-literal-datatype")?;
         budget
             .claim_work(search_work(defined_datatypes.len()))
             .map_err(ProfilePhaseError::Encoded)?;
         if defined_datatypes
-            .binary_search_by(|candidate| (*candidate).cmp(datatype))
+            .binary_search_by(|candidate| (*candidate).cmp(&literal.datatype_iri))
             .is_ok()
         {
-            let iri = std::str::from_utf8(datatype).map_err(|_| {
+            let iri = std::str::from_utf8(&literal.datatype_iri).map_err(|_| {
                 ProfilePhaseError::Encoded(EncodedValidationError::invariant(
                     "validated literal datatype IRI is not UTF-8",
                 ))
@@ -3341,25 +4189,85 @@ fn append_datatype_issues<E>(
                 budget,
             )
             .map_err(ProfilePhaseError::Encoded)?;
-        } else if !is_supported_profile_datatype(datatype, budget)
-            .map_err(ProfilePhaseError::Encoded)?
-        {
-            push_profile_issue(
-                issues,
-                ProfileIssue {
-                    rule_id: UNSUPPORTED_DATATYPE_RULE,
-                    severity: "error",
-                    message: Cow::Borrowed(UNSUPPORTED_LITERAL_DATATYPE_MESSAGE),
-                    constructor: Some("Literal"),
-                    provenance_sha256: None,
-                },
-                budget,
-            )
-            .map_err(ProfilePhaseError::Encoded)?;
+            continue;
+        }
+        match literal.failure {
+            Some(ProfileDatatypeFailure::InvalidLiteral(invalid)) => {
+                let message = profile_invalid_literal_message(invalid);
+                push_profile_issue(
+                    issues,
+                    ProfileIssue {
+                        rule_id: INVALID_LITERAL_RULE,
+                        severity: "error",
+                        message: Cow::Borrowed(message),
+                        constructor: Some("Literal"),
+                        provenance_sha256: None,
+                    },
+                    budget,
+                )
+                .map_err(ProfilePhaseError::Encoded)?;
+            }
+            Some(ProfileDatatypeFailure::UnsupportedLiteral) => {
+                push_profile_issue(
+                    issues,
+                    ProfileIssue {
+                        rule_id: UNSUPPORTED_DATATYPE_RULE,
+                        severity: "error",
+                        message: Cow::Borrowed(UNSUPPORTED_LITERAL_DATATYPE_MESSAGE),
+                        constructor: Some("Literal"),
+                        provenance_sha256: None,
+                    },
+                    budget,
+                )
+                .map_err(ProfilePhaseError::Encoded)?;
+            }
+            None => {}
+            Some(_) => {
+                return Err(EncodedValidationError::invariant(
+                    "profile literal retained a non-literal datatype failure",
+                )
+                .into());
+            }
         }
     }
     poll(control, "profile-datatype-complete")?;
     Ok(())
+}
+
+const fn profile_datatype_failure_issue(
+    failure: ProfileDatatypeFailure,
+) -> Option<(&'static str, &'static str)> {
+    match failure {
+        ProfileDatatypeFailure::InvalidLiteral(invalid) => Some((
+            INVALID_LITERAL_RULE,
+            profile_invalid_literal_message(invalid),
+        )),
+        ProfileDatatypeFailure::UnsupportedLiteral => Some((
+            UNSUPPORTED_DATATYPE_RULE,
+            UNSUPPORTED_LITERAL_DATATYPE_MESSAGE,
+        )),
+        ProfileDatatypeFailure::UnsupportedRange => {
+            Some((UNSUPPORTED_DATATYPE_RULE, UNSUPPORTED_DATATYPE_MESSAGE))
+        }
+        ProfileDatatypeFailure::IllegalFacet => {
+            Some((ILLEGAL_DATATYPE_FACET_RULE, ILLEGAL_DATATYPE_FACET_MESSAGE))
+        }
+        ProfileDatatypeFailure::InvalidFacetValue => {
+            Some((INVALID_FACET_VALUE_RULE, INVALID_FACET_VALUE_MESSAGE))
+        }
+        ProfileDatatypeFailure::InvalidLanguageRange => {
+            Some((INVALID_FACET_VALUE_RULE, INVALID_LANGUAGE_RANGE_MESSAGE))
+        }
+        ProfileDatatypeFailure::Suppressed => None,
+    }
+}
+
+const fn profile_invalid_literal_message(invalid: ProfileLiteralInvalid) -> &'static str {
+    match invalid {
+        ProfileLiteralInvalid::Lexical => INVALID_LITERAL_MESSAGE,
+        ProfileLiteralInvalid::XmlMalformed => INVALID_XML_LITERAL_MESSAGE,
+        ProfileLiteralInvalid::XmlForbiddenDeclaration => FORBIDDEN_XML_LITERAL_MESSAGE,
+    }
 }
 
 fn is_supported_profile_datatype(iri: &[u8], budget: &mut PhaseBudget) -> EncodedResult<bool> {
@@ -5136,6 +6044,9 @@ fn is_recomputed_profile_rule(rule_id: &str) -> bool {
             | UNSUPPORTED_DATATYPE_RULE
             | RECURSIVE_DATATYPE_DEFINITION_RULE
             | CUSTOM_DATATYPE_LITERAL_RULE
+            | INVALID_LITERAL_RULE
+            | ILLEGAL_DATATYPE_FACET_RULE
+            | INVALID_FACET_VALUE_RULE
             | RIA_INVERSE_RECURSION_RULE
             | RIA_NON_REGULAR_RECURSION_RULE
             | RIA_DEPENDENCY_CYCLE_RULE
@@ -5489,12 +6400,35 @@ fn validate_phase(phase: &ProfilePhase) -> EncodedResult<()> {
         ));
     }
     if phase
-        .literal_datatypes
+        .datatype_range_failures
         .windows(2)
         .any(|pair| pair[0] >= pair[1])
     {
         return Err(EncodedValidationError::invariant(
-            "profile literal datatypes are not canonical sorted unique",
+            "profile datatype failures are not canonical sorted unique",
+        ));
+    }
+    if phase
+        .datatype_range_failures
+        .iter()
+        .any(|failure| failure.canonical_key.is_empty())
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile datatype failure has an empty canonical key",
+        ));
+    }
+    if phase.literals.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(EncodedValidationError::invariant(
+            "profile literals are not canonical sorted unique",
+        ));
+    }
+    if phase
+        .literals
+        .iter()
+        .any(|literal| literal.canonical_key.is_empty() || literal.datatype_iri.is_empty())
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile literal has an invalid private shape",
         ));
     }
     if phase
@@ -6093,14 +7027,20 @@ mod tests {
                 statement_order_key: vec![1],
                 datatype_iri: b"urn:first".to_vec(),
                 references: vec![b"urn:second".to_vec()],
+                failure: None,
             },
             ProfileDatatypeDefinition {
                 statement_order_key: vec![2],
                 datatype_iri: b"urn:second".to_vec(),
                 references: vec![b"urn:first".to_vec()],
+                failure: None,
             },
         ];
-        let literal_datatypes = vec![b"urn:first".to_vec()];
+        let literals = vec![ProfileLiteralFact {
+            canonical_key: vec![3],
+            datatype_iri: b"urn:first".to_vec(),
+            failure: Some(ProfileDatatypeFailure::UnsupportedLiteral),
+        }];
         let mut issues = Vec::new();
         let mut budget = PhaseBudget::new(ProfilePhaseLimits::default());
         let mut control = |_phase| Ok::<(), Infallible>(());
@@ -6108,7 +7048,8 @@ mod tests {
         into_encoded(append_datatype_issues(
             &uses,
             &definitions,
-            &literal_datatypes,
+            &[],
+            &literals,
             &mut issues,
             &mut budget,
             &mut control,
@@ -6126,11 +7067,71 @@ mod tests {
             ])
         );
 
+        let range_failures = vec![ProfileDatatypeRangeFailure {
+            canonical_key: vec![1],
+            failure: ProfileDatatypeFailure::IllegalFacet,
+        }];
+        let invalid_literals = vec![ProfileLiteralFact {
+            canonical_key: vec![2],
+            datatype_iri: b"http://www.w3.org/2001/XMLSchema#integer".to_vec(),
+            failure: Some(ProfileDatatypeFailure::InvalidLiteral(
+                ProfileLiteralInvalid::Lexical,
+            )),
+        }];
+        let mut validation_issues = Vec::new();
+        into_encoded(append_datatype_issues(
+            &[],
+            &[],
+            &range_failures,
+            &invalid_literals,
+            &mut validation_issues,
+            &mut PhaseBudget::new(ProfilePhaseLimits::default()),
+            &mut control,
+        ))?;
+        validation_issues.sort();
+        validation_issues.dedup();
+        assert_eq!(
+            validation_issues
+                .iter()
+                .map(|issue| (issue.rule_id, issue.constructor))
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                (ILLEGAL_DATATYPE_FACET_RULE, Some("DataRange")),
+                (INVALID_LITERAL_RULE, Some("Literal")),
+            ])
+        );
+
+        let pattern_cancelled = profile_facet_failure(
+            "http://www.w3.org/2001/XMLSchema#string",
+            &ProfileFacetValue {
+                iri: XSD_PATTERN_IRI.to_owned(),
+                semantics: ProfileLiteralSemantics::String {
+                    text: "[ab]{2}".to_owned(),
+                    tagged: false,
+                },
+            },
+            &mut PhaseBudget::new(ProfilePhaseLimits::default()),
+            &mut |phase| {
+                if phase == "profile-datatype-pattern-work" {
+                    Err("injected datatype pattern cancellation")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(
+            pattern_cancelled,
+            Err(ProfilePhaseError::Control(
+                "injected datatype pattern cancellation"
+            ))
+        );
+
         let mut cancelled_issues = Vec::new();
         let cancelled = append_datatype_issues(
             &uses,
             &definitions,
-            &literal_datatypes,
+            &[],
+            &literals,
             &mut cancelled_issues,
             &mut PhaseBudget::new(ProfilePhaseLimits::default()),
             &mut |phase| {
@@ -6150,7 +7151,8 @@ mod tests {
         let limited = append_datatype_issues(
             &uses,
             &definitions,
-            &literal_datatypes,
+            &[],
+            &literals,
             &mut Vec::new(),
             &mut PhaseBudget::new(ProfilePhaseLimits {
                 max_owned_bytes: 0,
@@ -6167,6 +7169,7 @@ mod tests {
         let mut fact_budget = PhaseBudget::new(ProfilePhaseLimits {
             max_datatype_definitions: 0,
             max_datatype_references: 0,
+            max_datatype_failures: 0,
             max_literal_datatypes: 0,
             ..ProfilePhaseLimits::default()
         });
@@ -6179,6 +7182,12 @@ mod tests {
         assert_eq!(
             fact_budget
                 .claim_datatype_reference(1)
+                .map_err(|error| error.code),
+            Err("NATIVE_ENCODED_RESOURCE_LIMIT")
+        );
+        assert_eq!(
+            fact_budget
+                .claim_datatype_failure(1)
                 .map_err(|error| error.code),
             Err("NATIVE_ENCODED_RESOURCE_LIMIT")
         );

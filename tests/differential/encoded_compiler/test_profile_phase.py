@@ -49,6 +49,9 @@ NON_SIMPLE_PROPERTY_RULE = "OWL2DL_NON_SIMPLE_PROPERTY"
 BUILTIN_DATATYPE_REDEFINITION_RULE = "BUILTIN_DATATYPE_REDEFINITION"
 CUSTOM_DATATYPE_LITERAL_RULE = "CUSTOM_DATATYPE_LITERAL"
 DUPLICATE_DATATYPE_DEFINITION_RULE = "DUPLICATE_DATATYPE_DEFINITION"
+ILLEGAL_DATATYPE_FACET_RULE = "ILLEGAL_DATATYPE_FACET"
+INVALID_FACET_VALUE_RULE = "INVALID_FACET_VALUE"
+INVALID_LITERAL_RULE = "INVALID_LITERAL"
 RECURSIVE_DATATYPE_DEFINITION_RULE = "RECURSIVE_DATATYPE_DEFINITION"
 UNSUPPORTED_DATATYPE_RULE = "UNSUPPORTED_DATATYPE"
 RIA_DEPENDENCY_CYCLE_RULE = "RIA_DEPENDENCY_CYCLE"
@@ -77,6 +80,9 @@ PROJECTED_RULES = frozenset(
         DATA_RANGE_ARITY_RULE,
         DUPLICATE_DATATYPE_DEFINITION_RULE,
         EXTENSION_COMPONENT_RULE,
+        ILLEGAL_DATATYPE_FACET_RULE,
+        INVALID_FACET_VALUE_RULE,
+        INVALID_LITERAL_RULE,
         MISSING_DECLARATION_RULE,
         NON_SIMPLE_PROPERTY_RULE,
         PROPERTY_PUNNING_RULE,
@@ -616,6 +622,164 @@ def test_datatype_definition_error_precedence_matches_scalar_statement_order() -
     assert actual == _expected_manifest(snapshot)
 
 
+def test_invalid_literal_messages_and_constructors_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:value))",
+            'DataPropertyAssertion(:value :integer "nope"^^xsd:integer)',
+            'DataPropertyAssertion(:value :xml "<broken>"^^rdf:XMLLiteral)',
+            (
+                'DataPropertyAssertion(:value :declaration "<!DOCTYPE x [<!ENTITY y '
+                '\'z\'>]><x>&y;</x>"^^rdf:XMLLiteral)'
+            ),
+            'DataPropertyAssertion(:value :universal "value"^^rdfs:Literal)',
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    messages = {
+        cast(str, issue["message"])
+        for issue in cast(list[dict[str, object]], actual["issues"])
+        if issue["rule_id"] == INVALID_LITERAL_RULE
+    }
+    assert messages == {
+        "literal lexical form is outside the datatype lexical space",
+        "rdf:XMLLiteral is not a well-formed XML fragment",
+        "rdf:XMLLiteral forbids DTD and entity declarations",
+    }
+    assert {
+        issue["constructor"]
+        for issue in cast(list[dict[str, object]], actual["issues"])
+        if issue["rule_id"] == INVALID_LITERAL_RULE
+    } == {"Literal"}
+
+
+def test_invalid_data_enumeration_literal_has_data_range_and_literal_issues() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:value))",
+            'DataPropertyRange(:value DataOneOf("nope"^^xsd:integer))',
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    assert {
+        issue["constructor"]
+        for issue in cast(list[dict[str, object]], actual["issues"])
+        if issue["rule_id"] == INVALID_LITERAL_RULE
+    } == {"DataRange", "Literal"}
+
+
+@pytest.mark.parametrize(
+    ("data_range", "expected_rule", "expected_message"),
+    (
+        (
+            'DatatypeRestriction(xsd:boolean xsd:minInclusive "false"^^xsd:boolean)',
+            ILLEGAL_DATATYPE_FACET_RULE,
+            "facet is not legal for the restricted OWL 2 datatype",
+        ),
+        (
+            'DatatypeRestriction(xsd:string xsd:length "-1"^^xsd:integer)',
+            INVALID_FACET_VALUE_RULE,
+            "facet literal has the wrong datatype or value domain",
+        ),
+        (
+            'DatatypeRestriction(xsd:integer xsd:minInclusive "1"^^xsd:string)',
+            INVALID_FACET_VALUE_RULE,
+            "facet literal has the wrong datatype or value domain",
+        ),
+        (
+            'DatatypeRestriction(rdf:PlainLiteral rdf:langRange "-bad"^^xsd:string)',
+            INVALID_FACET_VALUE_RULE,
+            "rdf:langRange requires an RFC 4647 basic language range",
+        ),
+    ),
+)
+def test_datatype_facet_rules_match_scalar_exactly(
+    data_range: str,
+    expected_rule: str,
+    expected_message: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:value))",
+            f"DataPropertyRange(:value {data_range})",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    issue = next(
+        issue
+        for issue in cast(list[dict[str, object]], actual["issues"])
+        if issue["rule_id"] == expected_rule
+    )
+    assert issue["message"] == expected_message
+    assert issue["constructor"] == "DataRange"
+    assert issue["provenance_sha256"] is None
+
+
+def test_facet_literal_compilation_precedes_facet_legality() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:value))",
+            (
+                "DataPropertyRange(:value DatatypeRestriction(xsd:boolean "
+                'xsd:minInclusive "nope"^^xsd:boolean))'
+            ),
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    assert INVALID_LITERAL_RULE in cast(list[str], actual["ordered_rule_ids"])
+    assert ILLEGAL_DATATYPE_FACET_RULE not in cast(list[str], actual["ordered_rule_ids"])
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected_rule"),
+    (
+        ("[ab]+", ILLEGAL_DATATYPE_FACET_RULE),
+        ("[", None),
+    ),
+)
+def test_pattern_errors_preserve_scalar_semantic_error_precedence(
+    pattern: str,
+    expected_rule: str | None,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:value))",
+            (
+                "DataPropertyRange(:value DatatypeRestriction(xsd:string "
+                f'xsd:pattern "{pattern}"^^xsd:string '
+                'xsd:totalDigits "1"^^xsd:integer))'
+            ),
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    if expected_rule is None:
+        assert ILLEGAL_DATATYPE_FACET_RULE not in cast(
+            list[str], actual["ordered_rule_ids"]
+        )
+    else:
+        assert expected_rule in cast(list[str], actual["ordered_rule_ids"])
+
+
 def test_non_simple_object_property_positions_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -1149,6 +1313,44 @@ def test_datatype_rules_are_recomputed_across_one_root_slices() -> None:
         RECURSIVE_DATATYPE_DEFINITION_RULE,
         CUSTOM_DATATYPE_LITERAL_RULE,
     } <= set(json.loads(forward)["ordered_rule_ids"])
+
+
+def test_datatype_facet_precedence_is_recomputed_across_one_root_slices() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:custom))",
+            "Declaration(DataProperty(:value))",
+            (
+                "DatatypeDefinition(:custom DatatypeRestriction(xsd:boolean "
+                'xsd:minInclusive "false"^^xsd:boolean))'
+            ),
+            (
+                "DataPropertyRange(:value DatatypeRestriction(xsd:string "
+                'xsd:length "-1"^^xsd:integer))'
+            ),
+        ),
+        options=OPTIONS,
+    )
+    root_count = len(bytes(_buffers(snapshot)["root_kinds"]))
+    records = tuple(
+        _slice_record(
+            snapshot,
+            posting_mode=1,
+            postings=memoryview(struct.pack("<I", index)),
+        )
+        for index in range(1, root_count + 1)
+    )
+
+    direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
+    forward = native._encoded_profile_slices_manifest_v1(slices=records)
+    reverse = native._encoded_profile_slices_manifest_v1(
+        slices=tuple(reversed(records))
+    )
+
+    assert forward == reverse == direct
+    assert json.loads(forward) == _expected_manifest(snapshot)
+    assert ILLEGAL_DATATYPE_FACET_RULE in json.loads(forward)["ordered_rule_ids"]
+    assert INVALID_FACET_VALUE_RULE not in json.loads(forward)["ordered_rule_ids"]
 
 
 def test_extension_selection_and_composite_deduplication_are_canonical() -> None:

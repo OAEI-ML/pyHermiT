@@ -107,6 +107,8 @@ const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const ANY_URI_IDENTITY_PREFIX: &str = "[\"any-uri-v1\",";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
+const RDFS_LITERAL_IRI: &str = "http://www.w3.org/2000/01/rdf-schema#Literal";
+const OWL_REAL_IRI: &str = "http://www.w3.org/2002/07/owl#real";
 const OWL_RATIONAL_IRI: &str = "http://www.w3.org/2002/07/owl#rational";
 const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema#";
 const XSD_BOOLEAN_IRI: &str = "http://www.w3.org/2001/XMLSchema#boolean";
@@ -1282,6 +1284,10 @@ impl PhaseBudget {
 
     pub(super) const fn max_xml_nodes(&self) -> usize {
         self.limits.max_xml_nodes
+    }
+
+    pub(super) const fn usage(&self) -> (u64, usize) {
+        (self.work, self.owned_bytes)
     }
 }
 
@@ -9665,6 +9671,30 @@ struct ExtractedLiteral {
     data_identity_key: Option<Vec<u8>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum ProfileLiteralInvalid {
+    Lexical,
+    XmlMalformed,
+    XmlForbiddenDeclaration,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum ProfileLiteralSemantics {
+    Numeric { nonnegative_integer: bool },
+    Ieee32,
+    Ieee64,
+    DateTime,
+    String { text: String, tagged: bool },
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum ProfileLiteralValidation {
+    Valid(ProfileLiteralSemantics),
+    Invalid(ProfileLiteralInvalid),
+    Unsupported,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StringDatatypeKind {
     PlainLiteral,
@@ -9970,6 +10000,112 @@ fn literal_data_identity_key(
         return xml_literal_data_identity_key(lexical, budget).map(Some);
     }
     string_data_identity_key(lexical, datatype_iri, language, budget)
+}
+
+pub(super) fn profile_literal_validation(
+    lexical: &str,
+    datatype_iri: &str,
+    language: Option<&str>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<ProfileLiteralValidation> {
+    if datatype_iri == RDF_XML_LITERAL_IRI
+        && super::xml_literal::contains_forbidden_declaration(lexical)
+    {
+        return Ok(ProfileLiteralValidation::Invalid(
+            ProfileLiteralInvalid::XmlForbiddenDeclaration,
+        ));
+    }
+    let identity = match literal_data_identity_key(lexical, datatype_iri, language, budget) {
+        Ok(Some(identity)) => identity,
+        Ok(None) if matches!(datatype_iri, OWL_REAL_IRI | RDFS_LITERAL_IRI) => {
+            return Ok(ProfileLiteralValidation::Invalid(
+                ProfileLiteralInvalid::Lexical,
+            ));
+        }
+        Ok(None) => return Ok(ProfileLiteralValidation::Unsupported),
+        Err(error) if error.code == "NATIVE_ENCODED_RESOURCE_LIMIT" => return Err(error),
+        Err(error)
+            if datatype_iri == RDF_XML_LITERAL_IRI
+                && error.message == "rdf:XMLLiteral is not a well-formed XML fragment" =>
+        {
+            return Ok(ProfileLiteralValidation::Invalid(
+                ProfileLiteralInvalid::XmlMalformed,
+            ));
+        }
+        Err(error) if error.message.contains("outside its datatype lexical space") => {
+            return Ok(ProfileLiteralValidation::Invalid(
+                ProfileLiteralInvalid::Lexical,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let payload = identity.strip_prefix(DATA_IDENTITY_PREFIX).ok_or_else(|| {
+        EncodedValidationError::invariant("profile literal identity lost its domain prefix")
+    })?;
+    let semantics = if datatype_iri == XSD_FLOAT_IRI {
+        ProfileLiteralSemantics::Ieee32
+    } else if datatype_iri == XSD_DOUBLE_IRI {
+        ProfileLiteralSemantics::Ieee64
+    } else if matches!(datatype_iri, XSD_DATE_TIME_IRI | XSD_DATE_TIME_STAMP_IRI) {
+        ProfileLiteralSemantics::DateTime
+    } else if integer_datatype_bounds(datatype_iri).is_some()
+        || matches!(datatype_iri, XSD_DECIMAL_IRI | OWL_RATIONAL_IRI)
+    {
+        ProfileLiteralSemantics::Numeric {
+            nonnegative_integer: numeric_profile_identity_is_nonnegative_integer(payload)?,
+        }
+    } else if datatype_iri == RDF_PLAIN_LITERAL_IRI
+        || datatype_iri
+            .strip_prefix(XSD_NAMESPACE)
+            .is_some_and(|local| {
+                matches!(
+                    local,
+                    "string"
+                        | "normalizedString"
+                        | "token"
+                        | "language"
+                        | "Name"
+                        | "NCName"
+                        | "NMTOKEN"
+                )
+            })
+    {
+        let (tag, text, identity_language): (String, String, Option<String>) =
+            serde_json::from_slice(payload).map_err(|_| {
+                EncodedValidationError::invariant(
+                    "profile string literal identity could not be decoded",
+                )
+            })?;
+        if tag != "plain-string-v1" {
+            return Err(EncodedValidationError::invariant(
+                "profile string literal identity changed kind",
+            ));
+        }
+        budget.claim_owned(text.len())?;
+        ProfileLiteralSemantics::String {
+            text,
+            tagged: identity_language.is_some(),
+        }
+    } else {
+        ProfileLiteralSemantics::Other
+    };
+    Ok(ProfileLiteralValidation::Valid(semantics))
+}
+
+fn numeric_profile_identity_is_nonnegative_integer(payload: &[u8]) -> EncodedResult<bool> {
+    let (tag, numerator, denominator): (String, String, String) = serde_json::from_slice(payload)
+        .map_err(|_| {
+        EncodedValidationError::invariant("profile numeric literal identity could not be decoded")
+    })?;
+    if tag != "numeric-rational-hex-v1"
+        || !matches!(numerator.as_bytes().first(), Some(b'+' | b'-'))
+        || !matches!(denominator.as_bytes().first(), Some(b'+'))
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile numeric literal identity changed shape",
+        ));
+    }
+    Ok(denominator == "+1" && numerator.starts_with('+'))
 }
 
 fn xml_literal_data_identity_key(
