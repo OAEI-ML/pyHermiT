@@ -1915,6 +1915,137 @@ def test_recursive_horn_object_quantifiers_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_recursive_object_quantifier_fillers_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(Class(:E))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(ObjectSomeValuesFrom(:p ObjectIntersectionOf(:A :B)) :C)",
+            'SubClassOf(Annotation(:note "same nested definition") '
+            "ObjectSomeValuesFrom(:p ObjectIntersectionOf(:A :B)) :C)",
+            "SubClassOf(:A ObjectAllValuesFrom(:p ObjectUnionOf(:B :C)))",
+            "SubClassOf(ObjectSomeValuesFrom(:p ObjectSomeValuesFrom(:q :B)) :D)",
+            "SubClassOf(:D ObjectAllValuesFrom(:p ObjectAllValuesFrom(:q :C)))",
+            "SubClassOf(ObjectComplementOf(ObjectAllValuesFrom(ObjectInverseOf(:p) "
+            "ObjectUnionOf(:A :B))) :E)",
+            "SubClassOf(:E ObjectComplementOf(ObjectSomeValuesFrom(:q "
+            "ObjectIntersectionOf(:B :C))))",
+            "ClassAssertion(ObjectAllValuesFrom(:p ObjectHasSelf(:q)) :i)",
+            "DisjointClasses(ObjectSomeValuesFrom(:p "
+            "ObjectUnionOf(:A ObjectHasSelf(:q))) :E)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=9,
+        include_generated_object_self_definitions=True,
+        include_generated_object_quantifier_definitions=True,
+    )
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+        )
+        == 17
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_recursive_object_quantifier_fillers_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "SubClassOf(ObjectSomeValuesFrom(:p ObjectIntersectionOf(:A :B)) :C)",
+            "SubClassOf(:A ObjectAllValuesFrom(:q ObjectUnionOf(:B :C)))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "DisjointClasses(ObjectSomeValuesFrom(:p ObjectIntersectionOf(:A :B)) :C)",
+            "ObjectPropertyDomain(:p ObjectAllValuesFrom(:q ObjectUnionOf(:B :C)))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_generated_object_quantifier_definitions=True,
+    )
+    generated = [
+        value
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+        if value["generated"]
+    ]
+    assert len(generated) == 4
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert all(namespace in str(value["display"]) for value in generated)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_unsupported_recursive_quantifier_fillers_defer_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "SubClassOf(ObjectSomeValuesFrom(:p ObjectAllValuesFrom(:q :A)) :B)",
+            "SubClassOf(:A ObjectAllValuesFrom(:p ObjectSomeValuesFrom(:q :B)))",
+            "SubClassOf(ObjectSomeValuesFrom(:p ObjectIntersectionOf("
+            "ObjectSomeValuesFrom(:q :A) ObjectAllValuesFrom(:q :B))) :C)",
+            "SubClassOf(ObjectComplementOf(ObjectAllValuesFrom(:p "
+            "ObjectSomeValuesFrom(:q :A))) :C)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 4
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(("ObjectSomeValuesFrom:", "ObjectAllValuesFrom:"))
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.OBJECT_ROLE.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_composite_horn_object_quantifiers_reuse_global_identity() -> None:
     declarations = (
         "Declaration(Class(:A))",

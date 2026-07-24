@@ -673,8 +673,9 @@ struct ObjectQuantifierDefinition {
 struct NormalizedObjectQuantifierTerm {
     kind: ObjectQuantifierKind,
     role_id: u32,
+    property_key: Vec<u8>,
     key: Vec<u8>,
-    filler: NormalizedAtomicClassTerm,
+    filler: Box<NormalizedClassTerm>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4231,7 +4232,7 @@ fn normalized_class_term<B: ByteSource>(
                 budget.limits.max_canonical_depth,
                 "class-expression depth",
             )?;
-            let Some(NormalizedClassTerm::Atomic(filler)) = normalized_class_term(
+            let Some(filler) = normalized_class_term(
                 model,
                 symbols,
                 Some(object_roles),
@@ -4258,14 +4259,17 @@ fn normalized_class_term<B: ByteSource>(
                 }
             };
             let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
-            let key = synthetic_object_quantifier_key(kind, &property_key, &filler.key, budget)?;
-            budget.claim_owned(size_of::<NormalizedObjectQuantifierTerm>())?;
+            let key = synthetic_object_quantifier_key(kind, &property_key, filler.key(), budget)?;
+            budget.claim_owned(
+                size_of::<NormalizedObjectQuantifierTerm>() + size_of::<NormalizedClassTerm>(),
+            )?;
             return Ok(Some(NormalizedClassTerm::ObjectQuantifier(
                 NormalizedObjectQuantifierTerm {
                     kind,
                     role_id,
+                    property_key,
                     key,
-                    filler,
+                    filler: Box::new(filler),
                 },
             )));
         }
@@ -4459,11 +4463,13 @@ fn normalized_class_term_supports_polarity(
             .operands
             .iter()
             .all(|operand| normalized_class_term_supports_polarity(operand, polarity)),
-        NormalizedClassTerm::ObjectQuantifier(term) => matches!(
-            (term.kind, polarity),
-            (ObjectQuantifierKind::Some, DefinitionPolarity::Negative)
-                | (ObjectQuantifierKind::All, DefinitionPolarity::Positive)
-        ),
+        NormalizedClassTerm::ObjectQuantifier(term) => {
+            matches!(
+                (term.kind, polarity),
+                (ObjectQuantifierKind::Some, DefinitionPolarity::Negative)
+                    | (ObjectQuantifierKind::All, DefinitionPolarity::Positive)
+            ) && normalized_class_term_supports_polarity(&term.filler, polarity)
+        }
     }
 }
 
@@ -4615,8 +4621,15 @@ fn atomize_normalized_object_quantifier(
     definitions: &mut Vec<ClassBooleanDefinition>,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Vec<u8>> {
+    let NormalizedObjectQuantifierTerm {
+        kind,
+        role_id,
+        property_key,
+        key,
+        filler,
+    } = term;
     if !matches!(
-        (term.kind, polarity),
+        (kind, polarity),
         (ObjectQuantifierKind::Some, DefinitionPolarity::Negative)
             | (ObjectQuantifierKind::All, DefinitionPolarity::Positive)
     ) {
@@ -4624,18 +4637,47 @@ fn atomize_normalized_object_quantifier(
             "unsupported object-quantifier polarity reached atomization",
         ));
     }
-    let expression_tag = match term.kind {
+    let expression_tag = match kind {
         ObjectQuantifierKind::Some => OBJECT_SOME_VALUES_FROM_TAG,
         ObjectQuantifierKind::All => OBJECT_ALL_VALUES_FROM_TAG,
     };
-    let mut expression_symbols = term.filler.symbols;
-    let expression_seed = class_expression_symbol_seed(&term.key, expression_tag, budget)?;
-    push_class_expression_symbol_seed(&mut expression_symbols, expression_seed, budget)?;
+    let mut expression_symbols = Vec::new();
+    let (filler_key, filler_operand) = match *filler {
+        NormalizedClassTerm::Atomic(filler) => {
+            for seed in filler.symbols {
+                push_class_expression_symbol_seed(&mut expression_symbols, seed, budget)?;
+            }
+            (filler.key, ClassBooleanOperand::Atomic(filler.selection))
+        }
+        filler => {
+            let generated_key = atomize_normalized_class_term(
+                filler,
+                None,
+                polarity,
+                namespace,
+                definitions,
+                budget,
+            )?;
+            budget.claim_owned(generated_key.len())?;
+            (
+                generated_key.clone(),
+                ClassBooleanOperand::Generated {
+                    key: generated_key,
+                    negative: false,
+                },
+            )
+        }
+    };
+    let source_seed = class_expression_symbol_seed(&key, expression_tag, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, source_seed, budget)?;
+    let rewritten_key = synthetic_object_quantifier_key(kind, &property_key, &filler_key, budget)?;
+    let rewritten_seed = class_expression_symbol_seed(&rewritten_key, expression_tag, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, rewritten_seed, budget)?;
     budget.claim_work(sort_work(expression_symbols.len()))?;
     expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
     expression_symbols.dedup_by(|left, right| left.key == right.key);
     let (generated_key, generated_display) =
-        generated_class_symbol(namespace, &term.key, polarity, budget)?;
+        generated_class_symbol(namespace, &key, polarity, budget)?;
     budget.claim_owned(generated_key.len())?;
     let returned_key = generated_key.clone();
     let mut expressions = Vec::new();
@@ -4655,15 +4697,12 @@ fn atomize_normalized_object_quantifier(
     definitions.push(ClassBooleanDefinition {
         expressions,
         roots: Vec::new(),
-        expression_key: term.key,
+        expression_key: key,
         expression_symbols,
         intersection: false,
-        operands: vec![ClassBooleanOperand::Atomic(term.filler.selection)],
+        operands: vec![filler_operand],
         object_self_role_id: None,
-        object_quantifier: Some(ObjectQuantifierDefinition {
-            kind: term.kind,
-            role_id: term.role_id,
-        }),
+        object_quantifier: Some(ObjectQuantifierDefinition { kind, role_id }),
         complement: false,
         polarity,
         generated_key,
