@@ -45,6 +45,7 @@ CLASS_DATATYPE_PUNNING_RULE = "OWL2DL_CLASS_DATATYPE_PUNNING"
 RESERVED_VOCABULARY_RULE = "OWL2DL_RESERVED_VOCABULARY"
 BUILTIN_ENTITY_KIND_RULE = "OWL2DL_BUILTIN_ENTITY_KIND"
 MISSING_DECLARATION_RULE = "OWL2DL_MISSING_DECLARATION"
+NON_SIMPLE_PROPERTY_RULE = "OWL2DL_NON_SIMPLE_PROPERTY"
 ENTITY_RULES = frozenset(
     (
         BUILTIN_ENTITY_KIND_RULE,
@@ -66,6 +67,7 @@ PROJECTED_RULES = frozenset(
         DATA_RANGE_ARITY_RULE,
         EXTENSION_COMPONENT_RULE,
         MISSING_DECLARATION_RULE,
+        NON_SIMPLE_PROPERTY_RULE,
         PROPERTY_PUNNING_RULE,
         RESERVED_VOCABULARY_RULE,
         TOP_DATA_PROPERTY_RULE,
@@ -503,6 +505,86 @@ def test_legal_builtin_entity_kinds_match_scalar_without_global_issues() -> None
     )
 
 
+def test_non_simple_object_property_positions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:left))",
+            "Declaration(ObjectProperty(:right))",
+            "Declaration(ObjectProperty(:chain))",
+            "Declaration(ObjectProperty(:super))",
+            "Declaration(ObjectProperty(:equivalent))",
+            "Declaration(ObjectProperty(:inversePartner))",
+            "Declaration(ObjectProperty(:simple))",
+            "Declaration(ObjectProperty(:transitive))",
+            "SubObjectPropertyOf(ObjectPropertyChain(:left :right) :chain)",
+            "SubObjectPropertyOf(:chain :super)",
+            "EquivalentObjectProperties(:super :equivalent)",
+            "InverseObjectProperties(:super :inversePartner)",
+            "SymmetricObjectProperty(:super)",
+            "TransitiveObjectProperty(:transitive)",
+            "FunctionalObjectProperty(:super)",
+            "FunctionalObjectProperty(:equivalent)",
+            "FunctionalObjectProperty(:inversePartner)",
+            "FunctionalObjectProperty(:transitive)",
+            "InverseFunctionalObjectProperty(ObjectInverseOf(:super))",
+            "IrreflexiveObjectProperty(:chain)",
+            "AsymmetricObjectProperty(:super)",
+            "DisjointObjectProperties(:chain :simple)",
+            "SubClassOf(ObjectHasSelf(:chain) :A)",
+            "SubClassOf(ObjectMinCardinality(2 :super :A) :A)",
+            "SubClassOf(ObjectMaxCardinality(2 ObjectInverseOf(:super) :A) :A)",
+            "SubClassOf(ObjectExactCardinality(2 :simple :A) :A)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    issues = [
+        issue
+        for issue in cast(list[dict[str, object]], actual["issues"])
+        if issue["rule_id"] == NON_SIMPLE_PROPERTY_RULE
+    ]
+    assert len(issues) == 11
+    assert {issue["constructor"] for issue in issues} == {
+        "AsymmetricObjectProperty",
+        "DisjointObjectProperties",
+        "FunctionalObjectProperty",
+        "InverseFunctionalObjectProperty",
+        "IrreflexiveObjectProperty",
+        "SubClassOf",
+    }
+    assert all(
+        len(cast(str, issue["provenance_sha256"])) == 64 for issue in issues
+    )
+
+
+def test_simple_object_property_positions_remain_conformant() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:simple))",
+            "FunctionalObjectProperty(:simple)",
+            "InverseFunctionalObjectProperty(ObjectInverseOf(:simple))",
+            "IrreflexiveObjectProperty(:simple)",
+            "AsymmetricObjectProperty(:simple)",
+            "DisjointObjectProperties(:simple ObjectInverseOf(:simple))",
+            "SubClassOf(ObjectHasSelf(:simple) :A)",
+            "SubClassOf(ObjectMinCardinality(2 :simple :A) :A)",
+            "SubClassOf(ObjectMaxCardinality(2 :simple :A) :A)",
+            "SubClassOf(ObjectExactCardinality(2 :simple :A) :A)",
+        ),
+        options=OPTIONS,
+    )
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    assert NON_SIMPLE_PROPERTY_RULE not in actual["ordered_rule_ids"]
+
+
 def test_extension_component_diagnostic_and_count_match_scalar_exactly() -> None:
     snapshot = _extension_snapshot("single")
     scalar = validate_owl2_dl_view(snapshot)
@@ -741,6 +823,40 @@ def test_entity_rules_are_recomputed_across_one_root_slices() -> None:
     assert forward == reverse == direct
     assert json.loads(forward) == _expected_manifest(snapshot)
     assert json.loads(forward)["ordered_rule_ids"] == [PROPERTY_PUNNING_RULE]
+
+
+def test_non_simple_role_closure_is_recomputed_across_one_root_slices() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:left))",
+            "Declaration(ObjectProperty(:right))",
+            "Declaration(ObjectProperty(:chain))",
+            "Declaration(ObjectProperty(:super))",
+            "SubObjectPropertyOf(ObjectPropertyChain(:left :right) :chain)",
+            "SubObjectPropertyOf(:chain :super)",
+            "FunctionalObjectProperty(:super)",
+        ),
+        options=OPTIONS,
+    )
+    root_count = len(bytes(_buffers(snapshot)["root_kinds"]))
+    records = tuple(
+        _slice_record(
+            snapshot,
+            posting_mode=1,
+            postings=memoryview(struct.pack("<I", index)),
+        )
+        for index in range(1, root_count + 1)
+    )
+
+    direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
+    forward = native._encoded_profile_slices_manifest_v1(slices=records)
+    reverse = native._encoded_profile_slices_manifest_v1(
+        slices=tuple(reversed(records))
+    )
+
+    assert forward == reverse == direct
+    assert json.loads(forward) == _expected_manifest(snapshot)
+    assert json.loads(forward)["ordered_rule_ids"] == [NON_SIMPLE_PROPERTY_RULE]
 
 
 def test_extension_selection_and_composite_deduplication_are_canonical() -> None:

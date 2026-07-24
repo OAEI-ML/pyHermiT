@@ -3,12 +3,13 @@
 //! Profile violations are successful semantic output. Malformed columns,
 //! resource exhaustion, and cancellation remain distinct operational failures.
 //! This first private phase owns exact data-arity, top-data-property, local
-//! anonymous-placement, and extension projections. Structural-columns schema 1
-//! does not carry document-origin rows, so the manifest exposes canonical root
-//! provenance without inventing `ProfileIssue.document_keys`. Anonymous graph
-//! facts remain private until all selected slices can be merged and validated
-//! globally. Issue ordering and deduplication use the exact projected field
-//! tuple published by this phase.
+//! anonymous-placement, global entity/declaration, object-role simplicity, and
+//! extension projections. Structural-columns schema 1 does not carry
+//! document-origin rows, so the manifest exposes canonical root provenance
+//! without inventing `ProfileIssue.document_keys`. Anonymous graph, entity,
+//! declaration, and role facts remain private until all selected slices can be
+//! merged and validated globally. Issue ordering and deduplication use the
+//! exact projected field tuple published by this phase.
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #![forbid(unsafe_code)]
@@ -22,7 +23,8 @@ use sha2::{Digest, Sha256};
 
 use super::canonical::{self, AnonymousScopeMap, CanonicalBudget};
 use super::model::{
-    ComponentKind, ComponentRef, ComponentValue, NodeId, RootKind, ScalarRef, ValidatedModel,
+    CollectionRef, ComponentKind, ComponentRef, ComponentValue, NodeId, NodeRef, RootKind,
+    ScalarRef, ValidatedModel,
 };
 use super::symbols::RootHandler;
 use super::{u32_at, ByteSource, EncodedResult, EncodedValidationError};
@@ -34,11 +36,27 @@ const POSTINGS_EXCLUDE: u8 = 2;
 const IRI_TAG: u16 = 1;
 const ENTITY_TAG: u16 = 2;
 const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
+const OBJECT_INVERSE_OF_TAG: u16 = 10;
+const OBJECT_PROPERTY_CHAIN_TAG: u16 = 11;
 const OBJECT_ONE_OF_TAG: u16 = 33;
 const OBJECT_HAS_VALUE_TAG: u16 = 36;
+const OBJECT_HAS_SELF_TAG: u16 = 37;
+const OBJECT_MIN_CARDINALITY_TAG: u16 = 38;
+const OBJECT_MAX_CARDINALITY_TAG: u16 = 39;
+const OBJECT_EXACT_CARDINALITY_TAG: u16 = 40;
 const DATA_SOME_VALUES_FROM_TAG: u16 = 41;
 const DATA_ALL_VALUES_FROM_TAG: u16 = 42;
 const DECLARATION_TAG: u16 = 60;
+const SUB_OBJECT_PROPERTY_TAG: u16 = 70;
+const EQUIVALENT_OBJECT_PROPERTIES_TAG: u16 = 71;
+const DISJOINT_OBJECT_PROPERTIES_TAG: u16 = 72;
+const INVERSE_OBJECT_PROPERTIES_TAG: u16 = 73;
+const FUNCTIONAL_OBJECT_PROPERTY_TAG: u16 = 76;
+const INVERSE_FUNCTIONAL_OBJECT_PROPERTY_TAG: u16 = 77;
+const IRREFLEXIVE_OBJECT_PROPERTY_TAG: u16 = 79;
+const SYMMETRIC_OBJECT_PROPERTY_TAG: u16 = 80;
+const ASYMMETRIC_OBJECT_PROPERTY_TAG: u16 = 81;
+const TRANSITIVE_OBJECT_PROPERTY_TAG: u16 = 82;
 const SUB_DATA_PROPERTY_TAG: u16 = 90;
 const SAME_INDIVIDUAL_TAG: u16 = 110;
 const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
@@ -73,6 +91,9 @@ const CLASS_DATATYPE_PUNNING_RULE: &str = "OWL2DL_CLASS_DATATYPE_PUNNING";
 const RESERVED_VOCABULARY_RULE: &str = "OWL2DL_RESERVED_VOCABULARY";
 const BUILTIN_ENTITY_KIND_RULE: &str = "OWL2DL_BUILTIN_ENTITY_KIND";
 const MISSING_DECLARATION_RULE: &str = "OWL2DL_MISSING_DECLARATION";
+const NON_SIMPLE_PROPERTY_RULE: &str = "OWL2DL_NON_SIMPLE_PROPERTY";
+const NON_SIMPLE_PROPERTY_MESSAGE: &str =
+    "axiom position requires a simple object property expression";
 const EXTENSION_COMPONENT_RULE: &str = "OWL2DL_EXTENSION_COMPONENT";
 const EXTENSION_COMPONENT_MESSAGE: &str =
     "extension components such as SWRL are outside the OWL 2 DL reasoner scope";
@@ -143,6 +164,8 @@ const BUILTIN_DATATYPES: &[&[u8]] = &[
     b"http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral",
     b"http://www.w3.org/2000/01/rdf-schema#Literal",
 ];
+const TOP_OBJECT_PROPERTY_IRI: &[u8] = b"http://www.w3.org/2002/07/owl#topObjectProperty";
+const BOTTOM_OBJECT_PROPERTY_IRI: &[u8] = b"http://www.w3.org/2002/07/owl#bottomObjectProperty";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProfilePhaseLimits {
@@ -154,6 +177,9 @@ pub struct ProfilePhaseLimits {
     pub max_anonymous_assertions: usize,
     pub max_entity_uses: usize,
     pub max_entity_declarations: usize,
+    pub max_role_inclusions: usize,
+    pub max_non_simple_role_seeds: usize,
+    pub max_simple_role_requirements: usize,
     pub max_owned_bytes: usize,
     pub max_work: u64,
     pub max_manifest_bytes: usize,
@@ -172,6 +198,9 @@ impl Default for ProfilePhaseLimits {
             max_anonymous_assertions: 10_000_000,
             max_entity_uses: 10_000_000,
             max_entity_declarations: 10_000_000,
+            max_role_inclusions: 100_000_000,
+            max_non_simple_role_seeds: 10_000_000,
+            max_simple_role_requirements: 10_000_000,
             max_owned_bytes: 512 * 1024 * 1024,
             max_work: 2_000_000_000,
             max_manifest_bytes: 512 * 1024 * 1024,
@@ -262,6 +291,25 @@ struct ProfileEntityIdentity {
     kind: ProfileEntityKind,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProfileObjectRole {
+    iri: Vec<u8>,
+    inverse: bool,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProfileRoleInclusion {
+    sub_role: ProfileObjectRole,
+    super_role: ProfileObjectRole,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProfileSimpleRoleRequirement {
+    role: ProfileObjectRole,
+    constructor: &'static str,
+    provenance_sha256: [u8; 32],
+}
+
 /// Transactional profile result. Violations never use the error channel.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProfilePhase {
@@ -277,6 +325,9 @@ pub struct ProfilePhase {
     anonymous_assertions: Vec<AnonymousAssertion>,
     entity_uses: Vec<ProfileEntityIdentity>,
     entity_declarations: Vec<ProfileEntityIdentity>,
+    role_inclusions: Vec<ProfileRoleInclusion>,
+    non_simple_role_seeds: Vec<ProfileObjectRole>,
+    simple_role_requirements: Vec<ProfileSimpleRoleRequirement>,
     manifest_limit: usize,
 }
 
@@ -496,6 +547,36 @@ impl PhaseBudget {
         if following > self.limits.max_entity_declarations {
             Err(EncodedValidationError::resource(
                 "profile entity declaration count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn claim_role_inclusion(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_role_inclusions {
+            Err(EncodedValidationError::resource(
+                "profile role inclusion count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn claim_non_simple_role_seed(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_non_simple_role_seeds {
+            Err(EncodedValidationError::resource(
+                "profile non-simple role seed count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn claim_simple_role_requirement(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_simple_role_requirements {
+            Err(EncodedValidationError::resource(
+                "profile simple-role requirement count exceeds its limit",
             ))
         } else {
             Ok(())
@@ -769,6 +850,9 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     let mut anonymous_assertions = Vec::new();
     let mut entity_uses = Vec::new();
     let mut entity_declarations = Vec::new();
+    let mut role_inclusions = Vec::new();
+    let mut non_simple_role_seeds = Vec::new();
+    let mut simple_role_requirements = Vec::new();
     let mut epoch = 0_u32;
 
     for root_index in 0..summary.root_count {
@@ -926,6 +1010,14 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
             .claim_work(key.len())
             .map_err(ProfilePhaseError::Encoded)?;
         let provenance_sha256: [u8; 32] = Sha256::digest(&key).into();
+        retain_profile_role_axiom_facts(
+            model,
+            root.node(),
+            &mut role_inclusions,
+            &mut non_simple_role_seeds,
+            &mut budget,
+            control,
+        )?;
         if axiom_tag == OBJECT_PROPERTY_ASSERTION_TAG {
             let (source, target) =
                 anonymous_assertion_endpoints(model, root.node(), scope_maps, &mut budget)
@@ -974,6 +1066,15 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
             poll(control, "profile-node")?;
             budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
             let node = model.node(identifier).map_err(ProfilePhaseError::Encoded)?;
+            retain_simple_role_requirements_for_node(
+                model,
+                identifier,
+                axiom_constructor,
+                provenance_sha256,
+                &mut simple_role_requirements,
+                &mut budget,
+                control,
+            )?;
             if node.tag() == ANONYMOUS_INDIVIDUAL_TAG {
                 anonymous_individual_occurs = true;
                 let anonymous_index = usize::try_from(identifier.get() - 1).map_err(|_| {
@@ -1202,6 +1303,29 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         control,
     )?;
     budget
+        .claim_work(sort_work(role_inclusions.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    role_inclusions.sort();
+    role_inclusions.dedup();
+    budget
+        .claim_work(sort_work(non_simple_role_seeds.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    non_simple_role_seeds.sort();
+    non_simple_role_seeds.dedup();
+    budget
+        .claim_work(sort_work(simple_role_requirements.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    simple_role_requirements.sort();
+    simple_role_requirements.dedup();
+    append_non_simple_role_issues(
+        &role_inclusions,
+        &non_simple_role_seeds,
+        &simple_role_requirements,
+        &mut issues,
+        &mut budget,
+        control,
+    )?;
+    budget
         .claim_work(sort_work(issues.len()))
         .map_err(ProfilePhaseError::Encoded)?;
     issues.sort();
@@ -1229,6 +1353,9 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         anonymous_assertions,
         entity_uses,
         entity_declarations,
+        role_inclusions,
+        non_simple_role_seeds,
+        simple_role_requirements,
         manifest_limit: limits.max_manifest_bytes,
     };
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
@@ -1318,6 +1445,31 @@ pub fn merge_profile_phases_controlled<E>(
                 )
             })
     })?;
+    let role_inclusion_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total
+            .checked_add(phase.role_inclusions.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("merged profile role inclusion count overflowed")
+            })
+    })?;
+    let non_simple_role_seed_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total
+            .checked_add(phase.non_simple_role_seeds.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "merged profile non-simple role seed count overflowed",
+                )
+            })
+    })?;
+    let simple_role_requirement_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total
+            .checked_add(phase.simple_role_requirements.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "merged profile simple-role requirement count overflowed",
+                )
+            })
+    })?;
     if issue_count > limits.max_issues {
         return Err(EncodedValidationError::resource(
             "merged profile issue count exceeds its limit",
@@ -1357,6 +1509,24 @@ pub fn merge_profile_phases_controlled<E>(
     if entity_declaration_count > limits.max_entity_declarations {
         return Err(EncodedValidationError::resource(
             "merged profile entity declaration count exceeds its limit",
+        )
+        .into());
+    }
+    if role_inclusion_count > limits.max_role_inclusions {
+        return Err(EncodedValidationError::resource(
+            "merged profile role inclusion count exceeds its limit",
+        )
+        .into());
+    }
+    if non_simple_role_seed_count > limits.max_non_simple_role_seeds {
+        return Err(EncodedValidationError::resource(
+            "merged profile non-simple role seed count exceeds its limit",
+        )
+        .into());
+    }
+    if simple_role_requirement_count > limits.max_simple_role_requirements {
+        return Err(EncodedValidationError::resource(
+            "merged profile simple-role requirement count exceeds its limit",
         )
         .into());
     }
@@ -1480,6 +1650,60 @@ pub fn merge_profile_phases_controlled<E>(
                 })?,
         )
         .map_err(ProfilePhaseError::Encoded)?;
+    let mut role_inclusions = Vec::new();
+    reserve_exact(
+        &mut role_inclusions,
+        role_inclusion_count,
+        "merged profile role inclusion allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            role_inclusion_count
+                .checked_mul(size_of::<ProfileRoleInclusion>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "merged profile role inclusion size overflowed",
+                    )
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut non_simple_role_seeds = Vec::new();
+    reserve_exact(
+        &mut non_simple_role_seeds,
+        non_simple_role_seed_count,
+        "merged profile non-simple role seed allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            non_simple_role_seed_count
+                .checked_mul(size_of::<ProfileObjectRole>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "merged profile non-simple role seed size overflowed",
+                    )
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut simple_role_requirements = Vec::new();
+    reserve_exact(
+        &mut simple_role_requirements,
+        simple_role_requirement_count,
+        "merged profile simple-role requirement allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            simple_role_requirement_count
+                .checked_mul(size_of::<ProfileSimpleRoleRequirement>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "merged profile simple-role requirement size overflowed",
+                    )
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
 
     for mut phase in phases {
         validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
@@ -1501,6 +1725,9 @@ pub fn merge_profile_phases_controlled<E>(
         anonymous_assertions.append(&mut phase.anonymous_assertions);
         entity_uses.append(&mut phase.entity_uses);
         entity_declarations.append(&mut phase.entity_declarations);
+        role_inclusions.append(&mut phase.role_inclusions);
+        non_simple_role_seeds.append(&mut phase.non_simple_role_seeds);
+        simple_role_requirements.append(&mut phase.simple_role_requirements);
         poll(control, "profile-merge-source")?;
     }
     budget
@@ -1538,6 +1765,29 @@ pub fn merge_profile_phases_controlled<E>(
         control,
     )?;
     budget
+        .claim_work(sort_work(role_inclusions.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    role_inclusions.sort();
+    role_inclusions.dedup();
+    budget
+        .claim_work(sort_work(non_simple_role_seeds.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    non_simple_role_seeds.sort();
+    non_simple_role_seeds.dedup();
+    budget
+        .claim_work(sort_work(simple_role_requirements.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    simple_role_requirements.sort();
+    simple_role_requirements.dedup();
+    append_non_simple_role_issues(
+        &role_inclusions,
+        &non_simple_role_seeds,
+        &simple_role_requirements,
+        &mut issues,
+        &mut budget,
+        control,
+    )?;
+    budget
         .claim_work(sort_work(issues.len()))
         .map_err(ProfilePhaseError::Encoded)?;
     issues.sort();
@@ -1565,6 +1815,9 @@ pub fn merge_profile_phases_controlled<E>(
         anonymous_assertions,
         entity_uses,
         entity_declarations,
+        role_inclusions,
+        non_simple_role_seeds,
+        simple_role_requirements,
         manifest_limit: limits.max_manifest_bytes,
     };
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
@@ -1704,6 +1957,674 @@ fn clone_profile_scalar<B: ByteSource>(
         })?);
     }
     Ok(owned)
+}
+
+fn profile_object_role<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<ProfileObjectRole> {
+    budget.claim_work(1)?;
+    let node = model.node(identifier)?;
+    let (entity, inverse) = if node.tag() == ENTITY_TAG {
+        (identifier, false)
+    } else if node.tag() == OBJECT_INVERSE_OF_TAG && node.field_count() == 1 {
+        (
+            required_node(
+                model,
+                node.fields().start,
+                "profile inverse object property",
+            )?,
+            true,
+        )
+    } else {
+        return Err(EncodedValidationError::invariant(
+            "validated profile object role lost its schema-1 shape",
+        ));
+    };
+    let identity = profile_entity_identity(model, entity, budget)?;
+    if identity.kind != ProfileEntityKind::ObjectProperty {
+        return Err(EncodedValidationError::invariant(
+            "validated profile object role is not an object-property entity",
+        ));
+    }
+    let inverse = inverse
+        && identity.iri != TOP_OBJECT_PROPERTY_IRI
+        && identity.iri != BOTTOM_OBJECT_PROPERTY_IRI;
+    Ok(ProfileObjectRole {
+        iri: identity.iri,
+        inverse,
+    })
+}
+
+fn clone_profile_object_role(
+    role: &ProfileObjectRole,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<ProfileObjectRole> {
+    Ok(ProfileObjectRole {
+        iri: clone_profile_bytes(
+            &role.iri,
+            budget,
+            "profile object-role IRI allocation failed",
+        )?,
+        inverse: role.inverse,
+    })
+}
+
+fn inverse_profile_object_role(
+    role: &ProfileObjectRole,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<ProfileObjectRole> {
+    let mut inverse = clone_profile_object_role(role, budget)?;
+    if inverse.iri != TOP_OBJECT_PROPERTY_IRI && inverse.iri != BOTTOM_OBJECT_PROPERTY_IRI {
+        inverse.inverse = !inverse.inverse;
+    }
+    Ok(inverse)
+}
+
+fn profile_role_collection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    node: NodeRef,
+    field_offset: usize,
+    name: &'static str,
+) -> EncodedResult<CollectionRef> {
+    let field = node
+        .fields()
+        .start
+        .checked_add(field_offset)
+        .ok_or_else(|| EncodedValidationError::resource("profile role field index overflowed"))?;
+    let component = required_component(model.field(field)?, name)?;
+    let ComponentValue::Collection(collection) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated {name} is not a collection"
+        )));
+    };
+    if collection.kind() != ComponentKind::Set {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated {name} is not a canonical set"
+        )));
+    }
+    Ok(collection)
+}
+
+fn profile_role_field_with_budget<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    node: NodeRef,
+    field_offset: usize,
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<ProfileObjectRole> {
+    let field = node
+        .fields()
+        .start
+        .checked_add(field_offset)
+        .ok_or_else(|| EncodedValidationError::resource("profile role field index overflowed"))?;
+    profile_object_role(model, required_node(model, field, name)?, budget)
+}
+
+fn profile_role_item<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    item_index: usize,
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<ProfileObjectRole> {
+    let item = required_component(model.item(item_index)?, name)?;
+    let ComponentValue::Node(identifier) = model.resolve(item)? else {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated {name} is not a node"
+        )));
+    };
+    profile_object_role(model, identifier, budget)
+}
+
+fn push_profile_role_inclusion(
+    target: &mut Vec<ProfileRoleInclusion>,
+    inclusion: ProfileRoleInclusion,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let following = target.len().checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("profile role inclusion count overflowed")
+    })?;
+    budget.claim_role_inclusion(following)?;
+    reserve_profile_one(target, budget, "profile role inclusion allocation failed")?;
+    target.push(inclusion);
+    Ok(())
+}
+
+fn add_profile_simple_inclusion(
+    target: &mut Vec<ProfileRoleInclusion>,
+    sub_role: &ProfileObjectRole,
+    super_role: &ProfileObjectRole,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let inverse_sub = inverse_profile_object_role(sub_role, budget)?;
+    let inverse_super = inverse_profile_object_role(super_role, budget)?;
+    push_profile_role_inclusion(
+        target,
+        ProfileRoleInclusion {
+            sub_role: clone_profile_object_role(sub_role, budget)?,
+            super_role: clone_profile_object_role(super_role, budget)?,
+        },
+        budget,
+    )?;
+    push_profile_role_inclusion(
+        target,
+        ProfileRoleInclusion {
+            sub_role: inverse_sub,
+            super_role: inverse_super,
+        },
+        budget,
+    )
+}
+
+fn push_non_simple_role_seed(
+    target: &mut Vec<ProfileObjectRole>,
+    role: ProfileObjectRole,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let following = target.len().checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("profile non-simple role seed count overflowed")
+    })?;
+    budget.claim_non_simple_role_seed(following)?;
+    reserve_profile_one(
+        target,
+        budget,
+        "profile non-simple role seed allocation failed",
+    )?;
+    target.push(role);
+    Ok(())
+}
+
+fn add_non_simple_role_seed_pair(
+    target: &mut Vec<ProfileObjectRole>,
+    role: &ProfileObjectRole,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    push_non_simple_role_seed(target, clone_profile_object_role(role, budget)?, budget)?;
+    push_non_simple_role_seed(target, inverse_profile_object_role(role, budget)?, budget)
+}
+
+fn retain_profile_role_axiom_facts<B: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    inclusions: &mut Vec<ProfileRoleInclusion>,
+    seeds: &mut Vec<ProfileObjectRole>,
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
+    let node = model.node(identifier)?;
+    match node.tag() {
+        SUB_OBJECT_PROPERTY_TAG => {
+            if node.field_count() != 3 {
+                return Err(EncodedValidationError::invariant(
+                    "validated sub-object-property axiom lost its schema-1 shape",
+                )
+                .into());
+            }
+            let sub_field = node.fields().start;
+            let sub_identifier =
+                required_node(model, sub_field, "profile sub-object-property expression")?;
+            let super_role = profile_role_field_with_budget(
+                model,
+                node,
+                1,
+                "profile super object property",
+                budget,
+            )?;
+            let sub_node = model.node(sub_identifier)?;
+            if sub_node.tag() == OBJECT_PROPERTY_CHAIN_TAG {
+                if sub_node.field_count() != 1 {
+                    return Err(EncodedValidationError::invariant(
+                        "validated object-property chain lost its schema-1 shape",
+                    )
+                    .into());
+                }
+                let component = required_component(
+                    model.field(sub_node.fields().start)?,
+                    "profile object-property chain members",
+                )?;
+                let ComponentValue::Collection(chain) = model.resolve(component)? else {
+                    return Err(EncodedValidationError::invariant(
+                        "validated object-property chain members are not a sequence",
+                    )
+                    .into());
+                };
+                if chain.kind() != ComponentKind::Sequence || chain.len() < 2 {
+                    return Err(EncodedValidationError::invariant(
+                        "validated object-property chain has fewer than two ordered members",
+                    )
+                    .into());
+                }
+                add_non_simple_role_seed_pair(seeds, &super_role, budget)?;
+            } else {
+                let sub_role = profile_object_role(model, sub_identifier, budget)?;
+                add_profile_simple_inclusion(inclusions, &sub_role, &super_role, budget)?;
+            }
+        }
+        EQUIVALENT_OBJECT_PROPERTIES_TAG => {
+            if node.field_count() != 2 {
+                return Err(EncodedValidationError::invariant(
+                    "validated equivalent-object-properties axiom lost its schema-1 shape",
+                )
+                .into());
+            }
+            let collection =
+                profile_role_collection(model, node, 0, "profile equivalent object properties")?;
+            if collection.len() < 2 {
+                return Err(EncodedValidationError::invariant(
+                    "validated equivalent-object-properties axiom has fewer than two members",
+                )
+                .into());
+            }
+            let mut items = collection.items();
+            let first_index = items.next().ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "validated equivalent-object-properties set is empty",
+                )
+            })?;
+            let first = profile_role_item(
+                model,
+                first_index,
+                "profile equivalent object property",
+                budget,
+            )?;
+            for item_index in items {
+                poll(control, "profile-role-axiom-member")?;
+                budget.claim_work(1)?;
+                let other = profile_role_item(
+                    model,
+                    item_index,
+                    "profile equivalent object property",
+                    budget,
+                )?;
+                add_profile_simple_inclusion(inclusions, &first, &other, budget)?;
+                add_profile_simple_inclusion(inclusions, &other, &first, budget)?;
+            }
+        }
+        INVERSE_OBJECT_PROPERTIES_TAG => {
+            if node.field_count() != 3 {
+                return Err(EncodedValidationError::invariant(
+                    "validated inverse-object-properties axiom lost its schema-1 shape",
+                )
+                .into());
+            }
+            let first = profile_role_field_with_budget(
+                model,
+                node,
+                0,
+                "profile first inverse object property",
+                budget,
+            )?;
+            let second = profile_role_field_with_budget(
+                model,
+                node,
+                1,
+                "profile second inverse object property",
+                budget,
+            )?;
+            let inverse_second = inverse_profile_object_role(&second, budget)?;
+            add_profile_simple_inclusion(inclusions, &first, &inverse_second, budget)?;
+            add_profile_simple_inclusion(inclusions, &inverse_second, &first, budget)?;
+        }
+        SYMMETRIC_OBJECT_PROPERTY_TAG => {
+            if node.field_count() != 2 {
+                return Err(EncodedValidationError::invariant(
+                    "validated symmetric-object-property axiom lost its schema-1 shape",
+                )
+                .into());
+            }
+            let role = profile_role_field_with_budget(
+                model,
+                node,
+                0,
+                "profile symmetric object property",
+                budget,
+            )?;
+            let inverse = inverse_profile_object_role(&role, budget)?;
+            add_profile_simple_inclusion(inclusions, &role, &inverse, budget)?;
+            add_profile_simple_inclusion(inclusions, &inverse, &role, budget)?;
+        }
+        TRANSITIVE_OBJECT_PROPERTY_TAG => {
+            if node.field_count() != 2 {
+                return Err(EncodedValidationError::invariant(
+                    "validated transitive-object-property axiom lost its schema-1 shape",
+                )
+                .into());
+            }
+            let role = profile_role_field_with_budget(
+                model,
+                node,
+                0,
+                "profile transitive object property",
+                budget,
+            )?;
+            add_non_simple_role_seed_pair(seeds, &role, budget)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn push_simple_role_requirement(
+    target: &mut Vec<ProfileSimpleRoleRequirement>,
+    role: ProfileObjectRole,
+    constructor: &'static str,
+    provenance_sha256: [u8; 32],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let following = target.len().checked_add(1).ok_or_else(|| {
+        EncodedValidationError::resource("profile simple-role requirement count overflowed")
+    })?;
+    budget.claim_simple_role_requirement(following)?;
+    reserve_profile_one(
+        target,
+        budget,
+        "profile simple-role requirement allocation failed",
+    )?;
+    target.push(ProfileSimpleRoleRequirement {
+        role,
+        constructor,
+        provenance_sha256,
+    });
+    Ok(())
+}
+
+fn retain_simple_role_requirements_for_node<B: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    constructor: &'static str,
+    provenance_sha256: [u8; 32],
+    target: &mut Vec<ProfileSimpleRoleRequirement>,
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
+    let node = model.node(identifier)?;
+    match node.tag() {
+        FUNCTIONAL_OBJECT_PROPERTY_TAG
+        | INVERSE_FUNCTIONAL_OBJECT_PROPERTY_TAG
+        | IRREFLEXIVE_OBJECT_PROPERTY_TAG
+        | ASYMMETRIC_OBJECT_PROPERTY_TAG => {
+            if node.field_count() != 2 {
+                return Err(EncodedValidationError::invariant(
+                    "validated simple-required object characteristic lost its schema-1 shape",
+                )
+                .into());
+            }
+            let role = profile_role_field_with_budget(
+                model,
+                node,
+                0,
+                "profile simple-required object property",
+                budget,
+            )?;
+            push_simple_role_requirement(target, role, constructor, provenance_sha256, budget)?;
+        }
+        DISJOINT_OBJECT_PROPERTIES_TAG => {
+            if node.field_count() != 2 {
+                return Err(EncodedValidationError::invariant(
+                    "validated disjoint-object-properties axiom lost its schema-1 shape",
+                )
+                .into());
+            }
+            let collection =
+                profile_role_collection(model, node, 0, "profile disjoint object properties")?;
+            if collection.len() < 2 {
+                return Err(EncodedValidationError::invariant(
+                    "validated disjoint-object-properties axiom has fewer than two members",
+                )
+                .into());
+            }
+            for item_index in collection.items() {
+                poll(control, "profile-simple-requirement-member")?;
+                budget.claim_work(1)?;
+                let role = profile_role_item(
+                    model,
+                    item_index,
+                    "profile disjoint object property",
+                    budget,
+                )?;
+                push_simple_role_requirement(target, role, constructor, provenance_sha256, budget)?;
+            }
+        }
+        OBJECT_HAS_SELF_TAG => {
+            if node.field_count() != 1 {
+                return Err(EncodedValidationError::invariant(
+                    "validated object-self restriction lost its schema-1 shape",
+                )
+                .into());
+            }
+            let role = profile_role_field_with_budget(
+                model,
+                node,
+                0,
+                "profile object-self property",
+                budget,
+            )?;
+            push_simple_role_requirement(target, role, constructor, provenance_sha256, budget)?;
+        }
+        OBJECT_MIN_CARDINALITY_TAG | OBJECT_MAX_CARDINALITY_TAG | OBJECT_EXACT_CARDINALITY_TAG => {
+            if node.field_count() != 3 {
+                return Err(EncodedValidationError::invariant(
+                    "validated object cardinality lost its schema-1 shape",
+                )
+                .into());
+            }
+            let role = profile_role_field_with_budget(
+                model,
+                node,
+                1,
+                "profile object-cardinality property",
+                budget,
+            )?;
+            push_simple_role_requirement(target, role, constructor, provenance_sha256, budget)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn append_non_simple_role_issues<E>(
+    inclusions: &[ProfileRoleInclusion],
+    seeds: &[ProfileObjectRole],
+    requirements: &[ProfileSimpleRoleRequirement],
+    issues: &mut Vec<ProfileIssue>,
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
+    if requirements.is_empty() {
+        return Ok(());
+    }
+    poll(control, "profile-role-preflight")?;
+    let role_reference_count = inclusions
+        .len()
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(seeds.len()))
+        .and_then(|count| count.checked_add(requirements.len()))
+        .ok_or_else(|| {
+            ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                "profile role reference count overflowed",
+            ))
+        })?;
+    budget
+        .claim_owned(
+            role_reference_count
+                .checked_mul(size_of::<&ProfileObjectRole>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("profile role reference size overflowed")
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut roles = Vec::new();
+    reserve_exact(
+        &mut roles,
+        role_reference_count,
+        "profile role reference allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for inclusion in inclusions {
+        poll(control, "profile-role-reference")?;
+        roles.push(&inclusion.sub_role);
+        roles.push(&inclusion.super_role);
+    }
+    roles.extend(seeds);
+    roles.extend(requirements.iter().map(|requirement| &requirement.role));
+    budget
+        .claim_work(sort_work(roles.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    roles.sort_unstable();
+    roles.dedup();
+
+    budget
+        .claim_owned(
+            inclusions
+                .len()
+                .checked_mul(size_of::<(usize, usize)>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "profile indexed role inclusion size overflowed",
+                    )
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut indexed_inclusions = Vec::new();
+    reserve_exact(
+        &mut indexed_inclusions,
+        inclusions.len(),
+        "profile indexed role inclusion allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for inclusion in inclusions {
+        poll(control, "profile-role-inclusion")?;
+        budget
+            .claim_work(search_work(roles.len()).saturating_mul(2))
+            .map_err(ProfilePhaseError::Encoded)?;
+        indexed_inclusions.push((
+            profile_role_index(&roles, &inclusion.sub_role).map_err(ProfilePhaseError::Encoded)?,
+            profile_role_index(&roles, &inclusion.super_role)
+                .map_err(ProfilePhaseError::Encoded)?,
+        ));
+    }
+    budget
+        .claim_work(sort_work(indexed_inclusions.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    indexed_inclusions.sort_unstable();
+    indexed_inclusions.dedup();
+
+    budget
+        .claim_owned(roles.len())
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut marked = Vec::new();
+    reserve_exact(
+        &mut marked,
+        roles.len(),
+        "profile non-simple role mark allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    marked.resize(roles.len(), 0_u8);
+    budget
+        .claim_owned(roles.len().checked_mul(size_of::<usize>()).ok_or_else(|| {
+            EncodedValidationError::resource("profile non-simple role queue size overflowed")
+        })?)
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut queue = Vec::new();
+    reserve_exact(
+        &mut queue,
+        roles.len(),
+        "profile non-simple role queue allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    for seed in seeds {
+        poll(control, "profile-role-seed")?;
+        budget
+            .claim_work(search_work(roles.len()))
+            .map_err(ProfilePhaseError::Encoded)?;
+        let index = profile_role_index(&roles, seed).map_err(ProfilePhaseError::Encoded)?;
+        mark_non_simple_role(index, &mut marked, &mut queue).map_err(ProfilePhaseError::Encoded)?;
+    }
+    for (index, role) in roles.iter().enumerate() {
+        poll(control, "profile-role-builtin")?;
+        budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+        if !role.inverse
+            && (role.iri == TOP_OBJECT_PROPERTY_IRI || role.iri == BOTTOM_OBJECT_PROPERTY_IRI)
+        {
+            mark_non_simple_role(index, &mut marked, &mut queue)
+                .map_err(ProfilePhaseError::Encoded)?;
+        }
+    }
+    let mut queue_offset = 0_usize;
+    while queue_offset < queue.len() {
+        poll(control, "profile-role-closure")?;
+        let role = queue[queue_offset];
+        queue_offset = queue_offset.checked_add(1).ok_or_else(|| {
+            ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                "profile role queue offset overflowed",
+            ))
+        })?;
+        budget
+            .claim_work(search_work(indexed_inclusions.len()).saturating_mul(2))
+            .map_err(ProfilePhaseError::Encoded)?;
+        let start = indexed_inclusions.partition_point(|edge| edge.0 < role);
+        let end = indexed_inclusions.partition_point(|edge| edge.0 <= role);
+        for &(_, super_role) in &indexed_inclusions[start..end] {
+            budget.claim_work(1).map_err(ProfilePhaseError::Encoded)?;
+            mark_non_simple_role(super_role, &mut marked, &mut queue)
+                .map_err(ProfilePhaseError::Encoded)?;
+        }
+    }
+    for requirement in requirements {
+        poll(control, "profile-simple-requirement")?;
+        budget
+            .claim_work(search_work(roles.len()))
+            .map_err(ProfilePhaseError::Encoded)?;
+        let role =
+            profile_role_index(&roles, &requirement.role).map_err(ProfilePhaseError::Encoded)?;
+        if marked[role] == 0 {
+            continue;
+        }
+        push_profile_issue(
+            issues,
+            ProfileIssue {
+                rule_id: NON_SIMPLE_PROPERTY_RULE,
+                severity: "error",
+                message: Cow::Borrowed(NON_SIMPLE_PROPERTY_MESSAGE),
+                constructor: Some(requirement.constructor),
+                provenance_sha256: Some(requirement.provenance_sha256),
+            },
+            budget,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    }
+    poll(control, "profile-role-complete")?;
+    Ok(())
+}
+
+fn profile_role_index(
+    roles: &[&ProfileObjectRole],
+    target: &ProfileObjectRole,
+) -> EncodedResult<usize> {
+    roles
+        .binary_search_by(|candidate| (*candidate).cmp(target))
+        .map_err(|_| EncodedValidationError::invariant("profile role index is incomplete"))
+}
+
+fn mark_non_simple_role(
+    index: usize,
+    marked: &mut [u8],
+    queue: &mut Vec<usize>,
+) -> EncodedResult<()> {
+    let selected = marked.get_mut(index).ok_or_else(|| {
+        EncodedValidationError::invariant("profile non-simple role index is dangling")
+    })?;
+    if *selected == 0 {
+        *selected = 1;
+        if queue.len() == queue.capacity() {
+            return Err(EncodedValidationError::resource(
+                "profile non-simple role queue exceeded its domain",
+            ));
+        }
+        queue.push(index);
+    }
+    Ok(())
 }
 
 fn append_entity_issues<E>(
@@ -2235,6 +3156,7 @@ fn is_recomputed_profile_rule(rule_id: &str) -> bool {
             | RESERVED_VOCABULARY_RULE
             | BUILTIN_ENTITY_KIND_RULE
             | MISSING_DECLARATION_RULE
+            | NON_SIMPLE_PROPERTY_RULE
     )
 }
 
@@ -2561,6 +3483,33 @@ fn validate_phase(phase: &ProfilePhase) -> EncodedResult<()> {
     {
         return Err(EncodedValidationError::invariant(
             "profile entity declarations are not canonical sorted unique",
+        ));
+    }
+    if phase
+        .role_inclusions
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile role inclusions are not canonical sorted unique",
+        ));
+    }
+    if phase
+        .non_simple_role_seeds
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile non-simple role seeds are not canonical sorted unique",
+        ));
+    }
+    if phase
+        .simple_role_requirements
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile simple-role requirements are not canonical sorted unique",
         ));
     }
     Ok(())
@@ -3100,6 +4049,148 @@ mod tests {
             Err(ProfilePhaseError::Control("injected entity cancellation"))
         );
         assert!(cancelled_issues.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn non_simple_role_closure_is_global_bounded_and_cancellable() -> EncodedResult<()> {
+        let role = |iri: &str, inverse: bool| ProfileObjectRole {
+            iri: iri.as_bytes().to_vec(),
+            inverse,
+        };
+        let inclusions = vec![
+            ProfileRoleInclusion {
+                sub_role: role("urn:chain", false),
+                super_role: role("urn:super", false),
+            },
+            ProfileRoleInclusion {
+                sub_role: role("urn:chain", true),
+                super_role: role("urn:super", true),
+            },
+        ];
+        let seeds = vec![role("urn:chain", false), role("urn:chain", true)];
+        let requirements = vec![
+            ProfileSimpleRoleRequirement {
+                role: role("urn:simple", false),
+                constructor: "FunctionalObjectProperty",
+                provenance_sha256: [1; 32],
+            },
+            ProfileSimpleRoleRequirement {
+                role: role("urn:super", false),
+                constructor: "FunctionalObjectProperty",
+                provenance_sha256: [2; 32],
+            },
+            ProfileSimpleRoleRequirement {
+                role: role("urn:super", true),
+                constructor: "SubClassOf",
+                provenance_sha256: [3; 32],
+            },
+            ProfileSimpleRoleRequirement {
+                role: role(
+                    std::str::from_utf8(TOP_OBJECT_PROPERTY_IRI).map_err(|_| {
+                        EncodedValidationError::invariant("builtin role IRI is not UTF-8")
+                    })?,
+                    false,
+                ),
+                constructor: "ObjectHasSelf",
+                provenance_sha256: [4; 32],
+            },
+        ];
+        let mut issues = Vec::new();
+        let mut budget = PhaseBudget::new(ProfilePhaseLimits::default());
+        let mut control = |_phase| Ok::<(), Infallible>(());
+
+        into_encoded(append_non_simple_role_issues(
+            &inclusions,
+            &seeds,
+            &requirements,
+            &mut issues,
+            &mut budget,
+            &mut control,
+        ))?;
+        issues.sort();
+
+        assert_eq!(issues.len(), 3);
+        let mut provenance = issues
+            .iter()
+            .filter_map(|issue| issue.provenance_sha256.map(|value| value[0]))
+            .collect::<Vec<_>>();
+        provenance.sort_unstable();
+        assert_eq!(provenance, vec![2, 3, 4]);
+        assert!(issues
+            .iter()
+            .all(|issue| issue.rule_id == NON_SIMPLE_PROPERTY_RULE));
+
+        let mut cancelled_issues = Vec::new();
+        let mut cancelled_budget = PhaseBudget::new(ProfilePhaseLimits::default());
+        let cancelled = append_non_simple_role_issues(
+            &inclusions,
+            &seeds,
+            &requirements,
+            &mut cancelled_issues,
+            &mut cancelled_budget,
+            &mut |phase| {
+                if phase == "profile-role-preflight" {
+                    Err("injected role cancellation")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(
+            cancelled,
+            Err(ProfilePhaseError::Control("injected role cancellation"))
+        );
+        assert!(cancelled_issues.is_empty());
+
+        let mut limited_issues = Vec::new();
+        let mut limited_budget = PhaseBudget::new(ProfilePhaseLimits {
+            max_issues: 0,
+            ..ProfilePhaseLimits::default()
+        });
+        let limited = append_non_simple_role_issues(
+            &inclusions,
+            &seeds,
+            &requirements,
+            &mut limited_issues,
+            &mut limited_budget,
+            &mut control,
+        );
+        let Err(ProfilePhaseError::Encoded(error)) = limited else {
+            return Err(EncodedValidationError::invariant(
+                "non-simple role issue limit unexpectedly succeeded",
+            ));
+        };
+        assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
+        assert!(limited_issues.is_empty());
+
+        let mut fact_budget = PhaseBudget::new(ProfilePhaseLimits {
+            max_role_inclusions: 0,
+            max_non_simple_role_seeds: 0,
+            max_simple_role_requirements: 0,
+            ..ProfilePhaseLimits::default()
+        });
+        assert_eq!(
+            push_profile_role_inclusion(&mut Vec::new(), inclusions[0].clone(), &mut fact_budget,)
+                .map_err(|error| error.code),
+            Err("NATIVE_ENCODED_RESOURCE_LIMIT")
+        );
+        assert_eq!(
+            push_non_simple_role_seed(&mut Vec::new(), seeds[0].clone(), &mut fact_budget,)
+                .map_err(|error| error.code),
+            Err("NATIVE_ENCODED_RESOURCE_LIMIT")
+        );
+        assert_eq!(
+            push_simple_role_requirement(
+                &mut Vec::new(),
+                requirements[0].role.clone(),
+                requirements[0].constructor,
+                requirements[0].provenance_sha256,
+                &mut fact_budget,
+            )
+            .map_err(|error| error.code),
+            Err("NATIVE_ENCODED_RESOURCE_LIMIT")
+        );
         Ok(())
     }
 
