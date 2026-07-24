@@ -9168,11 +9168,12 @@ fn reduction_entity_is_retained(symbols: &SymbolPhase, entity_id: u32) -> Encode
         .ok_or_else(|| {
             EncodedValidationError::invariant("reducible expression entity ID is dangling")
         })?;
-    let builtin = entity.display == THING_DISPLAY
+    let implicitly_retained = entity.display == THING_DISPLAY
         || entity.display == NOTHING_DISPLAY
         || entity.display == RDFS_LITERAL_DISPLAY
-        || is_implicit_builtin_property(&entity.display);
-    if builtin {
+        || is_implicit_builtin_property(&entity.display)
+        || entity.display.starts_with(NAMED_INDIVIDUAL_PREFIX);
+    if implicitly_retained {
         return Ok(true);
     }
     Ok(symbols.entity_has_source_declaration(entity_id))

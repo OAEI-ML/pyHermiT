@@ -3791,6 +3791,44 @@ def test_object_has_value_definitions_cover_generated_class_contexts() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_undeclared_named_object_has_value_matches_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "SubClassOf(:A ObjectHasValue(:p :implicit))",
+            "SubClassOf(ObjectComplementOf(ObjectHasValue("
+            "ObjectInverseOf(:q) :implicit)) :B)",
+            "SubClassOf(:A ObjectSomeValuesFrom(:p ObjectOneOf(:implicit)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=3,
+        include_generated_object_quantifier_definitions=True,
+        include_at_least_object_predicates=True,
+    )
+    assert cast(list[dict[str, object]], manifest["individual_signature"])[0][
+        "declared"
+    ] is False
+    singleton_nominals = [
+        value
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if str(value["display"]).startswith("ObjectOneOf:")
+    ]
+    assert len(singleton_nominals) == 1
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_composite_object_has_value_reuses_explicit_quantifier_identity() -> None:
     declarations = (
         "Declaration(Class(:A))",
@@ -3851,7 +3889,49 @@ def test_composite_object_has_value_reuses_explicit_quantifier_identity() -> Non
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_object_has_value_unsupported_inputs_defer_without_symbol_leaks() -> None:
+def test_composite_undeclared_named_object_has_value_remaps_exactly() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:p))",
+            "SubClassOf(:A ObjectHasValue(:p :implicit))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "SubClassOf(:B ObjectSomeValuesFrom(:p ObjectOneOf(:implicit)))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    records = _composite_records(composite, (left, right))
+
+    forward = _native_slices_manifest(
+        *records,
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+    reverse = _native_slices_manifest(
+        *reversed(records),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert forward == reverse == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_generated_object_quantifier_definitions=True,
+        include_at_least_object_predicates=True,
+    )
+    assert cast(list[dict[str, object]], forward["individual_signature"])[0][
+        "declared"
+    ] is False
+    assert forward["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_object_has_value_partially_unsupported_inputs_defer_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
@@ -3869,33 +3949,40 @@ def test_object_has_value_unsupported_inputs_defer_without_symbol_leaks() -> Non
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 3
+    assert manifest["compiled_roots"] == 1
+    assert manifest["deferred_roots"] == 2
+    class_symbols = cast(
+        list[dict[str, object]], manifest["class_expression_symbols"]
+    )
+    assert sum(value["generated"] for value in class_symbols) == 1
+    assert sum(
+        str(value["display"]).startswith("ObjectOneOf:") for value in class_symbols
+    ) == 1
+    assert sum(
+        str(value["display"]).startswith("ObjectSomeValuesFrom:")
+        for value in class_symbols
+    ) == 1
     assert not any(
-        value["generated"]
-        or str(value["display"]).startswith(
-            (
-                "ObjectOneOf:",
-                "ObjectComplementOf:",
-                "ObjectSomeValuesFrom:",
-                "ObjectAllValuesFrom:",
-                "ObjectHasValue:",
-            )
+        str(value["display"]).startswith(
+            ("ObjectComplementOf:", "ObjectAllValuesFrom:", "ObjectHasValue:")
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in class_symbols
     )
-    assert all(
-        predicate["kind"]
-        not in {
-            PredicateKind.NOMINAL.value,
-            PredicateKind.NEGATED_NOMINAL.value,
-            PredicateKind.AT_LEAST_OBJECT.value,
-            PredicateKind.OBJECT_ROLE.value,
-        }
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
-    )
+    predicates = cast(list[dict[str, object]], manifest["predicates"])
+    nominal_predicates = [
+        predicate
+        for predicate in predicates
+        if predicate["kind"] == PredicateKind.NOMINAL.value
+    ]
+    assert [predicate["annotation"] for predicate in nominal_predicates] == [[1]]
+    assert sum(
+        predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
+        for predicate in predicates
+    ) == 1
+    assert sum(
+        predicate["kind"] == PredicateKind.OBJECT_ROLE.value
+        for predicate in predicates
+    ) == 1
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
