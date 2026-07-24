@@ -931,12 +931,23 @@ enum DatatypeBooleanOperands {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 struct AtomicDataRangeSelection {
     base: NodeId,
     expression: NodeId,
     negative: bool,
+    depth: usize,
 }
+
+impl PartialEq for AtomicDataRangeSelection {
+    fn eq(&self, other: &Self) -> bool {
+        self.base == other.base
+            && self.expression == other.expression
+            && self.negative == other.negative
+    }
+}
+
+impl Eq for AtomicDataRangeSelection {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RawDisjoint {
@@ -3221,13 +3232,10 @@ fn normalized_data_term<B: ByteSource>(
         complemented = !complemented;
     }
     let node = model.node(base)?;
-    if !matches!(node.tag(), DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG) {
-        let Some(mut selection) =
-            positive_atomic_data_range_selection(model, symbols, base, depth, budget)?
-        else {
-            return Ok(None);
-        };
-        selection.negative = complemented;
+    if let Some(mut selection) =
+        positive_atomic_data_range_selection(model, symbols, base, depth, budget)?
+    {
+        selection.negative = selection.negative != complemented;
         selection.expression = selection.base;
         let base_key = canonical::canonical_node_key(model, selection.base, scope_maps, budget)?;
         let mut expression_symbols = Vec::new();
@@ -3253,6 +3261,9 @@ fn normalized_data_term<B: ByteSource>(
             key,
             symbols: expression_symbols,
         })));
+    }
+    if !matches!(node.tag(), DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG) {
+        return Ok(None);
     }
     if node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
@@ -7381,6 +7392,28 @@ fn normalized_reachability<B: ByteSource>(
                     }
                 }
             }
+            if matches!(node.tag(), DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG) {
+                if let Some(selection) = positive_atomic_data_range_selection(
+                    model,
+                    symbols,
+                    current.node,
+                    current.depth,
+                    budget,
+                )? {
+                    budget.claim_owned(size_of::<NormalizedReachabilityPending>())?;
+                    pending.try_reserve(1).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "normalized-reachability allocation failed",
+                        )
+                    })?;
+                    pending.push(NormalizedReachabilityPending {
+                        node: selection.base,
+                        depth: selection.depth,
+                        semantic_root: false,
+                    });
+                    continue;
+                }
+            }
         }
         let fields = node.fields();
         let (field_end, child_depth) = if current.semantic_root {
@@ -10038,6 +10071,7 @@ fn positive_atomic_data_range_selection<B: ByteSource>(
             base: identifier,
             expression: identifier,
             negative: false,
+            depth,
         }));
     }
     if !matches!(node.tag(), DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG) {
@@ -24969,6 +25003,48 @@ mod tests {
         owned
     }
 
+    fn nested_reduced_data_one_of() -> OwnedColumns {
+        OwnedColumns {
+            root_kinds: vec![super::super::ROOT_AXIOM, super::super::ROOT_AXIOM],
+            root_ids: le32(&[12, 13]),
+            node_tags: le16(&[
+                1,
+                1,
+                1,
+                ENTITY_TAG,
+                ENTITY_TAG,
+                ENTITY_TAG,
+                LITERAL_TAG,
+                DATA_INTERSECTION_OF_TAG,
+                DATA_UNION_OF_TAG,
+                DATA_COMPLEMENT_OF_TAG,
+                DATA_ONE_OF_TAG,
+                60,
+                DATATYPE_DEFINITION_TAG,
+            ]),
+            node_field_offsets: le64(&[0, 1, 2, 3, 5, 7, 9, 12, 13, 14, 15, 16, 18, 21]),
+            field_kinds: vec![
+                2, 2, 2, 5, 1, 5, 1, 5, 1, 2, 1, 0, 6, 6, 1, 6, 1, 6, 1, 1, 6,
+            ],
+            field_values: le64(&[
+                0, 16, 60, 115, 1, 123, 2, 131, 3, 139, 6, 0, 0, 2, 5, 4, 4, 5, 4, 8, 5,
+            ]),
+            field_lengths: le64(&[
+                16, 44, 55, 8, 0, 8, 0, 8, 0, 8, 0, 0, 2, 2, 0, 1, 0, 0, 0, 0, 0,
+            ]),
+            item_kinds: vec![
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_NODE,
+            ],
+            item_values: le64(&[5, 9, 10, 11, 7]),
+            item_lengths: le64(&[0, 0, 0, 0, 0]),
+            scalar_bytes: b"urn:test:named#Thttp://www.w3.org/2000/01/rdf-schema#Literalhttp://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteraldatatypedatatypedatatyperetained".to_vec(),
+        }
+    }
+
     fn class_assertion() -> OwnedColumns {
         OwnedColumns {
             root_kinds: vec![super::super::ROOT_AXIOM],
@@ -25144,6 +25220,30 @@ mod tests {
             value.code == "NATIVE_ENCODED_RESOURCE_LIMIT" && value.message.contains("clause")
         }));
         assert_eq!(symbols, before);
+        Ok(())
+    }
+
+    #[test]
+    fn normalized_reachability_uses_selected_data_range_depth() -> EncodedResult<()> {
+        let owned = nested_reduced_data_one_of();
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let symbols = compile_symbol_phase(&model, SymbolPhaseLimits::default())?;
+        let limits = NamedClassPhaseLimits {
+            max_canonical_depth: 3,
+            ..NamedClassPhaseLimits::default()
+        };
+
+        let error = compile_named_class_phase(&model, &symbols, limits).err();
+
+        assert!(error.is_some_and(|value| {
+            value.code == "NATIVE_ENCODED_RESOURCE_LIMIT"
+                && value
+                    .message
+                    .contains("normalized-reachability traversal depth")
+        }));
+        let phase = compile_named_class_phase(&model, &symbols, NamedClassPhaseLimits::default())?;
+        assert_eq!(phase.compiled_roots, 1);
+        assert_eq!(phase.deferred_roots, 0);
         Ok(())
     }
 

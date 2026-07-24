@@ -4973,8 +4973,6 @@ def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
             "Declaration(DataProperty(:d))",
             "SubClassOf(:A DataMaxCardinality(4294967295 :d xsd:string))",
             "SubClassOf(:A DataMaxCardinality(4294967296 :d xsd:string))",
-            "SubClassOf(:A DataMaxCardinality(2 :d "
-            "DataIntersectionOf(xsd:string rdfs:Literal)))",
             "SubClassOf(:A DataMaxCardinality(2 :undeclared xsd:string))",
             "SubClassOf(ObjectComplementOf("
             "DataMaxCardinality(4294967295 :d xsd:string)) :B)",
@@ -4988,7 +4986,7 @@ def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
     manifest = _native_manifest(snapshot)
 
     assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 6
+    assert manifest["deferred_roots"] == 5
     assert not any(
         value["generated"]
         or str(value["display"]).startswith(
@@ -5355,8 +5353,6 @@ def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() 
             "Declaration(DataProperty(:d))",
             "SubClassOf(:A DataExactCardinality(4294967295 :d xsd:string))",
             "SubClassOf(:A DataExactCardinality(4294967296 :d xsd:string))",
-            "SubClassOf(:A DataExactCardinality(2 :d "
-            "DataIntersectionOf(xsd:string rdfs:Literal)))",
             "SubClassOf(:A DataExactCardinality(2 :undeclared xsd:string))",
             "SubClassOf(ObjectComplementOf("
             "DataExactCardinality(4294967295 :d xsd:string)) :B)",
@@ -5370,7 +5366,7 @@ def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() 
     manifest = _native_manifest(snapshot)
 
     assert manifest["compiled_roots"] == 0
-    assert manifest["deferred_roots"] == 6
+    assert manifest["deferred_roots"] == 5
     assert not any(
         value["generated"]
         or str(value["display"]).startswith(
@@ -6254,6 +6250,96 @@ def test_composite_discarded_data_range_value_keeps_shared_live_literal() -> Non
         compiled_roots=2,
         include_generated_data_quantifier_definitions=True,
         include_at_least_data_predicates=True,
+    )
+    assert len(cast(list[object], forward["source_literal_symbols"])) == 1
+    assert len(cast(list[object], forward["data_value_symbols"])) == 1
+    assert forward["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_discarded_data_boolean_operands_prune_normalized_symbols() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(Datatype(:T))",
+            "Declaration(Datatype(:U))",
+            'DatatypeDefinition(:T DataIntersectionOf('
+            'DataComplementOf(rdfs:Literal) DataOneOf("discarded-one")))',
+            "DatatypeDefinition(:U DataUnionOf(rdfs:Literal "
+            "DatatypeRestriction(xsd:string "
+            'xsd:minLength "1"^^xsd:integer)))',
+            "SubClassOf(:A DataSomeValuesFrom(:d "
+            "DataUnionOf(rdfs:Literal DataOneOf("
+            '"discarded-two"))))',
+            "SubClassOf(:A DataMaxCardinality(2 :d "
+            "DataIntersectionOf(rdfs:Literal xsd:boolean)))",
+            "SubClassOf(:A DataExactCardinality(2 :d "
+            "DataIntersectionOf(rdfs:Literal xsd:boolean)))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=5,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_datatype_definitions=True,
+    )
+    assert manifest["source_literal_symbols"] == []
+    assert manifest["data_value_symbols"] == []
+    assert not any(
+        value["display"]
+        in {
+            "datatype:http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral",
+            "datatype:http://www.w3.org/2001/XMLSchema#integer",
+            "datatype:http://www.w3.org/2001/XMLSchema#string",
+        }
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_discarded_data_boolean_keeps_shared_live_literal() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:T))",
+            "DatatypeDefinition(:T DataUnionOf("
+            'rdfs:Literal DataOneOf("shared")))',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            'SubClassOf(:B DataHasValue(:d "shared"))',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    records = _composite_records(composite, (left, right))
+
+    forward = _native_slices_manifest(
+        *records,
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+    reverse = _native_slices_manifest(
+        *reversed(records),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert forward == reverse == _expected_manifest(
+        composite,
+        compiled_roots=2,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+        include_datatype_definitions=True,
     )
     assert len(cast(list[object], forward["source_literal_symbols"])) == 1
     assert len(cast(list[object], forward["data_value_symbols"])) == 1
