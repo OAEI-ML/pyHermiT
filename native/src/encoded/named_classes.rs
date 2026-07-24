@@ -664,7 +664,7 @@ const OBJECT_VALUE_PROJECTION_RULES: [ObjectValueProjectionRule; 2] = [
         tag: OBJECT_HAS_VALUE_TAG,
         field_count: 2,
         top_reduction: None,
-        discardable_boolean_operand: false,
+        discardable_boolean_operand: true,
     },
     ObjectValueProjectionRule {
         tag: OBJECT_HAS_SELF_TAG,
