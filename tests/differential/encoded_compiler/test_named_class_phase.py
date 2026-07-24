@@ -256,6 +256,7 @@ def _expected_manifest(
     include_object_constraints: bool = False,
     include_object_characteristics: bool = False,
     include_generated_object_self_definitions: bool = False,
+    include_generated_object_quantifier_definitions: bool = False,
     include_data_domains: bool = False,
     include_data_ranges: bool = False,
     include_generated_data_definitions: bool = False,
@@ -317,6 +318,7 @@ def _expected_manifest(
     constraint_provenance_ids: set[int] = set()
     characteristic_provenance_ids: set[int] = set()
     self_definition_provenance_ids: set[int] = set()
+    quantifier_definition_provenance_ids: set[int] = set()
     data_domain_provenance_ids: set[int] = set()
     data_range_provenance_ids: set[int] = set()
     generated_data_definition_provenance_ids: set[int] = set()
@@ -331,6 +333,7 @@ def _expected_manifest(
         include_object_constraints
         or include_object_characteristics
         or include_generated_object_self_definitions
+        or include_generated_object_quantifier_definitions
         or include_data_domains
         or include_data_ranges
         or include_generated_data_definitions
@@ -377,6 +380,23 @@ def _expected_manifest(
             and (
                 isinstance(record.statement.sub_class, owl.ObjectHasSelf)
                 or isinstance(record.statement.super_class, owl.ObjectHasSelf)
+            )
+        }
+    if include_generated_object_quantifier_definitions:
+        quantifier_definition_provenance_ids = {
+            provenance_id_by_key[(record.provenance_sha256, record.generated)]
+            for record in normalized.records
+            if record.generated
+            and isinstance(record.statement, owl.SubClassOf)
+            and (
+                isinstance(
+                    record.statement.sub_class,
+                    (owl.ObjectSomeValuesFrom, owl.ObjectAllValuesFrom),
+                )
+                or isinstance(
+                    record.statement.super_class,
+                    (owl.ObjectSomeValuesFrom, owl.ObjectAllValuesFrom),
+                )
             )
         }
     if include_data_domains:
@@ -455,6 +475,11 @@ def _expected_manifest(
         for clause in program.clauses
         if self_definition_provenance_ids.intersection(clause.provenance_ids)
     }
+    quantifier_definition_clauses = {
+        clause.clause_id
+        for clause in program.clauses
+        if quantifier_definition_provenance_ids.intersection(clause.provenance_ids)
+    }
     data_domain_clauses = {
         clause.clause_id
         for clause in program.clauses
@@ -503,6 +528,13 @@ def _expected_manifest(
         atom.predicate_id
         for clause in program.clauses
         if clause.clause_id in self_definition_clauses
+        for atom in clause.body + clause.head
+        if predicates_by_id[atom.predicate_id].kind is PredicateKind.OBJECT_ROLE
+    }
+    quantifier_definition_role_predicates = {
+        atom.predicate_id
+        for clause in program.clauses
+        if clause.clause_id in quantifier_definition_clauses
         for atom in clause.body + clause.head
         if predicates_by_id[atom.predicate_id].kind is PredicateKind.OBJECT_ROLE
     }
@@ -610,6 +642,7 @@ def _expected_manifest(
         constraint_role_predicates
         | characteristic_role_predicates
         | self_definition_role_predicates
+        | quantifier_definition_role_predicates
         | data_domain_role_predicates
         | data_range_role_predicates
         | data_functionality_role_predicates
@@ -675,6 +708,7 @@ def _expected_manifest(
             and clause.clause_id not in constraint_clauses
             and clause.clause_id not in characteristic_clauses
             and clause.clause_id not in self_definition_clauses
+            and clause.clause_id not in quantifier_definition_clauses
             and clause.clause_id not in data_domain_clauses
             and clause.clause_id not in data_range_clauses
             and clause.clause_id not in generated_data_definition_clauses
@@ -1798,6 +1832,169 @@ def test_recursive_class_boolean_definitions_match_scalar_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_horn_object_quantifier_definitions_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(ObjectSomeValuesFrom(:p :A) :B)",
+            'SubClassOf(Annotation(:note "same definition") ObjectSomeValuesFrom(:p :A) :B)',
+            "SubClassOf(:A ObjectAllValuesFrom(:q :B))",
+            "SubClassOf(ObjectComplementOf(ObjectAllValuesFrom(ObjectInverseOf(:p) :A)) :C)",
+            "SubClassOf(:C ObjectComplementOf(ObjectSomeValuesFrom(ObjectInverseOf(:q) :B)))",
+            "ClassAssertion(ObjectAllValuesFrom(:p :A) :i)",
+            "ObjectPropertyDomain(:q ObjectAllValuesFrom(:p :A))",
+            "DataPropertyDomain(:d ObjectAllValuesFrom(:q :B))",
+            "HasKey(ObjectSomeValuesFrom(:p :A) (:q) (:d))",
+            "DisjointClasses(ObjectSomeValuesFrom(:p :A) :C)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=10,
+        include_object_constraints=True,
+        include_generated_object_quantifier_definitions=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    generated = [
+        value
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+        if value["generated"]
+    ]
+    assert len(generated) == 5
+    assert {str(value["display"]).split(":")[-2] for value in generated} == {"negative", "positive"}
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_recursive_horn_object_quantifiers_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "SubClassOf(ObjectIntersectionOf(:A ObjectSomeValuesFrom(:p :B)) :C)",
+            "SubClassOf(:A ObjectUnionOf(:B ObjectAllValuesFrom(:q :C)))",
+            "ClassAssertion(ObjectIntersectionOf(:D "
+            "ObjectComplementOf(ObjectSomeValuesFrom(:p :B))) :i)",
+            "DisjointClasses(ObjectUnionOf(:D ObjectComplementOf(ObjectAllValuesFrom(:q :C))) :A)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_generated_object_quantifier_definitions=True,
+    )
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+        )
+        == 8
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_horn_object_quantifiers_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(ObjectProperty(:q))",
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "SubClassOf(ObjectSomeValuesFrom(:p :A) :B)",
+            "SubClassOf(:A ObjectAllValuesFrom(:q :B))",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            "DisjointClasses(ObjectSomeValuesFrom(:p :A) :B)",
+            "ObjectPropertyDomain(:p ObjectAllValuesFrom(:q :B))",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_generated_object_quantifier_definitions=True,
+    )
+    generated = [
+        value
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+        if value["generated"]
+    ]
+    assert len(generated) == 2
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert all(namespace in str(value["display"]) for value in generated)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_opposite_object_quantifier_polarities_defer_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "SubClassOf(:A ObjectSomeValuesFrom(:p :B))",
+            "SubClassOf(ObjectAllValuesFrom(:p :A) :B)",
+            "EquivalentClasses(:A ObjectSomeValuesFrom(:p :B))",
+            "SubClassOf(ObjectIntersectionOf(ObjectSomeValuesFrom(:p :A) "
+            "ObjectAllValuesFrom(:p :B)) :C)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 4
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(("ObjectSomeValuesFrom:", "ObjectAllValuesFrom:"))
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.OBJECT_ROLE.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_object_self_definitions_match_scalar_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -2270,7 +2467,7 @@ def test_partial_boolean_disjoint_defers_without_generated_symbol_leaks() -> Non
             "Declaration(Class(:C))",
             "Declaration(ObjectProperty(:p))",
             "DisjointClasses(ObjectIntersectionOf(:A :B) "
-            "ObjectSomeValuesFrom(:p :C))",
+            "ObjectAllValuesFrom(:p :C))",
         ),
         options=OPTIONS,
     )
@@ -5447,7 +5644,7 @@ def test_partially_unsupported_has_key_defers_without_generated_symbols() -> Non
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:d))",
-            "HasKey(ObjectIntersectionOf(:A ObjectSomeValuesFrom(:q :B)) (:p) (:d))",
+            "HasKey(ObjectIntersectionOf(:A ObjectAllValuesFrom(:q :B)) (:p) (:d))",
         ),
         options=OPTIONS,
     )
@@ -5548,7 +5745,7 @@ def test_nested_complement_class_assertion_defers_without_partial_symbols() -> N
             "Declaration(Class(:A))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(NamedIndividual(:i))",
-            "ClassAssertion(ObjectComplementOf(ObjectSomeValuesFrom(:p :A)) :i)",
+            "ClassAssertion(ObjectSomeValuesFrom(:p :A) :i)",
         ),
         options=OPTIONS,
     )
@@ -5614,7 +5811,7 @@ def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
             "Declaration(DataProperty(:data))",
             "SubClassOf(ObjectOneOf(:a) ObjectSomeValuesFrom(:p :A))",
             "EquivalentClasses(ObjectOneOf(:a) ObjectSomeValuesFrom(:p :A))",
-            "DisjointClasses(ObjectOneOf(:a) ObjectSomeValuesFrom(:p :A))",
+            "DisjointClasses(ObjectOneOf(:a) ObjectAllValuesFrom(:p :A))",
             "ObjectPropertyDomain(:p ObjectComplementOf("
             "ObjectComplementOf(ObjectSomeValuesFrom(:p :A))))",
             "DataPropertyDomain(:data ObjectComplementOf("
@@ -5648,7 +5845,7 @@ def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
     "axiom",
     [
         "SubClassOf(ObjectComplementOf(:A) ObjectSomeValuesFrom(:p :B))",
-        "SubClassOf(ObjectSomeValuesFrom(:p :A) ObjectComplementOf(:B))",
+        "SubClassOf(ObjectAllValuesFrom(:p :A) ObjectComplementOf(:B))",
     ],
 )
 def test_partial_atomic_complement_subclass_defers_without_leaking_symbols(
@@ -5715,7 +5912,7 @@ def test_partial_atomic_complement_disjoint_defers_without_leaking_symbols() -> 
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
-            "DisjointClasses(ObjectComplementOf(:A) ObjectSomeValuesFrom(:p :B))",
+            "DisjointClasses(ObjectComplementOf(:A) ObjectAllValuesFrom(:p :B))",
         ),
         options=OPTIONS,
     )
@@ -5744,9 +5941,9 @@ def test_nested_complement_constraints_defer_without_leaking_symbols() -> None:
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:d))",
-            "ObjectPropertyDomain(:p ObjectComplementOf(ObjectSomeValuesFrom(:q :A)))",
-            "DataPropertyDomain(:d ObjectComplementOf(ObjectSomeValuesFrom(:q :A)))",
-            "HasKey(ObjectComplementOf(ObjectSomeValuesFrom(:q :A)) (:p) (:d))",
+            "ObjectPropertyDomain(:p ObjectSomeValuesFrom(:q :A))",
+            "DataPropertyDomain(:d ObjectSomeValuesFrom(:q :A))",
+            "HasKey(ObjectAllValuesFrom(:q :A) (:p) (:d))",
         ),
         options=OPTIONS,
     )
@@ -5798,13 +5995,13 @@ def test_anonymous_identity_axiom_defers_the_whole_root_without_partial_fact(
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_complex_named_class_root_is_deferred_without_breaking_scalar_fallback() -> None:
+def test_existential_consequent_is_deferred_without_breaking_scalar_fallback() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
-            "SubClassOf(ObjectSomeValuesFrom(:p :A) :B)",
+            "SubClassOf(:B ObjectSomeValuesFrom(:p :A))",
         ),
         options=OPTIONS,
     )

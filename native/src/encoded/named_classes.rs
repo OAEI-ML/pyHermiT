@@ -615,6 +615,7 @@ struct ClassBooleanDefinition {
     intersection: bool,
     operands: Vec<ClassBooleanOperand>,
     object_self_role_id: Option<u32>,
+    object_quantifier: Option<ObjectQuantifierDefinition>,
     complement: bool,
     polarity: DefinitionPolarity,
     generated_key: Vec<u8>,
@@ -656,11 +657,32 @@ struct NormalizedObjectSelfTerm {
     complemented: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObjectQuantifierKind {
+    Some,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObjectQuantifierDefinition {
+    kind: ObjectQuantifierKind,
+    role_id: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NormalizedObjectQuantifierTerm {
+    kind: ObjectQuantifierKind,
+    role_id: u32,
+    key: Vec<u8>,
+    filler: NormalizedAtomicClassTerm,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NormalizedClassTerm {
     Atomic(NormalizedAtomicClassTerm),
     Boolean(NormalizedClassBooleanTerm),
     ObjectSelf(NormalizedObjectSelfTerm),
+    ObjectQuantifier(NormalizedObjectQuantifierTerm),
 }
 
 impl NormalizedClassTerm {
@@ -669,6 +691,7 @@ impl NormalizedClassTerm {
             Self::Atomic(term) => &term.key,
             Self::Boolean(term) => &term.key,
             Self::ObjectSelf(term) => &term.key,
+            Self::ObjectQuantifier(term) => &term.key,
         }
     }
 }
@@ -771,6 +794,8 @@ enum ObjectConstraintKind {
     Range,
     SelfAntecedent,
     SelfConsequent,
+    ExistentialAntecedent,
+    UniversalConsequent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -778,6 +803,7 @@ struct RawObjectConstraint {
     kind: ObjectConstraintKind,
     role_id: u32,
     class: ClassLiteral,
+    filler: Option<ClassLiteral>,
     provenance: [u8; 32],
     generated: bool,
 }
@@ -787,6 +813,7 @@ struct NormalizedObjectConstraint {
     kind: ObjectConstraintKind,
     role_id: u32,
     class: ClassLiteral,
+    filler: Option<ClassLiteral>,
     provenance: Vec<[u8; 32]>,
     generated: bool,
 }
@@ -3894,6 +3921,9 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
         else {
             return Ok(());
         };
+        if !normalized_class_term_supports_polarity(&term, DefinitionPolarity::Negative) {
+            return Ok(());
+        }
         if !matches!(term, NormalizedClassTerm::Atomic(_)) {
             let _generated_key = atomize_normalized_class_term(
                 term.clone(),
@@ -3913,6 +3943,11 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
     let NormalizedClassTerm::Boolean(union) = union else {
         return Ok(());
     };
+    if !union.operands.iter().all(|operand| {
+        normalized_class_term_supports_polarity(operand, DefinitionPolarity::Positive)
+    }) {
+        return Ok(());
+    }
     let previous_count = pending.len();
     let outer_key = atomize_normalized_class_boolean(
         union,
@@ -4088,6 +4123,9 @@ fn class_boolean_definition_candidates<B: ByteSource>(
     if matches!(term, NormalizedClassTerm::Atomic(_)) {
         return Ok(None);
     }
+    if !normalized_class_term_supports_polarity(&term, polarity) {
+        return Ok(None);
+    }
     let mut definitions = Vec::new();
     let _generated_key = atomize_normalized_class_term(
         term,
@@ -4163,6 +4201,71 @@ fn normalized_class_term<B: ByteSource>(
                     base_key,
                     key,
                     complemented,
+                },
+            )));
+        }
+        if selection.is_none()
+            && matches!(
+                node.tag(),
+                OBJECT_SOME_VALUES_FROM_TAG | OBJECT_ALL_VALUES_FROM_TAG
+            )
+        {
+            if node.field_count() != 2 {
+                return Err(EncodedValidationError::invariant(
+                    "object-quantifier definition no longer has schema-1 shape",
+                ));
+            }
+            let Some(object_roles) = object_roles else {
+                return Ok(None);
+            };
+            if !reduction_inputs_are_retained(model, symbols, base, depth, budget)? {
+                return Ok(None);
+            }
+            let property = node_field(model, node, 0, "object-quantifier definition role")?;
+            let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
+            let filler = node_field(model, node, 1, "object-quantifier definition filler")?;
+            let filler_depth =
+                child_expression_depth(depth, "object-quantifier filler depth overflowed")?;
+            PhaseBudget::count(
+                filler_depth,
+                budget.limits.max_canonical_depth,
+                "class-expression depth",
+            )?;
+            let Some(NormalizedClassTerm::Atomic(filler)) = normalized_class_term(
+                model,
+                symbols,
+                Some(object_roles),
+                filler,
+                complemented,
+                filler_depth,
+                scope_maps,
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            let kind = match (node.tag(), complemented) {
+                (OBJECT_SOME_VALUES_FROM_TAG, false) | (OBJECT_ALL_VALUES_FROM_TAG, true) => {
+                    ObjectQuantifierKind::Some
+                }
+                (OBJECT_ALL_VALUES_FROM_TAG, false) | (OBJECT_SOME_VALUES_FROM_TAG, true) => {
+                    ObjectQuantifierKind::All
+                }
+                _ => {
+                    return Err(EncodedValidationError::invariant(
+                        "object-quantifier definition changed constructor",
+                    ));
+                }
+            };
+            let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
+            let key = synthetic_object_quantifier_key(kind, &property_key, &filler.key, budget)?;
+            budget.claim_owned(size_of::<NormalizedObjectQuantifierTerm>())?;
+            return Ok(Some(NormalizedClassTerm::ObjectQuantifier(
+                NormalizedObjectQuantifierTerm {
+                    kind,
+                    role_id,
+                    key,
+                    filler,
                 },
             )));
         }
@@ -4346,6 +4449,24 @@ fn normalized_class_boolean_term(
     )))
 }
 
+fn normalized_class_term_supports_polarity(
+    term: &NormalizedClassTerm,
+    polarity: DefinitionPolarity,
+) -> bool {
+    match term {
+        NormalizedClassTerm::Atomic(_) | NormalizedClassTerm::ObjectSelf(_) => true,
+        NormalizedClassTerm::Boolean(term) => term
+            .operands
+            .iter()
+            .all(|operand| normalized_class_term_supports_polarity(operand, polarity)),
+        NormalizedClassTerm::ObjectQuantifier(term) => matches!(
+            (term.kind, polarity),
+            (ObjectQuantifierKind::Some, DefinitionPolarity::Negative)
+                | (ObjectQuantifierKind::All, DefinitionPolarity::Positive)
+        ),
+    }
+}
+
 fn push_normalized_class_term(
     target: &mut Vec<NormalizedClassTerm>,
     term: NormalizedClassTerm,
@@ -4375,6 +4496,25 @@ fn synthetic_class_complement_key(
     push_generated_varint(&mut key, u64::from(OBJECT_COMPLEMENT_OF_TAG), budget)?;
     push_generated_byte(&mut key, 1, budget)?;
     push_generated_frame(&mut key, operand_key, budget)?;
+    Ok(key)
+}
+
+fn synthetic_object_quantifier_key(
+    kind: ObjectQuantifierKind,
+    property_key: &[u8],
+    filler_key: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let tag = match kind {
+        ObjectQuantifierKind::Some => OBJECT_SOME_VALUES_FROM_TAG,
+        ObjectQuantifierKind::All => OBJECT_ALL_VALUES_FROM_TAG,
+    };
+    let mut key = Vec::new();
+    push_generated_varint(&mut key, u64::from(tag), budget)?;
+    push_generated_byte(&mut key, 1, budget)?;
+    push_generated_frame(&mut key, property_key, budget)?;
+    push_generated_byte(&mut key, 1, budget)?;
+    push_generated_frame(&mut key, filler_key, budget)?;
     Ok(key)
 }
 
@@ -4456,7 +4596,81 @@ fn atomize_normalized_class_term(
             definitions,
             budget,
         ),
+        NormalizedClassTerm::ObjectQuantifier(term) => atomize_normalized_object_quantifier(
+            term,
+            source_expression,
+            polarity,
+            namespace,
+            definitions,
+            budget,
+        ),
     }
+}
+
+fn atomize_normalized_object_quantifier(
+    term: NormalizedObjectQuantifierTerm,
+    source_expression: Option<NodeId>,
+    polarity: DefinitionPolarity,
+    namespace: [u8; 32],
+    definitions: &mut Vec<ClassBooleanDefinition>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    if !matches!(
+        (term.kind, polarity),
+        (ObjectQuantifierKind::Some, DefinitionPolarity::Negative)
+            | (ObjectQuantifierKind::All, DefinitionPolarity::Positive)
+    ) {
+        return Err(EncodedValidationError::invariant(
+            "unsupported object-quantifier polarity reached atomization",
+        ));
+    }
+    let expression_tag = match term.kind {
+        ObjectQuantifierKind::Some => OBJECT_SOME_VALUES_FROM_TAG,
+        ObjectQuantifierKind::All => OBJECT_ALL_VALUES_FROM_TAG,
+    };
+    let mut expression_symbols = term.filler.symbols;
+    let expression_seed = class_expression_symbol_seed(&term.key, expression_tag, budget)?;
+    push_class_expression_symbol_seed(&mut expression_symbols, expression_seed, budget)?;
+    budget.claim_work(sort_work(expression_symbols.len()))?;
+    expression_symbols.sort_by(|left, right| left.key.cmp(&right.key));
+    expression_symbols.dedup_by(|left, right| left.key == right.key);
+    let (generated_key, generated_display) =
+        generated_class_symbol(namespace, &term.key, polarity, budget)?;
+    budget.claim_owned(generated_key.len())?;
+    let returned_key = generated_key.clone();
+    let mut expressions = Vec::new();
+    if let Some(expression) = source_expression {
+        budget.claim_owned(size_of::<NodeId>())?;
+        expressions.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "object-quantifier definition expression allocation failed",
+            )
+        })?;
+        expressions.push(expression);
+    }
+    budget.claim_owned(size_of::<ClassBooleanDefinition>() + size_of::<ClassBooleanOperand>())?;
+    definitions.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("object-quantifier definition allocation failed")
+    })?;
+    definitions.push(ClassBooleanDefinition {
+        expressions,
+        roots: Vec::new(),
+        expression_key: term.key,
+        expression_symbols,
+        intersection: false,
+        operands: vec![ClassBooleanOperand::Atomic(term.filler.selection)],
+        object_self_role_id: None,
+        object_quantifier: Some(ObjectQuantifierDefinition {
+            kind: term.kind,
+            role_id: term.role_id,
+        }),
+        complement: false,
+        polarity,
+        generated_key,
+        generated_display,
+        provenance: Vec::new(),
+    });
+    Ok(returned_key)
 }
 
 fn atomize_normalized_object_self(
@@ -4533,6 +4747,7 @@ fn atomize_normalized_object_self(
                 negative: true,
             }],
             object_self_role_id: None,
+            object_quantifier: None,
             complement: true,
             polarity,
             generated_key,
@@ -4573,6 +4788,7 @@ fn atomize_normalized_object_self(
         intersection: false,
         operands: Vec::new(),
         object_self_role_id: Some(role_id),
+        object_quantifier: None,
         complement: false,
         polarity,
         generated_key,
@@ -4700,6 +4916,7 @@ fn atomize_normalized_class_boolean(
         intersection: term.intersection,
         operands,
         object_self_role_id: None,
+        object_quantifier: None,
         complement: false,
         polarity,
         generated_key,
@@ -4721,6 +4938,7 @@ fn retain_class_boolean_definition(
         if known.intersection != definition.intersection
             || known.operands != definition.operands
             || known.object_self_role_id != definition.object_self_role_id
+            || known.object_quantifier != definition.object_quantifier
             || known.complement != definition.complement
             || known.expression_symbols != definition.expression_symbols
             || known.generated_key != definition.generated_key
@@ -5791,6 +6009,8 @@ fn class_expression_prefix(tag: u16) -> EncodedResult<&'static str> {
         OBJECT_UNION_OF_TAG => Ok("ObjectUnionOf:"),
         OBJECT_ONE_OF_TAG => Ok("ObjectOneOf:"),
         OBJECT_COMPLEMENT_OF_TAG => Ok("ObjectComplementOf:"),
+        OBJECT_SOME_VALUES_FROM_TAG => Ok("ObjectSomeValuesFrom:"),
+        OBJECT_ALL_VALUES_FROM_TAG => Ok("ObjectAllValuesFrom:"),
         OBJECT_HAS_SELF_TAG => Ok("ObjectHasSelf:"),
         _ => Err(EncodedValidationError::invariant(
             "selected class expression has an unsupported constructor",
@@ -10162,6 +10382,7 @@ fn named_object_constraint<B: ByteSource>(
         kind,
         role_id,
         class: ClassLiteral { class_id, negative },
+        filler: None,
         provenance,
         generated: false,
     }))
@@ -11581,6 +11802,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
         if let Some(role_id) = definition.object_self_role_id {
             if definition.complement
                 || !definition.operands.is_empty()
+                || definition.object_quantifier.is_some()
                 || definition.provenance.is_empty()
             {
                 return Err(EncodedValidationError::invariant(
@@ -11601,6 +11823,59 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                     },
                     role_id,
                     class: generated,
+                    filler: None,
+                    provenance: *provenance,
+                    generated: true,
+                });
+            }
+            continue;
+        }
+        if let Some(quantifier) = definition.object_quantifier {
+            if definition.complement
+                || definition.object_self_role_id.is_some()
+                || definition.operands.len() != 1
+                || definition.provenance.is_empty()
+            {
+                return Err(EncodedValidationError::invariant(
+                    "generated object-quantifier definition changed before emission",
+                ));
+            }
+            let (filler_class_id, filler_negative) = class_boolean_operand_literal(
+                model,
+                class_domain,
+                signature,
+                &definition.operands[0],
+                scope_maps,
+                budget,
+            )?;
+            let kind = match (quantifier.kind, definition.polarity) {
+                (ObjectQuantifierKind::Some, DefinitionPolarity::Negative) => {
+                    ObjectConstraintKind::ExistentialAntecedent
+                }
+                (ObjectQuantifierKind::All, DefinitionPolarity::Positive) => {
+                    ObjectConstraintKind::UniversalConsequent
+                }
+                _ => {
+                    return Err(EncodedValidationError::invariant(
+                        "generated object-quantifier definition has an unsupported polarity",
+                    ));
+                }
+            };
+            for provenance in &definition.provenance {
+                budget.claim_owned(size_of::<RawObjectConstraint>())?;
+                object_constraints.try_reserve(1).map_err(|_| {
+                    EncodedValidationError::resource(
+                        "generated object-quantifier clause allocation failed",
+                    )
+                })?;
+                object_constraints.push(RawObjectConstraint {
+                    kind,
+                    role_id: quantifier.role_id,
+                    class: generated,
+                    filler: Some(ClassLiteral {
+                        class_id: filler_class_id,
+                        negative: filler_negative,
+                    }),
                     provenance: *provenance,
                     generated: true,
                 });
@@ -11670,7 +11945,11 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             }
             continue;
         }
-        if operands.len() < 2 || definition.provenance.is_empty() {
+        if operands.len() < 2
+            || definition.object_self_role_id.is_some()
+            || definition.object_quantifier.is_some()
+            || definition.provenance.is_empty()
+        {
             return Err(EncodedValidationError::invariant(
                 "generated Boolean definition lost operands or provenance",
             ));
@@ -12274,6 +12553,7 @@ fn normalize_object_constraints(
             if previous.kind == constraint.kind
                 && previous.role_id == constraint.role_id
                 && previous.class == constraint.class
+                && previous.filler == constraint.filler
                 && previous.generated == constraint.generated
             {
                 if previous.provenance.last() != Some(&constraint.provenance) {
@@ -12305,6 +12585,7 @@ fn normalize_object_constraints(
             kind: constraint.kind,
             role_id: constraint.role_id,
             class: constraint.class,
+            filler: constraint.filler,
             provenance,
             generated: constraint.generated,
         });
@@ -13099,7 +13380,12 @@ fn nominal_usage(
             literal.negative && nominal_binding(bindings, literal.class_id).is_some()
         })
     }) || object_constraints.iter().any(|constraint| {
-        constraint.class.negative && nominal_binding(bindings, constraint.class.class_id).is_some()
+        [Some(constraint.class), constraint.filler]
+            .into_iter()
+            .flatten()
+            .any(|literal| {
+                literal.negative && nominal_binding(bindings, literal.class_id).is_some()
+            })
     }) || data_domains.iter().any(|domain| {
         domain.class.negative && nominal_binding(bindings, domain.class.class_id).is_some()
     }) || keys
@@ -13239,19 +13525,19 @@ fn freeze_predicates(
         }
     }
     for constraint in object_constraints {
-        push_u32(
-            &mut class_ids,
-            constraint.class.class_id,
-            "predicate class",
-            budget,
-        )?;
-        if constraint.class.negative {
-            push_u32(
-                &mut negative_class_ids,
-                constraint.class.class_id,
-                "negated predicate class",
-                budget,
-            )?;
+        for literal in [Some(constraint.class), constraint.filler]
+            .into_iter()
+            .flatten()
+        {
+            push_u32(&mut class_ids, literal.class_id, "predicate class", budget)?;
+            if literal.negative {
+                push_u32(
+                    &mut negative_class_ids,
+                    literal.class_id,
+                    "negated predicate class",
+                    budget,
+                )?;
+            }
         }
     }
     for domain in data_domains {
@@ -14172,16 +14458,19 @@ fn freeze_clauses(
             )?;
         }
     }
-    for constraint in object_constraints
-        .iter()
-        .filter(|constraint| constraint.class.negative)
-    {
-        push_u32(
-            &mut negative_class_ids,
-            constraint.class.class_id,
-            "complement clause class",
-            budget,
-        )?;
+    for constraint in object_constraints {
+        for literal in [Some(constraint.class), constraint.filler]
+            .into_iter()
+            .flatten()
+            .filter(|literal| literal.negative)
+        {
+            push_u32(
+                &mut negative_class_ids,
+                literal.class_id,
+                "complement clause class",
+                budget,
+            )?;
+        }
     }
     for domain in data_domains.iter().filter(|domain| domain.class.negative) {
         push_u32(
@@ -14514,6 +14803,17 @@ fn freeze_clauses(
             constraint.class.class_id,
             constraint.class.negative,
         )?;
+        let filler = constraint
+            .filler
+            .map(|literal| {
+                class_literal_predicate_id(
+                    predicate_by_class,
+                    predicate_by_negative_class,
+                    literal.class_id,
+                    literal.negative,
+                )
+            })
+            .transpose()?;
         let provenance = provenance_id(
             provenance_keys,
             &constraint.provenance,
@@ -14521,10 +14821,14 @@ fn freeze_clauses(
         )?;
         push_object_constraint_clause(
             &mut ordered,
-            role,
-            class,
-            constraint.kind,
-            provenance,
+            ObjectConstraintClauseSpec {
+                role_predicate_id: role,
+                class_predicate_id: class,
+                filler_predicate_id: filler,
+                kind: constraint.kind,
+                provenance_id: provenance,
+            },
+            scalar_predicate_ids,
             budget,
         )?;
     }
@@ -15744,39 +16048,101 @@ fn write_decimal_digits(mut value: u32, digits: &mut [u8; 10]) -> usize {
     }
 }
 
-fn push_object_constraint_clause(
-    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+#[derive(Clone, Copy)]
+struct ObjectConstraintClauseSpec {
     role_predicate_id: u32,
     class_predicate_id: u32,
+    filler_predicate_id: Option<u32>,
     kind: ObjectConstraintKind,
     provenance_id: u32,
+}
+
+fn push_object_constraint_clause(
+    clauses: &mut Vec<(Vec<u8>, DecodedClause)>,
+    spec: ObjectConstraintClauseSpec,
+    scalar_predicate_ids: &[u32],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<()> {
-    let (body, head) = match kind {
-        ObjectConstraintKind::Domain => (
-            vec![object_variable_atom(role_predicate_id, 0, 1)],
-            vec![variable_atom_at(class_predicate_id, 0, TermSort::Object)],
+    let (body, head) = match (spec.kind, spec.filler_predicate_id) {
+        (ObjectConstraintKind::Domain, None) => (
+            vec![object_variable_atom(spec.role_predicate_id, 0, 1)],
+            vec![variable_atom_at(
+                spec.class_predicate_id,
+                0,
+                TermSort::Object,
+            )],
         ),
-        ObjectConstraintKind::Range => (
-            vec![object_variable_atom(role_predicate_id, 0, 1)],
-            vec![variable_atom_at(class_predicate_id, 1, TermSort::Object)],
+        (ObjectConstraintKind::Range, None) => (
+            vec![object_variable_atom(spec.role_predicate_id, 0, 1)],
+            vec![variable_atom_at(
+                spec.class_predicate_id,
+                1,
+                TermSort::Object,
+            )],
         ),
-        ObjectConstraintKind::SelfAntecedent => (
-            vec![object_variable_atom(role_predicate_id, 0, 0)],
-            vec![variable_atom_at(class_predicate_id, 0, TermSort::Object)],
+        (ObjectConstraintKind::SelfAntecedent, None) => (
+            vec![object_variable_atom(spec.role_predicate_id, 0, 0)],
+            vec![variable_atom_at(
+                spec.class_predicate_id,
+                0,
+                TermSort::Object,
+            )],
         ),
-        ObjectConstraintKind::SelfConsequent => (
-            vec![variable_atom_at(class_predicate_id, 0, TermSort::Object)],
-            vec![object_variable_atom(role_predicate_id, 0, 0)],
+        (ObjectConstraintKind::SelfConsequent, None) => (
+            vec![variable_atom_at(
+                spec.class_predicate_id,
+                0,
+                TermSort::Object,
+            )],
+            vec![object_variable_atom(spec.role_predicate_id, 0, 0)],
         ),
+        (ObjectConstraintKind::ExistentialAntecedent, Some(filler)) => (
+            vec![
+                object_variable_atom(spec.role_predicate_id, 0, 1),
+                variable_atom_at(filler, 1, TermSort::Object),
+            ],
+            vec![variable_atom_at(
+                spec.class_predicate_id,
+                0,
+                TermSort::Object,
+            )],
+        ),
+        (ObjectConstraintKind::UniversalConsequent, Some(filler)) => (
+            vec![
+                variable_atom_at(spec.class_predicate_id, 0, TermSort::Object),
+                object_variable_atom(spec.role_predicate_id, 0, 1),
+            ],
+            vec![variable_atom_at(filler, 1, TermSort::Object)],
+        ),
+        _ => {
+            return Err(EncodedValidationError::invariant(
+                "object-property constraint filler disagrees with its kind",
+            ));
+        }
+    };
+    let (body, head) = canonicalize_variable_rule(body, head, &[], scalar_predicate_ids, budget)?;
+    let join_order = if body.len() == 1 {
+        vec![0]
+    } else {
+        plan_key_join(&body, u32::MAX, scalar_predicate_ids, budget)?
     };
     let key = variable_rule_key(&body, &head)?;
     budget.claim_owned(size_of::<(Vec<u8>, DecodedClause)>() + key.len())?;
+    let atom_count = body.len().checked_add(head.len()).ok_or_else(|| {
+        EncodedValidationError::resource("object-property constraint atom count overflowed")
+    })?;
+    let term_count = body.iter().chain(&head).try_fold(0_usize, |count, atom| {
+        count.checked_add(atom.arguments.len()).ok_or_else(|| {
+            EncodedValidationError::resource("object-property constraint term count overflowed")
+        })
+    })?;
     budget.claim_owned(
-        2_usize
+        atom_count
             .checked_mul(size_of::<DecodedAtom>())
-            .and_then(|value| value.checked_add(3 * size_of::<DecodedTerm>()))
-            .and_then(|value| value.checked_add(2 * size_of::<u32>()))
+            .and_then(|value| value.checked_add(term_count.checked_mul(size_of::<DecodedTerm>())?))
+            .and_then(|value| {
+                value.checked_add(body.len().checked_add(1)?.checked_mul(size_of::<u32>())?)
+            })
             .ok_or_else(|| {
                 EncodedValidationError::resource(
                     "object-property constraint clause payload overflowed",
@@ -15792,8 +16158,8 @@ fn push_object_constraint_clause(
             clause_id: 0,
             body,
             head,
-            provenance_ids: vec![provenance_id],
-            join_order: vec![0],
+            provenance_ids: vec![spec.provenance_id],
+            join_order,
         },
     ));
     Ok(())
@@ -18729,6 +19095,19 @@ fn merge_normalized_sources(
                         kind: constraint.kind,
                         role_id,
                         class,
+                        filler: constraint
+                            .filler
+                            .map(|literal| {
+                                Ok(ClassLiteral {
+                                    class_id: mapped_id(
+                                        class_map,
+                                        literal.class_id,
+                                        "object-quantifier filler class",
+                                    )?,
+                                    negative: literal.negative,
+                                })
+                            })
+                            .transpose()?,
                         provenance: *provenance,
                         generated: constraint.generated,
                     });
