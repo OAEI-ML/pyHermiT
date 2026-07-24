@@ -50,7 +50,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyInt, PyMemoryView, PySequence, PyTuple};
+use pyo3::types::{PyBytes, PyInt, PyMemoryView, PySequence, PyString, PyTuple};
 
 pub use cancel::{CancellationHandle, CancellationState};
 use error::{ErrorKind, NativeError, NativeResult};
@@ -918,9 +918,217 @@ fn validate_encoded_selection_v1(
 
 const ENCODED_SLICE_RECORD_LEN: usize = 15;
 const ENCODED_SLICE_CONTEXT_DEPTH: usize = 32;
+const PROFILE_ONTOLOGY_IDENTITY_CONTEXT_VERSION: u16 = 1;
 
 fn encoded_slice_invalid(message: impl Into<String>) -> NativeError {
     NativeError::new(ErrorKind::Wire, "NATIVE_ENCODED_VIEW_INVALID", message)
+}
+
+fn profile_context_text(
+    value: &Bound<'_, PyAny>,
+    name: &'static str,
+    owned_bytes: &mut usize,
+    limit: usize,
+) -> NativeResult<Vec<u8>> {
+    if !value.is_exact_instance_of::<PyString>() {
+        return Err(encoded_slice_invalid(format!(
+            "encoded profile ontology identity {name} is not an exact string"
+        )));
+    }
+    let value = value
+        .cast::<PyString>()
+        .map_err(|_| encoded_slice_invalid("encoded profile ontology identity string changed"))?
+        .to_str()
+        .map_err(|_| {
+            encoded_slice_invalid(format!(
+                "encoded profile ontology identity {name} is not UTF-8"
+            ))
+        })?;
+    if value.is_empty() {
+        return Err(encoded_slice_invalid(format!(
+            "encoded profile ontology identity {name} is empty"
+        )));
+    }
+    *owned_bytes = owned_bytes.checked_add(value.len()).ok_or_else(|| {
+        encoded_slice_invalid("encoded profile ontology identity byte count overflowed")
+    })?;
+    if *owned_bytes > limit {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "encoded profile ontology identity context exceeds its byte limit",
+            ),
+        ));
+    }
+    let mut owned = Vec::new();
+    owned.try_reserve_exact(value.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded profile ontology identity string allocation failed",
+        ))
+    })?;
+    owned.extend_from_slice(value.as_bytes());
+    Ok(owned)
+}
+
+fn profile_context_optional_iri(
+    value: &Bound<'_, PyAny>,
+    name: &'static str,
+    owned_bytes: &mut usize,
+    limit: usize,
+) -> NativeResult<Option<Vec<u8>>> {
+    if value.is_none() {
+        Ok(None)
+    } else {
+        let iri = profile_context_text(value, name, owned_bytes, limit)?;
+        let iri_text = std::str::from_utf8(&iri).map_err(|_| {
+            encoded_slice_invalid(format!(
+                "encoded profile ontology identity {name} is not UTF-8"
+            ))
+        })?;
+        encoded::symbols::validate_iri(iri_text).map_err(|_| {
+            encoded_slice_invalid(format!(
+                "encoded profile ontology identity {name} violates the core model IRI contract"
+            ))
+        })?;
+        Ok(Some(iri))
+    }
+}
+
+fn decode_profile_ontology_identity_context(
+    value: Option<&Bound<'_, PyAny>>,
+    limits: encoded::profile::ProfilePhaseLimits,
+    poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
+) -> NativeResult<Vec<encoded::profile::ProfileOntologyIdentifier>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    poll("profile-ontology-identity-context-preflight")?;
+    if !value.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded profile ontology identity context is not an exact tuple",
+        ));
+    }
+    let context = value.cast::<PyTuple>().map_err(|_| {
+        encoded_slice_invalid("encoded profile ontology identity context changed type")
+    })?;
+    if context.len() != 2 {
+        return Err(encoded_slice_invalid(
+            "encoded profile ontology identity context has the wrong field count",
+        ));
+    }
+    let version = tuple_item(context, 0, "ontology identity context version")?;
+    if !version.is_exact_instance_of::<PyInt>() {
+        return Err(encoded_slice_invalid(
+            "encoded profile ontology identity context version is not an exact integer",
+        ));
+    }
+    let version = version.extract::<u16>().map_err(|_| {
+        encoded_slice_invalid("encoded profile ontology identity context version exceeds u16")
+    })?;
+    if version != PROFILE_ONTOLOGY_IDENTITY_CONTEXT_VERSION {
+        return Err(encoded_slice_invalid(
+            "encoded profile ontology identity context version is unsupported",
+        ));
+    }
+    let documents = tuple_item(context, 1, "ontology identity documents")?;
+    if !documents.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded profile ontology identity documents are not an exact tuple",
+        ));
+    }
+    let documents = documents.cast::<PyTuple>().map_err(|_| {
+        encoded_slice_invalid("encoded profile ontology identity documents changed type")
+    })?;
+    if documents.is_empty() {
+        return Err(encoded_slice_invalid(
+            "encoded profile ontology identity context has no documents",
+        ));
+    }
+    if documents.len() > limits.max_ontology_documents {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "encoded profile ontology identity context exceeds its document limit",
+            ),
+        ));
+    }
+    let row_bytes = documents
+        .len()
+        .checked_mul(std::mem::size_of::<
+            encoded::profile::ProfileOntologyIdentifier,
+        >())
+        .ok_or_else(|| {
+            encoded_slice_invalid("encoded profile ontology identity row size overflowed")
+        })?;
+    if row_bytes > limits.max_owned_bytes {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "encoded profile ontology identity context exceeds its byte limit",
+            ),
+        ));
+    }
+    let mut identifiers = Vec::new();
+    identifiers
+        .try_reserve_exact(documents.len())
+        .map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded profile ontology identity row allocation failed",
+            ))
+        })?;
+    let mut owned_bytes = row_bytes;
+    for index in 0..documents.len() {
+        poll("profile-ontology-identity-context-document")?;
+        let row = tuple_item(documents, index, "ontology identity document")?;
+        if !row.is_exact_instance_of::<PyTuple>() {
+            return Err(encoded_slice_invalid(
+                "encoded profile ontology identity document is not an exact tuple",
+            ));
+        }
+        let row = row.cast::<PyTuple>().map_err(|_| {
+            encoded_slice_invalid("encoded profile ontology identity document changed type")
+        })?;
+        if row.len() != 3 {
+            return Err(encoded_slice_invalid(
+                "encoded profile ontology identity document has the wrong field count",
+            ));
+        }
+        let document_key = profile_context_text(
+            &tuple_item(row, 0, "ontology identity document key")?,
+            "document key",
+            &mut owned_bytes,
+            limits.max_owned_bytes,
+        )?;
+        let ontology_iri = profile_context_optional_iri(
+            &tuple_item(row, 1, "ontology identity ontology IRI")?,
+            "ontology IRI",
+            &mut owned_bytes,
+            limits.max_owned_bytes,
+        )?;
+        let version_iri = profile_context_optional_iri(
+            &tuple_item(row, 2, "ontology identity version IRI")?,
+            "version IRI",
+            &mut owned_bytes,
+            limits.max_owned_bytes,
+        )?;
+        if ontology_iri.is_none() && version_iri.is_some() {
+            return Err(encoded_slice_invalid(
+                "encoded profile ontology identity version IRI has no ontology IRI",
+            ));
+        }
+        identifiers.push(encoded::profile::ProfileOntologyIdentifier {
+            document_key,
+            ontology_iri,
+            version_iri,
+        });
+    }
+    if identifiers
+        .windows(2)
+        .any(|pair| pair[0].document_key >= pair[1].document_key)
+    {
+        return Err(encoded_slice_invalid(
+            "encoded profile ontology identity documents are not ordered by unique document key",
+        ));
+    }
+    poll("profile-ontology-identity-context-complete")?;
+    Ok(identifiers)
 }
 
 fn tuple_item<'py>(
@@ -2545,12 +2753,39 @@ fn compile_encoded_profile_slices_controlled(
     .map_err(encoded_profile_error)
 }
 
+fn compile_encoded_profile_slices_manifest_controlled(
+    slices: &Bound<'_, PyAny>,
+    unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
+    ontology_identity_context: Option<&Bound<'_, PyAny>>,
+    poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
+) -> NativeResult<Vec<u8>> {
+    let limits = encoded::profile::ProfilePhaseLimits::default();
+    let ontology_identifiers =
+        decode_profile_ontology_identity_context(ontology_identity_context, limits, poll)?;
+    let phase = compile_encoded_profile_slices_controlled(slices, unsupported_datatypes, poll)?;
+    let phase = if ontology_identifiers.is_empty() {
+        phase
+    } else {
+        encoded::profile::apply_ontology_identity_context_controlled(
+            phase,
+            &ontology_identifiers,
+            limits,
+            poll,
+        )
+        .map_err(encoded_profile_error)?
+    };
+    phase
+        .canonical_manifest_json()
+        .map_err(encoded_validation_error)
+}
+
 #[pyfunction(name = "_encoded_profile_slices_manifest_v1")]
-#[pyo3(signature = (*, slices, unsupported_datatypes="error", cancellation=None))]
+#[pyo3(signature = (*, slices, unsupported_datatypes="error", ontology_identity_context=None, cancellation=None))]
 fn encoded_profile_slices_manifest_v1(
     py: Python<'_>,
     slices: &Bound<'_, PyAny>,
     unsupported_datatypes: &str,
+    ontology_identity_context: Option<&Bound<'_, PyAny>>,
     cancellation: Option<PyRef<'_, CancellationHandle>>,
 ) -> PyResult<Vec<u8>> {
     let cancellation = cancellation.map(|handle| handle.state());
@@ -2561,14 +2796,57 @@ fn encoded_profile_slices_manifest_v1(
         };
         let unsupported_datatypes =
             encoded_profile_unsupported_datatype_policy(unsupported_datatypes)?;
-        compile_encoded_profile_slices_controlled(slices, unsupported_datatypes, &mut poll)?
-            .canonical_manifest_json()
-            .map_err(encoded_validation_error)
+        compile_encoded_profile_slices_manifest_controlled(
+            slices,
+            unsupported_datatypes,
+            ontology_identity_context,
+            &mut poll,
+        )
+    })
+}
+
+/// Deterministically inject cancellation into the private profile-context transaction.
+#[pyfunction(name = "_debug_encoded_profile_context_cancel_v1")]
+#[pyo3(signature = (*, slices, ontology_identity_context, cancel_at_checkpoint))]
+fn debug_encoded_profile_context_cancel_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+    ontology_identity_context: &Bound<'_, PyAny>,
+    cancel_at_checkpoint: u64,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        if cancel_at_checkpoint == 0 {
+            return Err(encoded_slice_invalid(
+                "encoded profile cancellation checkpoint must be positive",
+            ));
+        }
+        let mut checkpoint = 0_u64;
+        let mut poll = |phase: &'static str| {
+            checkpoint = checkpoint.checked_add(1).ok_or_else(|| {
+                NativeError::invariant("encoded profile checkpoint count overflowed")
+            })?;
+            if checkpoint == cancel_at_checkpoint {
+                return Err(NativeError::new(
+                    ErrorKind::Cancelled,
+                    "REASONER_INTERRUPTED",
+                    "native encoded profile compilation was interrupted at a test checkpoint",
+                )
+                .with_context("checkpoint", checkpoint.to_string())
+                .with_context("phase", phase));
+            }
+            Ok(())
+        };
+        compile_encoded_profile_slices_manifest_controlled(
+            slices,
+            encoded::profile::ProfileUnsupportedDatatypePolicy::Error,
+            Some(ontology_identity_context),
+            &mut poll,
+        )
     })
 }
 
 #[pyfunction(name = "_encoded_profile_manifest_v1")]
-#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes, unsupported_datatypes="error", cancellation=None))]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes, unsupported_datatypes="error", ontology_identity_context=None, cancellation=None))]
 #[allow(clippy::too_many_arguments)]
 fn encoded_profile_manifest_v1(
     py: Python<'_>,
@@ -2584,6 +2862,7 @@ fn encoded_profile_manifest_v1(
     item_lengths: &Bound<'_, PyAny>,
     scalar_bytes: &Bound<'_, PyAny>,
     unsupported_datatypes: &str,
+    ontology_identity_context: Option<&Bound<'_, PyAny>>,
     cancellation: Option<PyRef<'_, CancellationHandle>>,
 ) -> PyResult<Vec<u8>> {
     let cancellation = cancellation.map(|handle| handle.state());
@@ -2595,6 +2874,9 @@ fn encoded_profile_manifest_v1(
         poll("profile-program-preflight")?;
         let unsupported_datatypes =
             encoded_profile_unsupported_datatype_policy(unsupported_datatypes)?;
+        let limits = encoded::profile::ProfilePhaseLimits::default();
+        let ontology_identifiers =
+            decode_profile_ontology_identity_context(ontology_identity_context, limits, &mut poll)?;
         let columns = borrowed_encoded_columns(
             root_kinds,
             root_ids,
@@ -2610,16 +2892,28 @@ fn encoded_profile_manifest_v1(
         )?;
         let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
             .map_err(encoded_validation_error)?;
-        encoded::profile::compile_profile_phase_controlled_with_policy(
+        let phase = encoded::profile::compile_profile_phase_controlled_with_policy(
             &model,
             &[],
-            encoded::profile::ProfilePhaseLimits::default(),
+            limits,
             unsupported_datatypes,
             &mut poll,
         )
-        .map_err(encoded_profile_error)?
-        .canonical_manifest_json()
-        .map_err(encoded_validation_error)
+        .map_err(encoded_profile_error)?;
+        let phase = if ontology_identifiers.is_empty() {
+            phase
+        } else {
+            encoded::profile::apply_ontology_identity_context_controlled(
+                phase,
+                &ontology_identifiers,
+                limits,
+                &mut poll,
+            )
+            .map_err(encoded_profile_error)?
+        };
+        phase
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
     })
 }
 
@@ -4138,6 +4432,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(encoded_profile_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(
         encoded_profile_slices_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        debug_encoded_profile_context_cancel_v1,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(encoded_symbol_manifest_v1, module)?)?;

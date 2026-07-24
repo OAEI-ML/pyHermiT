@@ -104,13 +104,27 @@ def _encoded_profile_manifest_v1(
     item_lengths: memoryview,
     scalar_bytes: memoryview,
     unsupported_datatypes: str = ...,
+    ontology_identity_context: (
+        tuple[int, tuple[tuple[str, str | None, str | None], ...]] | None
+    ) = ...,
     cancellation: CancellationHandle | None = ...,
 ) -> bytes: ...
 def _encoded_profile_slices_manifest_v1(
     *,
     slices: tuple[tuple[object, ...], ...],
     unsupported_datatypes: str = ...,
+    ontology_identity_context: (
+        tuple[int, tuple[tuple[str, str | None, str | None], ...]] | None
+    ) = ...,
     cancellation: CancellationHandle | None = ...,
+) -> bytes: ...
+def _debug_encoded_profile_context_cancel_v1(
+    *,
+    slices: tuple[tuple[object, ...], ...],
+    ontology_identity_context: tuple[
+        int, tuple[tuple[str, str | None, str | None], ...]
+    ],
+    cancel_at_checkpoint: int,
 ) -> bytes: ...
 def _encoded_symbol_manifest_v1(
     *,

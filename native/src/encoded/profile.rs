@@ -2,10 +2,11 @@
 //!
 //! Profile violations are successful semantic output. Malformed columns,
 //! resource exhaustion, and cancellation remain distinct operational failures.
-//! This first private phase owns exact data-arity, top-data-property, local
-//! anonymous-placement, global entity/declaration, object-role regularity and
-//! simplicity, and extension projections. Structural-columns schema 1 does not
-//! carry document-origin rows, so the manifest exposes canonical root provenance
+//! This private phase owns exact data-arity, top-data-property, local
+//! anonymous-placement, global entity/declaration, datatype, object-role, and
+//! extension projections. A separate versioned identity context supplies
+//! ontology/version IRIs without changing structural-columns schema 1. That schema
+//! does not carry origin rows, so the manifest exposes canonical root provenance
 //! without inventing `ProfileIssue.document_keys`. Anonymous graph, entity,
 //! declaration, and role facts remain private until all selected slices can be
 //! merged and validated globally. Issue ordering and deduplication use the
@@ -101,6 +102,12 @@ const ANONYMOUS_PARALLEL_EDGE_MESSAGE: &str =
 const ANONYMOUS_TREE_ROOT_RULE: &str = "OWL2DL_ANONYMOUS_TREE_ROOT";
 const ANONYMOUS_TREE_ROOT_MESSAGE: &str =
     "each anonymous-individual tree must contain a vertex connected by at most one assertion to named individuals";
+const RESERVED_ONTOLOGY_IRI_RULE: &str = "OWL2DL_RESERVED_ONTOLOGY_IRI";
+const RESERVED_VERSION_IRI_RULE: &str = "OWL2DL_RESERVED_VERSION_IRI";
+const RESERVED_ONTOLOGY_IRI_MESSAGE_PREFIX: &str =
+    "ontology IRI must not use reserved OWL/RDF vocabulary: ";
+const RESERVED_VERSION_IRI_MESSAGE_PREFIX: &str =
+    "version IRI must not use reserved OWL/RDF vocabulary: ";
 const PROPERTY_PUNNING_RULE: &str = "OWL2DL_PROPERTY_PUNNING";
 const CLASS_DATATYPE_PUNNING_RULE: &str = "OWL2DL_CLASS_DATATYPE_PUNNING";
 const RESERVED_VOCABULARY_RULE: &str = "OWL2DL_RESERVED_VOCABULARY";
@@ -246,6 +253,7 @@ pub enum ProfileUnsupportedDatatypePolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProfilePhaseLimits {
     pub max_slices: usize,
+    pub max_ontology_documents: usize,
     pub max_axioms: usize,
     pub max_extensions: usize,
     pub max_issues: usize,
@@ -273,6 +281,7 @@ impl Default for ProfilePhaseLimits {
     fn default() -> Self {
         Self {
             max_slices: 32_769,
+            max_ontology_documents: 10_000_000,
             max_axioms: 10_000_000,
             max_extensions: 10_000_000,
             max_issues: 10_000_000,
@@ -417,6 +426,14 @@ struct ProfileDatatypeFacts<'a> {
     definitions: &'a [ProfileDatatypeDefinition],
     range_failures: &'a [ProfileDatatypeRangeFailure],
     literals: &'a [ProfileLiteralFact],
+}
+
+/// One validated row from the private ontology-identity context schema.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ProfileOntologyIdentifier {
+    pub document_key: Vec<u8>,
+    pub ontology_iri: Option<Vec<u8>>,
+    pub version_iri: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -644,6 +661,16 @@ impl PhaseBudget {
         if following > self.limits.max_axioms {
             Err(EncodedValidationError::resource(
                 "profile axiom count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn claim_ontology_document(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_ontology_documents {
+            Err(EncodedValidationError::resource(
+                "profile ontology document count exceeds its limit",
             ))
         } else {
             Ok(())
@@ -2393,6 +2420,120 @@ pub fn merge_profile_phases_controlled_with_policy<E>(
     };
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
     poll(control, "profile-merge-complete")?;
+    Ok(phase)
+}
+
+/// Apply one validated private ontology-identity context to a completed phase.
+pub fn apply_ontology_identity_context_controlled<E>(
+    mut phase: ProfilePhase,
+    identifiers: &[ProfileOntologyIdentifier],
+    limits: ProfilePhaseLimits,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<ProfilePhase, E> {
+    poll(control, "profile-ontology-identity-preflight")?;
+    validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
+    let mut budget = PhaseBudget::new(limits);
+    budget
+        .claim_work_u64(phase.work)
+        .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(phase.owned_bytes)
+        .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_ontology_document(identifiers.len())
+        .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            identifiers
+                .len()
+                .checked_mul(size_of::<ProfileOntologyIdentifier>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "profile ontology identity context size overflowed",
+                    )
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    if identifiers
+        .windows(2)
+        .any(|pair| pair[0].document_key >= pair[1].document_key)
+    {
+        return Err(EncodedValidationError::protocol(
+            "profile ontology identity rows are not ordered by unique document key",
+        )
+        .into());
+    }
+    for identifier in identifiers {
+        poll(control, "profile-ontology-identity-document")?;
+        if identifier.document_key.is_empty() {
+            return Err(EncodedValidationError::protocol(
+                "profile ontology identity document key is empty",
+            )
+            .into());
+        }
+        budget
+            .claim_owned(identifier.document_key.len())
+            .map_err(ProfilePhaseError::Encoded)?;
+        budget
+            .claim_work(identifier.document_key.len())
+            .map_err(ProfilePhaseError::Encoded)?;
+        for (iri, rule_id, message_prefix) in [
+            (
+                identifier.ontology_iri.as_deref(),
+                RESERVED_ONTOLOGY_IRI_RULE,
+                RESERVED_ONTOLOGY_IRI_MESSAGE_PREFIX,
+            ),
+            (
+                identifier.version_iri.as_deref(),
+                RESERVED_VERSION_IRI_RULE,
+                RESERVED_VERSION_IRI_MESSAGE_PREFIX,
+            ),
+        ] {
+            poll(control, "profile-ontology-identity-iri")?;
+            let Some(iri) = iri else {
+                continue;
+            };
+            if iri.is_empty() {
+                return Err(EncodedValidationError::protocol(
+                    "profile ontology identity IRI is empty",
+                )
+                .into());
+            }
+            budget
+                .claim_owned(iri.len())
+                .map_err(ProfilePhaseError::Encoded)?;
+            budget
+                .claim_work(iri.len())
+                .map_err(ProfilePhaseError::Encoded)?;
+            if !reserved_iri(iri, &mut budget).map_err(ProfilePhaseError::Encoded)? {
+                continue;
+            }
+            let iri = std::str::from_utf8(iri).map_err(|_| {
+                ProfilePhaseError::Encoded(EncodedValidationError::protocol(
+                    "profile ontology identity IRI is not UTF-8",
+                ))
+            })?;
+            push_dynamic_profile_issue_with_constructor(
+                &mut phase.issues,
+                rule_id,
+                &[message_prefix, iri],
+                Some("OntologyID"),
+                &mut budget,
+            )
+            .map_err(ProfilePhaseError::Encoded)?;
+        }
+    }
+    poll(control, "profile-ontology-identity-canonicalize")?;
+    budget
+        .claim_work(sort_work(phase.issues.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    phase.issues.sort();
+    phase.issues.dedup();
+    phase.conforms = profile_issues_conform(&phase.issues);
+    phase.work = budget.work;
+    phase.owned_bytes = budget.owned_bytes;
+    validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
+    poll(control, "profile-ontology-identity-complete")?;
     Ok(phase)
 }
 
@@ -6949,6 +7090,127 @@ mod tests {
             .map_err(|_| EncodedValidationError::invariant("profile manifest is not JSON"))?;
         assert_eq!(manifest["family"], "owl2_dl_profile");
         assert_eq!(manifest["ordered_rule_ids"][0], DATA_RANGE_ARITY_RULE);
+        Ok(())
+    }
+
+    #[test]
+    fn ontology_identity_rules_are_canonical_bounded_and_cancellable() -> EncodedResult<()> {
+        let columns = invalid_data_arity_columns();
+        let phase = compile_profile_phase(&model(&columns)?, &[], ProfilePhaseLimits::default())?;
+        let identifiers = vec![
+            ProfileOntologyIdentifier {
+                document_key: b"document:a".to_vec(),
+                ontology_iri: Some(b"http://www.w3.org/2002/07/owl#ontology".to_vec()),
+                version_iri: None,
+            },
+            ProfileOntologyIdentifier {
+                document_key: b"document:b".to_vec(),
+                ontology_iri: Some(b"urn:ontology:b".to_vec()),
+                version_iri: Some(b"http://www.w3.org/2000/01/rdf-schema#version".to_vec()),
+            },
+        ];
+        let applied = into_encoded(apply_ontology_identity_context_controlled(
+            phase.clone(),
+            &identifiers,
+            ProfilePhaseLimits::default(),
+            &mut |_phase| Ok::<(), Infallible>(()),
+        ))?;
+        assert_eq!(
+            applied
+                .issues
+                .iter()
+                .filter(|issue| {
+                    matches!(
+                        issue.rule_id,
+                        RESERVED_ONTOLOGY_IRI_RULE | RESERVED_VERSION_IRI_RULE
+                    )
+                })
+                .map(|issue| (
+                    issue.rule_id,
+                    issue.message.as_ref(),
+                    issue.constructor,
+                    issue.provenance_sha256,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    RESERVED_ONTOLOGY_IRI_RULE,
+                    "ontology IRI must not use reserved OWL/RDF vocabulary: http://www.w3.org/2002/07/owl#ontology",
+                    Some("OntologyID"),
+                    None,
+                ),
+                (
+                    RESERVED_VERSION_IRI_RULE,
+                    "version IRI must not use reserved OWL/RDF vocabulary: http://www.w3.org/2000/01/rdf-schema#version",
+                    Some("OntologyID"),
+                    None,
+                ),
+            ]
+        );
+
+        let cancelled = apply_ontology_identity_context_controlled(
+            phase.clone(),
+            &identifiers,
+            ProfilePhaseLimits::default(),
+            &mut |checkpoint| {
+                if checkpoint == "profile-ontology-identity-iri" {
+                    Err("injected ontology identity cancellation")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(
+            cancelled,
+            Err(ProfilePhaseError::Control(
+                "injected ontology identity cancellation"
+            ))
+        );
+
+        let limited = apply_ontology_identity_context_controlled(
+            phase.clone(),
+            &identifiers,
+            ProfilePhaseLimits {
+                max_ontology_documents: 1,
+                ..ProfilePhaseLimits::default()
+            },
+            &mut |_phase| Ok::<(), Infallible>(()),
+        );
+        let Err(ProfilePhaseError::Encoded(error)) = limited else {
+            return Err(EncodedValidationError::invariant(
+                "ontology identity document limit unexpectedly succeeded",
+            ));
+        };
+        assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
+
+        let ownership_limited = apply_ontology_identity_context_controlled(
+            phase.clone(),
+            &identifiers,
+            ProfilePhaseLimits {
+                max_owned_bytes: phase.owned_bytes,
+                ..ProfilePhaseLimits::default()
+            },
+            &mut |_phase| Ok::<(), Infallible>(()),
+        );
+        let Err(ProfilePhaseError::Encoded(error)) = ownership_limited else {
+            return Err(EncodedValidationError::invariant(
+                "ontology identity ownership limit unexpectedly succeeded",
+            ));
+        };
+        assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
+
+        let noncanonical = apply_ontology_identity_context_controlled(
+            phase,
+            &[identifiers[1].clone(), identifiers[0].clone()],
+            ProfilePhaseLimits::default(),
+            &mut |_phase| Ok::<(), Infallible>(()),
+        );
+        let Err(ProfilePhaseError::Encoded(error)) = noncanonical else {
+            return Err(EncodedValidationError::invariant(
+                "noncanonical ontology identity context unexpectedly succeeded",
+            ));
+        };
+        assert_eq!(error.code, "NATIVE_ENCODED_VIEW_INVALID");
         Ok(())
     }
 

@@ -22,6 +22,7 @@ from pyowl_core import (
 )
 from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
 from pyowl_core.extensions import swrl
+from pyowl_core.index import OntologyIdentityIndex
 
 import pyhermit._native as native
 from pyhermit.config import UnsupportedDatatypePolicy
@@ -46,6 +47,8 @@ CLASS_DATATYPE_PUNNING_RULE = "OWL2DL_CLASS_DATATYPE_PUNNING"
 RESERVED_VOCABULARY_RULE = "OWL2DL_RESERVED_VOCABULARY"
 BUILTIN_ENTITY_KIND_RULE = "OWL2DL_BUILTIN_ENTITY_KIND"
 MISSING_DECLARATION_RULE = "OWL2DL_MISSING_DECLARATION"
+RESERVED_ONTOLOGY_IRI_RULE = "OWL2DL_RESERVED_ONTOLOGY_IRI"
+RESERVED_VERSION_IRI_RULE = "OWL2DL_RESERVED_VERSION_IRI"
 NON_SIMPLE_PROPERTY_RULE = "OWL2DL_NON_SIMPLE_PROPERTY"
 BUILTIN_DATATYPE_REDEFINITION_RULE = "BUILTIN_DATATYPE_REDEFINITION"
 CUSTOM_DATATYPE_LITERAL_RULE = "CUSTOM_DATATYPE_LITERAL"
@@ -68,6 +71,10 @@ ENTITY_RULES = frozenset(
         RESERVED_VOCABULARY_RULE,
     )
 )
+OntologyIdentityContext = tuple[
+    int,
+    tuple[tuple[str, str | None, str | None], ...],
+]
 PROJECTED_RULES = frozenset(
     (
         ANONYMOUS_AXIOM_POSITION_RULE,
@@ -88,7 +95,9 @@ PROJECTED_RULES = frozenset(
         MISSING_DECLARATION_RULE,
         NON_SIMPLE_PROPERTY_RULE,
         PROPERTY_PUNNING_RULE,
+        RESERVED_ONTOLOGY_IRI_RULE,
         RESERVED_VOCABULARY_RULE,
+        RESERVED_VERSION_IRI_RULE,
         RECURSIVE_DATATYPE_DEFINITION_RULE,
         RIA_DEPENDENCY_CYCLE_RULE,
         RIA_INVERSE_RECURSION_RULE,
@@ -110,6 +119,31 @@ def functional(*body: str, ontology_iri: str = "urn:test:profile") -> bytes:
 
 def _buffers(snapshot: pyowl_core.OntologyView) -> dict[str, memoryview]:
     return dict(produce_encoded_structural_view_v1(snapshot).buffers)
+
+
+def _ontology_identity_context(
+    snapshot: pyowl_core.OntologyView,
+) -> OntologyIdentityContext:
+    identity = snapshot.view(OntologyIdentityIndex)
+    documents = tuple(
+        sorted(
+            (
+                document.document_key,
+                (
+                    None
+                    if document.ontology_id.ontology_iri is None
+                    else document.ontology_id.ontology_iri.value
+                ),
+                (
+                    None
+                    if document.ontology_id.version_iri is None
+                    else document.ontology_id.version_iri.value
+                ),
+            )
+            for document in identity.documents
+        )
+    )
+    return (1, documents)
 
 
 def _slice_record(
@@ -151,6 +185,7 @@ def _native_manifest(
             native._encoded_profile_manifest_v1(
                 **_buffers(snapshot),
                 unsupported_datatypes=unsupported_datatypes.value,
+                ontology_identity_context=_ontology_identity_context(snapshot),
             )
         ),
     )
@@ -159,6 +194,7 @@ def _native_manifest(
 def _native_slices_manifest(
     *records: tuple[object, ...],
     unsupported_datatypes: UnsupportedDatatypePolicy = UnsupportedDatatypePolicy.ERROR,
+    ontology_identity_context: OntologyIdentityContext | None = None,
 ) -> dict[str, object]:
     return cast(
         dict[str, object],
@@ -166,6 +202,7 @@ def _native_slices_manifest(
             native._encoded_profile_slices_manifest_v1(
                 slices=records,
                 unsupported_datatypes=unsupported_datatypes.value,
+                ontology_identity_context=ontology_identity_context,
             )
         ),
     )
@@ -552,6 +589,122 @@ def test_legal_builtin_entity_kinds_match_scalar_without_global_issues() -> None
         issue["rule_id"] in ENTITY_RULES
         for issue in cast(list[dict[str, object]], actual["issues"])
     )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_rule", "expected_message"),
+    (
+        (
+            (
+                "Ontology(<http://www.w3.org/1999/02/22-rdf-syntax-ns#ontology> "
+                "Declaration(Class(<urn:test#A>)))"
+            ),
+            RESERVED_ONTOLOGY_IRI_RULE,
+            (
+                "ontology IRI must not use reserved OWL/RDF vocabulary: "
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#ontology"
+            ),
+        ),
+        (
+            (
+                "Ontology(<http://www.w3.org/2002/07/owl#ontology> "
+                "Declaration(Class(<urn:test#A>)))"
+            ),
+            RESERVED_ONTOLOGY_IRI_RULE,
+            (
+                "ontology IRI must not use reserved OWL/RDF vocabulary: "
+                "http://www.w3.org/2002/07/owl#ontology"
+            ),
+        ),
+        (
+            (
+                "Ontology(<urn:test:ontology> "
+                "<http://www.w3.org/2001/XMLSchema#version> "
+                "Declaration(Class(<urn:test#A>)))"
+            ),
+            RESERVED_VERSION_IRI_RULE,
+            (
+                "version IRI must not use reserved OWL/RDF vocabulary: "
+                "http://www.w3.org/2001/XMLSchema#version"
+            ),
+        ),
+        (
+            (
+                "Ontology(<urn:test:ontology> "
+                "<http://www.w3.org/2000/01/rdf-schema#version> "
+                "Declaration(Class(<urn:test#A>)))"
+            ),
+            RESERVED_VERSION_IRI_RULE,
+            (
+                "version IRI must not use reserved OWL/RDF vocabulary: "
+                "http://www.w3.org/2000/01/rdf-schema#version"
+            ),
+        ),
+    ),
+)
+def test_reserved_ontology_identifiers_match_scalar_projection(
+    source: str,
+    expected_rule: str,
+    expected_message: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(source.encode(), options=OPTIONS)
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    issue = next(
+        issue
+        for issue in cast(list[dict[str, object]], actual["issues"])
+        if issue["rule_id"] == expected_rule
+    )
+    assert issue == {
+        "rule_id": expected_rule,
+        "severity": "error",
+        "message": expected_message,
+        "constructor": "OntologyID",
+        "provenance_sha256": None,
+    }
+    assert "document_keys" not in issue
+
+
+def test_reserved_ontology_identifiers_compose_canonically_across_documents() -> None:
+    left = pyowl_core.load_snapshot(
+        (
+            b"Ontology(<http://www.w3.org/2002/07/owl#left> "
+            b"Declaration(Class(<urn:left#A>)))"
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        (
+            b"Ontology(<urn:right> <http://www.w3.org/2000/01/rdf-schema#right> "
+            b"Declaration(Class(<urn:right#A>)))"
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
+    sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
+    records = tuple(
+        _slice_record(source, member_tokens=(token,))
+        for token, source in sources_by_token
+    )
+    context = _ontology_identity_context(composite)
+
+    forward = _native_slices_manifest(
+        *records,
+        ontology_identity_context=context,
+    )
+    reverse = _native_slices_manifest(
+        *reversed(records),
+        ontology_identity_context=context,
+    )
+
+    assert forward == reverse == _expected_manifest(composite)
+    assert {
+        RESERVED_ONTOLOGY_IRI_RULE,
+        RESERVED_VERSION_IRI_RULE,
+    } <= set(cast(list[str], forward["ordered_rule_ids"]))
 
 
 @pytest.mark.parametrize(
@@ -1649,6 +1802,74 @@ def test_unknown_unsupported_datatype_policy_fails_before_profile_publication() 
         )
 
     assert native._encoded_profile_manifest_v1(**buffers) == baseline
+
+
+@pytest.mark.parametrize(
+    "context",
+    (
+        (2, ()),
+        (1, ()),
+        (1, []),
+        (1, (("urn:document:b", "urn:b", None), ("urn:document:a", "urn:a", None))),
+        (1, (("urn:document:a", "urn:a", None), ("urn:document:a", "urn:b", None))),
+        (1, (("", "urn:a", None),)),
+        (1, (("urn:document:a", "", None),)),
+        (1, (("urn:document:a", None, "urn:version"),)),
+        (1, (("urn:document:a", "relative/ontology", None),)),
+        (1, (("urn:document:a", "1bad:ontology", None),)),
+        (1, (("urn:document:a", "urn:ontology", "urn:bad|version"),)),
+        (1, (("urn:document:a", "urn:bad%2", None),)),
+    ),
+)
+def test_hostile_ontology_identity_context_fails_transactionally(
+    context: object,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(functional(*_invalid_body()), options=OPTIONS)
+    buffers = _buffers(snapshot)
+    baseline = native._encoded_profile_manifest_v1(**buffers)
+
+    with pytest.raises(BackendMismatchError, match="ontology identity"):
+        native._encoded_profile_manifest_v1(
+            **buffers,
+            ontology_identity_context=context,
+        )
+
+    assert native._encoded_profile_manifest_v1(**buffers) == baseline
+
+
+def test_ontology_identity_context_decode_cancellation_is_transactional() -> None:
+    snapshot = pyowl_core.load_snapshot(functional(*_invalid_body()), options=OPTIONS)
+    records = (_slice_record(snapshot),)
+    context = _ontology_identity_context(snapshot)
+    baseline = native._encoded_profile_slices_manifest_v1(
+        slices=records,
+        ontology_identity_context=context,
+    )
+    expected_phases = (
+        "profile-ontology-identity-context-preflight",
+        "profile-ontology-identity-context-document",
+        "profile-ontology-identity-context-complete",
+    )
+
+    for checkpoint, expected_phase in enumerate(expected_phases, start=1):
+        with pytest.raises(ReasonerInterruptedError) as interrupted:
+            native._debug_encoded_profile_context_cancel_v1(
+                slices=records,
+                ontology_identity_context=context,
+                cancel_at_checkpoint=checkpoint,
+            )
+        assert interrupted.value.code == "REASONER_INTERRUPTED"
+        assert interrupted.value.context == {
+            "checkpoint": str(checkpoint),
+            "phase": expected_phase,
+        }
+        assert (
+            native._encoded_profile_slices_manifest_v1(
+                slices=records,
+                ontology_identity_context=context,
+            )
+            == baseline
+        )
 
 
 def test_profile_cancellation_preserves_reason_and_retry() -> None:

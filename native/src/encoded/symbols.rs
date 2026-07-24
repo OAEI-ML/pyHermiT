@@ -1343,7 +1343,7 @@ fn copy_scalar<B: ByteSource>(
     Ok(output)
 }
 
-fn validate_iri(value: &str) -> EncodedResult<()> {
+pub(crate) fn validate_iri(value: &str) -> EncodedResult<()> {
     let bytes = value.as_bytes();
     let Some(colon) = bytes.iter().position(|byte| *byte == b':') else {
         return Err(invalid_iri());
