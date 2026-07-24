@@ -107,6 +107,7 @@ def _encoded_profile_manifest_v1(
     ontology_identity_context: (
         tuple[int, tuple[tuple[str, str | None, str | None], ...]] | None
     ) = ...,
+    origin_context: (tuple[int, tuple[tuple[bytes, tuple[str, ...]], ...]] | None) = ...,
     cancellation: CancellationHandle | None = ...,
 ) -> bytes: ...
 def _encoded_profile_slices_manifest_v1(
@@ -116,15 +117,15 @@ def _encoded_profile_slices_manifest_v1(
     ontology_identity_context: (
         tuple[int, tuple[tuple[str, str | None, str | None], ...]] | None
     ) = ...,
+    origin_context: (tuple[int, tuple[tuple[bytes, tuple[str, ...]], ...]] | None) = ...,
     cancellation: CancellationHandle | None = ...,
 ) -> bytes: ...
 def _debug_encoded_profile_context_cancel_v1(
     *,
     slices: tuple[tuple[object, ...], ...],
-    ontology_identity_context: tuple[
-        int, tuple[tuple[str, str | None, str | None], ...]
-    ],
+    ontology_identity_context: tuple[int, tuple[tuple[str, str | None, str | None], ...]],
     cancel_at_checkpoint: int,
+    origin_context: (tuple[int, tuple[tuple[bytes, tuple[str, ...]], ...]] | None) = ...,
 ) -> bytes: ...
 def _encoded_symbol_manifest_v1(
     *,

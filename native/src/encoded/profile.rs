@@ -314,6 +314,7 @@ pub struct ProfileIssue {
     pub severity: &'static str,
     pub message: Cow<'static, str>,
     pub constructor: Option<&'static str>,
+    pub document_keys: Vec<String>,
     pub provenance_sha256: Option<[u8; 32]>,
 }
 
@@ -436,6 +437,13 @@ pub struct ProfileOntologyIdentifier {
     pub version_iri: Option<Vec<u8>>,
 }
 
+/// One canonical provenance-to-document row from the private origin side context.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ProfileOrigin {
+    pub provenance_sha256: [u8; 32],
+    pub document_keys: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ProfileObjectRole {
     iri: Vec<u8>,
@@ -506,13 +514,41 @@ pub struct ProfilePhase {
 impl ProfilePhase {
     /// Canonical private manifest used for exact scalar differential checks.
     pub fn canonical_manifest_json(&self) -> EncodedResult<Vec<u8>> {
+        self.canonical_manifest_json_with_origins(false)
+    }
+
+    /// Canonical private manifest including the full scalar origin projection.
+    pub fn canonical_origin_manifest_json(&self) -> EncodedResult<Vec<u8>> {
+        self.canonical_manifest_json_with_origins(true)
+    }
+
+    fn canonical_manifest_json_with_origins(
+        &self,
+        include_origins: bool,
+    ) -> EncodedResult<Vec<u8>> {
         validate_phase(self)?;
         let issue_bound = self.issues.iter().try_fold(0_usize, |total, issue| {
+            let document_bound =
+                issue
+                    .document_keys
+                    .iter()
+                    .try_fold(0_usize, |document_total, document_key| {
+                        document_key
+                            .len()
+                            .checked_mul(6)
+                            .and_then(|value| document_total.checked_add(value))
+                            .ok_or_else(|| {
+                                EncodedValidationError::resource(
+                                    "profile manifest document-key bound overflowed",
+                                )
+                            })
+                    })?;
             issue
                 .message
                 .len()
                 .checked_mul(6)
                 .and_then(|message| message.checked_add(PROFILE_MANIFEST_ISSUE_BOUND))
+                .and_then(|issue| issue.checked_add(document_bound))
                 .and_then(|issue| total.checked_add(issue))
                 .ok_or_else(|| {
                     EncodedValidationError::resource("profile manifest size bound overflowed")
@@ -548,6 +584,7 @@ impl ProfilePhase {
                 severity: issue.severity,
                 message: issue.message.as_ref(),
                 constructor: issue.constructor,
+                document_keys: include_origins.then_some(issue.document_keys.as_slice()),
                 provenance_sha256: issue
                     .provenance_sha256
                     .map(|value| crate::model::hex(&value)),
@@ -589,6 +626,8 @@ struct ProfileIssueManifest<'a> {
     severity: &'a str,
     message: &'a str,
     constructor: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document_keys: Option<&'a [String]>,
     provenance_sha256: Option<String>,
 }
 
@@ -1289,6 +1328,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                     severity: "error",
                     message: Cow::Borrowed(EXTENSION_COMPONENT_MESSAGE),
                     constructor: Some("SWRLRule"),
+                    document_keys: Vec::new(),
                     provenance_sha256: Some(provenance_sha256),
                 });
                 continue;
@@ -1499,6 +1539,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                     severity: "error",
                     message: Cow::Borrowed(ANONYMOUS_CLASS_EXPRESSION_MESSAGE),
                     constructor: Some(constructor),
+                    document_keys: Vec::new(),
                     provenance_sha256: Some(provenance_sha256),
                 });
             }
@@ -1559,6 +1600,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                         } else {
                             "DataAllValuesFrom"
                         }),
+                        document_keys: Vec::new(),
                         provenance_sha256: Some(provenance_sha256),
                     });
                 }
@@ -1595,6 +1637,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                 severity: "error",
                 message: Cow::Borrowed(ANONYMOUS_AXIOM_POSITION_MESSAGE),
                 constructor: Some(axiom_constructor),
+                document_keys: Vec::new(),
                 provenance_sha256: Some(provenance_sha256),
             });
         }
@@ -1617,6 +1660,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
                 severity: "error",
                 message: Cow::Borrowed(TOP_DATA_PROPERTY_MESSAGE),
                 constructor: Some(axiom_constructor),
+                document_keys: Vec::new(),
                 provenance_sha256: Some(provenance_sha256),
             });
         }
@@ -2427,6 +2471,7 @@ pub fn merge_profile_phases_controlled_with_policy<E>(
 pub fn apply_ontology_identity_context_controlled<E>(
     mut phase: ProfilePhase,
     identifiers: &[ProfileOntologyIdentifier],
+    include_document_keys: bool,
     limits: ProfilePhaseLimits,
     control: &mut impl FnMut(&'static str) -> Result<(), E>,
 ) -> ControlledResult<ProfilePhase, E> {
@@ -2521,6 +2566,35 @@ pub fn apply_ontology_identity_context_controlled<E>(
                 &mut budget,
             )
             .map_err(ProfilePhaseError::Encoded)?;
+            if include_document_keys {
+                let document_key = std::str::from_utf8(&identifier.document_key).map_err(|_| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::protocol(
+                        "profile ontology identity document key is not UTF-8",
+                    ))
+                })?;
+                budget
+                    .claim_owned(
+                        size_of::<String>()
+                            .checked_add(document_key.len())
+                            .ok_or_else(|| {
+                                ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                                    "profile ontology identity document-key ownership overflowed",
+                                ))
+                            })?,
+                    )
+                    .map_err(ProfilePhaseError::Encoded)?;
+                let issue = phase.issues.last_mut().ok_or_else(|| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::invariant(
+                        "profile ontology identity issue disappeared",
+                    ))
+                })?;
+                issue.document_keys.try_reserve_exact(1).map_err(|_| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                        "profile ontology identity document-key allocation failed",
+                    ))
+                })?;
+                issue.document_keys.push(document_key.to_owned());
+            }
         }
     }
     poll(control, "profile-ontology-identity-canonicalize")?;
@@ -2534,6 +2608,135 @@ pub fn apply_ontology_identity_context_controlled<E>(
     phase.owned_bytes = budget.owned_bytes;
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
     poll(control, "profile-ontology-identity-complete")?;
+    Ok(phase)
+}
+
+/// Attach exact effective-origin document keys to every provenance-bearing issue.
+pub fn apply_origin_context_controlled<E>(
+    mut phase: ProfilePhase,
+    origins: &[ProfileOrigin],
+    limits: ProfilePhaseLimits,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<ProfilePhase, E> {
+    poll(control, "profile-origin-preflight")?;
+    validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
+    let mut budget = PhaseBudget::new(limits);
+    budget
+        .claim_work_u64(phase.work)
+        .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(phase.owned_bytes)
+        .map_err(ProfilePhaseError::Encoded)?;
+    if origins.len() > limits.max_axioms {
+        return Err(
+            EncodedValidationError::resource("profile origin row count exceeds its limit").into(),
+        );
+    }
+    budget
+        .claim_owned(
+            origins
+                .len()
+                .checked_mul(size_of::<ProfileOrigin>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("profile origin context size overflowed")
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    if origins
+        .windows(2)
+        .any(|pair| pair[0].provenance_sha256 >= pair[1].provenance_sha256)
+    {
+        return Err(EncodedValidationError::protocol(
+            "profile origin rows are not ordered by unique provenance",
+        )
+        .into());
+    }
+    for origin in origins {
+        poll(control, "profile-origin-row")?;
+        if origin.document_keys.is_empty()
+            || origin
+                .document_keys
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || origin.document_keys.iter().any(String::is_empty)
+        {
+            return Err(EncodedValidationError::protocol(
+                "profile origin document keys are not nonempty, sorted, and unique",
+            )
+            .into());
+        }
+        budget
+            .claim_owned(
+                origin
+                    .document_keys
+                    .iter()
+                    .try_fold(0_usize, |total, document_key| {
+                        total
+                            .checked_add(size_of::<String>())
+                            .and_then(|value| value.checked_add(document_key.len()))
+                            .ok_or_else(|| {
+                                EncodedValidationError::resource(
+                                    "profile origin document-key ownership overflowed",
+                                )
+                            })
+                    })
+                    .map_err(ProfilePhaseError::Encoded)?,
+            )
+            .map_err(ProfilePhaseError::Encoded)?;
+        budget
+            .claim_work(origin.document_keys.len())
+            .map_err(ProfilePhaseError::Encoded)?;
+    }
+    for issue in &mut phase.issues {
+        poll(control, "profile-origin-issue")?;
+        let Some(provenance) = issue.provenance_sha256 else {
+            continue;
+        };
+        budget
+            .claim_work(search_work(origins.len()))
+            .map_err(ProfilePhaseError::Encoded)?;
+        let position = origins
+            .binary_search_by_key(&provenance, |origin| origin.provenance_sha256)
+            .map_err(|_| {
+                ProfilePhaseError::Encoded(EncodedValidationError::protocol(
+                    "profile origin context is missing a provenance-bearing issue",
+                ))
+            })?;
+        let document_keys = &origins[position].document_keys;
+        issue
+            .document_keys
+            .try_reserve_exact(document_keys.len())
+            .map_err(|_| {
+                ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                    "profile issue document-key allocation failed",
+                ))
+            })?;
+        for document_key in document_keys {
+            budget
+                .claim_owned(
+                    size_of::<String>()
+                        .checked_add(document_key.len())
+                        .ok_or_else(|| {
+                            ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                                "profile issue document-key ownership overflowed",
+                            ))
+                        })?,
+                )
+                .map_err(ProfilePhaseError::Encoded)?;
+            issue.document_keys.push(document_key.clone());
+        }
+    }
+    poll(control, "profile-origin-canonicalize")?;
+    budget
+        .claim_work(sort_work(phase.issues.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    phase.issues.sort();
+    phase.issues.dedup();
+    phase.conforms = profile_issues_conform(&phase.issues);
+    phase.work = budget.work;
+    phase.owned_bytes = budget.owned_bytes;
+    validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
+    poll(control, "profile-origin-complete")?;
     Ok(phase)
 }
 
@@ -4434,6 +4637,7 @@ fn append_datatype_issues<E>(
                 severity: "error",
                 message: Cow::Borrowed(message),
                 constructor: Some("DataRange"),
+                document_keys: Vec::new(),
                 provenance_sha256: None,
             },
             budget,
@@ -4475,6 +4679,7 @@ fn append_datatype_issues<E>(
                         severity: "error",
                         message: Cow::Borrowed(message),
                         constructor: Some("Literal"),
+                        document_keys: Vec::new(),
                         provenance_sha256: None,
                     },
                     budget,
@@ -4490,6 +4695,7 @@ fn append_datatype_issues<E>(
                             severity: "error",
                             message: Cow::Borrowed(UNSUPPORTED_LITERAL_DATATYPE_MESSAGE),
                             constructor: Some("Literal"),
+                            document_keys: Vec::new(),
                             provenance_sha256: None,
                         },
                         budget,
@@ -5004,6 +5210,7 @@ fn append_role_regularity_issues<E>(
                     severity: "error",
                     message: Cow::Borrowed(RIA_INVERSE_RECURSION_MESSAGE),
                     constructor: Some("SubObjectPropertyOf"),
+                    document_keys: Vec::new(),
                     provenance_sha256: Some(fact.provenance_sha256),
                 },
                 budget,
@@ -5025,6 +5232,7 @@ fn append_role_regularity_issues<E>(
                     severity: "error",
                     message: Cow::Borrowed(RIA_NON_REGULAR_RECURSION_MESSAGE),
                     constructor: Some("SubObjectPropertyOf"),
+                    document_keys: Vec::new(),
                     provenance_sha256: Some(fact.provenance_sha256),
                 },
                 budget,
@@ -5097,6 +5305,7 @@ fn append_role_regularity_issues<E>(
                     severity: "error",
                     message: Cow::Borrowed(RIA_DEPENDENCY_CYCLE_MESSAGE),
                     constructor: Some("SubObjectPropertyOf"),
+                    document_keys: Vec::new(),
                     provenance_sha256: Some(fact.provenance_sha256),
                 },
                 budget,
@@ -5762,6 +5971,7 @@ fn append_non_simple_role_issues<E>(
                 severity: "error",
                 message: Cow::Borrowed(NON_SIMPLE_PROPERTY_MESSAGE),
                 constructor: Some(requirement.constructor),
+                document_keys: Vec::new(),
                 provenance_sha256: Some(requirement.provenance_sha256),
             },
             budget,
@@ -5959,6 +6169,7 @@ fn push_dynamic_profile_issue_with_severity_and_constructor(
             severity,
             message: Cow::Owned(message),
             constructor,
+            document_keys: Vec::new(),
             provenance_sha256: None,
         },
         budget,
@@ -6184,6 +6395,7 @@ fn append_anonymous_graph_issues<E>(
                             severity: "error",
                             message: Cow::Borrowed(ANONYMOUS_GRAPH_CYCLE_MESSAGE),
                             constructor: Some("ObjectPropertyAssertion"),
+                            document_keys: Vec::new(),
                             provenance_sha256: Some(assertion.provenance_sha256),
                         },
                         budget,
@@ -6238,6 +6450,7 @@ fn append_anonymous_graph_issues<E>(
                     severity: "error",
                     message: Cow::Borrowed(ANONYMOUS_PARALLEL_EDGE_MESSAGE),
                     constructor: Some("ObjectPropertyAssertion"),
+                    document_keys: Vec::new(),
                     provenance_sha256: Some(assertion.provenance_sha256),
                 },
                 budget,
@@ -6297,6 +6510,7 @@ fn append_anonymous_graph_issues<E>(
                     severity: "error",
                     message: Cow::Borrowed(ANONYMOUS_TREE_ROOT_MESSAGE),
                     constructor: Some("ObjectPropertyAssertion"),
+                    document_keys: Vec::new(),
                     provenance_sha256: Some(assertion.provenance_sha256),
                 },
                 budget,
@@ -6649,6 +6863,17 @@ fn validate_phase(phase: &ProfilePhase) -> EncodedResult<()> {
     {
         return Err(EncodedValidationError::invariant(
             "profile issue severity is not recognized",
+        ));
+    }
+    if phase.issues.iter().any(|issue| {
+        issue.document_keys.iter().any(String::is_empty)
+            || issue
+                .document_keys
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+    }) {
+        return Err(EncodedValidationError::invariant(
+            "profile issue document keys are not canonical sorted unique",
         ));
     }
     if phase.axioms_checked != phase.axiom_keys.len() {
@@ -7112,6 +7337,7 @@ mod tests {
         let applied = into_encoded(apply_ontology_identity_context_controlled(
             phase.clone(),
             &identifiers,
+            false,
             ProfilePhaseLimits::default(),
             &mut |_phase| Ok::<(), Infallible>(()),
         ))?;
@@ -7151,6 +7377,7 @@ mod tests {
         let cancelled = apply_ontology_identity_context_controlled(
             phase.clone(),
             &identifiers,
+            false,
             ProfilePhaseLimits::default(),
             &mut |checkpoint| {
                 if checkpoint == "profile-ontology-identity-iri" {
@@ -7170,6 +7397,7 @@ mod tests {
         let limited = apply_ontology_identity_context_controlled(
             phase.clone(),
             &identifiers,
+            false,
             ProfilePhaseLimits {
                 max_ontology_documents: 1,
                 ..ProfilePhaseLimits::default()
@@ -7186,6 +7414,7 @@ mod tests {
         let ownership_limited = apply_ontology_identity_context_controlled(
             phase.clone(),
             &identifiers,
+            false,
             ProfilePhaseLimits {
                 max_owned_bytes: phase.owned_bytes,
                 ..ProfilePhaseLimits::default()
@@ -7202,6 +7431,7 @@ mod tests {
         let noncanonical = apply_ontology_identity_context_controlled(
             phase,
             &[identifiers[1].clone(), identifiers[0].clone()],
+            false,
             ProfilePhaseLimits::default(),
             &mut |_phase| Ok::<(), Infallible>(()),
         );
@@ -7589,6 +7819,7 @@ mod tests {
                     "unsupported datatype is treated as opaque: urn:opaque".to_owned()
                 ),
                 constructor: Some("Datatype"),
+                document_keys: Vec::new(),
                 provenance_sha256: None,
             }]
         );
@@ -8061,6 +8292,75 @@ mod tests {
                 EncodedValidationError::invariant("profile extension limit unexpectedly succeeded")
             })?;
         assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
+        Ok(())
+    }
+
+    #[test]
+    fn origin_context_restores_document_keys_transactionally() -> EncodedResult<()> {
+        let columns = invalid_data_arity_columns();
+        let phase = compile_profile_phase(&model(&columns)?, &[], ProfilePhaseLimits::default())?;
+        let provenance = phase.issues[0].provenance_sha256.ok_or_else(|| {
+            EncodedValidationError::invariant("profile origin fixture lost its provenance")
+        })?;
+        let origins = vec![ProfileOrigin {
+            provenance_sha256: provenance,
+            document_keys: vec!["document:a".to_owned(), "document:b".to_owned()],
+        }];
+        let applied = into_encoded(apply_origin_context_controlled(
+            phase.clone(),
+            &origins,
+            ProfilePhaseLimits::default(),
+            &mut |_phase| Ok::<(), Infallible>(()),
+        ))?;
+        assert_eq!(
+            applied.issues[0].document_keys,
+            ["document:a", "document:b"]
+        );
+        let origin_manifest: serde_json::Value =
+            serde_json::from_slice(&applied.canonical_origin_manifest_json()?).map_err(|_| {
+                EncodedValidationError::invariant("profile origin manifest is not JSON")
+            })?;
+        assert_eq!(
+            origin_manifest["issues"][0]["document_keys"],
+            serde_json::json!(["document:a", "document:b"])
+        );
+        let projected_manifest: serde_json::Value =
+            serde_json::from_slice(&applied.canonical_manifest_json()?).map_err(|_| {
+                EncodedValidationError::invariant("projected profile manifest is not JSON")
+            })?;
+        assert!(projected_manifest["issues"][0]
+            .as_object()
+            .is_some_and(|issue| !issue.contains_key("document_keys")));
+
+        let cancelled = apply_origin_context_controlled(
+            phase.clone(),
+            &origins,
+            ProfilePhaseLimits::default(),
+            &mut |checkpoint| {
+                if checkpoint == "profile-origin-issue" {
+                    Err("injected origin cancellation")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(
+            cancelled,
+            Err(ProfilePhaseError::Control("injected origin cancellation"))
+        );
+
+        let missing = apply_origin_context_controlled(
+            phase,
+            &[],
+            ProfilePhaseLimits::default(),
+            &mut |_phase| Ok::<(), Infallible>(()),
+        );
+        let Err(ProfilePhaseError::Encoded(error)) = missing else {
+            return Err(EncodedValidationError::invariant(
+                "missing profile origin unexpectedly succeeded",
+            ));
+        };
+        assert_eq!(error.code, "NATIVE_ENCODED_VIEW_INVALID");
         Ok(())
     }
 

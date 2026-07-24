@@ -919,6 +919,7 @@ fn validate_encoded_selection_v1(
 const ENCODED_SLICE_RECORD_LEN: usize = 15;
 const ENCODED_SLICE_CONTEXT_DEPTH: usize = 32;
 const PROFILE_ONTOLOGY_IDENTITY_CONTEXT_VERSION: u16 = 1;
+const PROFILE_ORIGIN_CONTEXT_VERSION: u16 = 1;
 
 fn encoded_slice_invalid(message: impl Into<String>) -> NativeError {
     NativeError::new(ErrorKind::Wire, "NATIVE_ENCODED_VIEW_INVALID", message)
@@ -1129,6 +1130,196 @@ fn decode_profile_ontology_identity_context(
     }
     poll("profile-ontology-identity-context-complete")?;
     Ok(identifiers)
+}
+
+fn decode_profile_origin_context(
+    value: Option<&Bound<'_, PyAny>>,
+    limits: encoded::profile::ProfilePhaseLimits,
+    poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
+) -> NativeResult<Option<Vec<encoded::profile::ProfileOrigin>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    poll("profile-origin-context-preflight")?;
+    if !value.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded profile origin context is not an exact tuple",
+        ));
+    }
+    let context = value
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("encoded profile origin context changed type"))?;
+    if context.len() != 2 {
+        return Err(encoded_slice_invalid(
+            "encoded profile origin context has the wrong field count",
+        ));
+    }
+    let version = tuple_item(context, 0, "profile origin context version")?;
+    if !version.is_exact_instance_of::<PyInt>() {
+        return Err(encoded_slice_invalid(
+            "encoded profile origin context version is not an exact integer",
+        ));
+    }
+    let version = version
+        .extract::<u16>()
+        .map_err(|_| encoded_slice_invalid("encoded profile origin context version exceeds u16"))?;
+    if version != PROFILE_ORIGIN_CONTEXT_VERSION {
+        return Err(encoded_slice_invalid(
+            "encoded profile origin context version is unsupported",
+        ));
+    }
+    let rows = tuple_item(context, 1, "profile origin rows")?;
+    if !rows.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded profile origin rows are not an exact tuple",
+        ));
+    }
+    let rows = rows
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("encoded profile origin rows changed type"))?;
+    if rows.len() > limits.max_axioms {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "encoded profile origin context exceeds its row limit",
+            ),
+        ));
+    }
+    let mut owned_bytes = rows
+        .len()
+        .checked_mul(std::mem::size_of::<encoded::profile::ProfileOrigin>())
+        .ok_or_else(|| encoded_slice_invalid("encoded profile origin row size overflowed"))?;
+    if owned_bytes > limits.max_owned_bytes {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "encoded profile origin context exceeds its byte limit",
+            ),
+        ));
+    }
+    let mut origins = Vec::new();
+    origins.try_reserve_exact(rows.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded profile origin row allocation failed",
+        ))
+    })?;
+    for index in 0..rows.len() {
+        poll("profile-origin-context-row")?;
+        let row = tuple_item(rows, index, "profile origin row")?;
+        if !row.is_exact_instance_of::<PyTuple>() {
+            return Err(encoded_slice_invalid(
+                "encoded profile origin row is not an exact tuple",
+            ));
+        }
+        let row = row
+            .cast::<PyTuple>()
+            .map_err(|_| encoded_slice_invalid("encoded profile origin row changed type"))?;
+        if row.len() != 2 {
+            return Err(encoded_slice_invalid(
+                "encoded profile origin row has the wrong field count",
+            ));
+        }
+        let provenance = tuple_item(row, 0, "profile origin provenance")?;
+        if !provenance.is_exact_instance_of::<PyBytes>() {
+            return Err(encoded_slice_invalid(
+                "encoded profile origin provenance is not exact bytes",
+            ));
+        }
+        let provenance = provenance
+            .cast::<PyBytes>()
+            .map_err(|_| encoded_slice_invalid("encoded profile origin provenance changed type"))?
+            .as_bytes();
+        let provenance_sha256: [u8; 32] = provenance.try_into().map_err(|_| {
+            encoded_slice_invalid("encoded profile origin provenance is not bytes32")
+        })?;
+        let document_values = tuple_item(row, 1, "profile origin document keys")?;
+        if !document_values.is_exact_instance_of::<PyTuple>() {
+            return Err(encoded_slice_invalid(
+                "encoded profile origin document keys are not an exact tuple",
+            ));
+        }
+        let document_values = document_values.cast::<PyTuple>().map_err(|_| {
+            encoded_slice_invalid("encoded profile origin document keys changed type")
+        })?;
+        if document_values.is_empty() {
+            return Err(encoded_slice_invalid(
+                "encoded profile origin row has no document keys",
+            ));
+        }
+        owned_bytes = owned_bytes
+            .checked_add(
+                document_values
+                    .len()
+                    .checked_mul(std::mem::size_of::<String>())
+                    .ok_or_else(|| {
+                        encoded_slice_invalid("encoded profile origin document-key size overflowed")
+                    })?,
+            )
+            .ok_or_else(|| encoded_slice_invalid("encoded profile origin ownership overflowed"))?;
+        let mut document_keys = Vec::new();
+        document_keys
+            .try_reserve_exact(document_values.len())
+            .map_err(|_| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded profile origin document-key allocation failed",
+                ))
+            })?;
+        for document_index in 0..document_values.len() {
+            poll("profile-origin-context-document")?;
+            let document_key = tuple_item(
+                document_values,
+                document_index,
+                "profile origin document key",
+            )?;
+            if !document_key.is_exact_instance_of::<PyString>() {
+                return Err(encoded_slice_invalid(
+                    "encoded profile origin document key is not an exact string",
+                ));
+            }
+            let document_key = document_key
+                .cast::<PyString>()
+                .map_err(|_| {
+                    encoded_slice_invalid("encoded profile origin document key changed type")
+                })?
+                .to_str()
+                .map_err(|_| {
+                    encoded_slice_invalid("encoded profile origin document key is not UTF-8")
+                })?;
+            if document_key.is_empty() {
+                return Err(encoded_slice_invalid(
+                    "encoded profile origin document key is empty",
+                ));
+            }
+            owned_bytes = owned_bytes.checked_add(document_key.len()).ok_or_else(|| {
+                encoded_slice_invalid("encoded profile origin byte count overflowed")
+            })?;
+            if owned_bytes > limits.max_owned_bytes {
+                return Err(encoded_validation_error(
+                    encoded::EncodedValidationError::resource(
+                        "encoded profile origin context exceeds its byte limit",
+                    ),
+                ));
+            }
+            document_keys.push(document_key.to_owned());
+        }
+        if document_keys.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(encoded_slice_invalid(
+                "encoded profile origin document keys are not sorted unique",
+            ));
+        }
+        origins.push(encoded::profile::ProfileOrigin {
+            provenance_sha256,
+            document_keys,
+        });
+    }
+    if origins
+        .windows(2)
+        .any(|pair| pair[0].provenance_sha256 >= pair[1].provenance_sha256)
+    {
+        return Err(encoded_slice_invalid(
+            "encoded profile origin rows are not sorted by unique provenance",
+        ));
+    }
+    poll("profile-origin-context-complete")?;
+    Ok(Some(origins))
 }
 
 fn tuple_item<'py>(
@@ -2757,11 +2948,13 @@ fn compile_encoded_profile_slices_manifest_controlled(
     slices: &Bound<'_, PyAny>,
     unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
     ontology_identity_context: Option<&Bound<'_, PyAny>>,
+    origin_context: Option<&Bound<'_, PyAny>>,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<Vec<u8>> {
     let limits = encoded::profile::ProfilePhaseLimits::default();
     let ontology_identifiers =
         decode_profile_ontology_identity_context(ontology_identity_context, limits, poll)?;
+    let origins = decode_profile_origin_context(origin_context, limits, poll)?;
     let phase = compile_encoded_profile_slices_controlled(slices, unsupported_datatypes, poll)?;
     let phase = if ontology_identifiers.is_empty() {
         phase
@@ -2769,23 +2962,37 @@ fn compile_encoded_profile_slices_manifest_controlled(
         encoded::profile::apply_ontology_identity_context_controlled(
             phase,
             &ontology_identifiers,
+            origins.is_some(),
             limits,
             poll,
         )
         .map_err(encoded_profile_error)?
     };
-    phase
-        .canonical_manifest_json()
-        .map_err(encoded_validation_error)
+    let phase = if let Some(origins) = origins.as_deref() {
+        encoded::profile::apply_origin_context_controlled(phase, origins, limits, poll)
+            .map_err(encoded_profile_error)?
+    } else {
+        phase
+    };
+    if origins.is_some() {
+        phase
+            .canonical_origin_manifest_json()
+            .map_err(encoded_validation_error)
+    } else {
+        phase
+            .canonical_manifest_json()
+            .map_err(encoded_validation_error)
+    }
 }
 
 #[pyfunction(name = "_encoded_profile_slices_manifest_v1")]
-#[pyo3(signature = (*, slices, unsupported_datatypes="error", ontology_identity_context=None, cancellation=None))]
+#[pyo3(signature = (*, slices, unsupported_datatypes="error", ontology_identity_context=None, origin_context=None, cancellation=None))]
 fn encoded_profile_slices_manifest_v1(
     py: Python<'_>,
     slices: &Bound<'_, PyAny>,
     unsupported_datatypes: &str,
     ontology_identity_context: Option<&Bound<'_, PyAny>>,
+    origin_context: Option<&Bound<'_, PyAny>>,
     cancellation: Option<PyRef<'_, CancellationHandle>>,
 ) -> PyResult<Vec<u8>> {
     let cancellation = cancellation.map(|handle| handle.state());
@@ -2800,6 +3007,7 @@ fn encoded_profile_slices_manifest_v1(
             slices,
             unsupported_datatypes,
             ontology_identity_context,
+            origin_context,
             &mut poll,
         )
     })
@@ -2807,12 +3015,13 @@ fn encoded_profile_slices_manifest_v1(
 
 /// Deterministically inject cancellation into the private profile-context transaction.
 #[pyfunction(name = "_debug_encoded_profile_context_cancel_v1")]
-#[pyo3(signature = (*, slices, ontology_identity_context, cancel_at_checkpoint))]
+#[pyo3(signature = (*, slices, ontology_identity_context, cancel_at_checkpoint, origin_context=None))]
 fn debug_encoded_profile_context_cancel_v1(
     py: Python<'_>,
     slices: &Bound<'_, PyAny>,
     ontology_identity_context: &Bound<'_, PyAny>,
     cancel_at_checkpoint: u64,
+    origin_context: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Vec<u8>> {
     contain_encoded_selection(py, || {
         if cancel_at_checkpoint == 0 {
@@ -2840,13 +3049,14 @@ fn debug_encoded_profile_context_cancel_v1(
             slices,
             encoded::profile::ProfileUnsupportedDatatypePolicy::Error,
             Some(ontology_identity_context),
+            origin_context,
             &mut poll,
         )
     })
 }
 
 #[pyfunction(name = "_encoded_profile_manifest_v1")]
-#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes, unsupported_datatypes="error", ontology_identity_context=None, cancellation=None))]
+#[pyo3(signature = (*, root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes, unsupported_datatypes="error", ontology_identity_context=None, origin_context=None, cancellation=None))]
 #[allow(clippy::too_many_arguments)]
 fn encoded_profile_manifest_v1(
     py: Python<'_>,
@@ -2863,6 +3073,7 @@ fn encoded_profile_manifest_v1(
     scalar_bytes: &Bound<'_, PyAny>,
     unsupported_datatypes: &str,
     ontology_identity_context: Option<&Bound<'_, PyAny>>,
+    origin_context: Option<&Bound<'_, PyAny>>,
     cancellation: Option<PyRef<'_, CancellationHandle>>,
 ) -> PyResult<Vec<u8>> {
     let cancellation = cancellation.map(|handle| handle.state());
@@ -2877,6 +3088,7 @@ fn encoded_profile_manifest_v1(
         let limits = encoded::profile::ProfilePhaseLimits::default();
         let ontology_identifiers =
             decode_profile_ontology_identity_context(ontology_identity_context, limits, &mut poll)?;
+        let origins = decode_profile_origin_context(origin_context, limits, &mut poll)?;
         let columns = borrowed_encoded_columns(
             root_kinds,
             root_ids,
@@ -2906,14 +3118,27 @@ fn encoded_profile_manifest_v1(
             encoded::profile::apply_ontology_identity_context_controlled(
                 phase,
                 &ontology_identifiers,
+                origins.is_some(),
                 limits,
                 &mut poll,
             )
             .map_err(encoded_profile_error)?
         };
-        phase
-            .canonical_manifest_json()
-            .map_err(encoded_validation_error)
+        let phase = if let Some(origins) = origins.as_deref() {
+            encoded::profile::apply_origin_context_controlled(phase, origins, limits, &mut poll)
+                .map_err(encoded_profile_error)?
+        } else {
+            phase
+        };
+        if origins.is_some() {
+            phase
+                .canonical_origin_manifest_json()
+                .map_err(encoded_validation_error)
+        } else {
+            phase
+                .canonical_manifest_json()
+                .map_err(encoded_validation_error)
+        }
     })
 }
 

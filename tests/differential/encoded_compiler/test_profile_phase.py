@@ -75,6 +75,10 @@ OntologyIdentityContext = tuple[
     int,
     tuple[tuple[str, str | None, str | None], ...],
 ]
+ProfileOriginContext = tuple[
+    int,
+    tuple[tuple[bytes, tuple[str, ...]], ...],
+]
 PROJECTED_RULES = frozenset(
     (
         ANONYMOUS_AXIOM_POSITION_RULE,
@@ -146,6 +150,25 @@ def _ontology_identity_context(
     return (1, documents)
 
 
+def _profile_origin_context(
+    snapshot: pyowl_core.OntologyView,
+) -> ProfileOriginContext:
+    documents_by_provenance: dict[bytes, set[str]] = {}
+    for value in (*snapshot.iter_axioms(), *snapshot.iter_extensions()):
+        document_keys = {origin.document_key for origin in snapshot.origin_index.origins_for(value)}
+        if not document_keys:
+            continue
+        provenance = hashlib.sha256(value.canonical_bytes()).digest()
+        documents_by_provenance.setdefault(provenance, set()).update(document_keys)
+    return (
+        1,
+        tuple(
+            (provenance, tuple(sorted(document_keys)))
+            for provenance, document_keys in sorted(documents_by_provenance.items())
+        ),
+    )
+
+
 def _slice_record(
     snapshot: pyowl_core.OntologyView,
     *,
@@ -208,6 +231,43 @@ def _native_slices_manifest(
     )
 
 
+def _native_origin_manifest(
+    snapshot: pyowl_core.OntologyView,
+    *,
+    unsupported_datatypes: UnsupportedDatatypePolicy = UnsupportedDatatypePolicy.ERROR,
+) -> dict[str, object]:
+    return cast(
+        dict[str, object],
+        json.loads(
+            native._encoded_profile_manifest_v1(
+                **_buffers(snapshot),
+                unsupported_datatypes=unsupported_datatypes.value,
+                ontology_identity_context=_ontology_identity_context(snapshot),
+                origin_context=_profile_origin_context(snapshot),
+            )
+        ),
+    )
+
+
+def _native_origin_slices_manifest(
+    *records: tuple[object, ...],
+    unsupported_datatypes: UnsupportedDatatypePolicy = UnsupportedDatatypePolicy.ERROR,
+    ontology_identity_context: OntologyIdentityContext,
+    origin_context: ProfileOriginContext,
+) -> dict[str, object]:
+    return cast(
+        dict[str, object],
+        json.loads(
+            native._encoded_profile_slices_manifest_v1(
+                slices=records,
+                unsupported_datatypes=unsupported_datatypes.value,
+                ontology_identity_context=ontology_identity_context,
+                origin_context=origin_context,
+            )
+        ),
+    )
+
+
 def _expected_manifest(
     snapshot: pyowl_core.OntologyView,
     *,
@@ -250,6 +310,37 @@ def _expected_manifest(
     }
 
 
+def _expected_origin_manifest(
+    snapshot: pyowl_core.OntologyView,
+    *,
+    unsupported_datatypes: UnsupportedDatatypePolicy = UnsupportedDatatypePolicy.ERROR,
+) -> dict[str, object]:
+    report = validate_owl2_dl_view(
+        snapshot,
+        unsupported_datatypes=unsupported_datatypes,
+    )
+    projected = tuple(issue for issue in report.issues if issue.rule_id in PROJECTED_RULES)
+    return {
+        "schema_version": 1,
+        "family": "owl2_dl_profile",
+        "conforms": not any(issue.severity.value == "error" for issue in projected),
+        "axioms_checked": report.axioms_checked,
+        "extensions_checked": report.extensions_checked,
+        "ordered_rule_ids": [issue.rule_id for issue in projected],
+        "issues": [
+            {
+                "rule_id": issue.rule_id,
+                "severity": issue.severity.value,
+                "message": issue.message,
+                "constructor": issue.constructor,
+                "document_keys": list(issue.document_keys),
+                "provenance_sha256": issue.provenance_sha256,
+            }
+            for issue in projected
+        ],
+    }
+
+
 def _invalid_body() -> tuple[str, ...]:
     return (
         "Declaration(Class(:A))",
@@ -257,8 +348,7 @@ def _invalid_body() -> tuple[str, ...]:
         "Declaration(DataProperty(:p))",
         "Declaration(DataProperty(:q))",
         "Declaration(AnnotationProperty(:note))",
-        'SubClassOf(Annotation(:note "source") '
-        ":A DataSomeValuesFrom(:p :q xsd:string))",
+        'SubClassOf(Annotation(:note "source") :A DataSomeValuesFrom(:p :q xsd:string))',
         "SubClassOf(:B DataAllValuesFrom(:q :p xsd:string))",
     )
 
@@ -314,8 +404,7 @@ def _entity_profile_snapshot() -> pyowl_core.OntologyView:
             "Declaration(DataProperty(:shared))",
             "Declaration(Class(:dual))",
             "Declaration(Datatype(:dual))",
-            "Declaration(Class("
-            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#custom>))",
+            "Declaration(Class(<http://www.w3.org/1999/02/22-rdf-syntax-ns#custom>))",
             "Declaration(Class(owl:real))",
             "SubClassOf(:Missing owl:Thing)",
             'Annotation(:annotationMissing "value")',
@@ -395,11 +484,24 @@ def test_multi_property_diagnostics_order_and_provenance_match_scalar_exactly() 
     ]
     assert all(len(cast(str, issue["provenance_sha256"])) == 64 for issue in issues)
     assert all(
-        issue.document_keys
-        for issue in scalar.issues
-        if issue.rule_id == DATA_RANGE_ARITY_RULE
+        issue.document_keys for issue in scalar.issues if issue.rule_id == DATA_RANGE_ARITY_RULE
     )
     assert all("document_keys" not in issue for issue in issues)
+
+
+def test_origin_context_restores_full_scalar_root_diagnostics() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(*_invalid_body()),
+        options=OPTIONS,
+    )
+
+    actual = _native_origin_manifest(snapshot)
+
+    assert actual == _expected_origin_manifest(snapshot)
+    issues = cast(list[dict[str, object]], actual["issues"])
+    assert issues
+    assert all(issue["document_keys"] for issue in issues)
+    assert all(len(cast(str, issue["provenance_sha256"])) == 64 for issue in issues)
 
 
 def test_top_data_property_positions_match_scalar_exactly() -> None:
@@ -428,9 +530,7 @@ def test_top_data_property_positions_match_scalar_exactly() -> None:
     assert allowed_manifest["conforms"] is True
     assert actual == _expected_manifest(invalid)
     issues = cast(list[dict[str, object]], actual["issues"])
-    top_issues = [
-        issue for issue in issues if issue["rule_id"] == TOP_DATA_PROPERTY_RULE
-    ]
+    top_issues = [issue for issue in issues if issue["rule_id"] == TOP_DATA_PROPERTY_RULE]
     assert {issue["constructor"] for issue in top_issues} == {
         "FunctionalDataProperty",
         "SubClassOf",
@@ -439,9 +539,7 @@ def test_top_data_property_positions_match_scalar_exactly() -> None:
     assert len(top_issues) == 3
     assert all(len(cast(str, issue["provenance_sha256"])) == 64 for issue in top_issues)
     assert all(
-        issue.document_keys
-        for issue in scalar.issues
-        if issue.rule_id == TOP_DATA_PROPERTY_RULE
+        issue.document_keys for issue in scalar.issues if issue.rule_id == TOP_DATA_PROPERTY_RULE
     )
     assert all("document_keys" not in issue for issue in top_issues)
 
@@ -466,15 +564,9 @@ def test_local_anonymous_individual_positions_match_scalar_exactly() -> None:
 
     assert actual == _expected_manifest(snapshot)
     issues = cast(list[dict[str, object]], actual["issues"])
-    axiom_issues = [
-        issue
-        for issue in issues
-        if issue["rule_id"] == ANONYMOUS_AXIOM_POSITION_RULE
-    ]
+    axiom_issues = [issue for issue in issues if issue["rule_id"] == ANONYMOUS_AXIOM_POSITION_RULE]
     expression_issues = [
-        issue
-        for issue in issues
-        if issue["rule_id"] == ANONYMOUS_CLASS_EXPRESSION_RULE
+        issue for issue in issues if issue["rule_id"] == ANONYMOUS_CLASS_EXPRESSION_RULE
     ]
     assert {issue["constructor"] for issue in axiom_issues} == {
         "DifferentIndividuals",
@@ -491,8 +583,7 @@ def test_local_anonymous_individual_positions_match_scalar_exactly() -> None:
     assert all(
         issue.document_keys
         for issue in scalar.issues
-        if issue.rule_id
-        in {ANONYMOUS_AXIOM_POSITION_RULE, ANONYMOUS_CLASS_EXPRESSION_RULE}
+        if issue.rule_id in {ANONYMOUS_AXIOM_POSITION_RULE, ANONYMOUS_CLASS_EXPRESSION_RULE}
     )
     assert all("document_keys" not in issue for issue in (*axiom_issues, *expression_issues))
 
@@ -520,12 +611,8 @@ def test_anonymous_forest_diagnostics_match_scalar_exactly() -> None:
         ANONYMOUS_PARALLEL_EDGE_RULE,
         ANONYMOUS_TREE_ROOT_RULE,
     }
-    assert all(
-        issue["constructor"] == "ObjectPropertyAssertion" for issue in graph_issues
-    )
-    assert all(
-        len(cast(str, issue["provenance_sha256"])) == 64 for issue in graph_issues
-    )
+    assert all(issue["constructor"] == "ObjectPropertyAssertion" for issue in graph_issues)
+    assert all(len(cast(str, issue["provenance_sha256"])) == 64 for issue in graph_issues)
     assert all(
         issue.document_keys
         for issue in scalar.issues
@@ -546,11 +633,7 @@ def test_global_entity_diagnostics_match_scalar_exactly_with_null_origin_fields(
 
     assert actual == _expected_manifest(snapshot)
     issues = cast(list[dict[str, object]], actual["issues"])
-    entity_issues = [
-        issue
-        for issue in issues
-        if issue["rule_id"] in ENTITY_RULES
-    ]
+    entity_issues = [issue for issue in issues if issue["rule_id"] in ENTITY_RULES]
     assert {issue["rule_id"] for issue in entity_issues} == {
         PROPERTY_PUNNING_RULE,
         CLASS_DATATYPE_PUNNING_RULE,
@@ -561,9 +644,7 @@ def test_global_entity_diagnostics_match_scalar_exactly_with_null_origin_fields(
     assert all(issue["constructor"] is None for issue in entity_issues)
     assert all(issue["provenance_sha256"] is None for issue in entity_issues)
     assert all("document_keys" not in issue for issue in entity_issues)
-    assert sum(
-        issue["rule_id"] == MISSING_DECLARATION_RULE for issue in entity_issues
-    ) == 2
+    assert sum(issue["rule_id"] == MISSING_DECLARATION_RULE for issue in entity_issues) == 2
 
 
 def test_legal_builtin_entity_kinds_match_scalar_without_global_issues() -> None:
@@ -572,12 +653,10 @@ def test_legal_builtin_entity_kinds_match_scalar_without_global_issues() -> None
             "Declaration(Class(owl:Thing))",
             "Declaration(ObjectProperty(owl:bottomObjectProperty))",
             "Declaration(DataProperty(owl:bottomDataProperty))",
-            "Declaration(AnnotationProperty("
-            "<http://www.w3.org/2000/01/rdf-schema#label>))",
+            "Declaration(AnnotationProperty(<http://www.w3.org/2000/01/rdf-schema#label>))",
             "Declaration(Datatype(xsd:string))",
             "Declaration(Datatype(owl:rational))",
-            "Declaration(Datatype("
-            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral>))",
+            "Declaration(Datatype(<http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral>))",
         ),
         options=OPTIONS,
     )
@@ -606,10 +685,7 @@ def test_legal_builtin_entity_kinds_match_scalar_without_global_issues() -> None
             ),
         ),
         (
-            (
-                "Ontology(<http://www.w3.org/2002/07/owl#ontology> "
-                "Declaration(Class(<urn:test#A>)))"
-            ),
+            ("Ontology(<http://www.w3.org/2002/07/owl#ontology> Declaration(Class(<urn:test#A>)))"),
             RESERVED_ONTOLOGY_IRI_RULE,
             (
                 "ontology IRI must not use reserved OWL/RDF vocabulary: "
@@ -669,10 +745,7 @@ def test_reserved_ontology_identifiers_match_scalar_projection(
 
 def test_reserved_ontology_identifiers_compose_canonically_across_documents() -> None:
     left = pyowl_core.load_snapshot(
-        (
-            b"Ontology(<http://www.w3.org/2002/07/owl#left> "
-            b"Declaration(Class(<urn:left#A>)))"
-        ),
+        (b"Ontology(<http://www.w3.org/2002/07/owl#left> Declaration(Class(<urn:left#A>)))"),
         options=OPTIONS,
     )
     right = pyowl_core.load_snapshot(
@@ -686,8 +759,7 @@ def test_reserved_ontology_identifiers_compose_canonically_across_documents() ->
     tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
     sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
     records = tuple(
-        _slice_record(source, member_tokens=(token,))
-        for token, source in sources_by_token
+        _slice_record(source, member_tokens=(token,)) for token, source in sources_by_token
     )
     context = _ontology_identity_context(composite)
 
@@ -705,6 +777,122 @@ def test_reserved_ontology_identifiers_compose_canonically_across_documents() ->
         RESERVED_ONTOLOGY_IRI_RULE,
         RESERVED_VERSION_IRI_RULE,
     } <= set(cast(list[str], forward["ordered_rule_ids"]))
+
+
+def test_origin_context_preserves_document_specific_ontology_identity_issues() -> None:
+    left = pyowl_core.load_snapshot(
+        (b"Ontology(<http://www.w3.org/2002/07/owl#left> Declaration(Class(<urn:left#A>)))"),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        (
+            b"Ontology(<urn:right> <http://www.w3.org/2000/01/rdf-schema#right> "
+            b"Declaration(Class(<urn:right#A>)))"
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
+    sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
+    records = tuple(
+        _slice_record(source, member_tokens=(token,)) for token, source in sources_by_token
+    )
+
+    forward = _native_origin_slices_manifest(
+        *records,
+        ontology_identity_context=_ontology_identity_context(composite),
+        origin_context=_profile_origin_context(composite),
+    )
+    reverse = _native_origin_slices_manifest(
+        *reversed(records),
+        ontology_identity_context=_ontology_identity_context(composite),
+        origin_context=_profile_origin_context(composite),
+    )
+
+    assert forward == reverse == _expected_origin_manifest(composite)
+    issues = cast(list[dict[str, object]], forward["issues"])
+    assert all(len(cast(list[str], issue["document_keys"])) == 1 for issue in issues)
+
+
+def test_origin_context_does_not_change_legacy_identity_deduplication() -> None:
+    ontology_iri = "http://www.w3.org/2002/07/owl#ontology"
+    left = pyowl_core.load_snapshot(
+        functional("Declaration(Class(:A))", ontology_iri=ontology_iri),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional("Declaration(Class(:B))", ontology_iri=ontology_iri),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
+    sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
+    records = tuple(
+        _slice_record(source, member_tokens=(token,)) for token, source in sources_by_token
+    )
+    identity_context = _ontology_identity_context(composite)
+
+    legacy = _native_slices_manifest(
+        *records,
+        ontology_identity_context=identity_context,
+    )
+    with_origins = _native_origin_slices_manifest(
+        *records,
+        ontology_identity_context=identity_context,
+        origin_context=_profile_origin_context(composite),
+    )
+
+    legacy_issues = [
+        issue
+        for issue in cast(list[dict[str, object]], legacy["issues"])
+        if issue["rule_id"] == RESERVED_ONTOLOGY_IRI_RULE
+    ]
+    origin_issues = [
+        issue
+        for issue in cast(list[dict[str, object]], with_origins["issues"])
+        if issue["rule_id"] == RESERVED_ONTOLOGY_IRI_RULE
+    ]
+    assert len(legacy_issues) == 1
+    assert "document_keys" not in legacy_issues[0]
+    assert with_origins == _expected_origin_manifest(composite)
+    assert len(origin_issues) == 2
+    assert len({tuple(cast(list[str], issue["document_keys"])) for issue in origin_issues}) == 2
+
+
+def test_origin_context_unions_documents_for_deduplicated_composite_axioms() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(*_invalid_body()[:-1], ontology_iri="urn:test:profile:left"),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(*_invalid_body()[:-1], ontology_iri="urn:test:profile:right"),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
+    sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
+    records = tuple(
+        _slice_record(source, member_tokens=(token,)) for token, source in sources_by_token
+    )
+    identity_context = _ontology_identity_context(composite)
+    origin_context = _profile_origin_context(composite)
+
+    forward = _native_origin_slices_manifest(
+        *records,
+        ontology_identity_context=identity_context,
+        origin_context=origin_context,
+    )
+    reverse = _native_origin_slices_manifest(
+        *reversed(records),
+        ontology_identity_context=identity_context,
+        origin_context=origin_context,
+    )
+
+    assert forward == reverse == _expected_origin_manifest(composite)
+    issues = cast(list[dict[str, object]], forward["issues"])
+    provenance_issues = [issue for issue in issues if issue["provenance_sha256"] is not None]
+    assert provenance_issues
+    assert all(len(cast(list[str], issue["document_keys"])) == 2 for issue in provenance_issues)
 
 
 @pytest.mark.parametrize(
@@ -753,9 +941,7 @@ def test_global_datatype_definition_errors_match_scalar_exactly(
         UNSUPPORTED_DATATYPE_RULE,
     }
     assert [
-        rule
-        for rule in cast(list[str], actual["ordered_rule_ids"])
-        if rule in datatype_rules
+        rule for rule in cast(list[str], actual["ordered_rule_ids"]) if rule in datatype_rules
     ] == [expected_rule]
 
 
@@ -785,10 +971,7 @@ def test_opaque_datatype_policy_matches_scalar_warning_and_conformance() -> None
         {
             "rule_id": UNSUPPORTED_DATATYPE_OPAQUE_RULE,
             "severity": "warning",
-            "message": (
-                "unsupported datatype is treated as opaque: "
-                "urn:test:profile#opaque"
-            ),
+            "message": ("unsupported datatype is treated as opaque: urn:test:profile#opaque"),
             "constructor": "Datatype",
             "provenance_sha256": None,
         }
@@ -839,9 +1022,7 @@ def test_opaque_policy_keeps_unsupported_range_boundaries(
         UNSUPPORTED_DATATYPE_RULE,
     }
     assert [
-        issue["constructor"]
-        for issue in issues
-        if issue["rule_id"] == UNSUPPORTED_DATATYPE_RULE
+        issue["constructor"] for issue in issues if issue["rule_id"] == UNSUPPORTED_DATATYPE_RULE
     ] == ["DataRange"]
 
 
@@ -865,8 +1046,7 @@ def test_opaque_datatype_warnings_recompute_across_slices() -> None:
     tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
     sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
     records = tuple(
-        _slice_record(source, member_tokens=(token,))
-        for token, source in sources_by_token
+        _slice_record(source, member_tokens=(token,)) for token, source in sources_by_token
     )
 
     forward = _native_slices_manifest(
@@ -938,7 +1118,7 @@ def test_invalid_literal_messages_and_constructors_match_scalar_exactly() -> Non
             'DataPropertyAssertion(:value :xml "<broken>"^^rdf:XMLLiteral)',
             (
                 'DataPropertyAssertion(:value :declaration "<!DOCTYPE x [<!ENTITY y '
-                '\'z\'>]><x>&y;</x>"^^rdf:XMLLiteral)'
+                "'z'>]><x>&y;</x>\"^^rdf:XMLLiteral)"
             ),
             'DataPropertyAssertion(:value :universal "value"^^rdfs:Literal)',
         ),
@@ -1081,9 +1261,7 @@ def test_pattern_errors_preserve_scalar_semantic_error_precedence(
 
     assert actual == _expected_manifest(snapshot)
     if expected_rule is None:
-        assert ILLEGAL_DATATYPE_FACET_RULE not in cast(
-            list[str], actual["ordered_rule_ids"]
-        )
+        assert ILLEGAL_DATATYPE_FACET_RULE not in cast(list[str], actual["ordered_rule_ids"])
     else:
         assert expected_rule in cast(list[str], actual["ordered_rule_ids"])
 
@@ -1139,9 +1317,7 @@ def test_non_simple_object_property_positions_match_scalar_exactly() -> None:
         "IrreflexiveObjectProperty",
         "SubClassOf",
     }
-    assert all(
-        len(cast(str, issue["provenance_sha256"])) == 64 for issue in issues
-    )
+    assert all(len(cast(str, issue["provenance_sha256"])) == 64 for issue in issues)
 
 
 def test_simple_object_property_positions_remain_conformant() -> None:
@@ -1221,10 +1397,8 @@ def test_annotated_duplicate_regularity_source_uses_scalar_last_statement() -> N
         functional(
             "Declaration(AnnotationProperty(:note))",
             *(f"Declaration(ObjectProperty(:{name}))" for name in "acd"),
-            'SubObjectPropertyOf(Annotation(:note "first") '
-            "ObjectPropertyChain(:c :a :d) :a)",
-            'SubObjectPropertyOf(Annotation(:note "second") '
-            "ObjectPropertyChain(:c :a :d) :a)",
+            'SubObjectPropertyOf(Annotation(:note "first") ObjectPropertyChain(:c :a :d) :a)',
+            'SubObjectPropertyOf(Annotation(:note "second") ObjectPropertyChain(:c :a :d) :a)',
         ),
         options=OPTIONS,
     )
@@ -1243,10 +1417,7 @@ def test_annotated_duplicate_regularity_source_uses_scalar_last_statement() -> N
 def test_regularity_cycle_selection_uses_canonical_role_byte_order() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
-            *(
-                f"Declaration(ObjectProperty(:{name}))"
-                for name in ("aa", "ab", "g", "y", "z")
-            ),
+            *(f"Declaration(ObjectProperty(:{name}))" for name in ("aa", "ab", "g", "y", "z")),
             "SubObjectPropertyOf(ObjectPropertyChain(:ab :g) :aa)",
             "SubObjectPropertyOf(ObjectPropertyChain(:aa :g) :ab)",
             "SubObjectPropertyOf(ObjectPropertyChain(:z :g) :y)",
@@ -1296,14 +1467,21 @@ def test_extension_component_diagnostic_and_count_match_scalar_exactly() -> None
     assert actual["ordered_rule_ids"] == [EXTENSION_COMPONENT_RULE]
     issue = cast(list[dict[str, object]], actual["issues"])[0]
     assert issue["constructor"] == "SWRLRule"
-    assert issue["provenance_sha256"] == hashlib.sha256(
-        extension.canonical_bytes()
-    ).hexdigest()
-    scalar_issue = next(
-        item for item in scalar.issues if item.rule_id == EXTENSION_COMPONENT_RULE
-    )
+    assert issue["provenance_sha256"] == hashlib.sha256(extension.canonical_bytes()).hexdigest()
+    scalar_issue = next(item for item in scalar.issues if item.rule_id == EXTENSION_COMPONENT_RULE)
     assert scalar_issue.document_keys
     assert "document_keys" not in issue
+
+
+def test_origin_context_restores_extension_document_keys() -> None:
+    snapshot = _extension_snapshot("origin")
+
+    actual = _native_origin_manifest(snapshot)
+
+    assert actual == _expected_origin_manifest(snapshot)
+    issue = cast(list[dict[str, object]], actual["issues"])[0]
+    assert issue["rule_id"] == EXTENSION_COMPONENT_RULE
+    assert issue["document_keys"]
 
 
 def test_duplicate_bad_nodes_in_one_axiom_collapse_by_scalar_issue_identity() -> None:
@@ -1336,11 +1514,7 @@ def test_include_and_equivalent_exclude_selection_are_byte_identical() -> None:
     root_count = len(tuple(snapshot.iter_axioms()))
     bad_id = struct.unpack("<I", bad)[0]
     complement = memoryview(
-        b"".join(
-            struct.pack("<I", index)
-            for index in range(1, root_count + 1)
-            if index != bad_id
-        )
+        b"".join(struct.pack("<I", index) for index in range(1, root_count + 1) if index != bad_id)
     )
 
     included = native._encoded_profile_slices_manifest_v1(
@@ -1353,12 +1527,8 @@ def test_include_and_equivalent_exclude_selection_are_byte_identical() -> None:
     assert included == excluded
     manifest = cast(dict[str, object], json.loads(included))
     assert manifest["axioms_checked"] == 1
-    assert cast(list[str], manifest["ordered_rule_ids"]).count(
-        MISSING_DECLARATION_RULE
-    ) == 4
-    assert cast(list[str], manifest["ordered_rule_ids"]).count(
-        DATA_RANGE_ARITY_RULE
-    ) == 1
+    assert cast(list[str], manifest["ordered_rule_ids"]).count(MISSING_DECLARATION_RULE) == 4
+    assert cast(list[str], manifest["ordered_rule_ids"]).count(DATA_RANGE_ARITY_RULE) == 1
 
 
 def test_top_data_property_selection_and_composite_deduplication_are_canonical() -> None:
@@ -1375,9 +1545,7 @@ def test_top_data_property_selection_and_composite_deduplication_are_canonical()
     invalid_id = struct.unpack("<I", invalid)[0]
     complement = memoryview(
         b"".join(
-            struct.pack("<I", index)
-            for index in range(1, root_count + 1)
-            if index != invalid_id
+            struct.pack("<I", index) for index in range(1, root_count + 1) if index != invalid_id
         )
     )
 
@@ -1411,8 +1579,7 @@ def test_top_data_property_selection_and_composite_deduplication_are_canonical()
     tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
     sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
     records = tuple(
-        _slice_record(source, member_tokens=(token,))
-        for token, source in sources_by_token
+        _slice_record(source, member_tokens=(token,)) for token, source in sources_by_token
     )
     forward = native._encoded_profile_slices_manifest_v1(slices=records)
     reverse = native._encoded_profile_slices_manifest_v1(slices=tuple(reversed(records)))
@@ -1435,9 +1602,7 @@ def test_anonymous_position_selection_and_duplicate_slice_merge_are_canonical() 
     invalid_id = struct.unpack("<I", invalid)[0]
     complement = memoryview(
         b"".join(
-            struct.pack("<I", index)
-            for index in range(1, root_count + 1)
-            if index != invalid_id
+            struct.pack("<I", index) for index in range(1, root_count + 1) if index != invalid_id
         )
     )
 
@@ -1464,18 +1629,10 @@ def test_anonymous_forest_is_recomputed_across_selected_slices() -> None:
     snapshot = _anonymous_graph_snapshot()
     root_count = len(bytes(_buffers(snapshot)["root_kinds"]))
     odd = memoryview(
-        b"".join(
-            struct.pack("<I", index)
-            for index in range(1, root_count + 1)
-            if index % 2 == 1
-        )
+        b"".join(struct.pack("<I", index) for index in range(1, root_count + 1) if index % 2 == 1)
     )
     even = memoryview(
-        b"".join(
-            struct.pack("<I", index)
-            for index in range(1, root_count + 1)
-            if index % 2 == 0
-        )
+        b"".join(struct.pack("<I", index) for index in range(1, root_count + 1) if index % 2 == 0)
     )
     records = (
         _slice_record(snapshot, posting_mode=1, postings=odd),
@@ -1484,9 +1641,7 @@ def test_anonymous_forest_is_recomputed_across_selected_slices() -> None:
 
     direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
     forward = native._encoded_profile_slices_manifest_v1(slices=records)
-    reverse = native._encoded_profile_slices_manifest_v1(
-        slices=tuple(reversed(records))
-    )
+    reverse = native._encoded_profile_slices_manifest_v1(slices=tuple(reversed(records)))
 
     assert forward == reverse == direct
     assert json.loads(forward) == _expected_manifest(snapshot)
@@ -1514,9 +1669,7 @@ def test_entity_rules_are_recomputed_across_one_root_slices() -> None:
 
     direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
     forward = native._encoded_profile_slices_manifest_v1(slices=records)
-    reverse = native._encoded_profile_slices_manifest_v1(
-        slices=tuple(reversed(records))
-    )
+    reverse = native._encoded_profile_slices_manifest_v1(slices=tuple(reversed(records)))
 
     assert forward == reverse == direct
     assert json.loads(forward) == _expected_manifest(snapshot)
@@ -1548,9 +1701,7 @@ def test_non_simple_role_closure_is_recomputed_across_one_root_slices() -> None:
 
     direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
     forward = native._encoded_profile_slices_manifest_v1(slices=records)
-    reverse = native._encoded_profile_slices_manifest_v1(
-        slices=tuple(reversed(records))
-    )
+    reverse = native._encoded_profile_slices_manifest_v1(slices=tuple(reversed(records)))
 
     assert forward == reverse == direct
     assert json.loads(forward) == _expected_manifest(snapshot)
@@ -1578,9 +1729,7 @@ def test_role_regularity_is_recomputed_across_one_root_slices() -> None:
 
     direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
     forward = native._encoded_profile_slices_manifest_v1(slices=records)
-    reverse = native._encoded_profile_slices_manifest_v1(
-        slices=tuple(reversed(records))
-    )
+    reverse = native._encoded_profile_slices_manifest_v1(slices=tuple(reversed(records)))
 
     assert forward == reverse == direct
     assert json.loads(forward) == _expected_manifest(snapshot)
@@ -1611,9 +1760,7 @@ def test_datatype_rules_are_recomputed_across_one_root_slices() -> None:
 
     direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
     forward = native._encoded_profile_slices_manifest_v1(slices=records)
-    reverse = native._encoded_profile_slices_manifest_v1(
-        slices=tuple(reversed(records))
-    )
+    reverse = native._encoded_profile_slices_manifest_v1(slices=tuple(reversed(records)))
 
     assert forward == reverse == direct
     assert json.loads(forward) == _expected_manifest(snapshot)
@@ -1651,9 +1798,7 @@ def test_datatype_facet_precedence_is_recomputed_across_one_root_slices() -> Non
 
     direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
     forward = native._encoded_profile_slices_manifest_v1(slices=records)
-    reverse = native._encoded_profile_slices_manifest_v1(
-        slices=tuple(reversed(records))
-    )
+    reverse = native._encoded_profile_slices_manifest_v1(slices=tuple(reversed(records)))
 
     assert forward == reverse == direct
     assert json.loads(forward) == _expected_manifest(snapshot)
@@ -1668,9 +1813,7 @@ def test_extension_selection_and_composite_deduplication_are_canonical() -> None
     extension_id = struct.unpack("<I", extension)[0]
     complement = memoryview(
         b"".join(
-            struct.pack("<I", index)
-            for index in range(1, root_count + 1)
-            if index != extension_id
+            struct.pack("<I", index) for index in range(1, root_count + 1) if index != extension_id
         )
     )
 
@@ -1693,8 +1836,7 @@ def test_extension_selection_and_composite_deduplication_are_canonical() -> None
     tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
     sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
     records = tuple(
-        _slice_record(source, member_tokens=(token,))
-        for token, source in sources_by_token
+        _slice_record(source, member_tokens=(token,)) for token, source in sources_by_token
     )
     forward = native._encoded_profile_slices_manifest_v1(slices=records)
     reverse = native._encoded_profile_slices_manifest_v1(slices=tuple(reversed(records)))
@@ -1717,8 +1859,7 @@ def test_composite_merge_deduplicates_axioms_and_is_slice_order_independent() ->
     tokens = cast(tuple[bytes, ...], cast(Any, composite)._source_tokens())
     sources_by_token = sorted(zip(tokens, (left, right), strict=True), key=lambda row: row[0])
     records = tuple(
-        _slice_record(source, member_tokens=(token,))
-        for token, source in sources_by_token
+        _slice_record(source, member_tokens=(token,)) for token, source in sources_by_token
     )
 
     forward = native._encoded_profile_slices_manifest_v1(slices=records)
@@ -1733,8 +1874,7 @@ def test_anonymous_scope_map_rebases_issue_provenance_exactly() -> None:
         functional(
             "Declaration(DataProperty(:p))",
             "Declaration(DataProperty(:q))",
-            "SubClassOf(ObjectOneOf(_:a) "
-            "DataSomeValuesFrom(:p :q xsd:string))",
+            "SubClassOf(ObjectOneOf(_:a) DataSomeValuesFrom(:p :q xsd:string))",
         ),
         options=OPTIONS,
     )
@@ -1759,19 +1899,17 @@ def test_anonymous_scope_map_rebases_issue_provenance_exactly() -> None:
     scope_map = memoryview(source_anon.document_scope + target_scope)
 
     baseline = _native_manifest(snapshot)
-    mapped = _native_slices_manifest(
-        _slice_record(snapshot, anonymous_scope_maps=(scope_map,))
-    )
+    mapped = _native_slices_manifest(_slice_record(snapshot, anonymous_scope_maps=(scope_map,)))
 
     baseline_issues = cast(list[dict[str, object]], baseline["issues"])
     mapped_issues = cast(list[dict[str, object]], mapped["issues"])
     expected_provenance = hashlib.sha256(expected_axiom.canonical_bytes()).hexdigest()
-    assert {
-        cast(str, issue["provenance_sha256"]) for issue in mapped_issues
-    } == {expected_provenance}
-    assert {
-        cast(str, issue["provenance_sha256"]) for issue in baseline_issues
-    } != {expected_provenance}
+    assert {cast(str, issue["provenance_sha256"]) for issue in mapped_issues} == {
+        expected_provenance
+    }
+    assert {cast(str, issue["provenance_sha256"]) for issue in baseline_issues} != {
+        expected_provenance
+    }
 
 
 def test_hostile_columns_fail_transactionally_and_valid_retry_is_unchanged() -> None:
@@ -1837,6 +1975,64 @@ def test_hostile_ontology_identity_context_fails_transactionally(
     assert native._encoded_profile_manifest_v1(**buffers) == baseline
 
 
+@pytest.mark.parametrize(
+    "context",
+    (
+        (2, ()),
+        (1, []),
+        (1, ()),
+        (1, ((b"\x00" * 31, ("urn:document:a",)),)),
+        (1, ((b"\x00" * 32, ()),)),
+        (1, ((b"\x00" * 32, ["urn:document:a"]),)),
+        (1, ((b"\x00" * 32, ("",)),)),
+        (1, ((b"\x00" * 32, ("urn:document:b", "urn:document:a")),)),
+        (1, ((b"\x00" * 32, ("urn:document:a", "urn:document:a")),)),
+        (
+            1,
+            (
+                (b"\x01" * 32, ("urn:document:b",)),
+                (b"\x00" * 32, ("urn:document:a",)),
+            ),
+        ),
+        (
+            1,
+            (
+                (b"\x00" * 32, ("urn:document:a",)),
+                (b"\x00" * 32, ("urn:document:b",)),
+            ),
+        ),
+    ),
+)
+def test_hostile_profile_origin_context_fails_transactionally(
+    context: object,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(functional(*_invalid_body()), options=OPTIONS)
+    buffers = _buffers(snapshot)
+    identity_context = _ontology_identity_context(snapshot)
+    origin_context = _profile_origin_context(snapshot)
+    baseline = native._encoded_profile_manifest_v1(
+        **buffers,
+        ontology_identity_context=identity_context,
+        origin_context=origin_context,
+    )
+
+    with pytest.raises(BackendMismatchError, match="profile origin"):
+        native._encoded_profile_manifest_v1(
+            **buffers,
+            ontology_identity_context=identity_context,
+            origin_context=context,
+        )
+
+    assert (
+        native._encoded_profile_manifest_v1(
+            **buffers,
+            ontology_identity_context=identity_context,
+            origin_context=origin_context,
+        )
+        == baseline
+    )
+
+
 def test_ontology_identity_context_decode_cancellation_is_transactional() -> None:
     snapshot = pyowl_core.load_snapshot(functional(*_invalid_body()), options=OPTIONS)
     records = (_slice_record(snapshot),)
@@ -1867,6 +2063,46 @@ def test_ontology_identity_context_decode_cancellation_is_transactional() -> Non
             native._encoded_profile_slices_manifest_v1(
                 slices=records,
                 ontology_identity_context=context,
+            )
+            == baseline
+        )
+
+
+def test_profile_origin_context_decode_cancellation_is_transactional() -> None:
+    snapshot = pyowl_core.load_snapshot(functional(*_invalid_body()), options=OPTIONS)
+    records = (_slice_record(snapshot),)
+    identity_context = _ontology_identity_context(snapshot)
+    origin_context = _profile_origin_context(snapshot)
+    baseline = native._encoded_profile_slices_manifest_v1(
+        slices=records,
+        ontology_identity_context=identity_context,
+        origin_context=origin_context,
+    )
+    expected_phases = ["profile-origin-context-preflight"]
+    for _provenance, document_keys in origin_context[1]:
+        expected_phases.append("profile-origin-context-row")
+        expected_phases.extend("profile-origin-context-document" for _key in document_keys)
+    expected_phases.append("profile-origin-context-complete")
+    first_checkpoint = len(identity_context[1]) + 3
+
+    for checkpoint, expected_phase in enumerate(expected_phases, start=first_checkpoint):
+        with pytest.raises(ReasonerInterruptedError) as interrupted:
+            native._debug_encoded_profile_context_cancel_v1(
+                slices=records,
+                ontology_identity_context=identity_context,
+                origin_context=origin_context,
+                cancel_at_checkpoint=checkpoint,
+            )
+        assert interrupted.value.code == "REASONER_INTERRUPTED"
+        assert interrupted.value.context == {
+            "checkpoint": str(checkpoint),
+            "phase": expected_phase,
+        }
+        assert (
+            native._encoded_profile_slices_manifest_v1(
+                slices=records,
+                ontology_identity_context=identity_context,
+                origin_context=origin_context,
             )
             == baseline
         )
