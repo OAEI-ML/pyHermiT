@@ -273,6 +273,7 @@ pub struct SymbolPhase {
     pub work: u64,
     pub owned_bytes: usize,
     entity_node_symbols: Vec<(NodeId, u32)>,
+    source_declared_entity_ids: Vec<u32>,
     semantic_nodes: Vec<u8>,
     manifest_limit: usize,
 }
@@ -288,6 +289,17 @@ impl SymbolPhase {
             .binary_search_by_key(&node, |(candidate, _)| *candidate)
             .ok()
             .map(|index| self.entity_node_symbols[index].1)
+    }
+
+    /// Return whether a reachable entity has a declaration in its source.
+    ///
+    /// Source-local root selection controls the published declaration set, but
+    /// normalization still needs the underlying declaration to prove that a
+    /// restriction input has stable scalar symbol identity.
+    pub(super) fn entity_has_source_declaration(&self, entity_id: u32) -> bool {
+        self.source_declared_entity_ids
+            .binary_search(&entity_id)
+            .is_ok()
     }
 
     /// Return whether a node is reachable from the semantic fields of a
@@ -763,6 +775,8 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
             })?,
         ));
     }
+    let source_declared_entity_ids =
+        source_declared_entity_ids(model, &semantic_nodes, &entity_node_symbols, &mut budget)?;
 
     let mut values = Vec::new();
     values.try_reserve_exact(entities.len()).map_err(|_| {
@@ -797,9 +811,56 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
         work: budget.work,
         owned_bytes: budget.owned_bytes,
         entity_node_symbols,
+        source_declared_entity_ids,
         semantic_nodes,
         manifest_limit: limits.max_manifest_bytes,
     })
+}
+
+fn source_declared_entity_ids<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    semantic_nodes: &[u8],
+    entity_node_symbols: &[(NodeId, u32)],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u32>> {
+    let mut identifiers = Vec::new();
+    for root_index in 0..model.summary().root_count {
+        budget.claim_work(1)?;
+        let root = model
+            .root(root_index)?
+            .ok_or_else(|| EncodedValidationError::invariant("validated root row disappeared"))?;
+        let node = model.node(root.node())?;
+        if node.tag() != DECLARATION_TAG {
+            continue;
+        }
+        let entity = declaration_entity_node(model, root.node())?;
+        let entity_index = usize::try_from(entity.get() - 1).map_err(|_| {
+            EncodedValidationError::invariant("declaration entity index exceeds usize")
+        })?;
+        if semantic_nodes
+            .get(entity_index)
+            .is_none_or(|reachable| *reachable == 0)
+        {
+            continue;
+        }
+        budget.claim_work(binary_search_work(entity_node_symbols.len()))?;
+        let symbol_index = entity_node_symbols
+            .binary_search_by_key(&entity, |(candidate, _)| *candidate)
+            .map_err(|_| {
+                EncodedValidationError::invariant(
+                    "reachable declared entity is absent from the entity-node mapping",
+                )
+            })?;
+        budget.claim_owned(size_of::<u32>())?;
+        identifiers.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("source declaration retention allocation failed")
+        })?;
+        identifiers.push(entity_node_symbols[symbol_index].1);
+    }
+    budget.claim_work(sort_work(identifiers.len()))?;
+    identifiers.sort_unstable();
+    identifiers.dedup();
+    Ok(identifiers)
 }
 
 fn semantic_reachability<B: ByteSource>(
@@ -896,6 +957,19 @@ fn declaration_identity<B: ByteSource>(
     declaration: NodeId,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<DeclaredIdentity> {
+    let entity_id = declaration_entity_node(model, declaration)?;
+    let entity = extract_entity(model, entity_id, budget)?;
+    Ok(DeclaredIdentity {
+        key: entity.key,
+        kind: entity.kind,
+        iri: entity.iri,
+    })
+}
+
+fn declaration_entity_node<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    declaration: NodeId,
+) -> EncodedResult<NodeId> {
     let node = model.node(declaration)?;
     if node.tag() != DECLARATION_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
@@ -908,12 +982,7 @@ fn declaration_identity<B: ByteSource>(
             "declaration entity field did not resolve to a node",
         ));
     };
-    let entity = extract_entity(model, entity_id, budget)?;
-    Ok(DeclaredIdentity {
-        key: entity.key,
-        kind: entity.kind,
-        iri: entity.iri,
-    })
+    Ok(entity_id)
 }
 
 fn extract_entity<B: ByteSource>(

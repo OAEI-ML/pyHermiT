@@ -1591,6 +1591,150 @@ def test_source_local_include_and_exclude_match_scalar_root_selection(
     assert actual == expected
 
 
+@pytest.mark.parametrize("posting_mode", [1, 2])
+def test_source_local_selection_retains_generated_restriction_dependencies(
+    posting_mode: int,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(AnnotationProperty(:note))",
+            "ObjectPropertyRange(Annotation(:note \"selected\") ObjectInverseOf(:p) "
+            "ObjectIntersectionOf(ObjectExactCardinality(2 :q "
+            "ObjectIntersectionOf(:A :B)) DataExactCardinality(1 :d "
+            "DataUnionOf(xsd:string xsd:integer))))",
+        ),
+        options=OPTIONS,
+    )
+    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    root_ids = memoryview(buffers["root_ids"]).cast("I")
+    node_tags = memoryview(buffers["node_tags"]).cast("H")
+    range_roots = tuple(
+        index + 1 for index, node_id in enumerate(root_ids) if node_tags[node_id - 1] == 75
+    )
+    declaration_roots = tuple(
+        index + 1 for index, node_id in enumerate(root_ids) if node_tags[node_id - 1] == 60
+    )
+    assert len(range_roots) == 1
+    selected_roots = range_roots if posting_mode == 1 else declaration_roots
+    postings = memoryview(
+        b"".join(struct.pack("<I", value) for value in selected_roots)
+    )
+
+    actual = _native_slices_manifest(
+        _slice_record(snapshot, posting_mode=posting_mode, postings=postings),
+        logical_fingerprint=snapshot.logical_fingerprint.digest,
+    )
+
+    expected = _expected_manifest(
+        snapshot,
+        compiled_roots=1,
+        include_object_constraints=True,
+        include_generated_object_quantifier_definitions=True,
+        include_generated_object_cardinality_definitions=True,
+        include_at_least_object_predicates=True,
+        include_annotated_equality_predicates=True,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    for binding in cast(list[dict[str, object]], expected["class_signature"]):
+        binding["declared"] = False
+    assert actual == expected
+    class_namespace = f":class:{snapshot.logical_fingerprint.hex}:"
+    data_namespace = f":data:{snapshot.logical_fingerprint.hex}:"
+    assert all(
+        class_namespace in str(value["display"])
+        for value in cast(
+            list[dict[str, object]], actual["class_expression_symbols"]
+        )
+        if value["generated"]
+    )
+    assert all(
+        data_namespace in str(value["display"])
+        for value in cast(list[dict[str, object]], actual["data_range_symbols"])
+        if value["generated"]
+    )
+    assert actual["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_source_local_selection_excludes_unsupported_restriction_without_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(ObjectProperty(:r))",
+            "Declaration(DataProperty(:d))",
+            "ObjectPropertyRange(ObjectInverseOf(:p) ObjectIntersectionOf("
+            "ObjectExactCardinality(2 :q ObjectIntersectionOf(:A :B)) "
+            "DataExactCardinality(1 :d DataUnionOf(xsd:string xsd:integer))))",
+            "SubClassOf(ObjectIntersectionOf(:C ObjectSomeValuesFrom(:r :C)) "
+            "ObjectMinCardinality(4294967296 :r :C))",
+        ),
+        options=OPTIONS,
+    )
+    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    root_ids = memoryview(buffers["root_ids"]).cast("I")
+    node_tags = memoryview(buffers["node_tags"]).cast("H")
+    range_roots = tuple(
+        index + 1 for index, node_id in enumerate(root_ids) if node_tags[node_id - 1] == 75
+    )
+    excluded_roots = tuple(
+        index + 1
+        for index, node_id in enumerate(root_ids)
+        if node_tags[node_id - 1] in {60, 61}
+    )
+    assert len(range_roots) == 1
+    included = _native_slices_manifest(
+        _slice_record(
+            snapshot,
+            posting_mode=1,
+            postings=memoryview(struct.pack("<I", range_roots[0])),
+        ),
+        logical_fingerprint=snapshot.logical_fingerprint.digest,
+    )
+    excluded = _native_slices_manifest(
+        _slice_record(
+            snapshot,
+            posting_mode=2,
+            postings=memoryview(
+                b"".join(struct.pack("<I", value) for value in excluded_roots)
+            ),
+        ),
+        logical_fingerprint=snapshot.logical_fingerprint.digest,
+    )
+
+    assert included == excluded
+    assert included["compiled_roots"] == 1
+    assert included["deferred_roots"] == 0
+    assert any(
+        value["generated"]
+        for value in cast(
+            list[dict[str, object]], included["class_expression_symbols"]
+        )
+    )
+    assert any(
+        value["generated"]
+        for value in cast(list[dict[str, object]], included["data_range_symbols"])
+    )
+    assert all(
+        value["display"] != "class:urn:test:named#C"
+        for value in cast(
+            list[dict[str, object]], included["class_expression_symbols"]
+        )
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_double_digit_fragment_ids_preserve_scalar_predicate_and_clause_order() -> None:
     declarations = [f"Declaration(Class(:C{index}))" for index in range(12)]
     inclusions = [f"SubClassOf(:C{index} :C{index + 1})" for index in range(11)]

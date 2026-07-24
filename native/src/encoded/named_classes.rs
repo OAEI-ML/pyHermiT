@@ -8699,10 +8699,7 @@ fn reduction_entity_is_retained(symbols: &SymbolPhase, entity_id: u32) -> Encode
     if builtin {
         return Ok(true);
     }
-    Ok(symbols
-        .declared_entities
-        .iter()
-        .any(|declared| declared.entity_id == entity_id))
+    Ok(symbols.entity_has_source_declaration(entity_id))
 }
 
 fn builtin_atomic_class_selection(
