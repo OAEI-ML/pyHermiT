@@ -3376,7 +3376,8 @@ def test_object_has_value_unsupported_inputs_defer_without_symbol_leaks() -> Non
             "Declaration(DataProperty(:d))",
             "SubClassOf(:A ObjectHasValue(:p :undeclared))",
             "SubClassOf(:A ObjectHasValue(:p _:anonymous))",
-            'EquivalentClasses(:A ObjectHasValue(:p :i) DataHasValue(:d "value"))',
+            'EquivalentClasses(:A ObjectHasValue(:p :i) '
+            'DataHasValue(:undeclared "value"))',
         ),
         options=OPTIONS,
     )
@@ -3562,7 +3563,7 @@ def test_unsupported_data_quantifier_inputs_defer_without_symbol_leaks() -> None
             "DataIntersectionOf(xsd:string xsd:integer)) :B)",
             "SubClassOf(:A DataSomeValuesFrom(:undeclared xsd:string))",
             "EquivalentClasses(:A DataSomeValuesFrom(:d xsd:string) "
-            "DataHasValue(:e \"value\"))",
+            "DataHasValue(:undeclared \"value\"))",
         ),
         options=OPTIONS,
     )
@@ -3743,7 +3744,7 @@ def test_unsupported_data_minimum_inputs_defer_without_symbol_leaks() -> None:
             "DataIntersectionOf(xsd:string xsd:integer)))",
             "SubClassOf(:A DataMinCardinality(2 :undeclared xsd:string))",
             "EquivalentClasses(:A DataMinCardinality(2 :d xsd:string) "
-            'DataHasValue(:d "value"))',
+            'DataHasValue(:undeclared "value"))',
         ),
         options=OPTIONS,
     )
@@ -3955,7 +3956,7 @@ def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
             "SubClassOf(ObjectComplementOf("
             "DataMaxCardinality(4294967295 :d xsd:string)) :B)",
             "EquivalentClasses(:A DataMaxCardinality(2 :d xsd:string) "
-            'DataHasValue(:d "value"))',
+            'DataHasValue(:undeclared "value"))',
         ),
         options=OPTIONS,
     )
@@ -4168,7 +4169,7 @@ def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() 
             "SubClassOf(ObjectComplementOf("
             "DataExactCardinality(4294967295 :d xsd:string)) :B)",
             "EquivalentClasses(:A DataExactCardinality(2 :d xsd:string) "
-            'DataHasValue(:d "value"))',
+            'DataHasValue(:undeclared "value"))',
         ),
         options=OPTIONS,
     )
@@ -4199,6 +4200,184 @@ def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() 
             PredicateKind.DATA_ROLE.value,
             PredicateKind.EQUALITY.value,
             PredicateKind.INEQUALITY.value,
+        }
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_data_has_value_definitions_match_scalar_singleton_quantifiers() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(AnnotationProperty(:note))",
+            'SubClassOf(:A DataHasValue(:d "value"))',
+            'SubClassOf(Annotation(:note "same value") :A '
+            'DataHasValue(:d "value"))',
+            'SubClassOf(DataHasValue(:e "other") :B)',
+            'EquivalentClasses(:A DataHasValue(:e "value"))',
+            'SubClassOf(:B DataSomeValuesFrom(:d DataOneOf("value")))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=5,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+    )
+    singleton_ranges = [
+        value
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        if str(value["display"]).startswith("DataOneOf:")
+    ]
+    assert len(singleton_ranges) == 2
+    assert not any(
+        str(value["display"]).startswith("DataHasValue:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_data_has_value_definitions_cover_complements_and_generated_contexts() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            'SubClassOf(ObjectComplementOf(DataHasValue(:d "value")) :B)',
+            'ClassAssertion(DataHasValue(:d "value") :i)',
+            'ObjectPropertyDomain(:p DataHasValue(:e "other"))',
+            'DataPropertyDomain(:d ObjectComplementOf(DataHasValue(:e "value")))',
+            'HasKey(DataHasValue(:d "other") (:p) (:e))',
+            'DisjointClasses(ObjectComplementOf(DataHasValue(:e "other")) :A)',
+            'SubClassOf(ObjectIntersectionOf(:B DataHasValue(:d "value")) :A)',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=7,
+        include_object_constraints=True,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_data_has_value_definitions_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(DataProperty(:d))",
+        "Declaration(DataProperty(:e))",
+    )
+    has_value = 'DataHasValue(:d "value")'
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"SubClassOf(:A {has_value})",
+            'SubClassOf(DataHasValue(:e "other") :B)',
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"ObjectPropertyDomain(:p {has_value})",
+            'DisjointClasses(DataHasValue(:e "other") :A)',
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_generated_data_quantifier_definitions=True,
+        include_at_least_data_predicates=True,
+    )
+    generated = [
+        value
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ]
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert len(generated) == 2
+    assert all(namespace in str(value["display"]) for value in generated)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_unsupported_data_has_value_inputs_defer_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(owl:bottomDataProperty))",
+            'SubClassOf(:A DataHasValue(:undeclared "value"))',
+            'SubClassOf(DataHasValue(owl:bottomDataProperty "value") :B)',
+            'EquivalentClasses(:A DataHasValue(:d "value") '
+            "DataSomeValuesFrom(:d :undeclared xsd:string))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 3
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            (
+                "DataSomeValuesFrom:",
+                "DataAllValuesFrom:",
+                "DataOneOf:",
+                "DataComplementOf:",
+                "DataHasValue:",
+            )
+        )
+        for value in (
+            *cast(
+                list[dict[str, object]], manifest["class_expression_symbols"]
+            ),
+            *cast(list[dict[str, object]], manifest["data_range_symbols"]),
+        )
+    )
+    assert all(
+        predicate["kind"]
+        not in {
+            PredicateKind.AT_LEAST_DATA.value,
+            PredicateKind.DATA_ROLE.value,
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )

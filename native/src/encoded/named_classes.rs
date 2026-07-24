@@ -742,11 +742,17 @@ enum DataQuantifierKind {
     All,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DataRangeDefinition {
+    base_key: Vec<u8>,
+    negative: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct DataQuantifierDefinition {
     kind: DataQuantifierKind,
     role_id: u32,
-    filler: AtomicDataRangeSelection,
+    filler: DataRangeDefinition,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -776,12 +782,12 @@ enum DataCardinalityNormalization {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct DataCardinalityDefinition {
     kind: DataCardinalityKind,
     cardinality: u32,
     role_id: u32,
-    filler: AtomicDataRangeSelection,
+    filler: DataRangeDefinition,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -857,7 +863,9 @@ enum DataBooleanOperand {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NormalizedAtomicDataTerm {
-    selection: AtomicDataRangeSelection,
+    selection: Option<AtomicDataRangeSelection>,
+    base_key: Vec<u8>,
+    negative: bool,
     key: Vec<u8>,
     symbols: Vec<DataRangeSymbolSeed>,
 }
@@ -3165,11 +3173,14 @@ fn normalized_data_term<B: ByteSource>(
             push_data_range_symbol_seed(&mut expression_symbols, seed, budget)?;
             key
         } else {
-            base_key
+            budget.claim_owned(base_key.len())?;
+            base_key.clone()
         };
         budget.claim_owned(size_of::<NormalizedAtomicDataTerm>())?;
         return Ok(Some(NormalizedDataTerm::Atomic(NormalizedAtomicDataTerm {
-            selection,
+            selection: Some(selection),
+            base_key,
+            negative: selection.negative,
             key,
             symbols: expression_symbols,
         })));
@@ -3235,8 +3246,13 @@ fn normalized_data_term<B: ByteSource>(
     }
     for term in &operands {
         if let NormalizedDataTerm::Atomic(term) = term {
-            if atomic_data_range_selection_is_top(model, symbols, term.selection)?
-                || atomic_data_range_selection_is_bottom(model, symbols, term.selection)?
+            let selection = term.selection.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "recursive data Boolean contains a synthetic atomic operand",
+                )
+            })?;
+            if atomic_data_range_selection_is_top(model, symbols, selection)?
+                || atomic_data_range_selection_is_bottom(model, symbols, selection)?
             {
                 return Ok(None);
             }
@@ -3454,7 +3470,12 @@ fn atomize_normalized_data_boolean(
                 for seed in operand.symbols {
                     push_data_range_symbol_seed(&mut expression_symbols, seed, budget)?;
                 }
-                keyed.push((operand.key, DataBooleanOperand::Atomic(operand.selection)));
+                let selection = operand.selection.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "recursive data definition contains a synthetic atomic operand",
+                    )
+                })?;
+                keyed.push((operand.key, DataBooleanOperand::Atomic(selection)));
             }
             NormalizedDataTerm::Boolean(operand) => {
                 let generated_key = atomize_normalized_data_boolean(
@@ -4506,6 +4527,73 @@ fn normalized_class_term<B: ByteSource>(
                 },
             )));
         }
+        if selection.is_none() && node.tag() == DATA_HAS_VALUE_TAG {
+            if node.field_count() != 2 {
+                return Err(EncodedValidationError::invariant(
+                    "data-has-value definition no longer has schema-1 shape",
+                ));
+            }
+            let Some(data_roles) = data_roles else {
+                return Ok(None);
+            };
+            let property = node_field(model, node, 0, "data-has-value definition role")?;
+            if !reduction_inputs_are_retained(model, symbols, property, depth, budget)? {
+                return Ok(None);
+            }
+            if data_property_has_iri(model, symbols, property, BOTTOM_DATA_IRI)? {
+                return Ok(None);
+            }
+            let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
+            let literal = node_field(model, node, 1, "data-has-value definition literal")?;
+            if model.node(literal)?.tag() != LITERAL_TAG
+                || !symbols.semantic_node_is_reachable(literal)
+            {
+                return Ok(None);
+            }
+            let literal_key = canonical::canonical_node_key(model, literal, scope_maps, budget)?;
+            let base_key = synthetic_boolean_key(
+                DATA_ONE_OF_TAG,
+                std::iter::once(literal_key.as_slice()),
+                1,
+                budget,
+            )?;
+            let mut data_expression_symbols = Vec::new();
+            let singleton_seed = data_range_symbol_seed(&base_key, DATA_ONE_OF_TAG, budget)?;
+            push_data_range_symbol_seed(&mut data_expression_symbols, singleton_seed, budget)?;
+            let filler_key = if complemented {
+                let key = synthetic_data_complement_key(&base_key, budget)?;
+                let complement_seed = data_range_symbol_seed(&key, DATA_COMPLEMENT_OF_TAG, budget)?;
+                push_data_range_symbol_seed(&mut data_expression_symbols, complement_seed, budget)?;
+                key
+            } else {
+                budget.claim_owned(base_key.len())?;
+                base_key.clone()
+            };
+            let filler = NormalizedAtomicDataTerm {
+                selection: None,
+                base_key,
+                negative: complemented,
+                key: filler_key,
+                symbols: data_expression_symbols,
+            };
+            let kind = if complemented {
+                DataQuantifierKind::All
+            } else {
+                DataQuantifierKind::Some
+            };
+            let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
+            let key = synthetic_data_quantifier_key(kind, &property_key, &filler.key, budget)?;
+            budget.claim_owned(size_of::<NormalizedDataQuantifierTerm>())?;
+            return Ok(Some(NormalizedClassTerm::DataQuantifier(
+                NormalizedDataQuantifierTerm {
+                    kind,
+                    role_id,
+                    property_key,
+                    key,
+                    filler,
+                },
+            )));
+        }
         if selection.is_none()
             && matches!(
                 node.tag(),
@@ -4938,8 +5026,15 @@ fn normalized_class_term<B: ByteSource>(
             if matches!(
                 &normalized,
                 DataCardinalityNormalization::Cardinality { .. }
-            ) && atomic_data_range_selection_is_bottom(model, symbols, filler.selection)?
-            {
+            ) && atomic_data_range_selection_is_bottom(
+                model,
+                symbols,
+                filler.selection.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "data-cardinality source filler became synthetic",
+                    )
+                })?,
+            )? {
                 return Ok(None);
             }
             let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
@@ -5639,8 +5734,13 @@ fn normalized_data_restriction_term<B: ByteSource>(
     if matches!(
         &normalization,
         DataCardinalityNormalization::Cardinality { .. }
-    ) && atomic_data_range_selection_is_bottom(model, symbols, filler.selection)?
-    {
+    ) && atomic_data_range_selection_is_bottom(
+        model,
+        symbols,
+        filler.selection.ok_or_else(|| {
+            EncodedValidationError::invariant("normalized data-cardinality filler became synthetic")
+        })?,
+    )? {
         return Ok(None);
     }
     let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
@@ -5954,7 +6054,9 @@ fn atomize_normalized_data_quantifier(
         DataQuantifierKind::All => DATA_ALL_VALUES_FROM_TAG,
     };
     let NormalizedAtomicDataTerm {
-        selection,
+        selection: _,
+        base_key: filler_base_key,
+        negative: filler_negative,
         key: filler_key,
         symbols: data_expression_symbols,
     } = filler;
@@ -5999,7 +6101,10 @@ fn atomize_normalized_data_quantifier(
         data_quantifier: Some(DataQuantifierDefinition {
             kind,
             role_id,
-            filler: selection,
+            filler: DataRangeDefinition {
+                base_key: filler_base_key,
+                negative: filler_negative,
+            },
         }),
         data_cardinality: None,
         complement: false,
@@ -6029,7 +6134,9 @@ fn atomize_normalized_data_cardinality(
         filler,
     } = term;
     let NormalizedAtomicDataTerm {
-        selection,
+        selection: _,
+        base_key: filler_base_key,
+        negative: filler_negative,
         key: filler_key,
         symbols: data_expression_symbols,
     } = filler;
@@ -6086,7 +6193,10 @@ fn atomize_normalized_data_cardinality(
             kind,
             cardinality,
             role_id,
-            filler: selection,
+            filler: DataRangeDefinition {
+                base_key: filler_base_key,
+                negative: filler_negative,
+            },
         }),
         complement: false,
         polarity,
@@ -12546,6 +12656,33 @@ fn atomic_data_range_selection_literal<B: ByteSource>(
     })
 }
 
+fn data_range_definition_literal(
+    data_range_domain: &DecodedSymbolDomain,
+    definition: &DataRangeDefinition,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<DataRangeLiteral> {
+    if data_range_domain.kind != SymbolKind::DataRange {
+        return Err(EncodedValidationError::invariant(
+            "data-range definition received the wrong symbol domain",
+        ));
+    }
+    budget.claim_work(binary_search_work(data_range_domain.values.len()))?;
+    let index = data_range_domain
+        .values
+        .binary_search_by(|value| value.key.cmp(&definition.base_key))
+        .map_err(|_| {
+            EncodedValidationError::invariant(
+                "data-range definition base is absent from the symbol domain",
+            )
+        })?;
+    Ok(DataRangeLiteral {
+        range_id: u32::try_from(index).map_err(|_| {
+            EncodedValidationError::resource("data-range definition symbol ID exceeds u32")
+        })?,
+        negative: definition.negative,
+    })
+}
+
 fn named_data_range_id<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
@@ -13709,7 +13846,7 @@ fn retain_edge(
 #[allow(clippy::too_many_arguments)]
 fn emit_class_boolean_definitions<B: ByteSource>(
     model: &ValidatedModel<B>,
-    symbols: &SymbolPhase,
+    _symbols: &SymbolPhase,
     class_domain: &DecodedSymbolDomain,
     data_range_domain: &DecodedSymbolDomain,
     signature: &[ClassSignatureBinding],
@@ -13887,7 +14024,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             }
             continue;
         }
-        if let Some(quantifier) = definition.data_quantifier {
+        if let Some(quantifier) = &definition.data_quantifier {
             if definition.complement
                 || definition.object_self_role_id.is_some()
                 || definition.object_quantifier.is_some()
@@ -13900,14 +14037,8 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                     "generated data-quantifier definition changed before emission",
                 ));
             }
-            let mut filler = atomic_data_range_selection_literal(
-                model,
-                symbols,
-                data_range_domain,
-                quantifier.filler,
-                scope_maps,
-                budget,
-            )?;
+            let mut filler =
+                data_range_definition_literal(data_range_domain, &quantifier.filler, budget)?;
             let kind = match (quantifier.kind, definition.polarity) {
                 (DataQuantifierKind::Some, DefinitionPolarity::Negative) => {
                     DataConstraintKind::ExistentialAntecedent
@@ -13942,7 +14073,7 @@ fn emit_class_boolean_definitions<B: ByteSource>(
             }
             continue;
         }
-        if let Some(cardinality) = definition.data_cardinality {
+        if let Some(cardinality) = &definition.data_cardinality {
             if definition.complement
                 || definition.object_self_role_id.is_some()
                 || definition.object_quantifier.is_some()
@@ -13955,14 +14086,8 @@ fn emit_class_boolean_definitions<B: ByteSource>(
                     "generated data-cardinality definition changed before emission",
                 ));
             }
-            let filler = atomic_data_range_selection_literal(
-                model,
-                symbols,
-                data_range_domain,
-                cardinality.filler,
-                scope_maps,
-                budget,
-            )?;
+            let filler =
+                data_range_definition_literal(data_range_domain, &cardinality.filler, budget)?;
             for provenance in &definition.provenance {
                 budget.claim_owned(size_of::<RawDataConstraint>())?;
                 data_constraints.try_reserve(1).map_err(|_| {
