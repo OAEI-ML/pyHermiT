@@ -4664,6 +4664,147 @@ fn normalized_class_term<B: ByteSource>(
                 },
             )));
         }
+        if selection.is_none() && node.tag() == DATA_EXACT_CARDINALITY_TAG {
+            if node.field_count() != 3 {
+                return Err(EncodedValidationError::invariant(
+                    "data-exact-cardinality definition no longer has schema-1 shape",
+                ));
+            }
+            let Some(data_roles) = data_roles else {
+                return Ok(None);
+            };
+            let Some((cardinality, cardinality_bytes)) = integer_field_u32_bytes(
+                model,
+                node,
+                0,
+                "data-exact-cardinality definition cardinality",
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            let property = node_field(model, node, 1, "data-exact-cardinality definition role")?;
+            if !reduction_inputs_are_retained(model, symbols, property, depth, budget)? {
+                return Ok(None);
+            }
+            let role_id = named_data_role_id(model, symbols, data_roles, property, budget)?;
+            let filler = node_field(model, node, 2, "data-exact-cardinality definition filler")?;
+            let filler_depth =
+                child_expression_depth(depth, "data-exact-cardinality filler depth overflowed")?;
+            PhaseBudget::count(
+                filler_depth,
+                budget.limits.max_canonical_depth,
+                "class-expression depth",
+            )?;
+
+            if cardinality == 0 {
+                let normalization = if complemented {
+                    DataCardinalityNormalization::Quantifier {
+                        kind: DataQuantifierKind::Some,
+                        complement_filler: false,
+                    }
+                } else {
+                    DataCardinalityNormalization::Quantifier {
+                        kind: DataQuantifierKind::All,
+                        complement_filler: true,
+                    }
+                };
+                return normalized_data_restriction_term(
+                    model,
+                    symbols,
+                    property,
+                    role_id,
+                    filler,
+                    filler_depth,
+                    normalization,
+                    scope_maps,
+                    budget,
+                );
+            }
+
+            let (intersection, first, second) = if complemented {
+                let Some(upper_cardinality) = cardinality.checked_add(1) else {
+                    return Ok(None);
+                };
+                let lower = if cardinality == 1 {
+                    DataCardinalityNormalization::Quantifier {
+                        kind: DataQuantifierKind::All,
+                        complement_filler: true,
+                    }
+                } else {
+                    let lower_cardinality = cardinality.checked_sub(1).ok_or_else(|| {
+                        EncodedValidationError::invariant(
+                            "complemented data exact cardinality underflowed",
+                        )
+                    })?;
+                    DataCardinalityNormalization::Cardinality {
+                        kind: DataCardinalityKind::Maximum,
+                        cardinality: lower_cardinality,
+                        cardinality_bytes: canonical_u32_integer_bytes(lower_cardinality, budget)?,
+                    }
+                };
+                let upper = DataCardinalityNormalization::Cardinality {
+                    kind: DataCardinalityKind::Minimum,
+                    cardinality: upper_cardinality,
+                    cardinality_bytes: canonical_u32_integer_bytes(upper_cardinality, budget)?,
+                };
+                (false, lower, upper)
+            } else {
+                if cardinality == u32::MAX {
+                    return Ok(None);
+                }
+                let minimum = if cardinality == 1 {
+                    DataCardinalityNormalization::Quantifier {
+                        kind: DataQuantifierKind::Some,
+                        complement_filler: false,
+                    }
+                } else {
+                    DataCardinalityNormalization::Cardinality {
+                        kind: DataCardinalityKind::Minimum,
+                        cardinality,
+                        cardinality_bytes: canonical_u32_integer_bytes(cardinality, budget)?,
+                    }
+                };
+                let maximum = DataCardinalityNormalization::Cardinality {
+                    kind: DataCardinalityKind::Maximum,
+                    cardinality,
+                    cardinality_bytes,
+                };
+                (true, minimum, maximum)
+            };
+            let Some(first) = normalized_data_restriction_term(
+                model,
+                symbols,
+                property,
+                role_id,
+                filler,
+                filler_depth,
+                first,
+                scope_maps,
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(second) = normalized_data_restriction_term(
+                model,
+                symbols,
+                property,
+                role_id,
+                filler,
+                filler_depth,
+                second,
+                scope_maps,
+                budget,
+            )?
+            else {
+                return Ok(None);
+            };
+            let mut terms = Vec::new();
+            push_normalized_class_term(&mut terms, first, budget)?;
+            push_normalized_class_term(&mut terms, second, budget)?;
+            return normalized_class_boolean_term(symbols, terms, intersection, budget);
+        }
         if selection.is_none()
             && matches!(
                 node.tag(),
@@ -5455,6 +5596,94 @@ fn normalized_object_restriction_term<B: ByteSource>(
                     property_key,
                     key,
                     filler: Box::new(filler),
+                },
+            )))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalized_data_restriction_term<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    property: NodeId,
+    role_id: u32,
+    filler: NodeId,
+    filler_depth: usize,
+    normalization: DataCardinalityNormalization,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<NormalizedClassTerm>> {
+    let complement_filler = matches!(
+        &normalization,
+        DataCardinalityNormalization::Quantifier {
+            complement_filler: true,
+            ..
+        }
+    );
+    let Some(filler) = normalized_data_term(
+        model,
+        symbols,
+        filler,
+        complement_filler,
+        filler_depth,
+        scope_maps,
+        budget,
+    )?
+    else {
+        return Ok(None);
+    };
+    let NormalizedDataTerm::Atomic(filler) = filler else {
+        return Ok(None);
+    };
+    if matches!(
+        &normalization,
+        DataCardinalityNormalization::Cardinality { .. }
+    ) && atomic_data_range_selection_is_bottom(model, symbols, filler.selection)?
+    {
+        return Ok(None);
+    }
+    let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
+    match normalization {
+        DataCardinalityNormalization::Quantifier { kind, .. } => {
+            let key = synthetic_data_quantifier_key(kind, &property_key, &filler.key, budget)?;
+            budget.claim_owned(size_of::<NormalizedDataQuantifierTerm>())?;
+            Ok(Some(NormalizedClassTerm::DataQuantifier(
+                NormalizedDataQuantifierTerm {
+                    kind,
+                    role_id,
+                    property_key,
+                    key,
+                    filler,
+                },
+            )))
+        }
+        DataCardinalityNormalization::Cardinality {
+            kind,
+            cardinality,
+            cardinality_bytes,
+        } => {
+            let tag = match kind {
+                DataCardinalityKind::Minimum => DATA_MIN_CARDINALITY_TAG,
+                DataCardinalityKind::Maximum => DATA_MAX_CARDINALITY_TAG,
+            };
+            let key = synthetic_data_cardinality_key(
+                tag,
+                &cardinality_bytes,
+                &property_key,
+                &filler.key,
+                budget,
+            )?;
+            budget.claim_owned(size_of::<NormalizedDataCardinalityTerm>())?;
+            Ok(Some(NormalizedClassTerm::DataCardinality(
+                NormalizedDataCardinalityTerm {
+                    kind,
+                    cardinality,
+                    cardinality_bytes,
+                    role_id,
+                    property_key,
+                    key,
+                    filler,
                 },
             )))
         }

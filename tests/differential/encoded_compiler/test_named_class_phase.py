@@ -3986,6 +3986,225 @@ def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_data_exact_cardinality_definitions_match_scalar_normalization() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A DataExactCardinality(1 :d xsd:string))",
+            'SubClassOf(Annotation(:note "same exact") '
+            ":A DataExactCardinality(1 :d xsd:string))",
+            "SubClassOf(DataExactCardinality(2 :e xsd:boolean) :B)",
+            'EquivalentClasses(:A DataExactCardinality(2 :e DataOneOf("value")))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+    )
+    assert any(
+        predicate["kind"] == PredicateKind.EQUALITY.value
+        and predicate["argument_sorts"] == [TermSort.DATA.value, TermSort.DATA.value]
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert any(
+        predicate["kind"] == PredicateKind.INEQUALITY.value
+        and predicate["argument_sorts"] == [TermSort.DATA.value, TermSort.DATA.value]
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert not any(
+        str(value["display"]).startswith("DataExactCardinality:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_data_exact_cardinality_boundaries_and_complements_match_scalar() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "SubClassOf(:A DataExactCardinality(0 :d xsd:string))",
+            "SubClassOf(ObjectComplementOf("
+            "DataExactCardinality(0 :d xsd:string)) :B)",
+            "SubClassOf(:A DataExactCardinality(1 :e xsd:boolean))",
+            "SubClassOf(ObjectComplementOf("
+            "DataExactCardinality(1 :e xsd:boolean)) :B)",
+            "SubClassOf(:A ObjectComplementOf("
+            "DataExactCardinality(2 :d DataOneOf(\"value\"))))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=5,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_data_exact_cardinality_definitions_cover_generated_class_contexts() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "ClassAssertion(DataExactCardinality(1 :d xsd:string) :i)",
+            "ObjectPropertyDomain(:p DataExactCardinality(2 :e xsd:boolean))",
+            "DataPropertyDomain(:d DataExactCardinality(1 :e xsd:decimal))",
+            "HasKey(DataExactCardinality(2 :d xsd:integer) (:p) (:e))",
+            'DisjointClasses(DataExactCardinality(1 :e DataOneOf("value")) :A)',
+            "SubClassOf(ObjectIntersectionOf(:B DataExactCardinality(2 :d "
+            "DataComplementOf(xsd:string))) :A)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=6,
+        include_object_constraints=True,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_data_exact_cardinality_definitions_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(DataProperty(:d))",
+        "Declaration(DataProperty(:e))",
+    )
+    exact = "DataExactCardinality(1 :d xsd:string)"
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"SubClassOf(:A {exact})",
+            "SubClassOf(DataExactCardinality(2 :e xsd:integer) :B)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"ObjectPropertyDomain(:p {exact})",
+            "DisjointClasses(DataExactCardinality(2 :e xsd:integer) :A)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+    )
+    generated = [
+        value
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ]
+    namespace = f":class:{composite.logical_fingerprint.hex}:"
+    assert generated
+    assert all(namespace in str(value["display"]) for value in generated)
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "SubClassOf(:A DataExactCardinality(4294967295 :d xsd:string))",
+            "SubClassOf(:A DataExactCardinality(4294967296 :d xsd:string))",
+            "SubClassOf(:A DataExactCardinality(2 :d "
+            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "SubClassOf(:A DataExactCardinality(2 :undeclared xsd:string))",
+            "SubClassOf(ObjectComplementOf("
+            "DataExactCardinality(4294967295 :d xsd:string)) :B)",
+            "EquivalentClasses(:A DataExactCardinality(2 :d xsd:string) "
+            'DataHasValue(:d "value"))',
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest["compiled_roots"] == 0
+    assert manifest["deferred_roots"] == 6
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            (
+                "DataSomeValuesFrom:",
+                "DataAllValuesFrom:",
+                "DataMinCardinality:",
+                "DataMaxCardinality:",
+                "DataExactCardinality:",
+            )
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"]
+        not in {
+            PredicateKind.AT_LEAST_DATA.value,
+            PredicateKind.DATA_ROLE.value,
+            PredicateKind.EQUALITY.value,
+            PredicateKind.INEQUALITY.value,
+        }
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_partial_object_self_equivalence_defers_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
