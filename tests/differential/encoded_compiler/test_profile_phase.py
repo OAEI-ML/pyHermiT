@@ -37,10 +37,16 @@ EXTENSION_COMPONENT_RULE = "OWL2DL_EXTENSION_COMPONENT"
 TOP_DATA_PROPERTY_RULE = "OWL2DL_TOP_DATA_PROPERTY_POSITION"
 ANONYMOUS_AXIOM_POSITION_RULE = "OWL2DL_ANONYMOUS_AXIOM_POSITION"
 ANONYMOUS_CLASS_EXPRESSION_RULE = "OWL2DL_ANONYMOUS_CLASS_EXPRESSION"
+ANONYMOUS_GRAPH_CYCLE_RULE = "OWL2DL_ANONYMOUS_GRAPH_CYCLE"
+ANONYMOUS_PARALLEL_EDGE_RULE = "OWL2DL_ANONYMOUS_PARALLEL_EDGE"
+ANONYMOUS_TREE_ROOT_RULE = "OWL2DL_ANONYMOUS_TREE_ROOT"
 PROJECTED_RULES = frozenset(
     (
         ANONYMOUS_AXIOM_POSITION_RULE,
         ANONYMOUS_CLASS_EXPRESSION_RULE,
+        ANONYMOUS_GRAPH_CYCLE_RULE,
+        ANONYMOUS_PARALLEL_EDGE_RULE,
+        ANONYMOUS_TREE_ROOT_RULE,
         DATA_RANGE_ARITY_RULE,
         EXTENSION_COMPONENT_RULE,
         TOP_DATA_PROPERTY_RULE,
@@ -175,6 +181,23 @@ def _anonymous_root_posting(snapshot: pyowl_core.OntologyView) -> memoryview:
         if isinstance(axiom, owl.SameIndividual):
             return memoryview(struct.pack("<I", index))
     raise AssertionError("profile fixture has no forbidden anonymous-individual root")
+
+
+def _anonymous_graph_snapshot() -> pyowl_core.OntologyView:
+    return pyowl_core.load_snapshot(
+        functional(
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "ObjectPropertyAssertion(:p _:a _:b)",
+            "ObjectPropertyAssertion(:p _:b _:c)",
+            "ObjectPropertyAssertion(:p _:c _:a)",
+            "ObjectPropertyAssertion(:p _:d _:e)",
+            "ObjectPropertyAssertion(:q _:e _:d)",
+            "ObjectPropertyAssertion(:p _:f :first)",
+            "ObjectPropertyAssertion(:p :second _:f)",
+        ),
+        options=OPTIONS,
+    )
 
 
 def _extension_snapshot(label: str) -> pyowl_core.OntologyView:
@@ -350,6 +373,48 @@ def test_local_anonymous_individual_positions_match_scalar_exactly() -> None:
     assert all("document_keys" not in issue for issue in (*axiom_issues, *expression_issues))
 
 
+def test_anonymous_forest_diagnostics_match_scalar_exactly() -> None:
+    snapshot = _anonymous_graph_snapshot()
+    scalar = validate_owl2_dl_view(snapshot)
+
+    actual = _native_manifest(snapshot)
+
+    assert actual == _expected_manifest(snapshot)
+    issues = cast(list[dict[str, object]], actual["issues"])
+    graph_issues = [
+        issue
+        for issue in issues
+        if issue["rule_id"]
+        in {
+            ANONYMOUS_GRAPH_CYCLE_RULE,
+            ANONYMOUS_PARALLEL_EDGE_RULE,
+            ANONYMOUS_TREE_ROOT_RULE,
+        }
+    ]
+    assert {issue["rule_id"] for issue in graph_issues} == {
+        ANONYMOUS_GRAPH_CYCLE_RULE,
+        ANONYMOUS_PARALLEL_EDGE_RULE,
+        ANONYMOUS_TREE_ROOT_RULE,
+    }
+    assert all(
+        issue["constructor"] == "ObjectPropertyAssertion" for issue in graph_issues
+    )
+    assert all(
+        len(cast(str, issue["provenance_sha256"])) == 64 for issue in graph_issues
+    )
+    assert all(
+        issue.document_keys
+        for issue in scalar.issues
+        if issue.rule_id
+        in {
+            ANONYMOUS_GRAPH_CYCLE_RULE,
+            ANONYMOUS_PARALLEL_EDGE_RULE,
+            ANONYMOUS_TREE_ROOT_RULE,
+        }
+    )
+    assert all("document_keys" not in issue for issue in graph_issues)
+
+
 def test_extension_component_diagnostic_and_count_match_scalar_exactly() -> None:
     snapshot = _extension_snapshot("single")
     scalar = validate_owl2_dl_view(snapshot)
@@ -520,6 +585,38 @@ def test_anonymous_position_selection_and_duplicate_slice_merge_are_canonical() 
 
     assert merged == native._encoded_profile_manifest_v1(**_buffers(snapshot))
     assert json.loads(merged) == _expected_manifest(snapshot)
+
+
+def test_anonymous_forest_is_recomputed_across_selected_slices() -> None:
+    snapshot = _anonymous_graph_snapshot()
+    root_count = len(bytes(_buffers(snapshot)["root_kinds"]))
+    odd = memoryview(
+        b"".join(
+            struct.pack("<I", index)
+            for index in range(1, root_count + 1)
+            if index % 2 == 1
+        )
+    )
+    even = memoryview(
+        b"".join(
+            struct.pack("<I", index)
+            for index in range(1, root_count + 1)
+            if index % 2 == 0
+        )
+    )
+    records = (
+        _slice_record(snapshot, posting_mode=1, postings=odd),
+        _slice_record(snapshot, posting_mode=1, postings=even),
+    )
+
+    direct = native._encoded_profile_manifest_v1(**_buffers(snapshot))
+    forward = native._encoded_profile_slices_manifest_v1(slices=records)
+    reverse = native._encoded_profile_slices_manifest_v1(
+        slices=tuple(reversed(records))
+    )
+
+    assert forward == reverse == direct
+    assert json.loads(forward) == _expected_manifest(snapshot)
 
 
 def test_extension_selection_and_composite_deduplication_are_canonical() -> None:

@@ -5,8 +5,10 @@
 //! This first private phase owns exact data-arity, top-data-property, local
 //! anonymous-placement, and extension projections. Structural-columns schema 1
 //! does not carry document-origin rows, so the manifest exposes canonical root
-//! provenance without inventing `ProfileIssue.document_keys`. Issue ordering
-//! and deduplication use the exact projected field tuple published by this phase.
+//! provenance without inventing `ProfileIssue.document_keys`. Anonymous graph
+//! facts remain private until all selected slices can be merged and validated
+//! globally. Issue ordering and deduplication use the exact projected field
+//! tuple published by this phase.
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #![forbid(unsafe_code)]
@@ -36,6 +38,7 @@ const DATA_ALL_VALUES_FROM_TAG: u16 = 42;
 const SUB_DATA_PROPERTY_TAG: u16 = 90;
 const SAME_INDIVIDUAL_TAG: u16 = 110;
 const DIFFERENT_INDIVIDUALS_TAG: u16 = 111;
+const OBJECT_PROPERTY_ASSERTION_TAG: u16 = 113;
 const NEGATIVE_OBJECT_PROPERTY_ASSERTION_TAG: u16 = 114;
 const NEGATIVE_DATA_PROPERTY_ASSERTION_TAG: u16 = 116;
 const SWRL_RULE_TAG: u16 = 148;
@@ -52,6 +55,15 @@ const ANONYMOUS_AXIOM_POSITION_MESSAGE: &str =
 const ANONYMOUS_CLASS_EXPRESSION_RULE: &str = "OWL2DL_ANONYMOUS_CLASS_EXPRESSION";
 const ANONYMOUS_CLASS_EXPRESSION_MESSAGE: &str =
     "anonymous individuals are forbidden in ObjectOneOf and ObjectHasValue expressions";
+const ANONYMOUS_GRAPH_CYCLE_RULE: &str = "OWL2DL_ANONYMOUS_GRAPH_CYCLE";
+const ANONYMOUS_GRAPH_CYCLE_MESSAGE: &str =
+    "the anonymous-individual object-assertion graph must be a forest";
+const ANONYMOUS_PARALLEL_EDGE_RULE: &str = "OWL2DL_ANONYMOUS_PARALLEL_EDGE";
+const ANONYMOUS_PARALLEL_EDGE_MESSAGE: &str =
+    "at most one object-property assertion may connect an anonymous pair";
+const ANONYMOUS_TREE_ROOT_RULE: &str = "OWL2DL_ANONYMOUS_TREE_ROOT";
+const ANONYMOUS_TREE_ROOT_MESSAGE: &str =
+    "each anonymous-individual tree must contain a vertex connected by at most one assertion to named individuals";
 const EXTENSION_COMPONENT_RULE: &str = "OWL2DL_EXTENSION_COMPONENT";
 const EXTENSION_COMPONENT_MESSAGE: &str =
     "extension components such as SWRL are outside the OWL 2 DL reasoner scope";
@@ -64,6 +76,8 @@ pub struct ProfilePhaseLimits {
     pub max_axioms: usize,
     pub max_extensions: usize,
     pub max_issues: usize,
+    pub max_anonymous_vertices: usize,
+    pub max_anonymous_assertions: usize,
     pub max_owned_bytes: usize,
     pub max_work: u64,
     pub max_manifest_bytes: usize,
@@ -78,6 +92,8 @@ impl Default for ProfilePhaseLimits {
             max_axioms: 10_000_000,
             max_extensions: 10_000_000,
             max_issues: 10_000_000,
+            max_anonymous_vertices: 10_000_000,
+            max_anonymous_assertions: 10_000_000,
             max_owned_bytes: 512 * 1024 * 1024,
             max_work: 2_000_000_000,
             max_manifest_bytes: 512 * 1024 * 1024,
@@ -97,6 +113,16 @@ pub struct ProfileIssue {
     pub provenance_sha256: [u8; 32],
 }
 
+type AnonymousKey = [u8; 64];
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct AnonymousAssertion {
+    axiom_key: Vec<u8>,
+    provenance_sha256: [u8; 32],
+    source: Option<AnonymousKey>,
+    target: Option<AnonymousKey>,
+}
+
 /// Transactional profile result. Violations never use the error channel.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProfilePhase {
@@ -108,6 +134,8 @@ pub struct ProfilePhase {
     pub owned_bytes: usize,
     axiom_keys: Vec<Vec<u8>>,
     extension_keys: Vec<Vec<u8>>,
+    anonymous_vertices: Vec<AnonymousKey>,
+    anonymous_assertions: Vec<AnonymousAssertion>,
     manifest_limit: usize,
 }
 
@@ -275,6 +303,26 @@ impl PhaseBudget {
         if following > self.limits.max_issues {
             Err(EncodedValidationError::resource(
                 "profile issue count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn claim_anonymous_vertex(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_anonymous_vertices {
+            Err(EncodedValidationError::resource(
+                "profile anonymous vertex count exceeds its limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn claim_anonymous_assertion(&self, following: usize) -> EncodedResult<()> {
+        if following > self.limits.max_anonymous_assertions {
+            Err(EncodedValidationError::resource(
+                "profile anonymous assertion count exceeds its limit",
             ))
         } else {
             Ok(())
@@ -493,6 +541,17 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     )
     .map_err(ProfilePhaseError::Encoded)?;
     marks.resize(node_count, 0_u32);
+    budget
+        .claim_owned(node_count)
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut anonymous_seen = Vec::new();
+    reserve_exact(
+        &mut anonymous_seen,
+        node_count,
+        "profile anonymous-node mark allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    anonymous_seen.resize(node_count, 0_u8);
     let mut stack = Vec::new();
     reserve_exact(
         &mut stack,
@@ -522,6 +581,8 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
     .map_err(ProfilePhaseError::Encoded)?;
     let mut extension_keys = Vec::new();
     let mut issues = Vec::new();
+    let mut anonymous_vertices = Vec::new();
+    let mut anonymous_assertions = Vec::new();
     let mut epoch = 0_u32;
 
     for root_index in 0..summary.root_count {
@@ -630,6 +691,39 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
             .claim_work(key.len())
             .map_err(ProfilePhaseError::Encoded)?;
         let provenance_sha256: [u8; 32] = Sha256::digest(&key).into();
+        if axiom_tag == OBJECT_PROPERTY_ASSERTION_TAG {
+            let (source, target) =
+                anonymous_assertion_endpoints(model, root.node(), scope_maps, &mut budget)
+                    .map_err(ProfilePhaseError::Encoded)?;
+            if source.is_some() || target.is_some() {
+                let following = anonymous_assertions.len().checked_add(1).ok_or_else(|| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                        "profile anonymous assertion count overflowed",
+                    ))
+                })?;
+                budget
+                    .claim_anonymous_assertion(following)
+                    .map_err(ProfilePhaseError::Encoded)?;
+                let axiom_key = clone_profile_bytes(
+                    &key,
+                    &mut budget,
+                    "profile anonymous assertion key allocation failed",
+                )
+                .map_err(ProfilePhaseError::Encoded)?;
+                reserve_profile_one(
+                    &mut anonymous_assertions,
+                    &mut budget,
+                    "profile anonymous assertion allocation failed",
+                )
+                .map_err(ProfilePhaseError::Encoded)?;
+                anonymous_assertions.push(AnonymousAssertion {
+                    axiom_key,
+                    provenance_sha256,
+                    source,
+                    target,
+                });
+            }
+        }
         axiom_keys.push(key);
 
         epoch = epoch.checked_add(1).ok_or_else(|| {
@@ -647,6 +741,36 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
             let node = model.node(identifier).map_err(ProfilePhaseError::Encoded)?;
             if node.tag() == ANONYMOUS_INDIVIDUAL_TAG {
                 anonymous_individual_occurs = true;
+                let anonymous_index = usize::try_from(identifier.get() - 1).map_err(|_| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::invariant(
+                        "profile anonymous node index exceeds the platform width",
+                    ))
+                })?;
+                let seen = anonymous_seen.get_mut(anonymous_index).ok_or_else(|| {
+                    ProfilePhaseError::Encoded(EncodedValidationError::invariant(
+                        "profile anonymous node identifier is out of range",
+                    ))
+                })?;
+                if *seen == 0 {
+                    let following = anonymous_vertices.len().checked_add(1).ok_or_else(|| {
+                        ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                            "profile anonymous vertex count overflowed",
+                        ))
+                    })?;
+                    budget
+                        .claim_anonymous_vertex(following)
+                        .map_err(ProfilePhaseError::Encoded)?;
+                    let key = anonymous_key(model, identifier, scope_maps, &mut budget)
+                        .map_err(ProfilePhaseError::Encoded)?;
+                    reserve_profile_one(
+                        &mut anonymous_vertices,
+                        &mut budget,
+                        "profile anonymous vertex allocation failed",
+                    )
+                    .map_err(ProfilePhaseError::Encoded)?;
+                    anonymous_vertices.push(key);
+                    *seen = 1;
+                }
             }
             let anonymous_expression =
                 if matches!(node.tag(), OBJECT_ONE_OF_TAG | OBJECT_HAS_VALUE_TAG) {
@@ -799,6 +923,23 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
 
     poll(control, "profile-canonicalize")?;
     budget
+        .claim_work(sort_work(anonymous_vertices.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    anonymous_vertices.sort_unstable();
+    anonymous_vertices.dedup();
+    budget
+        .claim_work(sort_work(anonymous_assertions.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    anonymous_assertions.sort();
+    anonymous_assertions.dedup();
+    append_anonymous_graph_issues(
+        &anonymous_vertices,
+        &anonymous_assertions,
+        &mut issues,
+        &mut budget,
+        control,
+    )?;
+    budget
         .claim_work(sort_work(issues.len()))
         .map_err(ProfilePhaseError::Encoded)?;
     issues.sort();
@@ -822,6 +963,8 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         owned_bytes: budget.owned_bytes,
         axiom_keys,
         extension_keys,
+        anonymous_vertices,
+        anonymous_assertions,
         manifest_limit: limits.max_manifest_bytes,
     };
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
@@ -860,7 +1003,12 @@ pub fn merge_profile_phases_controlled<E>(
     }
     poll(control, "profile-merge-preflight")?;
     let issue_count = phases.iter().try_fold(0_usize, |total, phase| {
-        total.checked_add(phase.issues.len()).ok_or_else(|| {
+        let local = phase
+            .issues
+            .iter()
+            .filter(|issue| !is_anonymous_graph_rule(issue.rule_id))
+            .count();
+        total.checked_add(local).ok_or_else(|| {
             EncodedValidationError::resource("merged profile issue count overflowed")
         })
     })?;
@@ -874,6 +1022,22 @@ pub fn merge_profile_phases_controlled<E>(
             .checked_add(phase.extension_keys.len())
             .ok_or_else(|| {
                 EncodedValidationError::resource("merged profile extension count overflowed")
+            })
+    })?;
+    let anonymous_vertex_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total
+            .checked_add(phase.anonymous_vertices.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("merged profile anonymous vertex count overflowed")
+            })
+    })?;
+    let anonymous_assertion_count = phases.iter().try_fold(0_usize, |total, phase| {
+        total
+            .checked_add(phase.anonymous_assertions.len())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "merged profile anonymous assertion count overflowed",
+                )
             })
     })?;
     if issue_count > limits.max_issues {
@@ -891,6 +1055,18 @@ pub fn merge_profile_phases_controlled<E>(
     if extension_count > limits.max_extensions {
         return Err(EncodedValidationError::resource(
             "merged profile extension count exceeds its limit",
+        )
+        .into());
+    }
+    if anonymous_vertex_count > limits.max_anonymous_vertices {
+        return Err(EncodedValidationError::resource(
+            "merged profile anonymous vertex count exceeds its limit",
+        )
+        .into());
+    }
+    if anonymous_assertion_count > limits.max_anonymous_assertions {
+        return Err(EncodedValidationError::resource(
+            "merged profile anonymous assertion count exceeds its limit",
         )
         .into());
     }
@@ -944,6 +1120,42 @@ pub fn merge_profile_phases_controlled<E>(
                 })?,
         )
         .map_err(ProfilePhaseError::Encoded)?;
+    let mut anonymous_vertices = Vec::new();
+    reserve_exact(
+        &mut anonymous_vertices,
+        anonymous_vertex_count,
+        "merged profile anonymous vertex allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            anonymous_vertex_count
+                .checked_mul(size_of::<AnonymousKey>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "merged profile anonymous vertex size overflowed",
+                    )
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    let mut anonymous_assertions = Vec::new();
+    reserve_exact(
+        &mut anonymous_assertions,
+        anonymous_assertion_count,
+        "merged profile anonymous assertion allocation failed",
+    )
+    .map_err(ProfilePhaseError::Encoded)?;
+    budget
+        .claim_owned(
+            anonymous_assertion_count
+                .checked_mul(size_of::<AnonymousAssertion>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "merged profile anonymous assertion size overflowed",
+                    )
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
 
     for mut phase in phases {
         validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
@@ -953,11 +1165,35 @@ pub fn merge_profile_phases_controlled<E>(
         budget
             .claim_owned(phase.owned_bytes)
             .map_err(ProfilePhaseError::Encoded)?;
-        issues.append(&mut phase.issues);
+        issues.extend(
+            phase
+                .issues
+                .drain(..)
+                .filter(|issue| !is_anonymous_graph_rule(issue.rule_id)),
+        );
         axiom_keys.append(&mut phase.axiom_keys);
         extension_keys.append(&mut phase.extension_keys);
+        anonymous_vertices.append(&mut phase.anonymous_vertices);
+        anonymous_assertions.append(&mut phase.anonymous_assertions);
         poll(control, "profile-merge-source")?;
     }
+    budget
+        .claim_work(sort_work(anonymous_vertices.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    anonymous_vertices.sort_unstable();
+    anonymous_vertices.dedup();
+    budget
+        .claim_work(sort_work(anonymous_assertions.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    anonymous_assertions.sort();
+    anonymous_assertions.dedup();
+    append_anonymous_graph_issues(
+        &anonymous_vertices,
+        &anonymous_assertions,
+        &mut issues,
+        &mut budget,
+        control,
+    )?;
     budget
         .claim_work(sort_work(issues.len()))
         .map_err(ProfilePhaseError::Encoded)?;
@@ -982,11 +1218,424 @@ pub fn merge_profile_phases_controlled<E>(
         owned_bytes: budget.owned_bytes,
         axiom_keys,
         extension_keys,
+        anonymous_vertices,
+        anonymous_assertions,
         manifest_limit: limits.max_manifest_bytes,
     };
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
     poll(control, "profile-merge-complete")?;
     Ok(phase)
+}
+
+fn anonymous_assertion_endpoints<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<(Option<AnonymousKey>, Option<AnonymousKey>)> {
+    budget.claim_work(1)?;
+    let node = model.node(identifier)?;
+    if node.tag() != OBJECT_PROPERTY_ASSERTION_TAG || node.field_count() != 4 {
+        return Err(EncodedValidationError::invariant(
+            "validated object-property assertion lost its schema-1 shape",
+        ));
+    }
+    let fields = node.fields();
+    let source_field = fields
+        .start
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("profile field index overflowed"))?;
+    let target_field = fields
+        .start
+        .checked_add(2)
+        .ok_or_else(|| EncodedValidationError::resource("profile field index overflowed"))?;
+    let source = required_node(model, source_field, "profile object-assertion source")?;
+    let target = required_node(model, target_field, "profile object-assertion target")?;
+    Ok((
+        anonymous_endpoint(model, source, scope_maps, budget)?,
+        anonymous_endpoint(model, target, scope_maps, budget)?,
+    ))
+}
+
+fn anonymous_endpoint<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AnonymousKey>> {
+    match model.node(identifier)?.tag() {
+        ANONYMOUS_INDIVIDUAL_TAG => anonymous_key(model, identifier, scope_maps, budget).map(Some),
+        ENTITY_TAG => Ok(None),
+        _ => Err(EncodedValidationError::invariant(
+            "validated object-property assertion endpoint is not an individual",
+        )),
+    }
+}
+
+fn anonymous_key<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    identifier: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<AnonymousKey> {
+    let node = model.node(identifier)?;
+    if node.tag() != ANONYMOUS_INDIVIDUAL_TAG || node.field_count() != 2 {
+        return Err(EncodedValidationError::invariant(
+            "validated anonymous individual lost its schema-1 shape",
+        ));
+    }
+    let fields = node.fields();
+    let scope = fixed_profile_bytes(
+        model,
+        fields.start,
+        "profile anonymous document scope",
+        budget,
+    )?;
+    let local_field = fields
+        .start
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("profile field index overflowed"))?;
+    let local = fixed_profile_bytes(model, local_field, "profile anonymous local key", budget)?;
+    let scope = canonical::remap_anonymous_scope(scope, scope_maps, budget)?;
+    let mut key = [0_u8; 64];
+    key[..32].copy_from_slice(&scope);
+    key[32..].copy_from_slice(&local);
+    Ok(key)
+}
+
+fn fixed_profile_bytes<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    field_index: usize,
+    name: &'static str,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<[u8; 32]> {
+    let component = required_component(model.field(field_index)?, name)?;
+    let ComponentValue::Scalar(value) = model.resolve(component)? else {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated encoded {name} is not scalar"
+        )));
+    };
+    if value.kind() != ComponentKind::Bytes || value.len() != 32 {
+        return Err(EncodedValidationError::invariant(format!(
+            "validated encoded {name} is not a 32-byte value"
+        )));
+    }
+    budget.claim_work(32)?;
+    let mut result = [0_u8; 32];
+    for (index, target) in result.iter_mut().enumerate() {
+        *target = value.byte(index).ok_or_else(|| {
+            EncodedValidationError::invariant(format!("validated encoded {name} disappeared"))
+        })?;
+    }
+    Ok(result)
+}
+
+fn append_anonymous_graph_issues<E>(
+    vertices: &[AnonymousKey],
+    assertions: &[AnonymousAssertion],
+    issues: &mut Vec<ProfileIssue>,
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
+    if vertices.is_empty() {
+        return Ok(());
+    }
+    poll(control, "profile-anonymous-graph-preflight")?;
+    let index_bytes = vertices
+        .len()
+        .checked_mul(size_of::<usize>())
+        .ok_or_else(|| {
+            EncodedValidationError::resource("profile anonymous graph index size overflowed")
+        })?;
+
+    budget.claim_owned(index_bytes)?;
+    let mut parent = Vec::new();
+    reserve_exact(
+        &mut parent,
+        vertices.len(),
+        "profile anonymous parent allocation failed",
+    )?;
+    parent.extend(0..vertices.len());
+
+    budget.claim_owned(index_bytes)?;
+    let mut named_link_counts = Vec::new();
+    reserve_exact(
+        &mut named_link_counts,
+        vertices.len(),
+        "profile anonymous named-link count allocation failed",
+    )?;
+    named_link_counts.resize(vertices.len(), 0_usize);
+
+    budget.claim_owned(index_bytes)?;
+    let mut named_link_representatives = Vec::new();
+    reserve_exact(
+        &mut named_link_representatives,
+        vertices.len(),
+        "profile anonymous named-link representative allocation failed",
+    )?;
+    named_link_representatives.resize(vertices.len(), usize::MAX);
+
+    let parallel_bytes = assertions
+        .len()
+        .checked_mul(size_of::<(usize, usize, usize)>())
+        .ok_or_else(|| {
+            EncodedValidationError::resource("profile anonymous parallel-edge size overflowed")
+        })?;
+    budget.claim_owned(parallel_bytes)?;
+    let mut parallel_edges = Vec::new();
+    reserve_exact(
+        &mut parallel_edges,
+        assertions.len(),
+        "profile anonymous parallel-edge allocation failed",
+    )?;
+
+    for (assertion_index, assertion) in assertions.iter().enumerate() {
+        poll(control, "profile-anonymous-assertion")?;
+        budget.claim_work(1)?;
+        match (assertion.source, assertion.target) {
+            (Some(source), Some(target)) => {
+                let source_index = anonymous_index(vertices, &source, budget)?;
+                let target_index = anonymous_index(vertices, &target, budget)?;
+                let pair = if source_index <= target_index {
+                    (source_index, target_index, assertion_index)
+                } else {
+                    (target_index, source_index, assertion_index)
+                };
+                parallel_edges.push(pair);
+                let source_root = anonymous_root(&mut parent, source_index, budget)?;
+                let target_root = anonymous_root(&mut parent, target_index, budget)?;
+                if source_root == target_root {
+                    push_profile_issue(
+                        issues,
+                        ProfileIssue {
+                            rule_id: ANONYMOUS_GRAPH_CYCLE_RULE,
+                            severity: "error",
+                            message: ANONYMOUS_GRAPH_CYCLE_MESSAGE,
+                            constructor: "ObjectPropertyAssertion",
+                            provenance_sha256: assertion.provenance_sha256,
+                        },
+                        budget,
+                    )?;
+                } else {
+                    parent[target_root] = source_root;
+                }
+            }
+            (Some(value), None) | (None, Some(value)) => {
+                let index = anonymous_index(vertices, &value, budget)?;
+                named_link_counts[index] =
+                    named_link_counts[index].checked_add(1).ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "profile anonymous named-link count overflowed",
+                        )
+                    })?;
+                if named_link_representatives[index] == usize::MAX {
+                    named_link_representatives[index] = assertion_index;
+                }
+            }
+            (None, None) => {
+                return Err(EncodedValidationError::invariant(
+                    "profile anonymous assertion contains no anonymous endpoint",
+                )
+                .into());
+            }
+        }
+    }
+
+    budget.claim_work(sort_work(parallel_edges.len()))?;
+    parallel_edges.sort_unstable();
+    let mut start = 0_usize;
+    while start < parallel_edges.len() {
+        let mut end = start + 1;
+        while end < parallel_edges.len()
+            && parallel_edges[end].0 == parallel_edges[start].0
+            && parallel_edges[end].1 == parallel_edges[start].1
+        {
+            budget.claim_work(1)?;
+            end += 1;
+        }
+        if end - start > 1 {
+            let assertion = assertions.get(parallel_edges[start].2).ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "profile parallel-edge representative is out of range",
+                )
+            })?;
+            push_profile_issue(
+                issues,
+                ProfileIssue {
+                    rule_id: ANONYMOUS_PARALLEL_EDGE_RULE,
+                    severity: "error",
+                    message: ANONYMOUS_PARALLEL_EDGE_MESSAGE,
+                    constructor: "ObjectPropertyAssertion",
+                    provenance_sha256: assertion.provenance_sha256,
+                },
+                budget,
+            )?;
+        }
+        start = end;
+    }
+
+    budget.claim_owned(index_bytes)?;
+    let mut component_by_vertex = Vec::new();
+    reserve_exact(
+        &mut component_by_vertex,
+        vertices.len(),
+        "profile anonymous component allocation failed",
+    )?;
+    budget.claim_owned(index_bytes)?;
+    let mut component_roots = Vec::new();
+    reserve_exact(
+        &mut component_roots,
+        vertices.len(),
+        "profile anonymous component-root allocation failed",
+    )?;
+    for vertex in 0..vertices.len() {
+        let root = anonymous_root(&mut parent, vertex, budget)?;
+        component_by_vertex.push(root);
+        component_roots.push(root);
+    }
+    budget.claim_work(sort_work(component_roots.len()))?;
+    component_roots.sort_unstable();
+    component_roots.dedup();
+
+    for component_root in component_roots {
+        poll(control, "profile-anonymous-component")?;
+        let mut representative = usize::MAX;
+        let mut valid = true;
+        for (vertex, root) in component_by_vertex.iter().copied().enumerate() {
+            budget.claim_work(1)?;
+            if root != component_root {
+                continue;
+            }
+            if named_link_counts[vertex] <= 1 {
+                valid = false;
+                break;
+            }
+            representative = representative.min(named_link_representatives[vertex]);
+        }
+        if valid {
+            let assertion = assertions.get(representative).ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "profile anonymous tree-root representative is out of range",
+                )
+            })?;
+            push_profile_issue(
+                issues,
+                ProfileIssue {
+                    rule_id: ANONYMOUS_TREE_ROOT_RULE,
+                    severity: "error",
+                    message: ANONYMOUS_TREE_ROOT_MESSAGE,
+                    constructor: "ObjectPropertyAssertion",
+                    provenance_sha256: assertion.provenance_sha256,
+                },
+                budget,
+            )?;
+        }
+    }
+    poll(control, "profile-anonymous-graph-complete")?;
+    Ok(())
+}
+
+fn anonymous_index(
+    vertices: &[AnonymousKey],
+    value: &AnonymousKey,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<usize> {
+    budget.claim_work(search_work(vertices.len()))?;
+    vertices.binary_search(value).map_err(|_| {
+        EncodedValidationError::invariant(
+            "profile anonymous assertion references a missing graph vertex",
+        )
+    })
+}
+
+fn anonymous_root(
+    parent: &mut [usize],
+    start: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<usize> {
+    let mut current = start;
+    loop {
+        budget.claim_work(1)?;
+        let following = *parent.get(current).ok_or_else(|| {
+            EncodedValidationError::invariant("profile anonymous parent index is out of range")
+        })?;
+        if following == current {
+            break;
+        }
+        current = following;
+    }
+    let root = current;
+    current = start;
+    while parent[current] != current {
+        budget.claim_work(1)?;
+        let following = parent[current];
+        parent[current] = root;
+        current = following;
+    }
+    Ok(root)
+}
+
+fn is_anonymous_graph_rule(rule_id: &str) -> bool {
+    matches!(
+        rule_id,
+        ANONYMOUS_GRAPH_CYCLE_RULE | ANONYMOUS_PARALLEL_EDGE_RULE | ANONYMOUS_TREE_ROOT_RULE
+    )
+}
+
+fn push_profile_issue(
+    issues: &mut Vec<ProfileIssue>,
+    issue: ProfileIssue,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<()> {
+    let following = issues
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| EncodedValidationError::resource("profile issue count overflowed"))?;
+    budget.claim_issue(following)?;
+    reserve_profile_one(issues, budget, "profile issue allocation failed")?;
+    issues.push(issue);
+    Ok(())
+}
+
+fn clone_profile_bytes(
+    value: &[u8],
+    budget: &mut PhaseBudget,
+    message: &'static str,
+) -> EncodedResult<Vec<u8>> {
+    budget.claim_owned(value.len())?;
+    let mut owned = Vec::new();
+    owned
+        .try_reserve_exact(value.len())
+        .map_err(|_| EncodedValidationError::resource(message))?;
+    owned.extend_from_slice(value);
+    Ok(owned)
+}
+
+fn reserve_profile_one<T>(
+    values: &mut Vec<T>,
+    budget: &mut PhaseBudget,
+    message: &'static str,
+) -> EncodedResult<()> {
+    if values.len() < values.capacity() {
+        return Ok(());
+    }
+    let following_capacity = if values.capacity() == 0 {
+        4
+    } else {
+        values
+            .capacity()
+            .checked_mul(2)
+            .ok_or_else(|| EncodedValidationError::resource("profile capacity overflowed"))?
+    };
+    let additional = following_capacity - values.capacity();
+    budget.claim_owned(
+        additional.checked_mul(size_of::<T>()).ok_or_else(|| {
+            EncodedValidationError::resource("profile allocation size overflowed")
+        })?,
+    )?;
+    values
+        .try_reserve_exact(additional)
+        .map_err(|_| EncodedValidationError::resource(message))
 }
 
 fn forbidden_anonymous_expression<B: ByteSource>(
@@ -1226,6 +1875,24 @@ fn validate_phase(phase: &ProfilePhase) -> EncodedResult<()> {
             "profile extension keys are not canonical sorted unique",
         ));
     }
+    if phase
+        .anonymous_vertices
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile anonymous vertices are not canonical sorted unique",
+        ));
+    }
+    if phase
+        .anonymous_assertions
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile anonymous assertions are not canonical sorted unique",
+        ));
+    }
     Ok(())
 }
 
@@ -1278,6 +1945,13 @@ fn sort_work(count: usize) -> usize {
     }
     let rounds = usize::BITS - (count - 1).leading_zeros();
     count.saturating_mul(usize::try_from(rounds).unwrap_or(usize::MAX))
+}
+
+fn search_work(count: usize) -> usize {
+    if count < 2 {
+        return 1;
+    }
+    usize::try_from(usize::BITS - (count - 1).leading_zeros()).unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]
@@ -1547,6 +2221,114 @@ mod tests {
             mapped.issues[0].provenance_sha256,
             phase.issues[0].provenance_sha256
         );
+        Ok(())
+    }
+
+    #[test]
+    fn anonymous_graph_rules_use_global_canonical_assertion_order() -> EncodedResult<()> {
+        let vertex = |value| [value; 64];
+        let assertion = |order: u8, provenance: u8, source: Option<u8>, target: Option<u8>| {
+            AnonymousAssertion {
+                axiom_key: vec![order],
+                provenance_sha256: [provenance; 32],
+                source: source.map(vertex),
+                target: target.map(vertex),
+            }
+        };
+        let vertices = vec![
+            vertex(1),
+            vertex(2),
+            vertex(3),
+            vertex(4),
+            vertex(5),
+            vertex(6),
+        ];
+        let assertions = vec![
+            assertion(1, 1, Some(1), Some(2)),
+            assertion(2, 2, Some(2), Some(3)),
+            assertion(3, 3, Some(3), Some(1)),
+            assertion(4, 4, Some(4), Some(5)),
+            assertion(5, 5, Some(5), Some(4)),
+            assertion(6, 6, Some(6), None),
+            assertion(7, 7, None, Some(6)),
+        ];
+        let mut issues = Vec::new();
+        let mut budget = PhaseBudget::new(ProfilePhaseLimits::default());
+        let mut control = |_phase| Ok::<(), Infallible>(());
+
+        into_encoded(append_anonymous_graph_issues(
+            &vertices,
+            &assertions,
+            &mut issues,
+            &mut budget,
+            &mut control,
+        ))?;
+        issues.sort();
+
+        assert_eq!(issues.len(), 4);
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.rule_id == ANONYMOUS_GRAPH_CYCLE_RULE)
+                .map(|issue| issue.provenance_sha256[0])
+                .collect::<Vec<_>>(),
+            vec![3, 5]
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .find(|issue| issue.rule_id == ANONYMOUS_PARALLEL_EDGE_RULE)
+                .map(|issue| issue.provenance_sha256[0]),
+            Some(4)
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .find(|issue| issue.rule_id == ANONYMOUS_TREE_ROOT_RULE)
+                .map(|issue| issue.provenance_sha256[0]),
+            Some(6)
+        );
+
+        let mut cancelled_issues = Vec::new();
+        let mut cancelled_budget = PhaseBudget::new(ProfilePhaseLimits::default());
+        let cancelled = append_anonymous_graph_issues(
+            &vertices,
+            &assertions,
+            &mut cancelled_issues,
+            &mut cancelled_budget,
+            &mut |phase| {
+                if phase == "profile-anonymous-assertion" {
+                    Err("injected graph cancellation")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(
+            cancelled,
+            Err(ProfilePhaseError::Control("injected graph cancellation"))
+        );
+        assert!(cancelled_issues.is_empty());
+
+        let mut limited_issues = Vec::new();
+        let mut limited_budget = PhaseBudget::new(ProfilePhaseLimits {
+            max_issues: 0,
+            ..ProfilePhaseLimits::default()
+        });
+        let limited = append_anonymous_graph_issues(
+            &vertices,
+            &assertions,
+            &mut limited_issues,
+            &mut limited_budget,
+            &mut control,
+        );
+        let Err(ProfilePhaseError::Encoded(error)) = limited else {
+            return Err(EncodedValidationError::invariant(
+                "anonymous graph issue limit unexpectedly succeeded",
+            ));
+        };
+        assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
+        assert!(limited_issues.is_empty());
         Ok(())
     }
 
