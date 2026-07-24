@@ -5781,25 +5781,28 @@ fn normalized_data_restriction_term<B: ByteSource>(
     else {
         return Ok(None);
     };
-    let NormalizedDataTerm::Atomic(filler) = filler else {
-        return Ok(None);
-    };
     if matches!(
         &normalization,
         DataCardinalityNormalization::Cardinality { .. }
-    ) && atomic_data_range_selection_is_bottom(
-        model,
-        symbols,
-        filler.selection.ok_or_else(|| {
-            EncodedValidationError::invariant("normalized data-cardinality filler became synthetic")
-        })?,
-    )? {
-        return Ok(None);
+    ) {
+        if let NormalizedDataTerm::Atomic(atomic) = &filler {
+            if atomic_data_range_selection_is_bottom(
+                model,
+                symbols,
+                atomic.selection.ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "normalized data-cardinality filler became synthetic",
+                    )
+                })?,
+            )? {
+                return Ok(None);
+            }
+        }
     }
     let property_key = canonical::canonical_node_key(model, property, scope_maps, budget)?;
     match normalization {
         DataCardinalityNormalization::Quantifier { kind, .. } => {
-            let key = synthetic_data_quantifier_key(kind, &property_key, &filler.key, budget)?;
+            let key = synthetic_data_quantifier_key(kind, &property_key, filler.key(), budget)?;
             budget.claim_owned(size_of::<NormalizedDataQuantifierTerm>())?;
             Ok(Some(NormalizedClassTerm::DataQuantifier(
                 NormalizedDataQuantifierTerm {
@@ -5807,7 +5810,7 @@ fn normalized_data_restriction_term<B: ByteSource>(
                     role_id,
                     property_key,
                     key,
-                    filler: NormalizedDataTerm::Atomic(filler),
+                    filler,
                 },
             )))
         }
@@ -5824,7 +5827,7 @@ fn normalized_data_restriction_term<B: ByteSource>(
                 tag,
                 &cardinality_bytes,
                 &property_key,
-                &filler.key,
+                filler.key(),
                 budget,
             )?;
             budget.claim_owned(size_of::<NormalizedDataCardinalityTerm>())?;
@@ -5836,7 +5839,7 @@ fn normalized_data_restriction_term<B: ByteSource>(
                     role_id,
                     property_key,
                     key,
-                    filler: NormalizedDataTerm::Atomic(filler),
+                    filler,
                 },
             )))
         }

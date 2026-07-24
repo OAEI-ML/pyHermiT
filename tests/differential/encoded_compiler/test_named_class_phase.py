@@ -3708,7 +3708,7 @@ def test_unsupported_data_quantifier_inputs_defer_without_symbol_leaks() -> None
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "SubClassOf(:A DataSomeValuesFrom(:d :e xsd:string))",
-            "SubClassOf(DataExactCardinality(2 :d "
+            "SubClassOf(DataAllValuesFrom(:d :e "
             "DataIntersectionOf(xsd:string xsd:integer)) :B)",
             "SubClassOf(:A DataSomeValuesFrom(:undeclared xsd:string))",
             "EquivalentClasses(:A DataSomeValuesFrom(:d "
@@ -4400,8 +4400,8 @@ def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
             "Declaration(DataProperty(:d))",
             "SubClassOf(:A DataMaxCardinality(4294967295 :d xsd:string))",
             "SubClassOf(:A DataMaxCardinality(4294967296 :d xsd:string))",
-            "SubClassOf(:A DataExactCardinality(2 :d "
-            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "SubClassOf(:A DataMaxCardinality(2 :d "
+            "DataIntersectionOf(xsd:string rdfs:Literal)))",
             "SubClassOf(:A DataMaxCardinality(2 :undeclared xsd:string))",
             "SubClassOf(ObjectComplementOf("
             "DataMaxCardinality(4294967295 :d xsd:string)) :B)",
@@ -4613,6 +4613,167 @@ def test_composite_data_exact_cardinality_definitions_reuse_global_identity() ->
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_recursive_data_exact_cardinality_fillers_match_scalar_exactly() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(AnnotationProperty(:note))",
+            "SubClassOf(:A DataExactCardinality(1 :d "
+            "DataIntersectionOf(xsd:string xsd:integer)))",
+            'SubClassOf(Annotation(:note "same dependencies") :A '
+            "DataExactCardinality(1 :d "
+            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "SubClassOf(DataExactCardinality(2 :e "
+            "DataUnionOf(xsd:boolean xsd:decimal)) :B)",
+            "SubClassOf(:B DataExactCardinality(0 :d DataIntersectionOf("
+            "xsd:string DataUnionOf(xsd:integer xsd:boolean))))",
+            "SubClassOf(ObjectComplementOf(DataExactCardinality(0 :e "
+            "DataIntersectionOf(xsd:boolean xsd:integer))) :B)",
+            "SubClassOf(:A ObjectComplementOf(DataExactCardinality(2 :d "
+            "DataUnionOf(xsd:string xsd:decimal))))",
+            "DataPropertyRange(:e DataUnionOf(xsd:boolean xsd:decimal))",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=7,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_data_ranges=True,
+        include_generated_data_definitions=True,
+    )
+    assert not any(
+        str(value["display"]).startswith("DataExactCardinality:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_recursive_data_exact_cardinality_fillers_cover_generated_contexts() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "ClassAssertion(DataExactCardinality(1 :d "
+            "DataUnionOf(xsd:string xsd:integer)) :i)",
+            "ObjectPropertyDomain(:p DataExactCardinality(2 :e "
+            "DataIntersectionOf(xsd:boolean xsd:decimal)))",
+            "DataPropertyDomain(:d DataExactCardinality(3 :e "
+            "DataUnionOf(xsd:decimal xsd:integer)))",
+            "HasKey(DataExactCardinality(1 :d "
+            "DataIntersectionOf(xsd:string xsd:boolean)) (:p) (:e))",
+            "DisjointClasses(DataExactCardinality(2 :e "
+            "DataUnionOf(xsd:string xsd:decimal)) :A)",
+            "SubClassOf(ObjectIntersectionOf(:B DataExactCardinality(1 :d "
+            "DataIntersectionOf(xsd:boolean xsd:integer))) :A)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=6,
+        include_object_constraints=True,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+        include_data_domains=True,
+        include_keys=True,
+    )
+    assert not any(
+        str(value["display"]).startswith("DataExactCardinality:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_composite_recursive_data_exact_fillers_reuse_global_identity() -> None:
+    declarations = (
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(ObjectProperty(:p))",
+        "Declaration(DataProperty(:d))",
+    )
+    exact = (
+        "DataExactCardinality(2 :d "
+        "DataIntersectionOf(xsd:string DataUnionOf(xsd:integer xsd:boolean)))"
+    )
+    left = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"SubClassOf(:A {exact})",
+            f"SubClassOf({exact} :B)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            *declarations,
+            f"ObjectPropertyDomain(:p {exact})",
+            f"DisjointClasses({exact} :A)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    manifest = _native_slices_manifest(
+        *_composite_records(composite, (left, right)),
+        logical_fingerprint=composite.logical_fingerprint.digest,
+    )
+
+    assert manifest == _expected_manifest(
+        composite,
+        compiled_roots=4,
+        include_object_constraints=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_generated_data_definitions=True,
+    )
+    class_namespace = f":class:{composite.logical_fingerprint.hex}:"
+    data_namespace = f":data:{composite.logical_fingerprint.hex}:"
+    assert sum(
+        class_namespace in str(value["display"])
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+        if value["generated"]
+    ) == 6
+    assert sum(
+        data_namespace in str(value["display"])
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        if value["generated"]
+    ) == 4
+    assert not any(
+        str(value["display"]).startswith("DataExactCardinality:")
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -4622,11 +4783,12 @@ def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() 
             "SubClassOf(:A DataExactCardinality(4294967295 :d xsd:string))",
             "SubClassOf(:A DataExactCardinality(4294967296 :d xsd:string))",
             "SubClassOf(:A DataExactCardinality(2 :d "
-            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "DataIntersectionOf(xsd:string rdfs:Literal)))",
             "SubClassOf(:A DataExactCardinality(2 :undeclared xsd:string))",
             "SubClassOf(ObjectComplementOf("
             "DataExactCardinality(4294967295 :d xsd:string)) :B)",
-            "EquivalentClasses(:A DataExactCardinality(2 :d xsd:string) "
+            "EquivalentClasses(:A DataExactCardinality(2 :d "
+            "DataIntersectionOf(xsd:string xsd:integer)) "
             'DataHasValue(:undeclared "value"))',
         ),
         options=OPTIONS,
