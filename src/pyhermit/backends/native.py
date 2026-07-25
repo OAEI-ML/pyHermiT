@@ -46,6 +46,7 @@ from pyhermit.encoded_input import (
     ENCODED_BUFFER_WIDTHS,
     ENCODED_SCHEMA_NAME,
     ENCODED_SCHEMA_VERSION,
+    _encoded_slice_records,
     negotiate_encoded_input,
 )
 from pyhermit.events import CancellationToken, ProgressCallback, ProgressEvent
@@ -226,31 +227,7 @@ class NativeBackendFactory:
         root_slices = planner() if callable(planner) else lease.overlay_root_slices()
         slice_validator = self._validate_encoded_slices
         if slice_validator is not None and root_slices is not None:
-            column_order = (
-                "root_kinds",
-                "root_ids",
-                "node_tags",
-                "node_field_offsets",
-                "field_kinds",
-                "field_values",
-                "field_lengths",
-                "item_kinds",
-                "item_values",
-                "item_lengths",
-                "scalar_bytes",
-            )
-            result = slice_validator(
-                slices=tuple(
-                    (
-                        root_slice.posting_mode,
-                        root_slice.root_ids,
-                        root_slice.member_tokens,
-                        root_slice.anonymous_scope_maps,
-                        *(root_slice.lease.buffers[name] for name in column_order),
-                    )
-                    for root_slice in root_slices
-                )
-            )
+            result = slice_validator(slices=_encoded_slice_records(root_slices))
             if result is not None:
                 raise BackendMismatchError(
                     "native encoded validator returned an incompatible result",

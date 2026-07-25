@@ -11,10 +11,12 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import chain
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 
 import pyowl_core as owl
+from pyowl_core.index import OntologyIdentityIndex
 
 from .exceptions import ResourceLimitError
 
@@ -39,6 +41,27 @@ ENCODED_BUFFER_WIDTHS: Mapping[str, int] = MappingProxyType(
         "scalar_bytes": 1,
     }
 )
+_ENCODED_SLICE_COLUMN_ORDER = (
+    "root_kinds",
+    "root_ids",
+    "node_tags",
+    "node_field_offsets",
+    "field_kinds",
+    "field_values",
+    "field_lengths",
+    "item_kinds",
+    "item_values",
+    "item_lengths",
+    "scalar_bytes",
+)
+_OntologyIdentityContext: TypeAlias = tuple[
+    int,
+    tuple[tuple[str, str | None, str | None], ...],
+]
+_ProfileOriginContext: TypeAlias = tuple[
+    int,
+    tuple[tuple[bytes, tuple[str, ...]], ...],
+]
 _SEGMENT_DIRECT = 1
 _SEGMENT_OVERLAY_BASE = 2
 _SEGMENT_OVERLAY_DELTA = 3
@@ -163,6 +186,76 @@ class EncodedInputNegotiation:
     @property
     def available(self) -> bool:
         return self.lease is not None
+
+
+@dataclass(frozen=True, slots=True)
+class _EncodedProfileContexts:
+    ontology_identity_context: _OntologyIdentityContext
+    origin_context: _ProfileOriginContext
+
+
+def _encoded_profile_contexts(view: owl.OntologyView) -> _EncodedProfileContexts:
+    """Build the canonical side contexts omitted from structural-columns v1."""
+
+    identity = view.view(OntologyIdentityIndex)
+    ontology_identity_context: _OntologyIdentityContext = (
+        1,
+        tuple(
+            sorted(
+                (
+                    document.document_key,
+                    (
+                        None
+                        if document.ontology_id.ontology_iri is None
+                        else document.ontology_id.ontology_iri.value
+                    ),
+                    (
+                        None
+                        if document.ontology_id.version_iri is None
+                        else document.ontology_id.version_iri.value
+                    ),
+                )
+                for document in identity.documents
+            )
+        ),
+    )
+    documents_by_provenance: dict[bytes, set[str]] = {}
+    for value in chain(view.iter_axioms(), view.iter_extensions()):
+        document_keys = {
+            origin.document_key for origin in view.origin_index.origins_for(value)
+        }
+        if not document_keys:
+            continue
+        provenance = hashlib.sha256(value.canonical_bytes()).digest()
+        documents_by_provenance.setdefault(provenance, set()).update(document_keys)
+    origin_context: _ProfileOriginContext = (
+        1,
+        tuple(
+            (provenance, tuple(sorted(document_keys)))
+            for provenance, document_keys in sorted(documents_by_provenance.items())
+        ),
+    )
+    return _EncodedProfileContexts(ontology_identity_context, origin_context)
+
+
+def _encoded_slice_records(
+    root_slices: tuple[EncodedStructuralRootSlice, ...],
+) -> tuple[tuple[object, ...], ...]:
+    """Project retained root slices into the one frozen native record layout."""
+
+    return tuple(
+        (
+            root_slice.posting_mode,
+            root_slice.root_ids,
+            root_slice.member_tokens,
+            root_slice.anonymous_scope_maps,
+            *(
+                root_slice.lease.buffers[name]
+                for name in _ENCODED_SLICE_COLUMN_ORDER
+            ),
+        )
+        for root_slice in root_slices
+    )
 
 
 def negotiate_encoded_input(
@@ -769,23 +862,10 @@ def _encoded_fingerprint(
     segments: tuple[EncodedStructuralSegmentLease, ...],
     descriptor: bytes,
 ) -> owl.Fingerprint:
-    names = (
-        "root_kinds",
-        "root_ids",
-        "node_tags",
-        "node_field_offsets",
-        "field_kinds",
-        "field_values",
-        "field_lengths",
-        "item_kinds",
-        "item_values",
-        "item_lengths",
-        "scalar_bytes",
-    )
     hasher = hashlib.sha256()
     hasher.update(b"pyowl-core:encoded-structural-view:v1\x00")
     hasher.update(_frame(descriptor))
-    for name in names:
+    for name in _ENCODED_SLICE_COLUMN_ORDER:
         hasher.update(_frame(name.encode("ascii")))
         value = buffers[name]
         hasher.update(value.nbytes.to_bytes(8, "little"))

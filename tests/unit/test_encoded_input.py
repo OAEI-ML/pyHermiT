@@ -261,6 +261,80 @@ def test_valid_handoff_retains_owner_and_read_only_buffers(
     ]
 
 
+def test_profile_side_contexts_are_canonical_and_union_composite_origins() -> None:
+    options = owl.LoadOptions(
+        imports=owl.ImportPolicy.IGNORE,
+        backend=owl.BackendPreference.PYTHON,
+    )
+    body = (
+        b"Prefix(:=<urn:context#>) Ontology(<urn:context:left> "
+        b"Declaration(Class(:A)) Declaration(Class(:B)) SubClassOf(:A :B))"
+    )
+    left = owl.load_snapshot(body, document_iri="urn:document:z", options=options)
+    right = owl.load_snapshot(
+        body.replace(b"urn:context:left", b"urn:context:right"),
+        document_iri="urn:document:a",
+        options=options,
+    )
+    composite = owl.compose_views(left, right, roles=("left", "right"))
+
+    contexts = encoded_input._encoded_profile_contexts(composite)
+
+    identity_version, identity_rows = contexts.ontology_identity_context
+    assert identity_version == 1
+    assert identity_rows == tuple(sorted(identity_rows))
+    assert {row[1:] for row in identity_rows} == {
+        ("urn:context:left", None),
+        ("urn:context:right", None),
+    }
+    origin_version, origin_rows = contexts.origin_context
+    assert origin_version == 1
+    assert origin_rows == tuple(sorted(origin_rows))
+    assert len(origin_rows) == 3
+    assert all(len(provenance) == 32 for provenance, _document_keys in origin_rows)
+    assert all(
+        document_keys == tuple(sorted(document_keys)) and len(document_keys) == 2
+        for _provenance, document_keys in origin_rows
+    )
+
+
+def test_native_slice_records_share_one_exact_column_ledger() -> None:
+    buffers = {
+        name: memoryview(bytes((index,)))
+        for index, name in enumerate(ENCODED_BUFFER_WIDTHS)
+    }
+    root_ids = memoryview(b"\x01\x00\x00\x00")
+    member_token = b"m" * 32
+    scope_map = memoryview(b"a" * 32 + b"b" * 32)
+    root_slice = SimpleNamespace(
+        lease=SimpleNamespace(buffers=buffers),
+        posting_mode=1,
+        root_ids=root_ids,
+        member_tokens=(member_token,),
+        anonymous_scope_maps=(scope_map,),
+    )
+
+    records = encoded_input._encoded_slice_records((root_slice,))
+
+    assert records[0][:4] == (1, root_ids, (member_token,), (scope_map,))
+    assert records[0][4:] == tuple(
+        buffers[name]
+        for name in (
+            "root_kinds",
+            "root_ids",
+            "node_tags",
+            "node_field_offsets",
+            "field_kinds",
+            "field_values",
+            "field_lengths",
+            "item_kinds",
+            "item_values",
+            "item_lengths",
+            "scalar_bytes",
+        )
+    )
+
+
 def test_lease_retains_closeable_buffer_owner_until_the_handoff_is_released(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
