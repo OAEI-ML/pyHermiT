@@ -5,12 +5,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import struct
 import sys
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 
+import pyowl_core
 import pytest
+from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
 
 from pyhermit import __version__
 from pyhermit.backends.native import NativeBackendFactory
@@ -21,7 +24,7 @@ from pyhermit.backends.native_events import (
 )
 from pyhermit.backends.native_wire import RESULT_HEADER_LENGTH, RESULT_MAGIC, ResultKind
 from pyhermit.backends.protocol import CompiledOntology, DeltaOutcome, EntityRef
-from pyhermit.config import ReasonerConfig
+from pyhermit.config import ReasonerConfig, UnsupportedDatatypePolicy
 from pyhermit.encoded_input import (
     ENCODED_BUFFER_WIDTHS,
     ENCODED_NATIVE_FEATURE,
@@ -31,6 +34,7 @@ from pyhermit.encoded_input import (
 from pyhermit.events import CancellationSource, ProgressEvent
 from pyhermit.exceptions import BackendMismatchError, BackendPoisonedError, BackendVersionError
 from pyhermit.facade import Reasoner
+from pyhermit.profile import OWL2DLReport, validate_owl2_dl_view
 
 
 @dataclass(frozen=True)
@@ -197,6 +201,67 @@ def _extension() -> tuple[ModuleType, list[_Handle], list[_Session]]:
     module.create_session = create_session
     module.self_test = lambda: None
     return module, handles, sessions
+
+
+def _profile_fixture() -> tuple[pyowl_core.OntologyView, OWL2DLReport]:
+    options = pyowl_core.LoadOptions(
+        imports=pyowl_core.ImportPolicy.IGNORE,
+        backend=pyowl_core.BackendPreference.PYTHON,
+    )
+    snapshot = pyowl_core.load_snapshot(
+        (
+            b"Prefix(:=<urn:native-profile#>) "
+            b"Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>) "
+            b"Ontology(<urn:native-profile> "
+            b"Declaration(Class(:A)) Declaration(DataProperty(:p)) "
+            b"Declaration(DataProperty(:q)) "
+            b"SubClassOf(:A DataSomeValuesFrom(:p :q xsd:string)))"
+        ),
+        document_iri="urn:native-profile:document",
+        options=options,
+    )
+    return snapshot, validate_owl2_dl_view(snapshot)
+
+
+def _profile_result(report: OWL2DLReport) -> bytes:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "family": "owl2_dl_profile",
+            "conforms": report.conforms,
+            "axioms_checked": report.axioms_checked,
+            "extensions_checked": report.extensions_checked,
+            "ordered_rule_ids": [issue.rule_id for issue in report.issues],
+            "issues": [
+                {
+                    "rule_id": issue.rule_id,
+                    "severity": issue.severity.value,
+                    "message": issue.message,
+                    "constructor": issue.constructor,
+                    "document_keys": list(issue.document_keys),
+                    "provenance_sha256": issue.provenance_sha256,
+                }
+                for issue in report.issues
+            ],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+
+def _profile_lease(snapshot: pyowl_core.OntologyView) -> _EncodedLease:
+    published = produce_encoded_structural_view_v1(snapshot)
+    lease = _EncodedLease(dict(published.buffers))
+    lease._root_slices = (
+        SimpleNamespace(
+            lease=lease,
+            posting_mode=0,
+            root_ids=memoryview(b""),
+            member_tokens=(),
+            anonymous_scope_maps=(),
+        ),
+    )
+    return lease
 
 
 def _install_codec(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -585,6 +650,183 @@ def test_encoded_handoff_rejects_a_non_none_native_result(
         NativeBackendFactory(extension)._validate_encoded_handoff(object())  # type: ignore[arg-type]
 
     assert caught.value.context["reason"] == "encoded_validator_result_invalid"
+
+
+def test_profile_handoff_is_absent_without_requesting_core_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    factory = NativeBackendFactory(extension)
+
+    def unexpected_negotiation(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("encoded input must not be requested without a profile compiler")
+
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        unexpected_negotiation,
+    )
+
+    factory._validate_encoded_profile_handoff(  # type: ignore[arg-type]
+        object(),
+        object(),
+        object(),
+    )
+
+
+def test_profile_handoff_supplies_full_context_and_matches_scalar_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    snapshot, report = _profile_fixture()
+    received: dict[str, object] = {}
+
+    def compile_profile(**values: object) -> bytes:
+        received.update(values)
+        return _profile_result(report)
+
+    extension._encoded_profile_slices_manifest_v1 = compile_profile
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=_profile_lease(snapshot)),
+    )
+
+    NativeBackendFactory(extension)._validate_encoded_profile_handoff(
+        snapshot,
+        report,
+        UnsupportedDatatypePolicy.ERROR,
+    )
+
+    assert received["unsupported_datatypes"] == "error"
+    slices = received["slices"]
+    assert isinstance(slices, tuple) and len(slices) == 1
+    assert len(slices[0]) == 15
+    identity_version, identity_rows = received["ontology_identity_context"]  # type: ignore[misc]
+    assert identity_version == 1
+    assert len(identity_rows) == 1
+    assert identity_rows[0][1:] == ("urn:native-profile", None)
+    origin_version, origin_rows = received["origin_context"]  # type: ignore[misc]
+    assert origin_version == 1
+    assert origin_rows
+    assert all(
+        document_keys == (identity_rows[0][0],) for _provenance, document_keys in origin_rows
+    )
+
+
+def test_profile_handoff_rejects_native_scalar_manifest_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    snapshot, report = _profile_fixture()
+    extension._encoded_profile_slices_manifest_v1 = lambda **_values: b"{}"
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=_profile_lease(snapshot)),
+    )
+
+    with pytest.raises(BackendMismatchError) as caught:
+        NativeBackendFactory(extension)._validate_encoded_profile_handoff(
+            snapshot,
+            report,
+            UnsupportedDatatypePolicy.ERROR,
+        )
+
+    assert caught.value.context["reason"] == "encoded_profile_manifest_mismatch"
+
+
+def test_profile_handoff_rejects_duplicate_json_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    snapshot, report = _profile_fixture()
+    result = _profile_result(report)
+    expected = b'"schema_version":1'
+    assert result.count(expected) == 1
+    extension._encoded_profile_slices_manifest_v1 = lambda **_values: result.replace(
+        expected,
+        b'"schema_version":2,"schema_version":1',
+        1,
+    )
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=_profile_lease(snapshot)),
+    )
+
+    with pytest.raises(BackendMismatchError) as caught:
+        NativeBackendFactory(extension)._validate_encoded_profile_handoff(
+            snapshot,
+            report,
+            UnsupportedDatatypePolicy.ERROR,
+        )
+
+    assert caught.value.context["reason"] == "encoded_profile_manifest_invalid"
+
+
+@pytest.mark.parametrize(
+    "encoding_case",
+    ["utf-16", "utf-8-bom", "invalid-utf-8"],
+)
+def test_profile_handoff_rejects_noncanonical_json_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding_case: str,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    snapshot, report = _profile_fixture()
+    result = _profile_result(report)
+    if encoding_case == "utf-16":
+        result = result.decode("utf-8").encode("utf-16")
+    elif encoding_case == "utf-8-bom":
+        result = b"\xef\xbb\xbf" + result
+    else:
+        result = b"\xff" + result
+    extension._encoded_profile_slices_manifest_v1 = lambda **_values: result
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=_profile_lease(snapshot)),
+    )
+
+    with pytest.raises(BackendMismatchError) as caught:
+        NativeBackendFactory(extension)._validate_encoded_profile_handoff(
+            snapshot,
+            report,
+            UnsupportedDatatypePolicy.ERROR,
+        )
+
+    assert caught.value.context["reason"] == "encoded_profile_manifest_invalid"
+
+
+@pytest.mark.parametrize(
+    "schema_version",
+    [True, 1.0],
+    ids=["bool-for-int", "float-for-int"],
+)
+def test_profile_handoff_rejects_json_scalar_type_coercion(
+    monkeypatch: pytest.MonkeyPatch,
+    schema_version: object,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    snapshot, report = _profile_fixture()
+    manifest = json.loads(_profile_result(report))
+    assert manifest["schema_version"] == schema_version
+    assert type(manifest["schema_version"]) is not type(schema_version)
+    manifest["schema_version"] = schema_version
+    extension._encoded_profile_slices_manifest_v1 = lambda **_values: json.dumps(
+        manifest,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=_profile_lease(snapshot)),
+    )
+
+    with pytest.raises(BackendMismatchError) as caught:
+        NativeBackendFactory(extension)._validate_encoded_profile_handoff(
+            snapshot,
+            report,
+            UnsupportedDatatypePolicy.ERROR,
+        )
+
+    assert caught.value.context["reason"] == "encoded_profile_manifest_mismatch"
 
 
 def test_facade_runs_the_encoded_gate_before_scalar_compilation(

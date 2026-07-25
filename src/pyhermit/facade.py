@@ -130,6 +130,11 @@ class Reasoner:
             max_memory_bytes=selected_config.max_memory_bytes,
         )
         self._factory = select_backend_factory(selected_config)
+        profile_validator = getattr(
+            self._factory,
+            "_validate_encoded_profile_handoff",
+            None,
+        )
         validated = capture_ontology(
             ontology,
             config=selected_config,
@@ -137,6 +142,7 @@ class Reasoner:
             load_options=load_options,
             resolver=resolver,
             cancelled=self._cancelled,
+            _profile_validator=profile_validator if callable(profile_validator) else None,
         )
         self._validated = validated
         self._runtime = self._compile_runtime(validated)
@@ -668,10 +674,16 @@ class Reasoner:
                 remove_axioms=owl.CanonicalSet(removals),
             ),
         )
+        profile_validator = getattr(
+            self._factory,
+            "_validate_encoded_profile_handoff",
+            None,
+        )
         validated = capture_ontology(
             proposed,
             config=self._config,
             cancelled=self._cancelled,
+            _profile_validator=profile_validator if callable(profile_validator) else None,
         )
         compile_started = perf_counter()
         bundle = compile_captured_bundle(

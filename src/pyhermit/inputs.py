@@ -19,10 +19,15 @@ from pyowl_core import (
 )
 from pyowl_core.index import OntologyIdentityIndex
 
-from .config import ReasonerConfig
+from .config import ReasonerConfig, UnsupportedDatatypePolicy
 from .core import CapturedOntology, capture_compatible_view
 from .exceptions import IncompleteImportClosureError
 from .profile import OWL2DLReport, validate_owl2_dl_view
+
+_ProfileValidator = Callable[
+    [OntologyView, OWL2DLReport, UnsupportedDatatypePolicy],
+    None,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +60,7 @@ def capture_ontology(
     resolver: ImportResolver | None = None,
     cancellation_token: CancellationToken | None = None,
     cancelled: Callable[[], bool] | None = None,
+    _profile_validator: _ProfileValidator | None = None,
 ) -> ValidatedOntology:
     """Cross the shared-core boundary exactly once and validate the retained view."""
 
@@ -71,6 +77,8 @@ def capture_ontology(
         raise TypeError("cancellation_token must be pyowl_core.CancellationToken or None")
     if cancelled is not None and not callable(cancelled):
         raise TypeError("cancelled must be callable or None")
+    if _profile_validator is not None and not callable(_profile_validator):
+        raise TypeError("_profile_validator must be callable or None")
     view = pyowl_core.coerce_snapshot(
         source,
         document_iri=document_iri,
@@ -107,6 +115,8 @@ def capture_ontology(
         unsupported_datatypes=selected_config.unsupported_datatypes,
         cancelled=is_cancelled if cancelled is not None or cancellation_token is not None else None,
     )
+    if _profile_validator is not None:
+        _profile_validator(view, report, selected_config.unsupported_datatypes)
     report.raise_for_errors()
     return ValidatedOntology(captured, report, identity)
 

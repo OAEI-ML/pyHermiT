@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pyowl_core
@@ -25,9 +26,15 @@ from pyowl_core.extensions import swrl
 from pyowl_core.index import OntologyIdentityIndex
 
 import pyhermit._native as native
+from pyhermit.backends.native import NativeBackendFactory
 from pyhermit.config import UnsupportedDatatypePolicy
 from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE
-from pyhermit.exceptions import BackendMismatchError, ReasonerInterruptedError
+from pyhermit.exceptions import (
+    BackendMismatchError,
+    OntologyProfileError,
+    ReasonerInterruptedError,
+)
+from pyhermit.inputs import capture_ontology
 from pyhermit.profile import validate_owl2_dl_view
 
 OPTIONS = pyowl_core.LoadOptions(
@@ -502,6 +509,43 @@ def test_origin_context_restores_full_scalar_root_diagnostics() -> None:
     assert issues
     assert all(issue["document_keys"] for issue in issues)
     assert all(len(cast(str, issue["provenance_sha256"])) == 64 for issue in issues)
+
+
+def test_public_capture_checks_origin_bearing_native_profile_before_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(*_invalid_body()),
+        options=OPTIONS,
+    )
+    factory = NativeBackendFactory(native)
+    buffers = _buffers(snapshot)
+    lease = SimpleNamespace()
+    lease.buffers = buffers
+    lease.root_slices = lambda: (
+        SimpleNamespace(
+            lease=lease,
+            posting_mode=0,
+            root_ids=memoryview(b""),
+            member_tokens=(),
+            anonymous_scope_maps=(),
+        ),
+    )
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=lease),
+    )
+
+    with pytest.raises(OntologyProfileError) as caught:
+        capture_ontology(
+            snapshot,
+            _profile_validator=factory._validate_encoded_profile_handoff,
+        )
+
+    assert caught.value.context == {
+        "issue_count": 2,
+        "rule_ids": DATA_RANGE_ARITY_RULE,
+    }
 
 
 def test_top_data_property_positions_match_scalar_exactly() -> None:

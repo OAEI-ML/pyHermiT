@@ -249,16 +249,29 @@ def test_verify_factory_forwards_the_private_encoded_gate(
         def __init__(self) -> None:
             super().__init__("native", _Session())
             self.validated: list[object] = []
+            self.profile_validated: list[tuple[object, object, object]] = []
 
         def _validate_encoded_handoff(self, view: object) -> None:
             self.validated.append(view)
+
+        def _validate_encoded_profile_handoff(
+            self,
+            view: object,
+            profile: object,
+            unsupported_datatypes: object,
+        ) -> None:
+            self.profile_validated.append((view, profile, unsupported_datatypes))
 
     native = NativeFactory()
     python = _Factory("python", _Session())
     monkeypatch.setattr("pyhermit.backends.verify.PythonBackendFactory", lambda: python)
     factory = VerifyBackendFactory(native)  # type: ignore[arg-type]
     view = object()
+    profile = object()
+    policy = object()
 
     factory._validate_encoded_handoff(view)
+    factory._validate_encoded_profile_handoff(view, profile, policy)
 
     assert native.validated == [view]
+    assert native.profile_validated == [(view, profile, policy)]

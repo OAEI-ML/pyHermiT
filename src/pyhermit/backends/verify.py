@@ -95,6 +95,16 @@ class VerifyBackendFactory:
         if callable(hook):
             hook(view)
 
+    def _validate_encoded_profile_handoff(
+        self,
+        view: object,
+        profile: object,
+        unsupported_datatypes: object,
+    ) -> None:
+        hook = getattr(self._native, "_validate_encoded_profile_handoff", None)
+        if callable(hook):
+            hook(view, profile, unsupported_datatypes)
+
     def create_session(
         self,
         ontology: CompiledOntology,

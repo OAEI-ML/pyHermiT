@@ -11,6 +11,7 @@ becomes a backend-neutral contract value.
 from __future__ import annotations
 
 import importlib
+import json
 import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -40,12 +41,13 @@ from pyhermit.backends.protocol import (
     RealizationIds,
 )
 from pyhermit.backends.verify import VerifyBackendFactory
-from pyhermit.config import ReasonerConfig
+from pyhermit.config import ReasonerConfig, UnsupportedDatatypePolicy
 from pyhermit.core import current_core_versions
 from pyhermit.encoded_input import (
     ENCODED_BUFFER_WIDTHS,
     ENCODED_SCHEMA_NAME,
     ENCODED_SCHEMA_VERSION,
+    _encoded_profile_contexts,
     _encoded_slice_records,
     negotiate_encoded_input,
 )
@@ -56,6 +58,7 @@ from pyhermit.exceptions import (
     BackendVersionError,
     DisposedReasonerError,
 )
+from pyhermit.profile import OWL2DLReport
 
 _REQUIRED_FEATURES = frozenset(
     {"classification", "full_reasoner", "incremental_updates", "realization"}
@@ -123,6 +126,64 @@ class _InputCodec(Protocol):
     def encode_delta(self, delta: CompiledDelta) -> bytes: ...
 
 
+def _profile_manifest(profile: OWL2DLReport) -> dict[str, object]:
+    issues = profile.issues
+    return {
+        "schema_version": 1,
+        "family": "owl2_dl_profile",
+        "conforms": profile.conforms,
+        "axioms_checked": profile.axioms_checked,
+        "extensions_checked": profile.extensions_checked,
+        "ordered_rule_ids": [issue.rule_id for issue in issues],
+        "issues": [
+            {
+                "rule_id": issue.rule_id,
+                "severity": issue.severity.value,
+                "message": issue.message,
+                "constructor": issue.constructor,
+                "document_keys": list(issue.document_keys),
+                "provenance_sha256": issue.provenance_sha256,
+            }
+            for issue in issues
+        ],
+    }
+
+
+def _json_values_are_exact(actual: object, expected: object) -> bool:
+    """Compare decoded JSON without Python's bool/int/float coercions."""
+
+    if type(actual) is not type(expected):
+        return False
+    if type(expected) is dict:
+        actual_mapping = cast(dict[object, object], actual)
+        expected_mapping = cast(dict[object, object], expected)
+        return actual_mapping.keys() == expected_mapping.keys() and all(
+            _json_values_are_exact(actual_mapping[key], value)
+            for key, value in expected_mapping.items()
+        )
+    if type(expected) is list:
+        actual_values = cast(list[object], actual)
+        expected_values = cast(list[object], expected)
+        return len(actual_values) == len(expected_values) and all(
+            _json_values_are_exact(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual_values, expected_values, strict=True)
+        )
+    return actual == expected
+
+
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    """Build one JSON object while rejecting ambiguous duplicate names."""
+
+    values: dict[str, object] = {}
+    for key, value in pairs:
+        if key in values:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        values[key] = value
+    return values
+
+
 class NativeBackendFactory:
     """Validate extension metadata and create one retained coarse native session."""
 
@@ -130,6 +191,7 @@ class NativeBackendFactory:
         "_create_session",
         "_handle_type",
         "_info",
+        "_profile_encoded_slices",
         "_validate_encoded",
         "_validate_encoded_selection",
         "_validate_encoded_slices",
@@ -148,6 +210,7 @@ class NativeBackendFactory:
         validate_encoded = getattr(module, "_validate_encoded_columns_v1", None)
         validate_encoded_selection = getattr(module, "_validate_encoded_selection_v1", None)
         validate_encoded_slices = getattr(module, "_validate_encoded_slices_v1", None)
+        profile_encoded_slices = getattr(module, "_encoded_profile_slices_manifest_v1", None)
         if not isinstance(implementation, str) or not implementation:
             _version_error("native implementation version is invalid", "metadata_invalid")
         if implementation != __version__:
@@ -179,6 +242,8 @@ class NativeBackendFactory:
             _version_error("native encoded selection validator is invalid", "metadata_invalid")
         if validate_encoded_slices is not None and not callable(validate_encoded_slices):
             _version_error("native encoded slice validator is invalid", "metadata_invalid")
+        if profile_encoded_slices is not None and not callable(profile_encoded_slices):
+            _version_error("native encoded profile compiler is invalid", "metadata_invalid")
         try:
             self_test()
         except Exception as error:
@@ -192,6 +257,7 @@ class NativeBackendFactory:
         self._validate_encoded = validate_encoded
         self._validate_encoded_selection = validate_encoded_selection
         self._validate_encoded_slices = validate_encoded_slices
+        self._profile_encoded_slices = profile_encoded_slices
         self._info = BackendInfo(
             name="native",
             package_version=__version__,
@@ -255,6 +321,65 @@ class NativeBackendFactory:
                     "native encoded validator returned an incompatible result",
                     context={"reason": "encoded_validator_result_invalid"},
                 )
+
+    def _validate_encoded_profile_handoff(
+        self,
+        view: OntologyView,
+        profile: OWL2DLReport,
+        unsupported_datatypes: UnsupportedDatatypePolicy,
+    ) -> None:
+        """Compare the full origin-bearing native and scalar profile manifests."""
+
+        profile_compiler = self._profile_encoded_slices
+        if profile_compiler is None:
+            return
+        if not isinstance(profile, OWL2DLReport):
+            raise TypeError("profile must be OWL2DLReport")
+        if not isinstance(unsupported_datatypes, UnsupportedDatatypePolicy):
+            raise TypeError("unsupported_datatypes must be UnsupportedDatatypePolicy")
+        negotiation = negotiate_encoded_input(
+            view,
+            {ENCODED_SCHEMA_NAME: ENCODED_SCHEMA_VERSION},
+        )
+        lease = negotiation.lease
+        if lease is None:
+            return
+        planner = getattr(lease, "root_slices", None)
+        root_slices = planner() if callable(planner) else lease.overlay_root_slices()
+        if root_slices is None:
+            raise BackendMismatchError(
+                "native encoded profile compiler received no root-slice plan",
+                context={"reason": "encoded_profile_slices_missing"},
+            )
+        contexts = _encoded_profile_contexts(view)
+        result = profile_compiler(
+            slices=_encoded_slice_records(root_slices),
+            unsupported_datatypes=unsupported_datatypes.value,
+            ontology_identity_context=contexts.ontology_identity_context,
+            origin_context=contexts.origin_context,
+        )
+        if type(result) is not bytes:
+            raise BackendMismatchError(
+                "native encoded profile compiler returned an incompatible result",
+                context={"reason": "encoded_profile_manifest_invalid"},
+            )
+        try:
+            encoded = result.decode("utf-8", errors="strict")
+            actual = json.loads(
+                encoded,
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
+        except (ValueError, RecursionError) as error:
+            raise BackendMismatchError(
+                "native encoded profile compiler returned malformed JSON",
+                context={"reason": "encoded_profile_manifest_invalid"},
+            ) from error
+        expected = _profile_manifest(profile)
+        if not _json_values_are_exact(actual, expected):
+            raise BackendMismatchError(
+                "native encoded profile manifest differs from scalar validation",
+                context={"reason": "encoded_profile_manifest_mismatch"},
+            )
 
     def create_session(
         self,

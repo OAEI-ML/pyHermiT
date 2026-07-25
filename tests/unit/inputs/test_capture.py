@@ -13,7 +13,12 @@ from pyowl_core import (
     OptionConflictError,
 )
 
-from pyhermit.exceptions import IncompleteImportClosureError, ReasonerInterruptedError
+from pyhermit.config import UnsupportedDatatypePolicy
+from pyhermit.exceptions import (
+    IncompleteImportClosureError,
+    OntologyProfileError,
+    ReasonerInterruptedError,
+)
 from pyhermit.inputs import capture_ontology
 from pyhermit.io import (
     coerce_snapshot as reexported_coerce_snapshot,
@@ -125,3 +130,29 @@ def test_malformed_provider_and_profile_cancellation_are_not_retried() -> None:
     )
     with pytest.raises(ReasonerInterruptedError):
         capture_ontology(snapshot, cancelled=lambda: True)
+
+
+def test_profile_validator_observes_the_complete_report_before_public_rejection() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "SubClassOf(:A DataSomeValuesFrom(:p :q <http://www.w3.org/2001/XMLSchema#string>))",
+        ),
+        options=OPTIONS,
+    )
+    observed: list[tuple[object, object, object]] = []
+
+    def validate(view: object, report: object, policy: object) -> None:
+        observed.append((view, report, policy))
+
+    with pytest.raises(OntologyProfileError) as caught:
+        capture_ontology(snapshot, _profile_validator=validate)
+
+    assert len(observed) == 1
+    assert observed[0][0] is snapshot
+    report = observed[0][1]
+    assert report.conforms is False  # type: ignore[attr-defined]
+    assert observed[0][2] is UnsupportedDatatypePolicy.ERROR
+    assert caught.value.context["rule_ids"] == "OWL2_DATA_RANGE_ARITY"
