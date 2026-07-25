@@ -3160,6 +3160,24 @@ fn encoded_named_class_slices_manifest_v1(
     })
 }
 
+#[pyfunction(name = "_encoded_session_domain_slices_manifest_v1")]
+#[pyo3(signature = (*, slices, logical_fingerprint=None))]
+fn encoded_session_domain_slices_manifest_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+    logical_fingerprint: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        let namespace = logical_fingerprint
+            .map(encoded_logical_fingerprint)
+            .transpose()?;
+        compile_encoded_slice_program_with_namespace(slices, namespace)?
+            .named_classes
+            .canonical_session_domain_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
 #[pyfunction(name = "_encoded_object_role_slices_manifest_v1")]
 #[pyo3(signature = (*, slices))]
 fn encoded_object_role_slices_manifest_v1(
@@ -4756,6 +4774,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(encoded_named_class_manifest_v1, module)?)?;
     module.add_function(wrap_pyfunction!(
         encoded_named_class_slices_manifest_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_session_domain_slices_manifest_v1,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(self_test, module)?)?;

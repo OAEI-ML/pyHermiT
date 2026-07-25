@@ -381,6 +381,11 @@ def _encoded_named_class_slices_manifest_v1(
     slices: tuple[tuple[object, ...], ...],
     logical_fingerprint: memoryview | None = None,
 ) -> bytes: ...
+def _encoded_session_domain_slices_manifest_v1(
+    *,
+    slices: tuple[tuple[object, ...], ...],
+    logical_fingerprint: memoryview | None = None,
+) -> bytes: ...
 def self_test() -> None: ...
 def create_session(
     ir: bytes,

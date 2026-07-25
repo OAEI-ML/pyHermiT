@@ -39,11 +39,13 @@ use super::object_roles::ObjectRolePhase;
 use super::symbols::{RootHandler, SymbolPhase};
 use super::{ByteSource, EncodedResult, EncodedValidationError};
 use crate::input_wire::{
-    DecodedAtom, DecodedClause, DecodedGroundAtom, DecodedPredicate, DecodedProvenanceEntry,
-    DecodedSymbolDomain, DecodedSymbolValue, DecodedTerm, PredicateKind, SymbolKind, TermSort,
+    DecodedAtom, DecodedClause, DecodedEntity, DecodedGroundAtom, DecodedPredicate,
+    DecodedProvenanceEntry, DecodedSymbolDomain, DecodedSymbolValue, DecodedTerm, PredicateKind,
+    SymbolKind, TermSort,
 };
 
 const NAMED_CLASS_PHASE_SCHEMA_VERSION: u16 = 1;
+const SESSION_DOMAIN_SCHEMA_VERSION: u16 = 1;
 const ENTITY_TAG: u16 = 2;
 const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
 const LITERAL_TAG: u16 = 4;
@@ -220,6 +222,7 @@ pub struct IndividualSignatureBinding {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamedClassPhase {
     entity_domain: DecodedSymbolDomain,
+    pub declared_entities: Vec<DecodedEntity>,
     pub class_domain: DecodedSymbolDomain,
     pub class_signature: Vec<ClassSignatureBinding>,
     pub data_range_domain: DecodedSymbolDomain,
@@ -263,6 +266,40 @@ pub struct NamedClassPhase {
 }
 
 impl NamedClassPhase {
+    /// Canonical private handoff for the session-owned entity and individual sets.
+    pub fn canonical_session_domain_manifest_json(&self) -> EncodedResult<Vec<u8>> {
+        self.canonical_session_domain_manifest_json_with_limit(self.manifest_limit)
+    }
+
+    fn canonical_session_domain_manifest_json_with_limit(
+        &self,
+        max_manifest_bytes: usize,
+    ) -> EncodedResult<Vec<u8>> {
+        let declared_entities = self
+            .declared_entities
+            .iter()
+            .map(|entity| SessionDeclaredEntityManifest {
+                id: entity.entity_id,
+                iri: &entity.iri,
+                kind: &entity.kind,
+            })
+            .collect();
+        let encoded = serde_json::to_vec(&SessionDomainManifest {
+            schema_version: SESSION_DOMAIN_SCHEMA_VERSION,
+            declared_entities,
+            named_individuals: &self.named_individuals,
+        })
+        .map_err(|_| {
+            EncodedValidationError::invariant("session-domain manifest serialization failed")
+        })?;
+        if encoded.len() > max_manifest_bytes {
+            return Err(EncodedValidationError::resource(
+                "session-domain manifest exceeds its byte limit",
+            ));
+        }
+        Ok(encoded)
+    }
+
     /// Canonical private manifest used for exact scalar differential checks.
     pub fn canonical_manifest_json(&self) -> EncodedResult<Vec<u8>> {
         let class_expression_symbols = self
@@ -396,6 +433,20 @@ impl NamedClassPhase {
         }
         Ok(encoded)
     }
+}
+
+#[derive(Serialize)]
+struct SessionDomainManifest<'a> {
+    schema_version: u16,
+    declared_entities: Vec<SessionDeclaredEntityManifest<'a>>,
+    named_individuals: &'a [u32],
+}
+
+#[derive(Serialize)]
+struct SessionDeclaredEntityManifest<'a> {
+    id: u32,
+    iri: &'a str,
+    kind: &'a str,
 }
 
 #[derive(Serialize)]
@@ -1671,6 +1722,12 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &normalized_reachability.entity_ids,
         &mut budget,
     )?;
+    let declared_entities = published_declared_entities(
+        &symbols.declared_entities,
+        &source_entity_map,
+        &entity_domain,
+        &mut budget,
+    )?;
     let declared_class_ids = declared_class_ids(symbols, &mut budget)?;
     let (class_domain, class_signature) = class_signature(
         model,
@@ -2783,6 +2840,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         published_individual_signature(&individual_signature, &source_entity_map, &mut budget)?;
     Ok(NamedClassPhase {
         entity_domain,
+        declared_entities,
         class_domain,
         class_signature,
         data_range_domain,
@@ -7754,6 +7812,133 @@ fn source_entity_is_published(
         || normalized_entity_ids
             .binary_search(&value.identifier)
             .is_ok()
+}
+
+fn published_declared_entities(
+    source: &[DecodedEntity],
+    source_entity_map: &[u32],
+    entity_domain: &DecodedSymbolDomain,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedEntity>> {
+    PhaseBudget::count(
+        source.len(),
+        budget.limits.max_entity_symbols,
+        "declared entity count",
+    )?;
+    let mut declared = Vec::new();
+    declared.try_reserve_exact(source.len()).map_err(|_| {
+        EncodedValidationError::resource("declared entity output allocation failed")
+    })?;
+    for entity in source {
+        declared.push(remapped_declared_entity(
+            entity,
+            source_entity_map,
+            entity_domain,
+            budget,
+        )?);
+    }
+    canonicalize_declared_entities(declared, budget)
+}
+
+fn merge_declared_entities(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    entity_maps: &[Vec<u32>],
+    entity_domain: &DecodedSymbolDomain,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedEntity>> {
+    if phases.len() != entity_maps.len() {
+        return Err(EncodedValidationError::invariant(
+            "declared-entity source maps do not align with their slices",
+        ));
+    }
+    let count = phases.iter().try_fold(0_usize, |total, (_, phase)| {
+        total
+            .checked_add(phase.declared_entities.len())
+            .ok_or_else(|| EncodedValidationError::resource("declared entity count overflowed"))
+    })?;
+    PhaseBudget::count(
+        count,
+        budget.limits.max_entity_symbols,
+        "declared entity count",
+    )?;
+    let mut declared = Vec::new();
+    declared.try_reserve_exact(count).map_err(|_| {
+        EncodedValidationError::resource("merged declared entity allocation failed")
+    })?;
+    for (index, (_, phase)) in phases.iter().enumerate() {
+        for entity in &phase.declared_entities {
+            declared.push(remapped_declared_entity(
+                entity,
+                &entity_maps[index],
+                entity_domain,
+                budget,
+            )?);
+        }
+    }
+    canonicalize_declared_entities(declared, budget)
+}
+
+fn remapped_declared_entity(
+    source: &DecodedEntity,
+    entity_map: &[u32],
+    entity_domain: &DecodedSymbolDomain,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<DecodedEntity> {
+    budget.claim_work(1)?;
+    let entity_id = mapped_id(entity_map, source.entity_id, "declared entity")?;
+    let value = entity_domain
+        .values
+        .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+        .ok_or_else(|| EncodedValidationError::invariant("declared entity ID is dangling"))?;
+    let iri = value
+        .display
+        .strip_prefix(&source.kind)
+        .and_then(|suffix| suffix.strip_prefix(':'))
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("declared entity changed kind during remapping")
+        })?;
+    if iri != source.iri {
+        return Err(EncodedValidationError::invariant(
+            "declared entity changed IRI during remapping",
+        ));
+    }
+    budget.claim_owned(
+        size_of::<DecodedEntity>()
+            .checked_add(source.kind.len())
+            .and_then(|value| value.checked_add(source.iri.len()))
+            .ok_or_else(|| {
+                EncodedValidationError::resource("declared entity ownership overflowed")
+            })?,
+    )?;
+    Ok(DecodedEntity {
+        kind: source.kind.clone(),
+        iri: source.iri.clone(),
+        entity_id,
+    })
+}
+
+fn canonicalize_declared_entities(
+    mut declared: Vec<DecodedEntity>,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<DecodedEntity>> {
+    budget.claim_work(sort_work(declared.len()))?;
+    declared.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.iri.cmp(&right.iri))
+    });
+    for pair in declared.windows(2) {
+        if pair[0].kind == pair[1].kind
+            && pair[0].iri == pair[1].iri
+            && pair[0].entity_id != pair[1].entity_id
+        {
+            return Err(EncodedValidationError::invariant(
+                "merged declared entity has conflicting symbol IDs",
+            ));
+        }
+    }
+    declared.dedup_by(|left, right| left.kind == right.kind && left.iri == right.iri);
+    Ok(declared)
 }
 
 fn push_generated_frame(
@@ -23179,6 +23364,8 @@ fn merge_named_class_phases_impl(
         "entity",
         &mut budget,
     )?;
+    let declared_entities =
+        merge_declared_entities(phases, &entity_maps, &entity_domain, &mut budget)?;
     let (class_domain, class_maps) = merge_symbol_domains(
         &class_domains,
         SymbolKind::ClassExpression,
@@ -23514,6 +23701,7 @@ fn merge_named_class_phases_impl(
     )?;
     Ok(NamedClassPhase {
         entity_domain,
+        declared_entities,
         class_domain,
         class_signature,
         data_range_domain,
@@ -25684,6 +25872,26 @@ mod tests {
             fact.arguments == [DecodedTerm::Individual { individual_id: 0 }]
                 && !fact.provenance_ids.is_empty()
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn session_domain_manifest_limit_rolls_back_to_byte_exact_retry() -> EncodedResult<()> {
+        let owned = class_assertion();
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let symbols = compile_symbol_phase(&model, SymbolPhaseLimits::default())?;
+        let phase = compile_named_class_phase(&model, &symbols, NamedClassPhaseLimits::default())?;
+        let expected = phase.canonical_session_domain_manifest_json()?;
+
+        let error = phase
+            .canonical_session_domain_manifest_json_with_limit(1)
+            .err();
+
+        assert!(error.is_some_and(|value| {
+            value.code == "NATIVE_ENCODED_RESOURCE_LIMIT"
+                && value.message.contains("session-domain manifest")
+        }));
+        assert_eq!(phase.canonical_session_domain_manifest_json()?, expected);
         Ok(())
     }
 
