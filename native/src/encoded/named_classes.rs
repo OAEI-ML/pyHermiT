@@ -675,6 +675,35 @@ const OBJECT_QUANTIFIER_PROJECTION_RULES: [ObjectQuantifierProjectionRule; 2] = 
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DataRangeBoundary {
+    Bottom,
+    Top,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DataQuantifierProjectionRule {
+    tag: u16,
+    bottom_reduction: &'static str,
+    absorbing_filler: DataRangeBoundary,
+    discardable_boolean_operand: bool,
+}
+
+const DATA_QUANTIFIER_PROJECTION_RULES: [DataQuantifierProjectionRule; 2] = [
+    DataQuantifierProjectionRule {
+        tag: DATA_SOME_VALUES_FROM_TAG,
+        bottom_reduction: NOTHING_DISPLAY,
+        absorbing_filler: DataRangeBoundary::Bottom,
+        discardable_boolean_operand: true,
+    },
+    DataQuantifierProjectionRule {
+        tag: DATA_ALL_VALUES_FROM_TAG,
+        bottom_reduction: THING_DISPLAY,
+        absorbing_filler: DataRangeBoundary::Top,
+        discardable_boolean_operand: true,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ObjectCardinalityProjectionRule {
     tag: u16,
     zero_reduction: Option<&'static str>,
@@ -9059,8 +9088,9 @@ fn positive_atomic_class_projection<B: ByteSource>(
             );
         }
         DATA_SOME_VALUES_FROM_TAG | DATA_ALL_VALUES_FROM_TAG => {
-            return reducible_data_quantifier_selection(model, symbols, node, depth, budget)
-                .map(|selection| selection.map(AtomicClassProjection::Selected));
+            return reducible_data_quantifier_projection(
+                model, symbols, node, depth, scope, budget,
+            );
         }
         DATA_HAS_VALUE_TAG => {
             return reducible_data_has_value_selection(model, symbols, node, depth, budget)
@@ -9353,13 +9383,22 @@ fn reducible_object_cardinality_projection<B: ByteSource>(
     Ok(None)
 }
 
-fn reducible_data_quantifier_selection<B: ByteSource>(
+fn reducible_data_quantifier_projection<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     node: NodeRef,
     depth: usize,
+    scope: AtomicClassProjectionScope,
     budget: &mut PhaseBudget,
-) -> EncodedResult<Option<AtomicClassSelection>> {
+) -> EncodedResult<Option<AtomicClassProjection>> {
+    let rule = DATA_QUANTIFIER_PROJECTION_RULES
+        .iter()
+        .find(|rule| rule.tag == node.tag())
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "data quantifier constructor lost its projection rule",
+            )
+        })?;
     if node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
             "data quantifier no longer has schema-1 shape",
@@ -9368,31 +9407,32 @@ fn reducible_data_quantifier_selection<B: ByteSource>(
     if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
         return Ok(None);
     }
-    let some = node.tag() == DATA_SOME_VALUES_FROM_TAG;
     if data_property_collection_has_iri(model, symbols, node, 0, BOTTOM_DATA_IRI, budget)? {
-        return builtin_atomic_class_selection(
-            symbols,
-            node.id(),
-            if some { NOTHING_DISPLAY } else { THING_DISPLAY },
-        )
-        .map(Some);
+        return builtin_atomic_class_selection(symbols, node.id(), rule.bottom_reduction)
+            .map(AtomicClassProjection::Selected)
+            .map(Some);
     }
     let filler = node_field(model, node, 1, "data quantifier filler")?;
     let filler_depth = child_expression_depth(depth, "data quantifier filler depth overflowed")?;
-    let Some(selection) =
+    if let Some(selection) =
         atomic_data_range_selection_at_depth(model, symbols, filler, filler_depth, budget)?
-    else {
-        return Ok(None);
-    };
-    if (some && atomic_data_range_selection_is_bottom(model, symbols, selection)?)
-        || (!some && atomic_data_range_selection_is_top(model, symbols, selection)?)
     {
-        return builtin_atomic_class_selection(
-            symbols,
-            node.id(),
-            if some { NOTHING_DISPLAY } else { THING_DISPLAY },
-        )
-        .map(Some);
+        let absorbing = match rule.absorbing_filler {
+            DataRangeBoundary::Bottom => {
+                atomic_data_range_selection_is_bottom(model, symbols, selection)?
+            }
+            DataRangeBoundary::Top => {
+                atomic_data_range_selection_is_top(model, symbols, selection)?
+            }
+        };
+        if absorbing {
+            return builtin_atomic_class_selection(symbols, node.id(), rule.bottom_reduction)
+                .map(AtomicClassProjection::Selected)
+                .map(Some);
+        }
+    }
+    if scope == AtomicClassProjectionScope::BooleanOperand && rule.discardable_boolean_operand {
+        return Ok(Some(AtomicClassProjection::Discardable));
     }
     Ok(None)
 }
