@@ -704,6 +704,21 @@ const DATA_QUANTIFIER_PROJECTION_RULES: [DataQuantifierProjectionRule; 2] = [
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DataValueProjectionRule {
+    tag: u16,
+    field_count: usize,
+    bottom_reduction: &'static str,
+    discardable_boolean_operand: bool,
+}
+
+const DATA_VALUE_PROJECTION_RULES: [DataValueProjectionRule; 1] = [DataValueProjectionRule {
+    tag: DATA_HAS_VALUE_TAG,
+    field_count: 2,
+    bottom_reduction: NOTHING_DISPLAY,
+    discardable_boolean_operand: true,
+}];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ObjectCardinalityProjectionRule {
     tag: u16,
     zero_reduction: Option<&'static str>,
@@ -9093,8 +9108,7 @@ fn positive_atomic_class_projection<B: ByteSource>(
             );
         }
         DATA_HAS_VALUE_TAG => {
-            return reducible_data_has_value_selection(model, symbols, node, depth, budget)
-                .map(|selection| selection.map(AtomicClassProjection::Selected));
+            return reducible_data_value_projection(model, symbols, node, depth, scope, budget);
         }
         DATA_MIN_CARDINALITY_TAG | DATA_MAX_CARDINALITY_TAG | DATA_EXACT_CARDINALITY_TAG => {
             return reducible_data_cardinality_selection(model, symbols, node, depth, budget)
@@ -9437,26 +9451,40 @@ fn reducible_data_quantifier_projection<B: ByteSource>(
     Ok(None)
 }
 
-fn reducible_data_has_value_selection<B: ByteSource>(
+fn reducible_data_value_projection<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     node: NodeRef,
     depth: usize,
+    scope: AtomicClassProjectionScope,
     budget: &mut PhaseBudget,
-) -> EncodedResult<Option<AtomicClassSelection>> {
-    if node.field_count() != 2 {
+) -> EncodedResult<Option<AtomicClassProjection>> {
+    let rule = DATA_VALUE_PROJECTION_RULES
+        .iter()
+        .find(|rule| rule.tag == node.tag())
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "data value-restriction constructor lost its projection rule",
+            )
+        })?;
+    if node.field_count() != rule.field_count {
         return Err(EncodedValidationError::invariant(
             "data has-value restriction no longer has schema-1 shape",
         ));
     }
     let property = node_field(model, node, 0, "data has-value property")?;
     if data_property_has_iri(model, symbols, property, BOTTOM_DATA_IRI)? {
-        return builtin_atomic_class_selection(symbols, node.id(), NOTHING_DISPLAY).map(Some);
+        return builtin_atomic_class_selection(symbols, node.id(), rule.bottom_reduction)
+            .map(AtomicClassProjection::Selected)
+            .map(Some);
     }
     if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
         return Ok(None);
     }
     budget.claim_work(1)?;
+    if scope == AtomicClassProjectionScope::BooleanOperand && rule.discardable_boolean_operand {
+        return Ok(Some(AtomicClassProjection::Discardable));
+    }
     Ok(None)
 }
 
