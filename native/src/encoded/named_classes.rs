@@ -675,6 +675,39 @@ const OBJECT_QUANTIFIER_PROJECTION_RULES: [ObjectQuantifierProjectionRule; 2] = 
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObjectCardinalityProjectionRule {
+    tag: u16,
+    zero_reduction: Option<&'static str>,
+    empty_zero_reduction: &'static str,
+    empty_positive_reduction: &'static str,
+    discardable_boolean_operand: bool,
+}
+
+const OBJECT_CARDINALITY_PROJECTION_RULES: [ObjectCardinalityProjectionRule; 3] = [
+    ObjectCardinalityProjectionRule {
+        tag: OBJECT_MIN_CARDINALITY_TAG,
+        zero_reduction: Some(THING_DISPLAY),
+        empty_zero_reduction: THING_DISPLAY,
+        empty_positive_reduction: NOTHING_DISPLAY,
+        discardable_boolean_operand: true,
+    },
+    ObjectCardinalityProjectionRule {
+        tag: OBJECT_MAX_CARDINALITY_TAG,
+        zero_reduction: None,
+        empty_zero_reduction: THING_DISPLAY,
+        empty_positive_reduction: THING_DISPLAY,
+        discardable_boolean_operand: true,
+    },
+    ObjectCardinalityProjectionRule {
+        tag: OBJECT_EXACT_CARDINALITY_TAG,
+        zero_reduction: None,
+        empty_zero_reduction: THING_DISPLAY,
+        empty_positive_reduction: NOTHING_DISPLAY,
+        discardable_boolean_operand: true,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ObjectValueProjectionRule {
     tag: u16,
     field_count: usize,
@@ -9021,8 +9054,9 @@ fn positive_atomic_class_projection<B: ByteSource>(
             return reducible_object_value_projection(model, symbols, node, depth, scope, budget);
         }
         OBJECT_MIN_CARDINALITY_TAG | OBJECT_MAX_CARDINALITY_TAG | OBJECT_EXACT_CARDINALITY_TAG => {
-            return reducible_object_cardinality_selection(model, symbols, node, depth, budget)
-                .map(|selection| selection.map(AtomicClassProjection::Selected));
+            return reducible_object_cardinality_projection(
+                model, symbols, node, depth, scope, budget,
+            );
         }
         DATA_SOME_VALUES_FROM_TAG | DATA_ALL_VALUES_FROM_TAG => {
             return reducible_data_quantifier_selection(model, symbols, node, depth, budget)
@@ -9248,13 +9282,22 @@ fn reducible_object_value_projection<B: ByteSource>(
     Ok(None)
 }
 
-fn reducible_object_cardinality_selection<B: ByteSource>(
+fn reducible_object_cardinality_projection<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     node: NodeRef,
     depth: usize,
+    scope: AtomicClassProjectionScope,
     budget: &mut PhaseBudget,
-) -> EncodedResult<Option<AtomicClassSelection>> {
+) -> EncodedResult<Option<AtomicClassProjection>> {
+    let rule = OBJECT_CARDINALITY_PROJECTION_RULES
+        .iter()
+        .find(|rule| rule.tag == node.tag())
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "object cardinality constructor lost its projection rule",
+            )
+        })?;
     if node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
             "object cardinality no longer has schema-1 shape",
@@ -9263,40 +9306,51 @@ fn reducible_object_cardinality_selection<B: ByteSource>(
     if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
         return Ok(None);
     }
-    let zero = integer_field_is_zero(model, node, 0, "object cardinality value")?;
-    let property = node_field(model, node, 1, "object cardinality property")?;
-    let bottom_property = object_property_has_iri(model, symbols, property, BOTTOM_OBJECT_IRI)?;
-    if node.tag() == OBJECT_MIN_CARDINALITY_TAG && zero {
-        return builtin_atomic_class_selection(symbols, node.id(), THING_DISPLAY).map(Some);
-    }
-    if bottom_property {
-        let display = if node.tag() == OBJECT_MIN_CARDINALITY_TAG
-            || (node.tag() == OBJECT_EXACT_CARDINALITY_TAG && !zero)
-        {
-            NOTHING_DISPLAY
-        } else {
-            THING_DISPLAY
-        };
-        return builtin_atomic_class_selection(symbols, node.id(), display).map(Some);
-    }
-    let filler = node_field(model, node, 2, "object cardinality filler")?;
-    let filler_depth = child_expression_depth(depth, "object cardinality depth overflowed")?;
-    let Some(selection) =
-        atomic_class_selection_at_depth(model, symbols, filler, filler_depth, budget)?
+    let Some((cardinality, _cardinality_bytes)) =
+        integer_field_u32_bytes(model, node, 0, "object cardinality value", budget)?
     else {
         return Ok(None);
     };
-    if !atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)? {
-        return Ok(None);
+    let zero = cardinality == 0;
+    if zero {
+        if let Some(display) = rule.zero_reduction {
+            return builtin_atomic_class_selection(symbols, node.id(), display)
+                .map(AtomicClassProjection::Selected)
+                .map(Some);
+        }
     }
-    let display = if node.tag() == OBJECT_MAX_CARDINALITY_TAG
-        || (node.tag() == OBJECT_EXACT_CARDINALITY_TAG && zero)
+    let property = node_field(model, node, 1, "object cardinality property")?;
+    let bottom_property = object_property_has_iri(model, symbols, property, BOTTOM_OBJECT_IRI)?;
+    if bottom_property {
+        let display = if zero {
+            rule.empty_zero_reduction
+        } else {
+            rule.empty_positive_reduction
+        };
+        return builtin_atomic_class_selection(symbols, node.id(), display)
+            .map(AtomicClassProjection::Selected)
+            .map(Some);
+    }
+    let filler = node_field(model, node, 2, "object cardinality filler")?;
+    let filler_depth = child_expression_depth(depth, "object cardinality depth overflowed")?;
+    if let Some(selection) =
+        atomic_class_selection_at_depth(model, symbols, filler, filler_depth, budget)?
     {
-        THING_DISPLAY
-    } else {
-        NOTHING_DISPLAY
-    };
-    builtin_atomic_class_selection(symbols, node.id(), display).map(Some)
+        if atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)? {
+            let display = if zero {
+                rule.empty_zero_reduction
+            } else {
+                rule.empty_positive_reduction
+            };
+            return builtin_atomic_class_selection(symbols, node.id(), display)
+                .map(AtomicClassProjection::Selected)
+                .map(Some);
+        }
+    }
+    if scope == AtomicClassProjectionScope::BooleanOperand && rule.discardable_boolean_operand {
+        return Ok(Some(AtomicClassProjection::Discardable));
+    }
+    Ok(None)
 }
 
 fn reducible_data_quantifier_selection<B: ByteSource>(
