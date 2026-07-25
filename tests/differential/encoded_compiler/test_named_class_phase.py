@@ -6964,6 +6964,98 @@ def test_absorbing_class_booleans_discard_data_values_in_scalar_contexts() -> No
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+@pytest.mark.parametrize(
+    ("constructor", "label"),
+    (
+        ("DataMinCardinality", "minimum"),
+        ("DataMaxCardinality", "maximum"),
+        ("DataExactCardinality", "exact"),
+    ),
+)
+def test_absorbing_class_booleans_discard_data_cardinalities_in_scalar_contexts(
+    constructor: str,
+    label: str,
+) -> None:
+    direct = f"{constructor}(2 :discarded xsd:string)"
+    complemented = f"ObjectComplementOf({direct})"
+    expressions = (
+        f"ObjectComplementOf(ObjectUnionOf(owl:Thing {direct}))",
+        "ObjectComplementOf(ObjectUnionOf("
+        f":A :B owl:Thing {complemented}))",
+        "ObjectComplementOf(ObjectUnionOf("
+        f"owl:Thing ObjectIntersectionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing {direct}))",
+        "ObjectComplementOf(ObjectIntersectionOf("
+        f":A :B owl:Nothing {complemented}))",
+        "ObjectComplementOf(ObjectIntersectionOf("
+        f"owl:Nothing ObjectUnionOf(:A {direct})))",
+    )
+    contexts = (
+        "SubClassOf({} :Z)",
+        "SubClassOf(:Z {})",
+        "EquivalentClasses(:Z {})",
+        "DisjointClasses(:Z {})",
+        "ClassAssertion({} :i)",
+        "ObjectPropertyDomain(:p {})",
+        "ObjectPropertyRange(:p {})",
+        "DataPropertyDomain(:d {})",
+        "HasKey({} (:p) (:d))",
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:Z))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:discarded))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:i))",
+            *(
+                context.format(expression)
+                for expression in expressions
+                for context in contexts
+            ),
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _native_manifest(snapshot)
+
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=54,
+        include_object_constraints=True,
+        include_generated_data_quantifier_definitions=True,
+        include_generated_data_cardinality_definitions=True,
+        include_at_least_data_predicates=True,
+        include_data_domains=True,
+        include_keys=True,
+    ), label
+    assert not any(
+        str(value["display"]).startswith(
+            (
+                "DataMinCardinality:",
+                "DataMaxCardinality:",
+                "DataSomeValuesFrom:",
+                "DataAllValuesFrom:",
+            )
+        )
+        for value in cast(
+            list[dict[str, object]], manifest["class_expression_symbols"]
+        )
+    )
+    assert all(
+        predicate["kind"] != PredicateKind.AT_LEAST_DATA.value
+        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    )
+    assert [
+        value["display"]
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
+    assert manifest["deferred_roots"] == 0
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
     string_datatype = "<http://www.w3.org/2001/XMLSchema#string>"
     snapshot = pyowl_core.load_snapshot(

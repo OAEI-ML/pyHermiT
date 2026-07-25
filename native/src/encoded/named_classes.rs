@@ -719,31 +719,65 @@ const DATA_VALUE_PROJECTION_RULES: [DataValueProjectionRule; 1] = [DataValueProj
 }];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ObjectCardinalityProjectionRule {
+enum CardinalityProjectionDomain {
+    Object,
+    Data,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CardinalityProjectionRule {
     tag: u16,
+    domain: CardinalityProjectionDomain,
     zero_reduction: Option<&'static str>,
     empty_zero_reduction: &'static str,
     empty_positive_reduction: &'static str,
     discardable_boolean_operand: bool,
 }
 
-const OBJECT_CARDINALITY_PROJECTION_RULES: [ObjectCardinalityProjectionRule; 3] = [
-    ObjectCardinalityProjectionRule {
+const CARDINALITY_PROJECTION_RULES: [CardinalityProjectionRule; 6] = [
+    CardinalityProjectionRule {
         tag: OBJECT_MIN_CARDINALITY_TAG,
+        domain: CardinalityProjectionDomain::Object,
         zero_reduction: Some(THING_DISPLAY),
         empty_zero_reduction: THING_DISPLAY,
         empty_positive_reduction: NOTHING_DISPLAY,
         discardable_boolean_operand: true,
     },
-    ObjectCardinalityProjectionRule {
+    CardinalityProjectionRule {
         tag: OBJECT_MAX_CARDINALITY_TAG,
+        domain: CardinalityProjectionDomain::Object,
         zero_reduction: None,
         empty_zero_reduction: THING_DISPLAY,
         empty_positive_reduction: THING_DISPLAY,
         discardable_boolean_operand: true,
     },
-    ObjectCardinalityProjectionRule {
+    CardinalityProjectionRule {
         tag: OBJECT_EXACT_CARDINALITY_TAG,
+        domain: CardinalityProjectionDomain::Object,
+        zero_reduction: None,
+        empty_zero_reduction: THING_DISPLAY,
+        empty_positive_reduction: NOTHING_DISPLAY,
+        discardable_boolean_operand: true,
+    },
+    CardinalityProjectionRule {
+        tag: DATA_MIN_CARDINALITY_TAG,
+        domain: CardinalityProjectionDomain::Data,
+        zero_reduction: Some(THING_DISPLAY),
+        empty_zero_reduction: THING_DISPLAY,
+        empty_positive_reduction: NOTHING_DISPLAY,
+        discardable_boolean_operand: true,
+    },
+    CardinalityProjectionRule {
+        tag: DATA_MAX_CARDINALITY_TAG,
+        domain: CardinalityProjectionDomain::Data,
+        zero_reduction: None,
+        empty_zero_reduction: THING_DISPLAY,
+        empty_positive_reduction: THING_DISPLAY,
+        discardable_boolean_operand: true,
+    },
+    CardinalityProjectionRule {
+        tag: DATA_EXACT_CARDINALITY_TAG,
+        domain: CardinalityProjectionDomain::Data,
         zero_reduction: None,
         empty_zero_reduction: THING_DISPLAY,
         empty_positive_reduction: NOTHING_DISPLAY,
@@ -9097,10 +9131,13 @@ fn positive_atomic_class_projection<B: ByteSource>(
         OBJECT_HAS_VALUE_TAG | OBJECT_HAS_SELF_TAG => {
             return reducible_object_value_projection(model, symbols, node, depth, scope, budget);
         }
-        OBJECT_MIN_CARDINALITY_TAG | OBJECT_MAX_CARDINALITY_TAG | OBJECT_EXACT_CARDINALITY_TAG => {
-            return reducible_object_cardinality_projection(
-                model, symbols, node, depth, scope, budget,
-            );
+        OBJECT_MIN_CARDINALITY_TAG
+        | OBJECT_MAX_CARDINALITY_TAG
+        | OBJECT_EXACT_CARDINALITY_TAG
+        | DATA_MIN_CARDINALITY_TAG
+        | DATA_MAX_CARDINALITY_TAG
+        | DATA_EXACT_CARDINALITY_TAG => {
+            return reducible_cardinality_projection(model, symbols, node, depth, scope, budget);
         }
         DATA_SOME_VALUES_FROM_TAG | DATA_ALL_VALUES_FROM_TAG => {
             return reducible_data_quantifier_projection(
@@ -9109,10 +9146,6 @@ fn positive_atomic_class_projection<B: ByteSource>(
         }
         DATA_HAS_VALUE_TAG => {
             return reducible_data_value_projection(model, symbols, node, depth, scope, budget);
-        }
-        DATA_MIN_CARDINALITY_TAG | DATA_MAX_CARDINALITY_TAG | DATA_EXACT_CARDINALITY_TAG => {
-            return reducible_data_cardinality_selection(model, symbols, node, depth, budget)
-                .map(|selection| selection.map(AtomicClassProjection::Selected));
         }
         _ => {}
     }
@@ -9326,7 +9359,7 @@ fn reducible_object_value_projection<B: ByteSource>(
     Ok(None)
 }
 
-fn reducible_object_cardinality_projection<B: ByteSource>(
+fn reducible_cardinality_projection<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
     node: NodeRef,
@@ -9334,24 +9367,22 @@ fn reducible_object_cardinality_projection<B: ByteSource>(
     scope: AtomicClassProjectionScope,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<AtomicClassProjection>> {
-    let rule = OBJECT_CARDINALITY_PROJECTION_RULES
+    let rule = CARDINALITY_PROJECTION_RULES
         .iter()
         .find(|rule| rule.tag == node.tag())
         .ok_or_else(|| {
-            EncodedValidationError::invariant(
-                "object cardinality constructor lost its projection rule",
-            )
+            EncodedValidationError::invariant("cardinality constructor lost its projection rule")
         })?;
     if node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "object cardinality no longer has schema-1 shape",
+            "cardinality restriction no longer has schema-1 shape",
         ));
     }
     if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
         return Ok(None);
     }
     let Some((cardinality, _cardinality_bytes)) =
-        integer_field_u32_bytes(model, node, 0, "object cardinality value", budget)?
+        integer_field_u32_bytes(model, node, 0, "cardinality value", budget)?
     else {
         return Ok(None);
     };
@@ -9363,8 +9394,15 @@ fn reducible_object_cardinality_projection<B: ByteSource>(
                 .map(Some);
         }
     }
-    let property = node_field(model, node, 1, "object cardinality property")?;
-    let bottom_property = object_property_has_iri(model, symbols, property, BOTTOM_OBJECT_IRI)?;
+    let property = node_field(model, node, 1, "cardinality property")?;
+    let bottom_property = match rule.domain {
+        CardinalityProjectionDomain::Object => {
+            object_property_has_iri(model, symbols, property, BOTTOM_OBJECT_IRI)?
+        }
+        CardinalityProjectionDomain::Data => {
+            data_property_has_iri(model, symbols, property, BOTTOM_DATA_IRI)?
+        }
+    };
     if bottom_property {
         let display = if zero {
             rule.empty_zero_reduction
@@ -9375,21 +9413,37 @@ fn reducible_object_cardinality_projection<B: ByteSource>(
             .map(AtomicClassProjection::Selected)
             .map(Some);
     }
-    let filler = node_field(model, node, 2, "object cardinality filler")?;
-    let filler_depth = child_expression_depth(depth, "object cardinality depth overflowed")?;
-    if let Some(selection) =
-        atomic_class_selection_at_depth(model, symbols, filler, filler_depth, budget)?
-    {
-        if atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)? {
-            let display = if zero {
-                rule.empty_zero_reduction
+    let filler = node_field(model, node, 2, "cardinality filler")?;
+    let filler_depth = child_expression_depth(depth, "cardinality depth overflowed")?;
+    let empty_filler = match rule.domain {
+        CardinalityProjectionDomain::Object => {
+            let selection =
+                atomic_class_selection_at_depth(model, symbols, filler, filler_depth, budget)?;
+            if let Some(selection) = selection {
+                atomic_class_selection_has_display(symbols, selection, NOTHING_DISPLAY)?
             } else {
-                rule.empty_positive_reduction
-            };
-            return builtin_atomic_class_selection(symbols, node.id(), display)
-                .map(AtomicClassProjection::Selected)
-                .map(Some);
+                false
+            }
         }
+        CardinalityProjectionDomain::Data => {
+            let selection =
+                atomic_data_range_selection_at_depth(model, symbols, filler, filler_depth, budget)?;
+            if let Some(selection) = selection {
+                atomic_data_range_selection_is_bottom(model, symbols, selection)?
+            } else {
+                false
+            }
+        }
+    };
+    if empty_filler {
+        let display = if zero {
+            rule.empty_zero_reduction
+        } else {
+            rule.empty_positive_reduction
+        };
+        return builtin_atomic_class_selection(symbols, node.id(), display)
+            .map(AtomicClassProjection::Selected)
+            .map(Some);
     }
     if scope == AtomicClassProjectionScope::BooleanOperand && rule.discardable_boolean_operand {
         return Ok(Some(AtomicClassProjection::Discardable));
@@ -9486,57 +9540,6 @@ fn reducible_data_value_projection<B: ByteSource>(
         return Ok(Some(AtomicClassProjection::Discardable));
     }
     Ok(None)
-}
-
-fn reducible_data_cardinality_selection<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    symbols: &SymbolPhase,
-    node: NodeRef,
-    depth: usize,
-    budget: &mut PhaseBudget,
-) -> EncodedResult<Option<AtomicClassSelection>> {
-    if node.field_count() != 3 {
-        return Err(EncodedValidationError::invariant(
-            "data cardinality no longer has schema-1 shape",
-        ));
-    }
-    if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
-        return Ok(None);
-    }
-    let zero = integer_field_is_zero(model, node, 0, "data cardinality value")?;
-    let property = node_field(model, node, 1, "data cardinality property")?;
-    let bottom_property = data_property_has_iri(model, symbols, property, BOTTOM_DATA_IRI)?;
-    if node.tag() == DATA_MIN_CARDINALITY_TAG && zero {
-        return builtin_atomic_class_selection(symbols, node.id(), THING_DISPLAY).map(Some);
-    }
-    if bottom_property {
-        let display = if node.tag() == DATA_MIN_CARDINALITY_TAG
-            || (node.tag() == DATA_EXACT_CARDINALITY_TAG && !zero)
-        {
-            NOTHING_DISPLAY
-        } else {
-            THING_DISPLAY
-        };
-        return builtin_atomic_class_selection(symbols, node.id(), display).map(Some);
-    }
-    let filler = node_field(model, node, 2, "data cardinality filler")?;
-    let filler_depth = child_expression_depth(depth, "data cardinality depth overflowed")?;
-    let Some(selection) =
-        atomic_data_range_selection_at_depth(model, symbols, filler, filler_depth, budget)?
-    else {
-        return Ok(None);
-    };
-    if !atomic_data_range_selection_is_bottom(model, symbols, selection)? {
-        return Ok(None);
-    }
-    let display = if node.tag() == DATA_MAX_CARDINALITY_TAG
-        || (node.tag() == DATA_EXACT_CARDINALITY_TAG && zero)
-    {
-        THING_DISPLAY
-    } else {
-        NOTHING_DISPLAY
-    };
-    builtin_atomic_class_selection(symbols, node.id(), display).map(Some)
 }
 
 fn reduction_inputs_are_retained<B: ByteSource>(
@@ -9794,31 +9797,6 @@ fn data_property_collection_has_iri<B: ByteSource>(
     Ok(false)
 }
 
-fn integer_field_is_zero<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    node: NodeRef,
-    offset: usize,
-    name: &'static str,
-) -> EncodedResult<bool> {
-    let field_index = node
-        .fields()
-        .start
-        .checked_add(offset)
-        .ok_or_else(|| EncodedValidationError::invariant(format!("{name} index overflowed")))?;
-    let component = required_component(model.field(field_index)?, name)?;
-    let ComponentValue::Scalar(value) = model.resolve(component)? else {
-        return Err(EncodedValidationError::invariant(format!(
-            "{name} is not an integer scalar"
-        )));
-    };
-    if value.kind() != ComponentKind::Integer {
-        return Err(EncodedValidationError::invariant(format!(
-            "{name} changed component kind"
-        )));
-    }
-    Ok(value.len() == 1 && value.byte(0) == Some(0))
-}
-
 fn integer_field_u32_bytes<B: ByteSource>(
     model: &ValidatedModel<B>,
     node: NodeRef,
@@ -9845,7 +9823,7 @@ fn integer_field_u32_bytes<B: ByteSource>(
     budget.claim_work(value.len())?;
     if value.is_empty() {
         return Err(EncodedValidationError::invariant(
-            "object cardinality scalar is empty",
+            "cardinality scalar is empty",
         ));
     }
     if value.len() > size_of::<u32>() {
@@ -9854,14 +9832,12 @@ fn integer_field_u32_bytes<B: ByteSource>(
     let mut cardinality = 0_u32;
     for index in 0..value.len() {
         let byte = value.byte(index).ok_or_else(|| {
-            EncodedValidationError::invariant("object cardinality scalar became truncated")
+            EncodedValidationError::invariant("cardinality scalar became truncated")
         })?;
         let shift = u32::try_from(index)
             .ok()
             .and_then(|value| value.checked_mul(8))
-            .ok_or_else(|| {
-                EncodedValidationError::resource("object cardinality shift overflowed")
-            })?;
+            .ok_or_else(|| EncodedValidationError::resource("cardinality shift overflowed"))?;
         cardinality |= u32::from(byte) << shift;
     }
     Ok(Some((
@@ -9876,14 +9852,13 @@ fn canonical_u32_integer_bytes(
 ) -> EncodedResult<Vec<u8>> {
     let mut remaining = cardinality;
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(5).map_err(|_| {
-        EncodedValidationError::resource("object cardinality scalar allocation failed")
-    })?;
+    bytes
+        .try_reserve_exact(5)
+        .map_err(|_| EncodedValidationError::resource("cardinality scalar allocation failed"))?;
     loop {
         budget.claim_work(1)?;
-        let chunk = u8::try_from(remaining & 0x7f).map_err(|_| {
-            EncodedValidationError::invariant("object cardinality chunk exceeds u8")
-        })?;
+        let chunk = u8::try_from(remaining & 0x7f)
+            .map_err(|_| EncodedValidationError::invariant("cardinality chunk exceeds u8"))?;
         remaining >>= 7;
         bytes.push(chunk | if remaining == 0 { 0 } else { 0x80 });
         if remaining == 0 {
