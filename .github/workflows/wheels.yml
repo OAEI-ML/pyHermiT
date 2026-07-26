@@ -451,34 +451,18 @@ jobs:
             python -m tools.packaging_probe.check_artifact --compare artifacts/*-py3-none-any.whl "$wheel"
           done
 
-      - name: Verify resolver preference and create immutable manifest
+      - name: Verify resolver preference and create immutable release bundle
         run: |
           python tests/packaging/check_index_preference.py --index artifacts
-          python - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          artifacts = Path("artifacts")
-          entries = []
-          for path in sorted((*artifacts.glob("*.whl"), *artifacts.glob("*.tar.gz"))):
-              entries.append({"file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
-          manifest = {
-              "schema": 1,
-              "source_revision": os.environ["GITHUB_SHA"],
-              "source_date_epoch": int(os.environ.get("SOURCE_DATE_EPOCH", "946684800")),
-              "artifacts": entries,
-          }
-          (artifacts / "release-manifest.json").write_text(
-              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          PY
           python -m tools.packaging_probe.create_sbom \
             --namespace "https://github.com/OAEI-ML/pyHermiT/sbom/${GITHUB_SHA}" \
             --output artifacts/release-sbom.spdx.json
-          cd artifacts
-          sha256sum *.whl *.tar.gz release-manifest.json release-sbom.spdx.json > SHA256SUMS
+          python -m tools.packaging_probe.release_manifest \
+            --bundle artifacts --source-revision "${GITHUB_SHA}" \
+            --source-date-epoch 946684800
+          python -m tools.packaging_probe.release_manifest \
+            --bundle artifacts --source-revision "${GITHUB_SHA}" \
+            --source-date-epoch 946684800 --verify
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

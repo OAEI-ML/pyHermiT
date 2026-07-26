@@ -30,11 +30,10 @@ jobs:
           path: artifacts
 
       - name: Verify the staged release manifest and every artifact again
-        run: |
-          cd artifacts
-          sha256sum --check SHA256SUMS
-          cd ..
-          python -m tools.packaging_probe.check_artifact artifacts/*.tar.gz artifacts/*.whl
+        run: >-
+          python -m tools.packaging_probe.release_manifest
+          --bundle artifacts --source-revision "${GITHUB_SHA}"
+          --source-date-epoch 946684800 --verify
 
       # Deliberately no package-index upload permission or action. Publication remains
       # unavailable until LIC-001 evidence is complete and owner-reviewed.

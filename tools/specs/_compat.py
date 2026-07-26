@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from importlib import import_module
+from io import BytesIO
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol, cast
 
@@ -27,7 +28,13 @@ def repository_root() -> Path:
 def load_toml(path: Path) -> dict[str, Any]:
     """Load one UTF-8 TOML document with the Python 3.10 compatibility dependency."""
 
-    with path.open("rb") as stream:
+    return parse_toml(path.read_bytes())
+
+
+def parse_toml(payload: bytes) -> dict[str, Any]:
+    """Load one TOML document from already captured bytes."""
+
+    with BytesIO(payload) as stream:
         return _toml.load(stream)
 
 

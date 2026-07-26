@@ -14,3 +14,11 @@ directories, makes Cargo/Rust unavailable, and verifies:
   simulated unsupported runtime selects the universal wheel.
 
 The dummy crate contains no reasoner behavior and never enters a runtime artifact.
+
+`python -m tools.packaging_probe.release_manifest` creates the schema-2 release manifest
+and `SHA256SUMS` only for the exact ten-distribution matrix plus the audited SPDX SBOM.
+It binds regular-file bytes, the clean Git revision/tree, release recipes, commit-pinned
+actions, pinned build tools, and the Rust production-license inventory. Re-run it with
+`--verify` to reject substitutions or unbound members. This local manifest inventories
+the staged candidate; the release workflow's later GitHub attestation establishes hosted
+build-run provenance.

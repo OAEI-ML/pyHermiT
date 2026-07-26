@@ -95,7 +95,45 @@ manylinux-x86_64-image = "manylinux2014"
 manylinux-aarch64-image = "manylinux2014"
 musllinux-x86_64-image = "musllinux_1_2"
 musllinux-aarch64-image = "musllinux_1_2"
-before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 --profile minimal"
+before-all = """
+set -eu
+rustup_version=1.28.2
+rust_toolchain=1.97.1
+rustup_libc=gnu
+if ldd --version 2>&1 | grep -qi musl; then
+  rustup_libc=musl
+fi
+case "$(uname -m)-$rustup_libc" in
+  x86_64-gnu)
+    rustup_host=x86_64-unknown-linux-gnu
+    rustup_sha256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+    ;;
+  aarch64-gnu)
+    rustup_host=aarch64-unknown-linux-gnu
+    rustup_sha256=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c
+    ;;
+  x86_64-musl)
+    rustup_host=x86_64-unknown-linux-musl
+    rustup_sha256=e6599a1c7be58a2d8eaca66a80e0dc006d87bbcf780a58b7343d6e14c1605cb2
+    ;;
+  aarch64-musl)
+    rustup_host=aarch64-unknown-linux-musl
+    rustup_sha256=a97c8f56d7462908695348dd8c71ea6740c138ce303715793a690503a94fc9a9
+    ;;
+  *)
+    echo "unsupported rustup host: $(uname -m)-$rustup_libc" >&2
+    exit 1
+    ;;
+esac
+rustup_directory="$(mktemp -d)"
+rustup_installer="$rustup_directory/rustup-init"
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+  --output "$rustup_installer" \
+  "https://static.rust-lang.org/rustup/archive/$rustup_version/$rustup_host/rustup-init"
+printf '%s  %s\n' "$rustup_sha256" "$rustup_installer" | sha256sum -c -
+chmod 0755 "$rustup_installer"
+"$rustup_installer" -y --default-toolchain "$rust_toolchain" --profile minimal --no-modify-path
+"""
 environment = { PYHERMIT_BUILD_NATIVE = "1", CARGO_TERM_COLOR = "always", PATH = "$HOME/.cargo/bin:$PATH", SOURCE_DATE_EPOCH = "946684800" }
 
 [tool.cibuildwheel.macos]
