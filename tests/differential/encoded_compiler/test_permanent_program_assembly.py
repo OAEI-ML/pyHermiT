@@ -13,7 +13,16 @@ from typing import Any, cast
 import pyowl_core
 import pyowl_core.model as owl
 import pytest
+from pyowl_core import (
+    DetectionBasis,
+    DigestKind,
+    DocumentFormat,
+    DocumentProvenance,
+    OntologyDocument,
+    OntologyID,
+)
 from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.extensions import swrl
 
 import pyhermit._native as native
 import pyhermit.facade as facade_module
@@ -279,6 +288,35 @@ def _direct_snapshot() -> pyowl_core.OntologyView:
         ),
         options=OPTIONS,
     )
+
+
+def _extension_snapshot() -> pyowl_core.OntologyView:
+    class_a = owl.Class(owl.IRI("urn:test:permanent#A"))
+    variable = swrl.Variable(owl.IRI("urn:test:permanent#x"))
+    rule = swrl.SWRLRule(
+        owl.CanonicalSet((swrl.ClassAtom(class_a, variable),)),
+        owl.CanonicalSet((swrl.ClassAtom(class_a, variable),)),
+    )
+    provenance = DocumentProvenance(
+        hashlib.sha256(b"permanent-extension").digest(),
+        DigestKind.EXACT_BYTES,
+        0,
+        0,
+        None,
+        None,
+        DocumentFormat.FUNCTIONAL,
+        DetectionBasis.EXPLICIT,
+    )
+    document = OntologyDocument(
+        OntologyID(owl.IRI("urn:test:permanent:extension")),
+        None,
+        (),
+        owl.CanonicalSet(),
+        owl.CanonicalSet((owl.Declaration(class_a),)),
+        owl.CanonicalSet((rule,)),
+        provenance,
+    )
+    return pyowl_core.load_snapshot(document, options=OPTIONS)
 
 
 def _object_query_snapshot() -> pyowl_core.OntologyView:
@@ -1337,6 +1375,118 @@ def test_nested_datatype_restrictions_have_exact_fail_closed_runtime_parity() ->
         scalar.close()
 
 
+def test_custom_datatype_definition_graphs_have_program_and_runtime_parity() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:alias))",
+            "Declaration(Datatype(:bounded))",
+            "Declaration(Datatype(:topish))",
+            "Declaration(DataProperty(:d))",
+            "DatatypeDefinition(:bounded DataUnionOf("
+            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#integer> "
+            "<http://www.w3.org/2001/XMLSchema#minInclusive> "
+            '"0"^^<http://www.w3.org/2001/XMLSchema#integer>) '
+            'DataOneOf("alpha" '
+            '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>) '
+            "DataComplementOf(<http://www.w3.org/2001/XMLSchema#dateTime>)))",
+            "DatatypeDefinition(:alias :bounded)",
+            "DatatypeDefinition(:topish DataUnionOf("
+            "<http://www.w3.org/2000/01/rdf-schema#Literal> "
+            "<http://www.w3.org/2001/XMLSchema#string>))",
+            "DataPropertyRange(:d :alias)",
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    manifest = _manifest(snapshot, reference=compiled)
+    datatype_model = cast(
+        dict[str, object],
+        cast(dict[str, object], manifest["program"])["datatype_model"],
+    )
+    assert len(cast(list[object], datatype_model["datatype_definitions"])) == 3
+    semantic_model = cast(
+        dict[str, object],
+        json.loads(cast(str, datatype_model["semantic_payload_json"])),
+    )
+    definitions = cast(
+        list[dict[str, object]],
+        semantic_model["definitions"],
+    )
+    assert [definition["datatype_iri"] for definition in definitions] == [
+        "urn:test:permanent#alias",
+        "urn:test:permanent#bounded",
+        "urn:test:permanent#topish",
+    ]
+    assert {
+        cast(dict[str, object], definition["data_range"])["kind"]
+        for definition in definitions
+    } == {"datatype", "union"}
+
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.classify_data_properties() == scalar.classify_data_properties()
+    finally:
+        encoded.close()
+        scalar.close()
+
+
+def test_composite_custom_datatype_definitions_are_canonical_across_slice_order() -> None:
+    left = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:bounded))",
+            "Declaration(DataProperty(:d))",
+            "DatatypeDefinition(:bounded DataUnionOf("
+            "<http://www.w3.org/2001/XMLSchema#int> "
+            "<http://www.w3.org/2001/XMLSchema#string>))",
+            "DataPropertyRange(:d :bounded)",
+        ),
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:alias))",
+            "Declaration(Datatype(:bounded))",
+            "Declaration(DataProperty(:e))",
+            "DatatypeDefinition(:alias :bounded)",
+            "DataPropertyRange(:e :alias)",
+        ),
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+    records = _composite_records(composite, (left, right))
+    reference = _compiled(composite)
+
+    canonical = _manifest(composite, records=records, reference=reference)
+    reversed_order = _manifest(
+        composite,
+        records=tuple(reversed(records)),
+        reference=reference,
+    )
+
+    assert reversed_order == canonical
+    datatype_model = cast(
+        dict[str, object],
+        cast(dict[str, object], canonical["program"])["datatype_model"],
+    )
+    definitions = cast(
+        list[dict[str, object]],
+        cast(
+            dict[str, object],
+            json.loads(cast(str, datatype_model["semantic_payload_json"])),
+        )["definitions"],
+    )
+    assert [definition["datatype_iri"] for definition in definitions] == [
+        "urn:test:permanent#alias",
+        "urn:test:permanent#bounded",
+    ]
+
+
 def test_ieee_literal_semantics_preserve_identity_ordering_and_runtime_parity() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -1763,21 +1913,11 @@ def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactiona
 
 
 def test_direct_publication_fails_closed_for_unrepresented_semantics() -> None:
-    snapshot = pyowl_core.load_snapshot(
-        functional(
-            "Declaration(Datatype(:bounded))",
-            "Declaration(DataProperty(:p))",
-            "DatatypeDefinition(:bounded DatatypeRestriction("
-            "<http://www.w3.org/2001/XMLSchema#int> "
-            "<http://www.w3.org/2001/XMLSchema#minInclusive> "
-            '"0"^^<http://www.w3.org/2001/XMLSchema#int>))',
-            "DataPropertyRange(:p :bounded)",
-        ),
-        options=OPTIONS,
-    )
+    snapshot = _extension_snapshot()
+    reference = _compiled(_direct_snapshot())
 
-    with pytest.raises(BackendMismatchError, match="datatype semantic phase"):
-        _direct_session(snapshot)
+    with pytest.raises(BackendMismatchError, match="unsupported extension"):
+        _direct_session(snapshot, reference=reference)
 
 
 def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(

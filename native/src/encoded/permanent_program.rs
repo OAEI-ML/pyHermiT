@@ -536,6 +536,7 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
         .map_err(PermanentProgramError::Encoded)?;
     let unknown_datatype_ids =
         freeze_unknown_datatype_ids(&named, &mut budget).map_err(PermanentProgramError::Encoded)?;
+    let datatype_definitions = named.datatype_definition_pairs;
     let declared_entities = named.declared_entities;
     let named_individuals = named.named_individuals;
     let symbol_domains = freeze_symbol_domains(
@@ -612,7 +613,7 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
     .map_err(PermanentProgramError::Encoded)?;
     let datatype_model = DecodedDatatypeModel {
         literal_identities,
-        datatype_definitions: Vec::new(),
+        datatype_definitions,
         unknown_datatype_ids,
         semantic_payload_json,
     };
@@ -725,6 +726,44 @@ fn validate_semantic_coverage(
             "permanent-program source literal semantics are incomplete",
         ));
     }
+    if !named
+        .datatype_definition_pairs
+        .windows(2)
+        .all(|pair| pair[0].0 < pair[1].0)
+    {
+        return Err(EncodedValidationError::invariant(
+            "permanent-program datatype definitions are not canonical",
+        ));
+    }
+    for (datatype_id, data_range_id) in &named.datatype_definition_pairs {
+        let datatype = usize::try_from(*datatype_id)
+            .ok()
+            .and_then(|index| named.data_range_domain.values.get(index))
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "permanent-program defined datatype ID is dangling",
+                )
+            })?;
+        let datatype_iri = datatype
+            .display
+            .strip_prefix("datatype:")
+            .filter(|iri| !crate::datatypes::is_supported_datatype(iri))
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "permanent-program definition subject is not a custom datatype",
+                )
+            })?;
+        if datatype_iri.is_empty()
+            || usize::try_from(*data_range_id)
+                .ok()
+                .and_then(|index| named.data_range_domain.values.get(index))
+                .is_none()
+        {
+            return Err(EncodedValidationError::invariant(
+                "permanent-program datatype defining range is dangling",
+            ));
+        }
+    }
     let Some(_top) = named
         .data_range_domain
         .values
@@ -778,7 +817,23 @@ fn data_range_semantics_are_supported_at(
     };
     let value = &named.data_range_domain.values[index];
     if let Some(iri) = value.display.strip_prefix("datatype:") {
-        return crate::datatypes::is_supported_datatype(iri) || value.generated;
+        if crate::datatypes::is_supported_datatype(iri) {
+            return true;
+        }
+        let Some(defining_range_id) = datatype_definition_range_id(named, value.identifier) else {
+            return true;
+        };
+        let Some(defining_range) = usize::try_from(defining_range_id)
+            .ok()
+            .and_then(|index| named.data_range_domain.values.get(index))
+        else {
+            return false;
+        };
+        return data_range_semantics_are_supported_at(
+            named,
+            &defining_range.key,
+            remaining_depth.saturating_sub(1),
+        );
     }
     if let Some(operand) = data_range_complement_operand_key(key) {
         return operand.len() < key.len()
@@ -854,6 +909,14 @@ fn source_literal_semantics_are_supported(named: &NamedProgramParts, key: &[u8])
     literal_semantic_values(source, &data_value.key).is_some()
 }
 
+fn datatype_definition_range_id(named: &NamedProgramParts, datatype_id: u32) -> Option<u32> {
+    named
+        .datatype_definition_pairs
+        .binary_search_by_key(&datatype_id, |(defined_id, _)| *defined_id)
+        .ok()
+        .map(|index| named.datatype_definition_pairs[index].1)
+}
+
 fn freeze_unknown_datatype_ids(
     named: &NamedProgramParts,
     budget: &mut Budget,
@@ -901,8 +964,23 @@ fn data_range_semantics_are_unknown(
         return true;
     };
     let value = &named.data_range_domain.values[index];
-    if value.display.starts_with("datatype:") {
-        return value.generated;
+    if let Some(iri) = value.display.strip_prefix("datatype:") {
+        if crate::datatypes::is_supported_datatype(iri) {
+            return false;
+        }
+        let Some(defining_range_id) = datatype_definition_range_id(named, value.identifier) else {
+            return true;
+        };
+        return usize::try_from(defining_range_id)
+            .ok()
+            .and_then(|index| named.data_range_domain.values.get(index))
+            .is_none_or(|defining_range| {
+                data_range_semantics_are_unknown(
+                    named,
+                    &defining_range.key,
+                    remaining_depth.saturating_sub(1),
+                )
+            });
     }
     if let Some(operand) = data_range_complement_operand_key(key) {
         return data_range_semantics_are_unknown(named, operand, remaining_depth.saturating_sub(1));
@@ -1055,11 +1133,66 @@ fn freeze_datatype_semantic_payload(
         )?;
         ranges.push(payload);
     }
+    let mut definitions = Vec::new();
+    definitions
+        .try_reserve_exact(named.datatype_definition_pairs.len())
+        .map_err(|_| {
+            EncodedValidationError::resource(
+                "permanent-program datatype definition payload allocation failed",
+            )
+        })?;
+    for (datatype_id, data_range_id) in &named.datatype_definition_pairs {
+        let datatype = named
+            .data_range_domain
+            .values
+            .get(usize::try_from(*datatype_id).map_err(|_| {
+                EncodedValidationError::invariant("defined datatype ID exceeds usize")
+            })?)
+            .ok_or_else(|| EncodedValidationError::invariant("defined datatype ID is dangling"))?;
+        let datatype_iri = datatype.display.strip_prefix("datatype:").ok_or_else(|| {
+            EncodedValidationError::invariant("definition subject is not a datatype")
+        })?;
+        let data_range = named
+            .data_range_domain
+            .values
+            .get(usize::try_from(*data_range_id).map_err(|_| {
+                EncodedValidationError::invariant("datatype defining range ID exceeds usize")
+            })?)
+            .ok_or_else(|| {
+                EncodedValidationError::invariant("datatype defining range ID is dangling")
+            })?;
+        let data_range = data_range_semantic_value(
+            named,
+            &data_range.key,
+            named.data_range_domain.values.len().saturating_add(1),
+            budget,
+        )?;
+        let payload = serde_json::to_string(&serde_json::json!({
+            "data_range": data_range,
+            "datatype_iri": datatype_iri,
+            "record": "datatype_definition_semantic",
+            "schema_version": 1,
+        }))
+        .map_err(|_| {
+            EncodedValidationError::invariant("datatype definition JSON encoding failed")
+        })?;
+        definitions.push((datatype_iri, payload));
+    }
+    budget.claim_work(definitions.len())?;
+    definitions.sort_unstable_by(|left, right| left.0.cmp(right.0));
     let range_bytes = ranges.iter().map(String::len).sum::<usize>();
-    let separator_bytes = ranges.len().saturating_sub(1);
+    let definition_bytes = definitions
+        .iter()
+        .map(|(_, definition)| definition.len())
+        .sum::<usize>();
+    let separator_bytes = ranges
+        .len()
+        .saturating_sub(1)
+        .saturating_add(definitions.len().saturating_sub(1));
     let capacity = "{\"data_ranges\":[],\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}"
         .len()
         .saturating_add(range_bytes)
+        .saturating_add(definition_bytes)
         .saturating_add(separator_bytes);
     let mut payload = String::new();
     payload.try_reserve_exact(capacity).map_err(|_| {
@@ -1074,9 +1207,14 @@ fn freeze_datatype_semantic_payload(
         }
         payload.push_str(&range);
     }
-    payload.push_str(
-        "],\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}",
-    );
+    payload.push_str("],\"definitions\":[");
+    for (index, (_, definition)) in definitions.into_iter().enumerate() {
+        if index != 0 {
+            payload.push(',');
+        }
+        payload.push_str(&definition);
+    }
+    payload.push_str("],\"record\":\"datatype_semantic_model\",\"schema_version\":1}");
     budget.claim_owned(payload.capacity())?;
     Ok(payload)
 }
@@ -1115,15 +1253,12 @@ fn data_range_semantic_value(
         })?;
     let value = &named.data_range_domain.values[index];
     if let Some(iri) = value.display.strip_prefix("datatype:") {
-        if crate::datatypes::is_supported_datatype(iri) {
+        if crate::datatypes::is_supported_datatype(iri)
+            || datatype_definition_range_id(named, value.identifier).is_some()
+        {
             return Ok(named_datatype_semantic_value(iri, false));
         }
-        if value.generated {
-            return Ok(named_datatype_semantic_value(iri, true));
-        }
-        return Err(EncodedValidationError::invariant(
-            "validated datatype payload contains an unsupported named datatype",
-        ));
+        return Ok(named_datatype_semantic_value(iri, true));
     }
     if let Some(operand_key) = data_range_complement_operand_key(key) {
         if operand_key.len() >= key.len() {
@@ -1719,6 +1854,13 @@ fn permanent_input_owned_bytes(
             .source_literal_semantics
             .capacity()
             .checked_mul(size_of::<SourceLiteralSemanticSeed>()),
+    )?;
+    add_bytes(
+        &mut total,
+        named
+            .datatype_definition_pairs
+            .capacity()
+            .checked_mul(size_of::<(u32, u32)>()),
     )?;
     for semantics in &named.source_literal_semantics {
         add_bytes(&mut total, Some(semantics.lexical_form.capacity()))?;

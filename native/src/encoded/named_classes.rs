@@ -281,6 +281,7 @@ pub struct NamedClassPhase {
     normalized_data_ranges: Vec<NormalizedDataRange>,
     normalized_data_boolean_clauses: Vec<NormalizedDataBooleanClause>,
     normalized_datatype_definitions: Vec<NormalizedDatatypeDefinition>,
+    datatype_definition_pairs: Vec<(u32, u32)>,
     normalized_keys: Vec<NormalizedKey>,
     normalized_data_functionalities: Vec<NormalizedDataFunctionality>,
     normalized_facts: Vec<NormalizedFact>,
@@ -311,6 +312,7 @@ pub(crate) struct NamedProgramParts {
     pub data_value_domain: DecodedSymbolDomain,
     pub source_data_identity_ids: Vec<Option<u32>>,
     pub source_literal_semantics: Vec<SourceLiteralSemanticSeed>,
+    pub datatype_definition_pairs: Vec<(u32, u32)>,
     pub declared_entities: Vec<DecodedEntity>,
     pub named_individuals: Vec<u32>,
     pub predicates: Vec<DecodedPredicate>,
@@ -333,6 +335,7 @@ impl NamedClassPhase {
             data_value_domain: self.data_value_domain,
             source_data_identity_ids: self.source_data_identity_ids,
             source_literal_semantics: self.source_literal_semantics,
+            datatype_definition_pairs: self.datatype_definition_pairs,
             declared_entities: self.declared_entities,
             named_individuals: self.named_individuals,
             predicates: self.predicates,
@@ -1242,6 +1245,7 @@ impl NormalizedDataTerm {
 struct DatatypeBooleanDefinition {
     root: NodeId,
     expression: NodeId,
+    expression_key: Vec<u8>,
     expression_symbols: Vec<DataRangeSymbolSeed>,
     intersection: bool,
     operands: DatatypeBooleanOperands,
@@ -2020,6 +2024,14 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         &definitions,
         &data_definitions,
         &datatype_boolean_definitions,
+        &mut budget,
+    )?;
+    let datatype_definition_pairs = source_datatype_definition_pairs(
+        model,
+        symbols,
+        &data_range_domain,
+        &datatype_boolean_definitions,
+        scope_maps,
         &mut budget,
     )?;
     let (individual_domain, individual_signature) = individual_signature(
@@ -3147,6 +3159,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_data_ranges: data_ranges,
         normalized_data_boolean_clauses: data_boolean_clauses,
         normalized_datatype_definitions: datatype_definitions,
+        datatype_definition_pairs,
         normalized_keys: keys,
         normalized_data_functionalities: data_functionalities,
         normalized_facts: facts,
@@ -4207,7 +4220,9 @@ fn datatype_boolean_definitions<B: ByteSource>(
         }
         let candidate =
             flat_data_boolean_expression(model, symbols, expression, scope_maps, budget)?;
+        let expression_key;
         let (expression_symbols, intersection, operands) = if let Some(candidate) = candidate {
+            expression_key = candidate.expression_key;
             (
                 candidate.expression_symbols,
                 candidate.intersection,
@@ -4239,6 +4254,8 @@ fn datatype_boolean_definitions<B: ByteSource>(
                 ));
             }
             let intersection = positive_term.intersection;
+            budget.claim_owned(positive_term.key.len())?;
+            expression_key = positive_term.key.clone();
             let mut pending = Vec::new();
             let (positive, mut expression_symbols) = datatype_boolean_operands(
                 positive_term,
@@ -4290,6 +4307,7 @@ fn datatype_boolean_definitions<B: ByteSource>(
         definitions.push(DatatypeBooleanDefinition {
             root: root.node,
             expression,
+            expression_key,
             expression_symbols,
             intersection,
             operands,
@@ -14414,6 +14432,93 @@ fn named_data_range_id<B: ByteSource>(
     Ok(Some(range_id))
 }
 
+fn source_datatype_definition_pairs<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    data_range_domain: &DecodedSymbolDomain,
+    definitions: &[DatatypeBooleanDefinition],
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<(u32, u32)>> {
+    let mut pairs = Vec::new();
+    for root in &symbols.roots {
+        budget.claim_work(1)?;
+        if root.handler != RootHandler::DatatypeDefinition {
+            continue;
+        }
+        let node = model.node(root.node)?;
+        if node.tag() != DATATYPE_DEFINITION_TAG || node.field_count() != 3 {
+            return Err(EncodedValidationError::invariant(
+                "datatype-definition root no longer has schema-1 shape",
+            ));
+        }
+        let datatype = node_field(model, node, 0, "defined datatype")?;
+        let data_range = node_field(model, node, 1, "datatype defining range")?;
+        let datatype_key = canonical::canonical_node_key(model, datatype, scope_maps, budget)?;
+        let owned_data_range_key;
+        let data_range_key = if let Some(definition) =
+            datatype_boolean_definition_for_root(definitions, root.node)
+        {
+            definition.expression_key.as_slice()
+        } else {
+            let selection = atomic_data_range_selection(model, symbols, data_range, budget)?
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "datatype defining expression has no normalized data-range symbol",
+                    )
+                })?;
+            let base_key =
+                canonical::canonical_node_key(model, selection.base, scope_maps, budget)?;
+            owned_data_range_key = if selection.negative {
+                synthetic_data_complement_key(&base_key, budget)?
+            } else {
+                base_key
+            };
+            owned_data_range_key.as_slice()
+        };
+        budget.claim_work(binary_search_work(data_range_domain.values.len()).saturating_mul(2))?;
+        let datatype_id = data_range_domain
+            .values
+            .binary_search_by(|value| value.key.cmp(&datatype_key))
+            .map_err(|_| {
+                EncodedValidationError::invariant(
+                    "defined datatype is absent from the data-range domain",
+                )
+            })?;
+        let data_range_id = data_range_domain
+            .values
+            .binary_search_by(|value| value.key.as_slice().cmp(data_range_key))
+            .map_err(|_| {
+                EncodedValidationError::invariant(
+                    "datatype defining expression is absent from the data-range domain",
+                )
+            })?;
+        budget.claim_owned(size_of::<(u32, u32)>())?;
+        pairs.try_reserve(1).map_err(|_| {
+            EncodedValidationError::resource("datatype-definition pair allocation failed")
+        })?;
+        pairs.push((
+            u32::try_from(datatype_id)
+                .map_err(|_| EncodedValidationError::resource("defined datatype ID exceeds u32"))?,
+            u32::try_from(data_range_id).map_err(|_| {
+                EncodedValidationError::resource("datatype defining range ID exceeds u32")
+            })?,
+        ));
+    }
+    budget.claim_work(sort_work(pairs.len()))?;
+    pairs.sort_unstable();
+    pairs.dedup();
+    if pairs
+        .windows(2)
+        .any(|pair| pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1)
+    {
+        return Err(EncodedValidationError::invariant(
+            "defined datatype has conflicting defining ranges",
+        ));
+    }
+    Ok(pairs)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn named_datatype_definition<B: ByteSource>(
     model: &ValidatedModel<B>,
@@ -23807,6 +23912,8 @@ fn merge_named_class_phases_impl(
         merged_data_roles,
         &mut budget,
     )?;
+    let datatype_definition_pairs =
+        merge_datatype_definition_pairs(phases, &data_range_maps, &mut budget)?;
     let thing = class_id_by_display(&class_domain, THING_DISPLAY)?;
     let nothing = class_id_by_display(&class_domain, NOTHING_DISPLAY)?;
     let top_data_range = data_range_id_by_display(&data_range_domain, RDFS_LITERAL_DISPLAY)?;
@@ -24054,6 +24161,7 @@ fn merge_named_class_phases_impl(
         normalized_data_ranges: data_ranges,
         normalized_data_boolean_clauses: data_boolean_clauses,
         normalized_datatype_definitions: datatype_definitions,
+        datatype_definition_pairs,
         normalized_keys: keys,
         normalized_data_functionalities: data_functionalities,
         normalized_facts: facts,
@@ -24658,6 +24766,47 @@ fn merge_nominal_bindings(
     {
         return Err(EncodedValidationError::invariant(
             "merged object nominal has conflicting individual members",
+        ));
+    }
+    Ok(merged)
+}
+
+fn merge_datatype_definition_pairs(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    data_range_maps: &[Vec<u32>],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<(u32, u32)>> {
+    if phases.len() != data_range_maps.len() {
+        return Err(EncodedValidationError::invariant(
+            "datatype-definition sources and data-range maps disagree",
+        ));
+    }
+    let mut merged = Vec::new();
+    for (phase_index, (_, phase)) in phases.iter().enumerate() {
+        let mapping = &data_range_maps[phase_index];
+        for (datatype_id, data_range_id) in &phase.datatype_definition_pairs {
+            budget.claim_work(1)?;
+            budget.claim_owned(size_of::<(u32, u32)>())?;
+            merged.try_reserve(1).map_err(|_| {
+                EncodedValidationError::resource(
+                    "merged datatype-definition pair allocation failed",
+                )
+            })?;
+            merged.push((
+                mapped_id(mapping, *datatype_id, "defined datatype")?,
+                mapped_id(mapping, *data_range_id, "datatype defining range")?,
+            ));
+        }
+    }
+    budget.claim_work(sort_work(merged.len()))?;
+    merged.sort_unstable();
+    merged.dedup();
+    if merged
+        .windows(2)
+        .any(|pair| pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1)
+    {
+        return Err(EncodedValidationError::invariant(
+            "merged datatype has conflicting defining ranges",
         ));
     }
     Ok(merged)
