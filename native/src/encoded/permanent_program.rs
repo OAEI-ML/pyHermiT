@@ -302,7 +302,6 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
     } = phases;
     let DataRolePhase {
         data_property_domain,
-        bottom_data_property_id,
         ..
     } = data_roles;
     let ObjectRolePhase {
@@ -322,8 +321,7 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
         role_automata,
     ));
     let named = named_classes.into_program_parts();
-    validate_semantic_coverage(&named, bottom_data_property_id, &role_clauses)
-        .map_err(PermanentProgramError::Encoded)?;
+    validate_semantic_coverage(&named).map_err(PermanentProgramError::Encoded)?;
     let semantic_evidence = named.semantic_evidence;
     let input_owned = permanent_input_owned_bytes(
         &named,
@@ -504,19 +502,10 @@ fn freeze_symbol_domains(
     Ok(values)
 }
 
-fn validate_semantic_coverage(
-    named: &NamedProgramParts,
-    bottom_data_property_id: u32,
-    role_clauses: &RoleClausePhase,
-) -> EncodedResult<()> {
+fn validate_semantic_coverage(named: &NamedProgramParts) -> EncodedResult<()> {
     if named.semantic_evidence.unsupported_extension {
         return Err(EncodedValidationError::protocol(
             "permanent-program source semantics contain an unsupported extension",
-        ));
-    }
-    if named.semantic_evidence.datatypes {
-        return Err(EncodedValidationError::protocol(
-            "permanent-program source semantics require a datatype semantic phase",
         ));
     }
     if !named.source_literal_domain.values.is_empty()
@@ -525,26 +514,7 @@ fn validate_semantic_coverage(
         || named.data_range_domain.values[0].display != RDFS_LITERAL_DISPLAY
     {
         return Err(EncodedValidationError::protocol(
-            "permanent-program datatype semantics are not representable by the current encoded phases",
-        ));
-    }
-    let unsupported_named_datatype = named.predicates.iter().any(|predicate| {
-        matches!(
-            predicate.kind,
-            PredicateKind::DataRange
-                | PredicateKind::NegatedDataRange
-                | PredicateKind::AtLeastData
-                | PredicateKind::NegatedDataRole
-        ) || (predicate.kind == PredicateKind::DataRole
-            && predicate.role_id != Some(bottom_data_property_id))
-    });
-    let unsupported_role_datatype = role_clauses.predicates.iter().any(|predicate| {
-        predicate.kind == PredicateKind::DataRole
-            && predicate.role_id != Some(bottom_data_property_id)
-    });
-    if unsupported_named_datatype || unsupported_role_datatype {
-        return Err(EncodedValidationError::protocol(
-            "permanent-program datatype constraints require an encoded datatype semantic phase",
+            "permanent-program source semantics require a datatype semantic phase for non-default ranges or literals",
         ));
     }
     Ok(())
@@ -1732,6 +1702,15 @@ fn derive_representable_expressivity(
         }
     }
     let non_horn = clauses.iter().any(|clause| clause.head.len() > 1);
+    let datatypes = predicates.iter().any(|predicate| {
+        matches!(
+            predicate.kind,
+            PredicateKind::DataRange | PredicateKind::NegatedDataRange | PredicateKind::AtLeastData
+        ) || (matches!(
+            predicate.kind,
+            PredicateKind::DataRole | PredicateKind::NegatedDataRole
+        ) && predicate.role_id != Some(roles.bottom_data_property_id))
+    });
     let abox = positive_facts
         .iter()
         .chain(negative_facts)
@@ -1763,7 +1742,7 @@ fn derive_representable_expressivity(
     Ok(DecodedExpressivity {
         inverse_roles: source.inverse_roles,
         nominals: source.nominals || nominals,
-        datatypes: false,
+        datatypes,
         unknown_datatypes: false,
         complex_roles: !roles.complex_inclusions.is_empty() || !roles.automata.is_empty(),
         number_restrictions: source.number_restrictions || number_restrictions,

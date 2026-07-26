@@ -708,12 +708,103 @@ def test_conjunction_with_negated_superclass_is_inconsistent_with_scalar_parity(
         scalar.close()
 
 
+@pytest.mark.parametrize(
+    "expression",
+    (
+        "DataSomeValuesFrom(:d <http://www.w3.org/2000/01/rdf-schema#Literal>)",
+        "DataAllValuesFrom(:d <http://www.w3.org/2000/01/rdf-schema#Literal>)",
+        "DataMinCardinality(2 :d <http://www.w3.org/2000/01/rdf-schema#Literal>)",
+        "DataMaxCardinality(2 :d <http://www.w3.org/2000/01/rdf-schema#Literal>)",
+        "DataExactCardinality(2 :d <http://www.w3.org/2000/01/rdf-schema#Literal>)",
+    ),
+    ids=("some", "all", "minimum", "maximum", "exact"),
+)
+def test_default_data_expression_families_have_program_and_reasoning_parity(
+    expression: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:i))",
+            f"SubClassOf({expression} :A)",
+            f"SubClassOf(:B {expression})",
+            f"ClassAssertion({expression} :i)",
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    manifest = _manifest(snapshot, reference=compiled)
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.classify_data_properties() == scalar.classify_data_properties()
+        _assert_dense_program(cast(dict[str, object], manifest["program"]))
+    finally:
+        encoded.close()
+        scalar.close()
+
+
+def test_default_data_property_schema_has_complete_program_parity() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(DataProperty(:f))",
+            "Declaration(DataProperty(:g))",
+            "SubDataPropertyOf(:d :e)",
+            "EquivalentDataProperties(:e :f)",
+            "DisjointDataProperties(:d :g)",
+            "FunctionalDataProperty(:e)",
+            "DataPropertyDomain(:e :A)",
+            "DataPropertyRange(:e <http://www.w3.org/2000/01/rdf-schema#Literal>)",
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    _manifest(snapshot, reference=compiled)
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.classify_data_properties() == scalar.classify_data_properties()
+    finally:
+        encoded.close()
+        scalar.close()
+
+
 def test_source_datatype_semantics_are_not_silently_optimized_away() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:p))",
             "Declaration(NamedIndividual(:i))",
             'DataPropertyAssertion(:p :i "value")',
+        ),
+        options=OPTIONS,
+    )
+
+    with pytest.raises(BackendMismatchError, match="datatype semantic phase"):
+        _manifest(snapshot)
+
+
+def test_nondefault_data_range_semantics_remain_fail_closed() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(DataProperty(:d))",
+            "SubClassOf(:A DataSomeValuesFrom("
+            ":d <http://www.w3.org/2001/XMLSchema#string>))",
         ),
         options=OPTIONS,
     )
