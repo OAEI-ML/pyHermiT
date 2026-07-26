@@ -1991,7 +1991,7 @@ def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactiona
             records=records,
             cancel_at_checkpoint=80,
         )
-    assert captured.value.context["phase"] == "encoded-session-digest"
+    assert captured.value.context["phase"] == "permanent-program-digest"
 
     interrupted = native.CancellationHandle()
     interrupted.interrupt("cancel before encoded lifecycle construction")

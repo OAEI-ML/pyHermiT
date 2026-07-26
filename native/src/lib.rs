@@ -4760,21 +4760,17 @@ fn create_encoded_session_v1(
                 assembled
             };
             if metadata.program_sha256.iter().all(|byte| *byte == 0) {
-                poll_encoded_session_checkpoint(
-                    &cancellation_state,
-                    &mut checkpoint,
-                    cancel_at_checkpoint,
-                    "encoded-session-digest-preflight",
-                )?;
+                let mut poll = |phase: &'static str| {
+                    poll_encoded_session_checkpoint(
+                        &cancellation_state,
+                        &mut checkpoint,
+                        cancel_at_checkpoint,
+                        phase,
+                    )
+                };
                 metadata.program_sha256 = assembled
-                    .semantic_sha256()
-                    .map_err(encoded_validation_error)?;
-                poll_encoded_session_checkpoint(
-                    &cancellation_state,
-                    &mut checkpoint,
-                    cancel_at_checkpoint,
-                    "encoded-session-digest",
-                )?;
+                    .semantic_sha256_controlled(&mut poll)
+                    .map_err(encoded_permanent_error)?;
             }
             let ontology = DecodedOntology {
                 metadata,

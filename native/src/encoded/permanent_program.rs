@@ -40,6 +40,7 @@ use crate::input_wire::{
 };
 
 const PERMANENT_PROGRAM_SCHEMA_VERSION: u16 = 1;
+const SEMANTIC_DIGEST_POLL_BYTES: usize = 8 * 1024;
 const DATA_INTERSECTION_OF_TAG: u64 = 21;
 const DATA_UNION_OF_TAG: u64 = 22;
 const DATA_COMPLEMENT_OF_TAG: u64 = 23;
@@ -323,12 +324,55 @@ pub(crate) struct EncodedPermanentProgram {
     manifest_limit: usize,
 }
 
-struct DigestWriter(Sha256);
+struct DigestWriter<'a, E, P> {
+    digest: Sha256,
+    poll: &'a mut P,
+    bytes_since_poll: usize,
+    control_error: Option<E>,
+}
 
-impl std::io::Write for DigestWriter {
+impl<'a, E, P> DigestWriter<'a, E, P> {
+    fn new(poll: &'a mut P) -> Self {
+        Self {
+            digest: Sha256::new(),
+            poll,
+            bytes_since_poll: 0,
+            control_error: None,
+        }
+    }
+}
+
+impl<E, P> std::io::Write for DigestWriter<'_, E, P>
+where
+    P: FnMut(&'static str) -> Result<(), E>,
+{
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.update(bytes);
-        Ok(bytes.len())
+        if self.control_error.is_some() {
+            return Err(std::io::Error::other(
+                "permanent-program digest control already failed",
+            ));
+        }
+        let length = bytes.len();
+        let mut remaining = bytes;
+        while !remaining.is_empty() {
+            let until_poll = SEMANTIC_DIGEST_POLL_BYTES - self.bytes_since_poll;
+            let consumed = remaining.len().min(until_poll);
+            self.digest.update(&remaining[..consumed]);
+            self.bytes_since_poll += consumed;
+            remaining = &remaining[consumed..];
+            if self.bytes_since_poll == SEMANTIC_DIGEST_POLL_BYTES {
+                self.bytes_since_poll = 0;
+                if let Err(error) = (self.poll)("permanent-program-digest") {
+                    self.control_error = Some(error);
+                    // `write_all` retries `Interrupted`; retain the typed control error
+                    // separately and use a terminal I/O sentinel to unwind serialization.
+                    return Err(std::io::Error::other(
+                        "permanent-program digest was interrupted",
+                    ));
+                }
+            }
+        }
+        Ok(length)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -338,11 +382,32 @@ impl std::io::Write for DigestWriter {
 
 impl EncodedPermanentProgram {
     pub(crate) fn semantic_sha256(&self) -> EncodedResult<[u8; 32]> {
-        let mut writer = DigestWriter(Sha256::new());
-        serde_json::to_writer(&mut writer, &self.program).map_err(|_| {
-            EncodedValidationError::invariant("permanent-program semantic serialization failed")
+        let mut poll = |_| Ok::<(), std::convert::Infallible>(());
+        match self.semantic_sha256_controlled(&mut poll) {
+            Ok(value) => Ok(value),
+            Err(PermanentProgramError::Encoded(error)) => Err(error),
+            Err(PermanentProgramError::Control(never)) => match never {},
+        }
+    }
+
+    pub(crate) fn semantic_sha256_controlled<E>(
+        &self,
+        poll: &mut impl FnMut(&'static str) -> Result<(), E>,
+    ) -> ControlledResult<[u8; 32], E> {
+        poll("permanent-program-digest-preflight").map_err(PermanentProgramError::Control)?;
+        let mut writer = DigestWriter::new(poll);
+        let serialized = serde_json::to_writer(&mut writer, &self.program);
+        if let Some(error) = writer.control_error.take() {
+            return Err(PermanentProgramError::Control(error));
+        }
+        serialized.map_err(|_| {
+            PermanentProgramError::Encoded(EncodedValidationError::invariant(
+                "permanent-program semantic serialization failed",
+            ))
         })?;
-        Ok(writer.0.finalize().into())
+        let digest = writer.digest.finalize().into();
+        poll("permanent-program-digest-publication").map_err(PermanentProgramError::Control)?;
+        Ok(digest)
     }
 
     pub(crate) fn parity_manifest_json(&self) -> EncodedResult<Vec<u8>> {
@@ -3967,6 +4032,46 @@ const fn is_negative_kind(kind: PredicateKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_digest_writer_preserves_every_byte_across_poll_boundaries() {
+        let payload = vec![11_u8; SEMANTIC_DIGEST_POLL_BYTES * 2 + 17];
+        let expected: [u8; 32] = Sha256::digest(&payload).into();
+        let mut checkpoints = 0;
+        let mut poll = |phase| {
+            assert_eq!(phase, "permanent-program-digest");
+            checkpoints += 1;
+            Ok::<(), ()>(())
+        };
+        let mut writer = DigestWriter::new(&mut poll);
+        writer.write_all(&payload).unwrap();
+        let actual: [u8; 32] = writer.digest.clone().finalize().into();
+        drop(writer);
+
+        assert_eq!(actual, expected);
+        assert_eq!(checkpoints, 2);
+    }
+
+    #[test]
+    fn semantic_digest_writer_polls_bounded_chunks_and_propagates_control() {
+        let mut checkpoints = 0;
+        let mut poll = |phase| {
+            assert_eq!(phase, "permanent-program-digest");
+            checkpoints += 1;
+            if checkpoints == 2 {
+                Err("cancel digest")
+            } else {
+                Ok(())
+            }
+        };
+        let mut writer = DigestWriter::new(&mut poll);
+        let payload = vec![7_u8; SEMANTIC_DIGEST_POLL_BYTES * 3];
+        let error = writer.write_all(&payload).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(writer.control_error, Some("cancel digest"));
+        assert_eq!(checkpoints, 2);
+    }
 
     #[test]
     fn named_datatype_payload_is_canonical_json() {
