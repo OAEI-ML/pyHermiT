@@ -56,8 +56,8 @@ pub use cancel::{CancellationHandle, CancellationState};
 use error::{ErrorKind, NativeError, NativeResult};
 use event_wire::encode_events;
 use input_wire::{
-    decode_config, decode_delta, decode_ontology, decode_query, DecodeLimits, DecodedConfig,
-    DecodedDelta, DecodedOntology, DecodedQuery, InputWireError,
+    decode_config, decode_delta, decode_ontology, decode_ontology_metadata, decode_query,
+    DecodeLimits, DecodedConfig, DecodedDelta, DecodedOntology, DecodedQuery, InputWireError,
 };
 use model::{
     ABI_VERSION, CORE_ADAPTER_PROTOCOL_VERSION, CORE_API_VERSION, CORE_MODEL_SCHEMA_VERSION,
@@ -76,6 +76,7 @@ use store::{replay_state_trace, TableauKernel, STATE_TRACE_MAGIC, STATE_TRACE_VE
 const EVENT_CAPACITY: usize = 256;
 const POLL_STRIDE_MAX: u64 = 1_000_000;
 const MAX_STATE_TRACE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ENCODED_SESSION_METADATA_BYTES: usize = 4 * 1024;
 const PYTHON_VERSION_SOURCE: &str = include_str!("../../src/pyhermit/_version.py");
 
 #[derive(Clone, Copy)]
@@ -4567,6 +4568,125 @@ fn self_test(py: Python<'_>) -> PyResult<()> {
     }
 }
 
+fn poll_encoded_session_checkpoint(
+    cancellation: &Arc<CancellationState>,
+    checkpoint: &mut u64,
+    cancel_at_checkpoint: Option<u64>,
+    phase: &'static str,
+) -> NativeResult<()> {
+    cancellation.poll()?;
+    *checkpoint = checkpoint
+        .checked_add(1)
+        .ok_or_else(|| NativeError::invariant("encoded session checkpoint count overflowed"))?;
+    if cancel_at_checkpoint == Some(*checkpoint) {
+        return Err(NativeError::new(
+            ErrorKind::Cancelled,
+            "REASONER_INTERRUPTED",
+            "native encoded session construction was interrupted at a test checkpoint",
+        )
+        .with_context("checkpoint", checkpoint.to_string())
+        .with_context("phase", phase));
+    }
+    Ok(())
+}
+
+/// Private direct encoded-program constructor. The production capability remains
+/// unadvertised until the complete WP18 constructor matrix passes.
+#[pyfunction(name = "_create_encoded_session_v1")]
+#[pyo3(signature = (
+    *,
+    slices,
+    metadata,
+    config,
+    cancellation,
+    max_owned_bytes=None,
+    cancel_at_checkpoint=None
+))]
+fn create_encoded_session_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+    metadata: &Bound<'_, PyBytes>,
+    config: &Bound<'_, PyBytes>,
+    cancellation: PyRef<'_, CancellationHandle>,
+    max_owned_bytes: Option<usize>,
+    cancel_at_checkpoint: Option<u64>,
+) -> PyResult<NativeSession> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if cancel_at_checkpoint == Some(0) {
+            return Err(encoded_slice_invalid(
+                "encoded session cancellation checkpoint must be positive",
+            ));
+        }
+        let limits = DecodeLimits::default();
+        let metadata = decode_ontology_metadata(&copy_capped_bytes(
+            metadata,
+            MAX_ENCODED_SESSION_METADATA_BYTES,
+            "encoded session metadata",
+        )?)
+        .map_err(map_input_wire_error)?;
+        validate_core_metadata(&metadata)?;
+        let config = decode_config(
+            copy_capped_bytes(config, limits.max_wire_bytes, "configuration wire")?,
+            &limits,
+        )
+        .map_err(map_input_wire_error)?;
+        let cancellation_state = cancellation.state();
+        let namespace = Some(metadata.logical_fingerprint.digest);
+        let mut checkpoint = 0_u64;
+        let phases = {
+            let mut poll = |phase: &'static str| {
+                poll_encoded_session_checkpoint(
+                    &cancellation_state,
+                    &mut checkpoint,
+                    cancel_at_checkpoint,
+                    phase,
+                )
+            };
+            compile_encoded_slice_program_controlled(slices, namespace, &mut poll)?
+        };
+        py.detach(move || {
+            let mut assembly_limits = encoded::permanent_program::PermanentProgramLimits::default();
+            if let Some(maximum) = max_owned_bytes {
+                assembly_limits.max_owned_bytes = maximum;
+            }
+            let assembled = {
+                let mut poll = |phase: &'static str| {
+                    poll_encoded_session_checkpoint(
+                        &cancellation_state,
+                        &mut checkpoint,
+                        cancel_at_checkpoint,
+                        phase,
+                    )
+                };
+                let assembled = encoded::permanent_program::assemble_encoded_permanent_program(
+                    phases,
+                    assembly_limits,
+                    &mut poll,
+                )
+                .map_err(encoded_permanent_error)?;
+                poll("encoded-session-publication")?;
+                assembled
+            };
+            let ontology = DecodedOntology {
+                metadata,
+                program: assembled.program,
+                declared_entities: assembled.declared_entities,
+                named_individuals: assembled.named_individuals,
+            };
+            construct_native_session(ontology, config, cancellation_state)
+        })
+    }));
+    match result {
+        Ok(value) => value.map_err(|error: NativeError| error.into_pyerr(py)),
+        Err(_) => Err(NativeError::new(
+            ErrorKind::Poisoned,
+            "NATIVE_PANIC",
+            "native encoded session-construction panic was contained",
+        )
+        .into_pyerr(py)),
+    }
+}
+
 #[pyfunction]
 fn create_session(
     py: Python<'_>,
@@ -4596,42 +4716,7 @@ fn create_session(
     let result = catch_unwind(AssertUnwindSafe(|| {
         py.detach(move || {
             let (ontology, config) = decode_session_inputs(ontology_wire, config_wire, &limits)?;
-            // Session construction preserves the WPR0 lifecycle contract: operation timeout and
-            // observed-memory failures are surfaced by the first semantic operation, not while the
-            // immutable permanent program is being installed.
-            let construction_control = CancellationHandle::from_options(None, None)?.state();
-            let ontology = Arc::new(ontology);
-            let rules = load_permanent_rule_state(
-                &ontology,
-                Arc::clone(&construction_control),
-                config.disjunction_learning,
-                config.existentials,
-                config.blocking,
-            )?;
-            let tableau = ProductionTableau::new(
-                Arc::clone(&ontology),
-                config.clone(),
-                Arc::clone(&cancellation_state),
-                rules,
-            )?;
-            let scheduler = SessionScheduler::new(tableau, SessionLimits::default())?;
-            Ok(NativeSession {
-                control: Arc::new(SessionControl {
-                    owner_pid: std::process::id(),
-                    closed: AtomicBool::new(false),
-                    busy: AtomicBool::new(false),
-                    poisoned: AtomicBool::new(false),
-                    cancellation: cancellation_state,
-                    owned: Mutex::new(Some(SessionOwned {
-                        ontology,
-                        config,
-                        scheduler,
-                        classification: ClassificationCache::new(),
-                        realization: RealizationCache::new(),
-                        events: VecDeque::with_capacity(EVENT_CAPACITY),
-                    })),
-                }),
-            })
+            construct_native_session(ontology, config, cancellation_state)
         })
     }));
     match result {
@@ -4643,6 +4728,49 @@ fn create_session(
         )
         .into_pyerr(py)),
     }
+}
+
+fn construct_native_session(
+    ontology: DecodedOntology,
+    config: DecodedConfig,
+    cancellation_state: Arc<CancellationState>,
+) -> NativeResult<NativeSession> {
+    // Session construction preserves the WPR0 lifecycle contract: operation timeout and
+    // observed-memory failures are surfaced by the first semantic operation, not while the
+    // immutable permanent program is being installed.
+    let construction_control = CancellationHandle::from_options(None, None)?.state();
+    let ontology = Arc::new(ontology);
+    let rules = load_permanent_rule_state(
+        &ontology,
+        Arc::clone(&construction_control),
+        config.disjunction_learning,
+        config.existentials,
+        config.blocking,
+    )?;
+    let tableau = ProductionTableau::new(
+        Arc::clone(&ontology),
+        config.clone(),
+        Arc::clone(&cancellation_state),
+        rules,
+    )?;
+    let scheduler = SessionScheduler::new(tableau, SessionLimits::default())?;
+    Ok(NativeSession {
+        control: Arc::new(SessionControl {
+            owner_pid: std::process::id(),
+            closed: AtomicBool::new(false),
+            busy: AtomicBool::new(false),
+            poisoned: AtomicBool::new(false),
+            cancellation: cancellation_state,
+            owned: Mutex::new(Some(SessionOwned {
+                ontology,
+                config,
+                scheduler,
+                classification: ClassificationCache::new(),
+                realization: RealizationCache::new(),
+                events: VecDeque::with_capacity(EVENT_CAPACITY),
+            })),
+        }),
+    })
 }
 
 fn copy_capped_bytes(
@@ -4909,6 +5037,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(self_test, module)?)?;
+    module.add_function(wrap_pyfunction!(create_encoded_session_v1, module)?)?;
     module.add_function(wrap_pyfunction!(create_session, module)?)?;
     Ok(())
 }

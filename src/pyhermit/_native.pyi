@@ -394,6 +394,15 @@ def _encoded_permanent_program_parity_v1(
     max_owned_bytes: int | None = None,
     cancel_at_checkpoint: int | None = None,
 ) -> bytes: ...
+def _create_encoded_session_v1(
+    *,
+    slices: tuple[tuple[object, ...], ...],
+    metadata: bytes,
+    config: bytes,
+    cancellation: CancellationHandle,
+    max_owned_bytes: int | None = None,
+    cancel_at_checkpoint: int | None = None,
+) -> NativeSession: ...
 def self_test() -> None: ...
 def create_session(
     ir: bytes,

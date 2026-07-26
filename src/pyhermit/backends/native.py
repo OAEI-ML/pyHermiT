@@ -45,6 +45,7 @@ from pyhermit.config import ReasonerConfig, UnsupportedDatatypePolicy
 from pyhermit.core import current_core_versions
 from pyhermit.encoded_input import (
     ENCODED_BUFFER_WIDTHS,
+    ENCODED_NATIVE_FEATURE,
     ENCODED_SCHEMA_NAME,
     ENCODED_SCHEMA_VERSION,
     _encoded_profile_contexts,
@@ -119,6 +120,8 @@ class _ExtensionSession(Protocol):
 class _InputCodec(Protocol):
     def encode_ontology(self, ontology: CompiledOntology) -> bytes: ...
 
+    def encode_ontology_metadata(self, ontology: CompiledOntology) -> bytes: ...
+
     def encode_config(self, config: ReasonerConfig) -> bytes: ...
 
     def encode_query(self, query: CompiledQuery) -> bytes: ...
@@ -188,6 +191,7 @@ class NativeBackendFactory:
     """Validate extension metadata and create one retained coarse native session."""
 
     __slots__ = (
+        "_create_encoded_session",
         "_create_session",
         "_handle_type",
         "_info",
@@ -206,6 +210,7 @@ class NativeBackendFactory:
         features = getattr(module, "FEATURES", None)
         handle_type = getattr(module, "CancellationHandle", None)
         create_session = getattr(module, "create_session", None)
+        create_encoded_session = getattr(module, "_create_encoded_session_v1", None)
         self_test = getattr(module, "self_test", None)
         validate_encoded = getattr(module, "_validate_encoded_columns_v1", None)
         validate_encoded_selection = getattr(module, "_validate_encoded_selection_v1", None)
@@ -238,6 +243,13 @@ class NativeBackendFactory:
             _version_error("native extension surface is incomplete", "metadata_invalid")
         if validate_encoded is not None and not callable(validate_encoded):
             _version_error("native encoded validator is invalid", "metadata_invalid")
+        if create_encoded_session is not None and not callable(create_encoded_session):
+            _version_error("native encoded session constructor is invalid", "metadata_invalid")
+        if ENCODED_NATIVE_FEATURE in features and not callable(create_encoded_session):
+            _version_error(
+                "native encoded session capability has no constructor",
+                "incomplete_features",
+            )
         if validate_encoded_selection is not None and not callable(validate_encoded_selection):
             _version_error("native encoded selection validator is invalid", "metadata_invalid")
         if validate_encoded_slices is not None and not callable(validate_encoded_slices):
@@ -253,6 +265,7 @@ class NativeBackendFactory:
             ) from error
         core = current_core_versions()
         self._handle_type = handle_type
+        self._create_encoded_session = create_encoded_session
         self._create_session = create_session
         self._validate_encoded = validate_encoded
         self._validate_encoded_selection = validate_encoded_selection
@@ -399,6 +412,87 @@ class NativeBackendFactory:
         config_wire = codec.encode_config(config)
         _require_bytes(ontology_wire, "encoded ontology")
         _require_bytes(config_wire, "encoded configuration")
+        return self._construct_adapter_session(
+            ontology,
+            config,
+            cancellation,
+            codec,
+            lambda handle: self._create_session(ontology_wire, config_wire, handle),
+        )
+
+    def _create_encoded_session_handoff(
+        self,
+        view: OntologyView,
+        ontology: CompiledOntology,
+        config: ReasonerConfig,
+        cancellation: CancellationToken,
+    ) -> NativeBackendSession | None:
+        """Create a session without handing the proportional private IR to Rust."""
+
+        if ENCODED_NATIVE_FEATURE not in self._info.complete_features:
+            return None
+        constructor = self._create_encoded_session
+        if constructor is None:
+            raise BackendVersionError(
+                "native encoded session capability has no constructor",
+                context={"reason": "encoded_session_constructor_missing"},
+            )
+        if not isinstance(view, OntologyView):
+            raise TypeError("view must be OntologyView")
+        if not isinstance(ontology, CompiledOntology):
+            raise TypeError("ontology must be CompiledOntology")
+        if not isinstance(config, ReasonerConfig):
+            raise TypeError("config must be ReasonerConfig")
+        if not isinstance(cancellation, CancellationToken):
+            raise TypeError("cancellation must be CancellationToken")
+        cancellation.check()
+        negotiation = negotiate_encoded_input(
+            view,
+            {ENCODED_SCHEMA_NAME: ENCODED_SCHEMA_VERSION},
+        )
+        lease = negotiation.lease
+        if lease is None:
+            return None
+        planner = getattr(lease, "root_slices", None)
+        root_slices = planner() if callable(planner) else lease.overlay_root_slices()
+        if root_slices is None:
+            raise BackendMismatchError(
+                "native encoded session constructor received no root-slice plan",
+                context={"reason": "encoded_session_slices_missing"},
+            )
+        slices = _encoded_slice_records(root_slices)
+        codec = _load_input_codec()
+        metadata_encoder = getattr(codec, "encode_ontology_metadata", None)
+        if not callable(metadata_encoder):
+            raise BackendVersionError(
+                "native metadata codec surface is incomplete",
+                context={"reason": "input_codec_invalid"},
+            )
+        metadata = metadata_encoder(ontology)
+        config_wire = codec.encode_config(config)
+        _require_bytes(metadata, "encoded ontology metadata")
+        _require_bytes(config_wire, "encoded configuration")
+        return self._construct_adapter_session(
+            ontology,
+            config,
+            cancellation,
+            codec,
+            lambda handle: constructor(
+                slices=slices,
+                metadata=metadata,
+                config=config_wire,
+                cancellation=handle,
+            ),
+        )
+
+    def _construct_adapter_session(
+        self,
+        ontology: CompiledOntology,
+        config: ReasonerConfig,
+        cancellation: CancellationToken,
+        codec: _InputCodec,
+        invoke: Callable[[object], object],
+    ) -> NativeBackendSession:
         cancellation.check()
         remaining = cancellation.remaining_seconds
         if remaining is not None and remaining <= 0:
@@ -411,7 +505,7 @@ class NativeBackendFactory:
         observer_id = cancellation._attach(handle)
         try:
             cancellation.check()
-            native_value = self._create_session(ontology_wire, config_wire, handle_value)
+            native_value = invoke(handle_value)
             native = _require_native_session(native_value)
             adapter = NativeBackendSession(
                 native,
@@ -602,7 +696,12 @@ class NativeBackendSession:
 
 def _load_input_codec() -> _InputCodec:
     module = importlib.import_module("pyhermit.backends.native_input")
-    for name in ("encode_config", "encode_delta", "encode_ontology", "encode_query"):
+    for name in (
+        "encode_config",
+        "encode_delta",
+        "encode_ontology",
+        "encode_query",
+    ):
         if not callable(getattr(module, name, None)):
             raise BackendVersionError(
                 "native input codec surface is incomplete",

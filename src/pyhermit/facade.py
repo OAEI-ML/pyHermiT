@@ -571,12 +571,36 @@ class Reasoner:
             self._config,
             cancelled=self._cancelled,
         )
-        session = self._factory.create_session(bundle[2], self._config, self._cancellation.token)
+        session = self._create_backend_session(validated.view, bundle[2])
         try:
             return self._services(bundle, session, compile_started=compile_started)
         except BaseException:
             session.close()
             raise
+
+    def _create_backend_session(
+        self,
+        view: OntologyView,
+        compiled: CompiledOntology,
+    ) -> BackendSession:
+        create_encoded = getattr(self._factory, "_create_encoded_session_handoff", None)
+        session = (
+            create_encoded(
+                view,
+                compiled,
+                self._config,
+                self._cancellation.token,
+            )
+            if callable(create_encoded)
+            else None
+        )
+        if session is None:
+            session = self._factory.create_session(
+                compiled,
+                self._config,
+                self._cancellation.token,
+            )
+        return session
 
     def _services(
         self,
@@ -656,7 +680,7 @@ class Reasoner:
             self._config,
             cancelled=self._cancelled,
         )
-        session = self._factory.create_session(bundle[2], self._config, self._cancellation.token)
+        session = self._create_backend_session(overlay, bundle[2])
         try:
             return session.check()
         finally:
@@ -702,9 +726,7 @@ class Reasoner:
         if outcome is DeltaOutcome.APPLIED_INCREMENTALLY:
             runtime = self._services(bundle, old.session, compile_started=compile_started)
         else:
-            session = self._factory.create_session(
-                bundle[2], self._config, self._cancellation.token
-            )
+            session = self._create_backend_session(validated.view, bundle[2])
             try:
                 runtime = self._services(bundle, session, compile_started=compile_started)
             except BaseException:

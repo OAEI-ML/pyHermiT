@@ -634,6 +634,13 @@ def encode_ontology(ontology: CompiledOntology) -> bytes:
     )
 
 
+def encode_ontology_metadata(ontology: CompiledOntology) -> bytes:
+    """Encode only the compact metadata needed by direct native publication."""
+
+    _exact(ontology, CompiledOntology, "ontology")
+    return _ontology_metadata(ontology, _program_from_ontology(ontology))
+
+
 def encode_config(config: ReasonerConfig) -> bytes:
     """Encode semantic configuration for the paired ``create_session`` call.
 
@@ -991,5 +998,6 @@ __all__ = [
     "encode_config",
     "encode_delta",
     "encode_ontology",
+    "encode_ontology_metadata",
     "encode_query",
 ]

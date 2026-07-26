@@ -31,9 +31,10 @@ use super::role_semantics::RoleSemanticsPhase;
 use super::simple_roles::SimpleRolePhase;
 use super::{EncodedResult, EncodedValidationError};
 use crate::input_wire::{
-    validate_decoded_program, DecodedAtom, DecodedClause, DecodedDatatypeModel,
-    DecodedExpressivity, DecodedGroundAtom, DecodedPredicate, DecodedProgram,
-    DecodedProvenanceEntry, DecodedSymbolDomain, DecodedTerm, PredicateKind, SymbolKind, TermSort,
+    validate_decoded_program, validate_decoded_session_domains, DecodedAtom, DecodedClause,
+    DecodedDatatypeModel, DecodedEntity, DecodedExpressivity, DecodedGroundAtom, DecodedPredicate,
+    DecodedProgram, DecodedProvenanceEntry, DecodedSymbolDomain, DecodedTerm, PredicateKind,
+    SymbolKind, TermSort,
 };
 
 const PERMANENT_PROGRAM_SCHEMA_VERSION: u16 = 1;
@@ -107,6 +108,8 @@ type ControlledResult<T, E> = Result<T, PermanentProgramError<E>>;
 /// One fully owned, validator-approved permanent-program candidate.
 pub(crate) struct EncodedPermanentProgram {
     pub(crate) program: DecodedProgram,
+    pub(crate) declared_entities: Vec<DecodedEntity>,
+    pub(crate) named_individuals: Vec<u32>,
     manifest_limit: usize,
 }
 
@@ -313,6 +316,8 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
     )
     .map_err(PermanentProgramError::Encoded)?;
     let mut budget = Budget::new(limits, input_owned).map_err(PermanentProgramError::Encoded)?;
+    let declared_entities = named.declared_entities;
+    let named_individuals = named.named_individuals;
     let symbol_domains = freeze_symbol_domains(
         named.class_domain,
         data_property_domain,
@@ -409,9 +414,19 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
             error.message
         )))
     })?;
+    validate_decoded_session_domains(&program, &declared_entities, &named_individuals).map_err(
+        |error| {
+            PermanentProgramError::Encoded(EncodedValidationError::invariant(format!(
+                "assembled session domains failed the decoded-domain validator: {}",
+                error.message
+            )))
+        },
+    )?;
     poll("permanent-program-publication").map_err(PermanentProgramError::Control)?;
     Ok(EncodedPermanentProgram {
         program,
+        declared_entities,
+        named_individuals,
         manifest_limit: limits.max_manifest_bytes,
     })
 }
@@ -552,6 +567,24 @@ fn permanent_input_owned_bytes(
             add_bytes(&mut total, Some(value.display.capacity()))?;
         }
     }
+    add_bytes(
+        &mut total,
+        named
+            .declared_entities
+            .capacity()
+            .checked_mul(size_of::<DecodedEntity>()),
+    )?;
+    for entity in &named.declared_entities {
+        add_bytes(&mut total, Some(entity.kind.capacity()))?;
+        add_bytes(&mut total, Some(entity.iri.capacity()))?;
+    }
+    add_bytes(
+        &mut total,
+        named
+            .named_individuals
+            .capacity()
+            .checked_mul(size_of::<u32>()),
+    )?;
     for predicates in [&named.predicates, &role_clauses.predicates] {
         add_bytes(
             &mut total,

@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
 import pyowl_core
@@ -14,11 +15,20 @@ import pytest
 from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
 
 import pyhermit._native as native
-from pyhermit import ReasonerConfig
-from pyhermit.backends.native_input import encode_ontology
+from pyhermit import Reasoner, ReasonerConfig
+from pyhermit.backends import native as native_backend
+from pyhermit.backends import native_input
+from pyhermit.backends.native import NativeBackendFactory
+from pyhermit.backends.native_input import (
+    encode_config,
+    encode_ontology,
+    encode_ontology_metadata,
+)
+from pyhermit.backends.native_wire import decode_check
 from pyhermit.backends.protocol import CompiledOntology
 from pyhermit.clauses.compiler import compile_captured_bundle
 from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE
+from pyhermit.events import CancellationSource, CancellationToken
 from pyhermit.exceptions import (
     BackendMismatchError,
     ReasonerInterruptedError,
@@ -133,6 +143,39 @@ def _manifest(
         cancel_at_checkpoint=cancel_at_checkpoint,
     )
     return cast(dict[str, object], json.loads(encoded))
+
+
+def _direct_session(
+    snapshot: pyowl_core.OntologyView,
+    *,
+    records: tuple[tuple[object, ...], ...] | None = None,
+    reference: CompiledOntology | None = None,
+    max_owned_bytes: int | None = None,
+    cancel_at_checkpoint: int | None = None,
+) -> Any:
+    compiled = reference or _compiled(snapshot)
+    return native._create_encoded_session_v1(
+        slices=records or (_slice_record(snapshot),),
+        metadata=encode_ontology_metadata(compiled),
+        config=encode_config(ReasonerConfig()),
+        cancellation=native.CancellationHandle(),
+        max_owned_bytes=max_owned_bytes,
+        cancel_at_checkpoint=cancel_at_checkpoint,
+    )
+
+
+def _check_signature(encoded: bytes) -> tuple[bool, int, int, int, int, int, int]:
+    result = decode_check(encoded)
+    statistics = result.statistics
+    return (
+        result.satisfiable,
+        statistics.nodes,
+        statistics.facts,
+        statistics.branches,
+        statistics.backtracks,
+        statistics.merges,
+        statistics.datatype_checks,
+    )
 
 
 def _assert_dense_program(program: dict[str, object]) -> None:
@@ -410,9 +453,9 @@ def test_shared_dag_keeps_assertion_context_and_fences_ground_disjunctions() -> 
         ),
         options=OPTIONS,
     )
-    node_tags = memoryview(
-        produce_encoded_structural_view_v1(snapshot).buffers["node_tags"]
-    ).cast("H")
+    node_tags = memoryview(produce_encoded_structural_view_v1(snapshot).buffers["node_tags"]).cast(
+        "H"
+    )
     assert list(node_tags).count(31) == 1
 
     with pytest.raises(BackendMismatchError, match="ground-disjunction"):
@@ -455,3 +498,249 @@ def test_reference_expressivity_mismatch_fails_closed_and_retry_succeeds() -> No
 
     assert captured.value.context["section"] == "expressivity"
     assert _manifest(snapshot, reference=reference) == baseline
+
+
+def test_direct_program_publication_constructs_the_same_native_session() -> None:
+    snapshot = _direct_snapshot()
+    compiled = _compiled(snapshot)
+    config_wire = encode_config(ReasonerConfig())
+    encoded = _direct_session(snapshot, reference=compiled)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        config_wire,
+        native.CancellationHandle(),
+    )
+    try:
+        assert encoded.ontology_fingerprint == scalar.ontology_fingerprint
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.classify_classes() == scalar.classify_classes()
+        assert encoded.classify_object_properties() == scalar.classify_object_properties()
+    finally:
+        encoded.close()
+        scalar.close()
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_reversed_and_interleaved_slices_publish_identical_sessions() -> None:
+    sources = (
+        pyowl_core.load_snapshot(
+            functional(
+                "Declaration(Class(:A))",
+                "Declaration(Class(:D))",
+                "SubClassOf(:A :D)",
+            ),
+            options=OPTIONS,
+        ),
+        pyowl_core.load_snapshot(
+            functional(
+                "Declaration(Class(:A))",
+                "Declaration(Class(:B))",
+                "Declaration(ObjectProperty(:p))",
+                "SubClassOf(:A ObjectSomeValuesFrom(:p :B))",
+            ),
+            options=OPTIONS,
+        ),
+        pyowl_core.load_snapshot(
+            functional(
+                "Declaration(Class(:B))",
+                "Declaration(Class(:C))",
+                "Declaration(ObjectProperty(:p))",
+                "Declaration(ObjectProperty(:q))",
+                "SubObjectPropertyOf(:p :q)",
+                "SubClassOf(:B :C)",
+            ),
+            options=OPTIONS,
+        ),
+    )
+    composite = pyowl_core.compose_views(
+        *sources,
+        roles=("left", "middle", "right"),
+    )
+    records = _composite_records(composite, sources)
+    reference = _compiled(composite)
+    sessions = tuple(
+        _direct_session(composite, records=order, reference=reference)
+        for order in (
+            records,
+            tuple(reversed(records)),
+            (records[2], records[0], records[1]),
+        )
+    )
+    try:
+        baseline = (
+            sessions[0].ontology_fingerprint,
+            _check_signature(sessions[0].check(None)),
+            sessions[0].classify_classes(),
+        )
+        assert all(
+            (
+                session.ontology_fingerprint,
+                _check_signature(session.check(None)),
+                session.classify_classes(),
+            )
+            == baseline
+            for session in sessions[1:]
+        )
+    finally:
+        for session in sessions:
+            session.close()
+
+
+def test_direct_publication_limit_and_cancellation_discard_then_retry() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "SubClassOf(:A :B)",
+        ),
+        options=OPTIONS,
+    )
+    reference = _compiled(snapshot)
+    records = (_slice_record(snapshot),)
+
+    with pytest.raises(ResourceLimitError):
+        _direct_session(
+            snapshot,
+            records=records,
+            reference=reference,
+            max_owned_bytes=1,
+        )
+    with pytest.raises(ReasonerInterruptedError) as captured:
+        _direct_session(
+            snapshot,
+            records=records,
+            reference=reference,
+            cancel_at_checkpoint=33,
+        )
+    assert captured.value.context["phase"] == "permanent-program-clause"
+
+    retry = _direct_session(snapshot, records=records, reference=reference)
+    try:
+        assert retry.ontology_fingerprint == reference.ontology_fingerprint
+        assert retry.check(None)
+    finally:
+        retry.close()
+
+
+def test_direct_publication_fails_closed_for_unrepresented_semantics() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            'DataPropertyAssertion(:p :i "value")',
+        ),
+        options=OPTIONS,
+    )
+
+    with pytest.raises(BackendMismatchError, match="datatype semantic phase"):
+        _direct_session(snapshot)
+
+
+def test_advertised_adapter_uses_no_scalar_wire_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _direct_snapshot()
+    compiled = _compiled(snapshot)
+    direct_calls = 0
+
+    extension = ModuleType("encoded_session_test_extension")
+    extension.__version__ = native.__version__
+    extension.ABI_VERSION = native.ABI_VERSION
+    extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
+    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    extension.CancellationHandle = native.CancellationHandle
+    extension.self_test = native.self_test
+
+    def forbidden_scalar_constructor(*_args: object) -> object:
+        raise AssertionError("scalar native session constructor was called")
+
+    def direct_constructor(**kwargs: object) -> object:
+        nonlocal direct_calls
+        direct_calls += 1
+        return native._create_encoded_session_v1(**kwargs)
+
+    extension.create_session = forbidden_scalar_constructor
+    extension._create_encoded_session_v1 = direct_constructor
+
+    def forbidden_ontology_wire(_ontology: CompiledOntology) -> bytes:
+        raise AssertionError("proportional ontology wire was encoded")
+
+    monkeypatch.setattr(native_input, "encode_ontology", forbidden_ontology_wire)
+    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    local_lease = SimpleNamespace(buffers=buffers)
+    root_slice = SimpleNamespace(
+        lease=local_lease,
+        posting_mode=0,
+        root_ids=memoryview(b""),
+        member_tokens=(),
+        anonymous_scope_maps=(),
+    )
+    lease = SimpleNamespace(root_slices=lambda: (root_slice,))
+    monkeypatch.setattr(
+        native_backend,
+        "negotiate_encoded_input",
+        lambda *_args, **_kwargs: SimpleNamespace(lease=lease),
+    )
+    factory = NativeBackendFactory(extension)
+    session = factory._create_encoded_session_handoff(
+        snapshot,
+        compiled,
+        ReasonerConfig(),
+        CancellationToken(),
+    )
+    assert session is not None
+    try:
+        assert direct_calls == 1
+        assert session.ontology_fingerprint == compiled.ontology_fingerprint
+        assert session.check(None).satisfiable
+    finally:
+        session.close()
+
+
+def test_facade_session_dispatch_never_replays_an_observed_encoded_failure() -> None:
+    snapshot = _direct_snapshot()
+    compiled = _compiled(snapshot)
+    reasoner = object.__new__(Reasoner)
+    reasoner._config = ReasonerConfig()
+    reasoner._cancellation = CancellationSource()
+    reasoner._cancellation.begin_operation(timeout=None, max_memory_bytes=None)
+    expected = object()
+    scalar_calls = 0
+
+    def create_encoded(
+        view: object,
+        ontology: object,
+        config: object,
+        cancellation: object,
+    ) -> object:
+        assert view is snapshot
+        assert ontology is compiled
+        assert config is reasoner._config
+        assert cancellation is reasoner._cancellation.token
+        return expected
+
+    def create_scalar(*_args: object) -> object:
+        nonlocal scalar_calls
+        scalar_calls += 1
+        raise AssertionError("scalar fallback was called")
+
+    reasoner._factory = SimpleNamespace(
+        _create_encoded_session_handoff=create_encoded,
+        create_session=create_scalar,
+    )
+    assert reasoner._create_backend_session(snapshot, compiled) is expected
+    assert scalar_calls == 0
+
+    failure = BackendMismatchError("encoded construction failed")
+
+    def reject_encoded(*_args: object) -> object:
+        raise failure
+
+    reasoner._factory = SimpleNamespace(
+        _create_encoded_session_handoff=reject_encoded,
+        create_session=create_scalar,
+    )
+    with pytest.raises(BackendMismatchError) as captured:
+        reasoner._create_backend_session(snapshot, compiled)
+    assert captured.value is failure
+    assert scalar_calls == 0

@@ -946,6 +946,57 @@ pub struct DecodedOntology {
     pub named_individuals: Vec<u32>,
 }
 
+/// Validate the session-owned entity sets shared by wire decoding and direct
+/// encoded-program publication.
+pub(crate) fn validate_decoded_session_domains(
+    program: &DecodedProgram,
+    declared_entities: &[DecodedEntity],
+    named_individuals: &[u32],
+) -> InputResult<()> {
+    if declared_entities.windows(2).any(|pair| {
+        (pair[0].kind.as_str(), pair[0].iri.as_str())
+            >= (pair[1].kind.as_str(), pair[1].iri.as_str())
+    }) {
+        return Err(InputWireError::wire(
+            "declared entities are not uniquely canonically ordered",
+        ));
+    }
+    let entity_domain = program
+        .domain(SymbolKind::Entity)
+        .ok_or_else(|| InputWireError::wire("program entity domain is missing"))?;
+    for entity in declared_entities {
+        if entity.kind.is_empty() || entity.iri.is_empty() {
+            return Err(InputWireError::wire(
+                "declared entity kind and IRI must be nonempty",
+            ));
+        }
+        let value = entity_domain
+            .values
+            .get(usize_from_u32(entity.entity_id, "declared entity")?)
+            .ok_or_else(|| InputWireError::wire("declared entity ID is dangling"))?;
+        let display = value
+            .display
+            .strip_prefix(entity.kind.as_str())
+            .and_then(|suffix| suffix.strip_prefix(':'));
+        if display != Some(entity.iri.as_str()) {
+            return Err(InputWireError::wire(
+                "declared entity identity disagrees with its symbol",
+            ));
+        }
+    }
+    validate_sorted_unique(named_individuals, "named individuals")?;
+    let individual_domain = program
+        .domain(SymbolKind::Individual)
+        .ok_or_else(|| InputWireError::wire("program individual domain is missing"))?;
+    for identifier in named_individuals {
+        individual_domain
+            .values
+            .get(usize_from_u32(*identifier, "named individual")?)
+            .ok_or_else(|| InputWireError::wire("named individual ID is dangling"))?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum BackendChoice {
@@ -1184,7 +1235,7 @@ pub fn decode_ontology(bytes: Vec<u8>, limits: &DecodeLimits) -> InputResult<Dec
         SectionKind::NamedIndividuals,
     ]);
     document.reject_unexpected(&allowed)?;
-    let metadata = decode_metadata(document.require(SectionKind::Metadata)?)?;
+    let metadata = decode_ontology_metadata(document.require(SectionKind::Metadata)?)?;
     let program = decode_program(&document)?;
     let strings = document.require(SectionKind::Strings)?;
     let mut declared_entities = Vec::new();
@@ -1202,26 +1253,11 @@ pub fn decode_ontology(bytes: Vec<u8>, limits: &DecodeLimits) -> InputResult<Dec
             entity_id: read_u32(record, 16)?,
         });
     }
-    if declared_entities.windows(2).any(|pair| {
-        (pair[0].kind.as_str(), pair[0].iri.as_str())
-            >= (pair[1].kind.as_str(), pair[1].iri.as_str())
-    }) {
-        return Err(InputWireError::wire(
-            "declared entities are not uniquely canonically ordered",
-        ));
-    }
     let named_individuals = decode_u32_records(
         document.require(SectionKind::NamedIndividuals)?,
         "named individuals",
     )?;
-    validate_sorted_unique(&named_individuals, "named individuals")?;
-    let individual_count = domain_len(&program, SymbolKind::Individual)?;
-    if named_individuals
-        .iter()
-        .any(|value| *value >= individual_count)
-    {
-        return Err(InputWireError::wire("named individual ID is dangling"));
-    }
+    validate_decoded_session_domains(&program, &declared_entities, &named_individuals)?;
     Ok(DecodedOntology {
         metadata,
         program,
@@ -1441,7 +1477,7 @@ pub fn decode_delta(bytes: Vec<u8>, limits: &DecodeLimits) -> InputResult<Decode
     })
 }
 
-fn decode_metadata(bytes: &[u8]) -> InputResult<OntologyMetadata> {
+pub(crate) fn decode_ontology_metadata(bytes: &[u8]) -> InputResult<OntologyMetadata> {
     if bytes.len() < 193 {
         return Err(InputWireError::wire("ontology metadata is truncated"));
     }
