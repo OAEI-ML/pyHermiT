@@ -81,25 +81,10 @@ impl RoleModelPhase {
         validate_role_model(&self.role_model, self.component_count)?;
         let transition_orders =
             canonical_transition_orders(&self.role_model.automata, self.manifest_limit)?;
-        let encoded = serde_json::to_vec(&RoleModelManifest {
-            automata: AutomataManifest {
-                values: &self.role_model.automata,
-                transition_orders: &transition_orders,
-            },
-            bottom_data_property_id: self.role_model.bottom_data_property_id,
-            bottom_object_role_id: self.role_model.bottom_object_role_id,
-            complex_inclusions: &self.role_model.complex_inclusions,
-            data_inclusions: &self.role_model.data_inclusions,
-            data_property_count: self.role_model.data_property_count,
-            inverse_role_ids: &self.role_model.inverse_role_ids,
-            non_simple_components: &self.role_model.non_simple_components,
-            object_role_count: self.role_model.object_role_count,
-            schema_version: IR_SCHEMA_VERSION,
-            simple_inclusions: &self.role_model.simple_inclusions,
-            top_data_property_id: self.role_model.top_data_property_id,
-            top_object_role_id: self.role_model.top_object_role_id,
-            record_type: "RoleModelIR",
-        })
+        let encoded = serde_json::to_vec(&CanonicalRoleModel::new(
+            &self.role_model,
+            &transition_orders,
+        ))
         .map_err(|_| EncodedValidationError::invariant("role-model serialization failed"))?;
         if encoded.len() > self.manifest_limit {
             return Err(EncodedValidationError::resource(
@@ -111,7 +96,7 @@ impl RoleModelPhase {
 }
 
 #[derive(Serialize)]
-struct RoleModelManifest<'a> {
+pub(crate) struct CanonicalRoleModel<'a> {
     automata: AutomataManifest<'a>,
     bottom_data_property_id: u32,
     bottom_object_role_id: u32,
@@ -129,6 +114,30 @@ struct RoleModelManifest<'a> {
     record_type: &'static str,
 }
 
+impl<'a> CanonicalRoleModel<'a> {
+    pub(crate) fn new(value: &'a DecodedRoleModel, transition_orders: &'a [Vec<usize>]) -> Self {
+        Self {
+            automata: AutomataManifest {
+                values: &value.automata,
+                transition_orders,
+            },
+            bottom_data_property_id: value.bottom_data_property_id,
+            bottom_object_role_id: value.bottom_object_role_id,
+            complex_inclusions: &value.complex_inclusions,
+            data_inclusions: &value.data_inclusions,
+            data_property_count: value.data_property_count,
+            inverse_role_ids: &value.inverse_role_ids,
+            non_simple_components: &value.non_simple_components,
+            object_role_count: value.object_role_count,
+            schema_version: IR_SCHEMA_VERSION,
+            simple_inclusions: &value.simple_inclusions,
+            top_data_property_id: value.top_data_property_id,
+            top_object_role_id: value.top_object_role_id,
+            record_type: "RoleModelIR",
+        }
+    }
+}
+
 struct AutomataManifest<'a> {
     values: &'a [DecodedRoleAutomaton],
     transition_orders: &'a [Vec<usize>],
@@ -139,6 +148,11 @@ impl Serialize for AutomataManifest<'_> {
     where
         S: Serializer,
     {
+        if self.values.len() != self.transition_orders.len() {
+            return Err(serde::ser::Error::custom(
+                "canonical role automata order has the wrong length",
+            ));
+        }
         let mut sequence = serializer.serialize_seq(Some(self.values.len()))?;
         for (automaton, order) in self.values.iter().zip(self.transition_orders) {
             sequence.serialize_element(&AutomatonManifest {
@@ -180,6 +194,11 @@ impl Serialize for TransitionsManifest<'_> {
     where
         S: Serializer,
     {
+        if self.values.len() != self.order.len() {
+            return Err(serde::ser::Error::custom(
+                "canonical role transition order has the wrong length",
+            ));
+        }
         let mut sequence = serializer.serialize_seq(Some(self.order.len()))?;
         for &index in self.order {
             let transition = self.values.get(index).ok_or_else(|| {
@@ -816,7 +835,10 @@ fn canonical_transition_orders(
     Ok(orders)
 }
 
-fn transition_ir_cmp(left: &DecodedRoleTransition, right: &DecodedRoleTransition) -> Ordering {
+pub(crate) fn transition_ir_cmp(
+    left: &DecodedRoleTransition,
+    right: &DecodedRoleTransition,
+) -> Ordering {
     compare_optional_decimal(left.role_id, right.role_id)
         .then_with(|| compare_decimal(left.source_state, right.source_state))
         .then_with(|| compare_decimal(left.target_state, right.target_state))

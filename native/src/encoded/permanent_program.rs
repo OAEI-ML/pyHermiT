@@ -32,7 +32,7 @@ use super::object_roles::ObjectRolePhase;
 use super::role_automata::RoleAutomataPhase;
 use super::role_characteristics::RoleCharacteristicPhase;
 use super::role_clauses::RoleClausePhase;
-use super::role_model::RoleModelPhase;
+use super::role_model::{transition_ir_cmp, RoleModelPhase};
 use super::role_semantics::RoleSemanticsPhase;
 use super::simple_roles::SimpleRolePhase;
 use super::{EncodedResult, EncodedValidationError};
@@ -40,8 +40,8 @@ use crate::input_wire::{
     validate_decoded_program, validate_decoded_session_domains, DecodedAtom, DecodedClause,
     DecodedDatatypeModel, DecodedEntity, DecodedExpressivity, DecodedGroundAtom,
     DecodedGroundDisjunction, DecodedLiteralIdentity, DecodedPredicate, DecodedProgram,
-    DecodedProvenanceEntry, DecodedSymbolDomain, DecodedTerm, OntologyMetadata, PredicateKind,
-    SymbolKind, TermSort,
+    DecodedProvenanceEntry, DecodedRoleModel, DecodedSymbolDomain, DecodedTerm, OntologyMetadata,
+    PredicateKind, SymbolKind, TermSort,
 };
 
 const PERMANENT_PROGRAM_SCHEMA_VERSION: u16 = 1;
@@ -327,6 +327,7 @@ pub(crate) struct EncodedPermanentProgram {
     pub(crate) program: DecodedProgram,
     pub(crate) declared_entities: Vec<DecodedEntity>,
     pub(crate) named_individuals: Vec<u32>,
+    role_transition_orders: Vec<Vec<usize>>,
     manifest_limit: usize,
 }
 
@@ -430,7 +431,10 @@ impl EncodedPermanentProgram {
     ) -> ControlledResult<[u8; 32], E> {
         poll("permanent-program-digest-preflight").map_err(PermanentProgramError::Control)?;
         let mut writer = DigestWriter::new(poll, "permanent-program-digest");
-        let serialized = serde_json::to_writer(&mut writer, &CanonicalClauseProgram(&self.program));
+        let serialized = serde_json::to_writer(
+            &mut writer,
+            &CanonicalClauseProgram::new(&self.program, &self.role_transition_orders),
+        );
         if let Some(error) = writer.control_error.take() {
             return Err(PermanentProgramError::Control(error));
         }
@@ -522,7 +526,10 @@ impl EncodedPermanentProgram {
             poll,
         )?;
         let role_model = compiler_component_sha256(
-            &CanonicalCompilerComponent::RoleModel(&program.role_model),
+            &CanonicalCompilerComponent::RoleModel {
+                value: &program.role_model,
+                transition_orders: &self.role_transition_orders,
+            },
             poll,
         )?;
         let symbols = compiler_component_sha256(
@@ -784,6 +791,8 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
         role_model,
         role_clauses,
     } = phases;
+    validate_complete_root_coverage(&named_classes, &role_characteristics)
+        .map_err(PermanentProgramError::Encoded)?;
     let DataRolePhase {
         data_property_domain,
         ..
@@ -817,6 +826,9 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
     )
     .map_err(PermanentProgramError::Encoded)?;
     let mut budget = Budget::new(limits, input_owned).map_err(PermanentProgramError::Encoded)?;
+    let role_transition_orders = freeze_role_transition_orders(&role_model.role_model, &mut budget)
+        .map_err(PermanentProgramError::Encoded)?;
+    poll("permanent-program-role-transition-order").map_err(PermanentProgramError::Control)?;
     let literal_identities = freeze_literal_identities(&named, datatype_semantics, &mut budget)
         .map_err(PermanentProgramError::Encoded)?;
     let semantic_payload_json = freeze_datatype_semantic_payload(&named, &mut budget)
@@ -940,8 +952,83 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
         program,
         declared_entities,
         named_individuals,
+        role_transition_orders,
         manifest_limit: limits.max_manifest_bytes,
     })
+}
+
+fn validate_complete_root_coverage(
+    named_classes: &NamedClassPhase,
+    role_characteristics: &RoleCharacteristicPhase,
+) -> EncodedResult<()> {
+    let deferred_roots = named_classes
+        .deferred_roots
+        .checked_add(role_characteristics.deferred_roots)
+        .ok_or_else(|| {
+            EncodedValidationError::resource(
+                "permanent-program deferred logical-root count overflowed",
+            )
+        })?;
+    if deferred_roots != 0 {
+        return Err(EncodedValidationError::protocol(format!(
+            "permanent-program source semantics contain uncompiled logical roots \
+             (count={deferred_roots})"
+        )));
+    }
+    Ok(())
+}
+
+fn freeze_role_transition_orders(
+    role_model: &DecodedRoleModel,
+    budget: &mut Budget,
+) -> EncodedResult<Vec<Vec<usize>>> {
+    budget.claim_owned(
+        role_model
+            .automata
+            .len()
+            .checked_mul(size_of::<Vec<usize>>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource(
+                    "permanent-program role-transition order ownership overflowed",
+                )
+            })?,
+    )?;
+    let mut orders = Vec::new();
+    orders
+        .try_reserve_exact(role_model.automata.len())
+        .map_err(|_| {
+            EncodedValidationError::resource(
+                "permanent-program role-transition order allocation failed",
+            )
+        })?;
+    for automaton in &role_model.automata {
+        budget.claim_owned(
+            automaton
+                .transitions
+                .len()
+                .checked_mul(size_of::<usize>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "permanent-program role-transition index ownership overflowed",
+                    )
+                })?,
+        )?;
+        budget.claim_work(sort_work(automaton.transitions.len()))?;
+        let mut order = Vec::new();
+        order
+            .try_reserve_exact(automaton.transitions.len())
+            .map_err(|_| {
+                EncodedValidationError::resource(
+                    "permanent-program role-transition index allocation failed",
+                )
+            })?;
+        order.extend(0..automaton.transitions.len());
+        order.sort_unstable_by(|&left, &right| {
+            transition_ir_cmp(&automaton.transitions[left], &automaton.transitions[right])
+        });
+        orders.push(order);
+    }
+    Ok(orders)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4227,6 +4314,14 @@ const fn is_negative_kind(kind: PredicateKind) -> bool {
     )
 }
 
+fn sort_work(count: usize) -> usize {
+    if count < 2 {
+        return count;
+    }
+    let comparisons = usize::BITS - (count - 1).leading_zeros();
+    count.saturating_mul(usize::try_from(comparisons).unwrap_or(usize::MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4285,6 +4380,74 @@ mod tests {
         let actual: [u8; 32] = writer.digest.clone().finalize().into();
         let expected: [u8; 32] = Sha256::digest(b"abc").into();
         assert_eq!(crate::model::hex(&actual), crate::model::hex(&expected),);
+    }
+
+    #[test]
+    fn role_transition_order_matches_scalar_canonical_keys() -> EncodedResult<()> {
+        let role_model = DecodedRoleModel {
+            object_role_count: 3,
+            data_property_count: 0,
+            inverse_role_ids: vec![0, 1, 2],
+            simple_inclusions: Vec::new(),
+            data_inclusions: Vec::new(),
+            complex_inclusions: vec![(vec![0, 1], 2)],
+            non_simple_components: vec![2],
+            automata: vec![crate::input_wire::DecodedRoleAutomaton {
+                component_id: 2,
+                state_count: 3,
+                initial_state: 0,
+                final_states: vec![2],
+                // The owned wire order is source-state first. Scalar
+                // canonical records order the nullable role ID first.
+                transitions: vec![
+                    crate::input_wire::DecodedRoleTransition {
+                        source_state: 0,
+                        target_state: 1,
+                        role_id: Some(2),
+                    },
+                    crate::input_wire::DecodedRoleTransition {
+                        source_state: 1,
+                        target_state: 2,
+                        role_id: Some(0),
+                    },
+                    crate::input_wire::DecodedRoleTransition {
+                        source_state: 2,
+                        target_state: 0,
+                        role_id: None,
+                    },
+                ],
+            }],
+            top_object_role_id: 0,
+            bottom_object_role_id: 1,
+            top_data_property_id: 0,
+            bottom_data_property_id: 0,
+        };
+        let mut budget = Budget::new(PermanentProgramLimits::default(), 0)?;
+        let transition_orders = freeze_role_transition_orders(&role_model, &mut budget)?;
+
+        assert_eq!(transition_orders, vec![vec![1, 0, 2]]);
+        let encoded = serde_json::to_value(CanonicalCompilerComponent::RoleModel {
+            value: &role_model,
+            transition_orders: &transition_orders,
+        })
+        .map_err(|error| {
+            EncodedValidationError::invariant(format!(
+                "role-transition canonical serialization failed: {error}"
+            ))
+        })?;
+        let Some(transitions) = encoded["automata"][0]["transitions"].as_array() else {
+            return Err(EncodedValidationError::invariant(
+                "canonical role transitions were not serialized as an array",
+            ));
+        };
+        assert_eq!(
+            transitions
+                .iter()
+                .map(|transition| transition["role_id"].as_u64())
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(2), None],
+        );
+        Ok(())
     }
 
     #[test]

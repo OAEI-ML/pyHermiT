@@ -14,13 +14,29 @@ use serde::{Serialize, Serializer};
 use crate::input_wire::{
     DecodedAtom, DecodedClause, DecodedDatatypeModel, DecodedExpressivity, DecodedGroundAtom,
     DecodedGroundDisjunction, DecodedLiteralIdentity, DecodedPredicate, DecodedProgram,
-    DecodedProvenanceEntry, DecodedRoleAutomaton, DecodedRoleModel, DecodedRoleTransition,
-    DecodedSymbolDomain, DecodedSymbolValue, DecodedTerm, OntologyMetadata, PredicateKind,
-    SymbolKind, TermSort,
+    DecodedProvenanceEntry, DecodedRoleModel, DecodedSymbolDomain, DecodedSymbolValue, DecodedTerm,
+    OntologyMetadata, PredicateKind, SymbolKind, TermSort,
 };
 use crate::model::IR_SCHEMA_VERSION;
 
-pub(crate) struct CanonicalClauseProgram<'a>(pub(crate) &'a DecodedProgram);
+use super::role_model::CanonicalRoleModel;
+
+pub(crate) struct CanonicalClauseProgram<'a> {
+    program: &'a DecodedProgram,
+    role_transition_orders: &'a [Vec<usize>],
+}
+
+impl<'a> CanonicalClauseProgram<'a> {
+    pub(crate) const fn new(
+        program: &'a DecodedProgram,
+        role_transition_orders: &'a [Vec<usize>],
+    ) -> Self {
+        Self {
+            program,
+            role_transition_orders,
+        }
+    }
+}
 
 pub(crate) enum CanonicalCompilerComponent<'a> {
     Clause(&'a DecodedClause),
@@ -29,7 +45,10 @@ pub(crate) enum CanonicalCompilerComponent<'a> {
     GroundAtom(&'a DecodedGroundAtom),
     GroundDisjunction(&'a DecodedGroundDisjunction),
     Provenance(&'a [DecodedProvenanceEntry]),
-    RoleModel(&'a DecodedRoleModel),
+    RoleModel {
+        value: &'a DecodedRoleModel,
+        transition_orders: &'a [Vec<usize>],
+    },
     Symbols {
         domains: &'a [DecodedSymbolDomain],
         predicates: &'a [DecodedPredicate],
@@ -197,7 +216,7 @@ impl Serialize for CanonicalClauseProgram<'_> {
     where
         S: Serializer,
     {
-        let program = self.0;
+        let program = self.program;
         let mut record = serializer.serialize_struct("ClauseProgram", 12)?;
         record.serialize_field("clauses", &Records(&program.clauses))?;
         record.serialize_field("datatype_model", &Record(&program.datatype_model))?;
@@ -210,7 +229,10 @@ impl Serialize for CanonicalClauseProgram<'_> {
         record.serialize_field("positive_facts", &Records(&program.positive_facts))?;
         record.serialize_field("predicates", &PredicateRegistry(&program.predicates))?;
         record.serialize_field("provenance", &ProvenanceTable(&program.provenance))?;
-        record.serialize_field("role_model", &Record(&program.role_model))?;
+        record.serialize_field(
+            "role_model",
+            &CanonicalRoleModel::new(&program.role_model, self.role_transition_orders),
+        )?;
         record.serialize_field("schema_version", &IR_SCHEMA_VERSION)?;
         record.serialize_field(
             "symbols",
@@ -236,7 +258,10 @@ impl Serialize for CanonicalCompilerComponent<'_> {
             Self::GroundAtom(value) => Record(*value).serialize(serializer),
             Self::GroundDisjunction(value) => Record(*value).serialize(serializer),
             Self::Provenance(value) => ProvenanceTable(value).serialize(serializer),
-            Self::RoleModel(value) => Record(*value).serialize(serializer),
+            Self::RoleModel {
+                value,
+                transition_orders,
+            } => CanonicalRoleModel::new(value, transition_orders).serialize(serializer),
             Self::Symbols {
                 domains,
                 predicates,
@@ -523,62 +548,6 @@ impl CanonicalRecord for DecodedProvenanceEntry {
         record.serialize_field("schema_version", &IR_SCHEMA_VERSION)?;
         record.serialize_field("source_sha256", &HexDigests(&self.source_sha256))?;
         record.serialize_field("type", "ProvenanceEntry")?;
-        record.end()
-    }
-}
-
-impl CanonicalRecord for DecodedRoleTransition {
-    fn serialize_canonical<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut record = serializer.serialize_struct("RoleTransitionIR", 5)?;
-        record.serialize_field("role_id", &self.role_id)?;
-        record.serialize_field("schema_version", &IR_SCHEMA_VERSION)?;
-        record.serialize_field("source_state", &self.source_state)?;
-        record.serialize_field("target_state", &self.target_state)?;
-        record.serialize_field("type", "RoleTransitionIR")?;
-        record.end()
-    }
-}
-
-impl CanonicalRecord for DecodedRoleAutomaton {
-    fn serialize_canonical<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut record = serializer.serialize_struct("RoleAutomatonIR", 7)?;
-        record.serialize_field("component_id", &self.component_id)?;
-        record.serialize_field("final_states", &self.final_states)?;
-        record.serialize_field("initial_state", &self.initial_state)?;
-        record.serialize_field("schema_version", &IR_SCHEMA_VERSION)?;
-        record.serialize_field("state_count", &self.state_count)?;
-        record.serialize_field("transitions", &Records(&self.transitions))?;
-        record.serialize_field("type", "RoleAutomatonIR")?;
-        record.end()
-    }
-}
-
-impl CanonicalRecord for DecodedRoleModel {
-    fn serialize_canonical<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut record = serializer.serialize_struct("RoleModelIR", 14)?;
-        record.serialize_field("automata", &Records(&self.automata))?;
-        record.serialize_field("bottom_data_property_id", &self.bottom_data_property_id)?;
-        record.serialize_field("bottom_object_role_id", &self.bottom_object_role_id)?;
-        record.serialize_field("complex_inclusions", &self.complex_inclusions)?;
-        record.serialize_field("data_inclusions", &self.data_inclusions)?;
-        record.serialize_field("data_property_count", &self.data_property_count)?;
-        record.serialize_field("inverse_role_ids", &self.inverse_role_ids)?;
-        record.serialize_field("non_simple_components", &self.non_simple_components)?;
-        record.serialize_field("object_role_count", &self.object_role_count)?;
-        record.serialize_field("schema_version", &IR_SCHEMA_VERSION)?;
-        record.serialize_field("simple_inclusions", &self.simple_inclusions)?;
-        record.serialize_field("top_data_property_id", &self.top_data_property_id)?;
-        record.serialize_field("top_object_role_id", &self.top_object_role_id)?;
-        record.serialize_field("type", "RoleModelIR")?;
         record.end()
     }
 }

@@ -732,7 +732,7 @@ def test_clause_assembly_cancellation_discards_candidate_and_retry_succeeds() ->
             snapshot,
             records=records,
             reference=reference,
-            cancel_at_checkpoint=33,
+            cancel_at_checkpoint=34,
         )
 
     assert captured.value.context["phase"] == "permanent-program-clause"
@@ -1863,6 +1863,170 @@ def test_direct_lifecycle_profile_gate_rejects_before_publication_and_allows_ret
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "SubClassOf(:A ObjectMinCardinality(4294967296 :p :B))",
+        ),
+        (
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "EquivalentClasses(:A ObjectIntersectionOf(:B ObjectMinCardinality(4294967296 :p :B)))",
+        ),
+        (
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:U))",
+            "Declaration(ObjectProperty(:p))",
+            "DisjointUnion(:U ObjectIntersectionOf(:A :B) ObjectMinCardinality(4294967296 :p :B))",
+        ),
+        (
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "ObjectPropertyRange(ObjectInverseOf(:p) ObjectIntersectionOf("
+            "ObjectSomeValuesFrom(:q :A) "
+            "ObjectMinCardinality(4294967296 :q :B)))",
+        ),
+        (
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:p))",
+            "DataPropertyDomain(:p ObjectMinCardinality(4294967296 :q :A))",
+        ),
+        (
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(DataProperty(:d))",
+            "HasKey(ObjectIntersectionOf(:A ObjectMinCardinality(4294967296 :q :B)) (:p) (:d))",
+        ),
+        (
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            "ClassAssertion(ObjectMinCardinality(4294967296 :p :A) :i)",
+        ),
+    ],
+    ids=[
+        "subclass",
+        "equivalent-classes",
+        "disjoint-union",
+        "object-property-range",
+        "data-property-domain",
+        "has-key",
+        "class-assertion",
+    ],
+)
+def test_direct_lifecycle_rejects_every_uncompiled_logical_root(
+    body: tuple[str, ...],
+) -> None:
+    snapshot = pyowl_core.load_snapshot(functional(*body), options=OPTIONS)
+
+    with pytest.raises(
+        BackendMismatchError,
+        match=r"source semantics contain uncompiled logical roots \(count=1\)",
+    ) as rejected:
+        _direct_lifecycle_session(snapshot)
+
+    assert rejected.value.code == "NATIVE_ENCODED_VIEW_INVALID"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "SubObjectPropertyOf(:p :q)",
+        ),
+        (
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(ObjectProperty(:r))",
+            "SubObjectPropertyOf(ObjectPropertyChain(:p :q) :r)",
+        ),
+        (
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "EquivalentObjectProperties(:p :q)",
+        ),
+        (
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "DisjointObjectProperties(:p :q)",
+        ),
+        (
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "InverseObjectProperties(:p :q)",
+        ),
+        (
+            "Declaration(ObjectProperty(:p))",
+            "IrreflexiveObjectProperty(:p)",
+        ),
+        (
+            "Declaration(ObjectProperty(:p))",
+            "SymmetricObjectProperty(:p)",
+        ),
+        (
+            "Declaration(ObjectProperty(:p))",
+            "AsymmetricObjectProperty(:p)",
+        ),
+        (
+            "Declaration(ObjectProperty(:p))",
+            "TransitiveObjectProperty(:p)",
+        ),
+        (
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "SubDataPropertyOf(:p :q)",
+        ),
+        (
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "EquivalentDataProperties(:p :q)",
+        ),
+        (
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "DisjointDataProperties(:p :q)",
+        ),
+    ],
+    ids=[
+        "simple-object-inclusion",
+        "complex-object-inclusion",
+        "equivalent-object-properties",
+        "disjoint-object-properties",
+        "inverse-object-properties",
+        "irreflexive-object-property",
+        "symmetric-object-property",
+        "asymmetric-object-property",
+        "transitive-object-property",
+        "sub-data-property",
+        "equivalent-data-properties",
+        "disjoint-data-properties",
+    ],
+)
+def test_direct_publication_accepts_every_delegated_role_root(
+    body: tuple[str, ...],
+) -> None:
+    snapshot = pyowl_core.load_snapshot(functional(*body), options=OPTIONS)
+
+    session = _direct_session(snapshot)
+    try:
+        assert session.permanent_program_sha256 != "0" * 64
+    finally:
+        session.close()
+
+
 def test_encoded_service_context_is_compact_strict_cancel_safe_and_close_safe() -> None:
     snapshot = _direct_snapshot()
     cancellation = native.CancellationHandle()
@@ -2003,7 +2167,7 @@ def test_direct_publication_limit_and_cancellation_discard_then_retry() -> None:
             snapshot,
             records=records,
             reference=reference,
-            cancel_at_checkpoint=73,
+            cancel_at_checkpoint=74,
         )
     assert captured.value.context["phase"] == "permanent-program-clause"
 
@@ -2036,7 +2200,7 @@ def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactiona
         _direct_lifecycle_session(
             snapshot,
             records=records,
-            cancel_at_checkpoint=80,
+            cancel_at_checkpoint=81,
         )
     assert captured.value.context["phase"] == "permanent-program-digest"
 
@@ -2140,6 +2304,64 @@ def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(
         assert counters["encoded_private_ir_bytes"] == 0
     finally:
         session.close()
+
+
+def test_advertised_lifecycle_is_ineligible_for_deferred_roots_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unsupported = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "SubClassOf(:A ObjectMinCardinality(4294967296 :p :B))",
+        ),
+        options=OPTIONS,
+    )
+    direct_calls = 0
+    scalar_calls = 0
+
+    extension = ModuleType("encoded_root_eligibility_test_extension")
+    extension.__version__ = native.__version__
+    extension.ABI_VERSION = native.ABI_VERSION
+    extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
+    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    extension.CancellationHandle = native.CancellationHandle
+    extension.self_test = native.self_test
+
+    def forbidden_scalar_constructor(*_args: object) -> object:
+        nonlocal scalar_calls
+        scalar_calls += 1
+        raise AssertionError("scalar fallback was called after direct input consumption")
+
+    def direct_constructor(**kwargs: object) -> object:
+        nonlocal direct_calls
+        direct_calls += 1
+        return native._create_encoded_session_v1(**kwargs)
+
+    extension.create_session = forbidden_scalar_constructor
+    extension._create_encoded_session_v1 = direct_constructor
+    factory = NativeBackendFactory(extension)
+    monkeypatch.setattr(
+        native_backend,
+        "negotiate_encoded_input",
+        lambda view, *_args, **_kwargs: _encoded_negotiation(view),
+    )
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+
+    with pytest.raises(
+        BackendMismatchError,
+        match=r"source semantics contain uncompiled logical roots \(count=1\)",
+    ):
+        Reasoner(unsupported)
+    assert direct_calls == 1
+    assert scalar_calls == 0
+
+    with Reasoner(_direct_snapshot()) as retry:
+        assert retry.is_consistent()
+        assert retry.diagnostics()["ingestion_path"] == "encoded-native"
+    assert direct_calls == 2
+    assert scalar_calls == 0
 
 
 def test_facade_rejects_mismatched_compiler_digest_then_retries(

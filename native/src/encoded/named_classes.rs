@@ -2153,7 +2153,23 @@ fn compile_named_class_phase_impl<B: ByteSource>(
             | RootHandler::AnnotationAssertion
             | RootHandler::SubAnnotationPropertyOf
             | RootHandler::AnnotationPropertyDomain
-            | RootHandler::AnnotationPropertyRange => {}
+            | RootHandler::AnnotationPropertyRange
+            | RootHandler::SubObjectPropertyOf
+            | RootHandler::EquivalentObjectProperties
+            | RootHandler::DisjointObjectProperties
+            | RootHandler::InverseObjectProperties
+            | RootHandler::IrreflexiveObjectProperty
+            | RootHandler::SymmetricObjectProperty
+            | RootHandler::AsymmetricObjectProperty
+            | RootHandler::TransitiveObjectProperty
+            | RootHandler::SubDataPropertyOf
+            | RootHandler::EquivalentDataProperties
+            | RootHandler::DisjointDataProperties => {
+                // Declarations and annotations emit no logical class
+                // fragment. Role roots are owned by the simple/complex role,
+                // data-inclusion, or role-characteristic compiler, so they
+                // are not deferred by this phase either.
+            }
             RootHandler::SubClassOf => {
                 match named_subclass(
                     model,
@@ -2906,7 +2922,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
                     }
                 }
             }
-            _ => {
+            RootHandler::SwrlRule => {
                 deferred_roots = deferred_roots.checked_add(1).ok_or_else(|| {
                     EncodedValidationError::resource("named-class deferred-root count overflowed")
                 })?;
