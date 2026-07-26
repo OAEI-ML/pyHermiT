@@ -172,18 +172,26 @@ def _manifest(
     max_owned_bytes: int | None = None,
     cancel_at_checkpoint: int | None = None,
 ) -> dict[str, object]:
+    selected_reference = reference
+    if reference_ir is None and selected_reference is None:
+        selected_reference = _compiled(snapshot)
     encoded = native._encoded_permanent_program_parity_v1(
         slices=records or (_slice_record(snapshot),),
         reference_ir=(
             reference_ir
             if reference_ir is not None
-            else encode_ontology(reference or _compiled(snapshot))
+            else encode_ontology(cast(CompiledOntology, selected_reference))
         ),
         logical_fingerprint=memoryview(snapshot.logical_fingerprint.digest),
         max_owned_bytes=max_owned_bytes,
         cancel_at_checkpoint=cancel_at_checkpoint,
     )
-    return cast(dict[str, object], json.loads(encoded))
+    manifest = cast(dict[str, object], json.loads(encoded))
+    if selected_reference is not None:
+        scalar_program = native_input._program_from_ontology(selected_reference)
+        expected_digest = hashlib.sha256(scalar_program.canonical_bytes()).hexdigest()
+        assert manifest["program_sha256"] == expected_digest
+    return manifest
 
 
 def _direct_session(
@@ -549,12 +557,6 @@ def test_direct_assembly_publishes_one_complete_dense_scalar_equal_manifest() ->
     assert manifest["schema_version"] == 1
     program = cast(dict[str, object], manifest["program"])
     assert set(program) == PROGRAM_SECTIONS
-    encoded_program = json.dumps(
-        program,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode()
-    assert manifest["program_sha256"] == hashlib.sha256(encoded_program).hexdigest()
     _assert_dense_program(program)
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
@@ -1744,6 +1746,33 @@ def test_direct_program_publication_constructs_the_same_native_session() -> None
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_direct_program_publication_rejects_false_program_digest_then_retries() -> None:
+    snapshot = _direct_snapshot()
+    compiled = _compiled(snapshot)
+    metadata = bytearray(encode_ontology_metadata(compiled))
+    program_digest_offset = 32 * 4
+    metadata[program_digest_offset] ^= 0xFF
+
+    with pytest.raises(BackendMismatchError) as rejected:
+        native._create_encoded_session_v1(
+            slices=(_slice_record(snapshot),),
+            metadata=bytes(metadata),
+            config=encode_config(ReasonerConfig()),
+            cancellation=native.CancellationHandle(),
+        )
+
+    assert rejected.value.code == "NATIVE_ENCODED_PARITY_MISMATCH"
+    assert rejected.value.context == {"section": "program_sha256"}
+
+    retry = _direct_session(snapshot, reference=compiled)
+    try:
+        assert retry.permanent_program_sha256 == hashlib.sha256(
+            native_input._program_from_ontology(compiled).canonical_bytes()
+        ).hexdigest()
+    finally:
+        retry.close()
+
+
 def test_no_reference_lifecycle_matches_scalar_consistency_and_classification() -> None:
     snapshot = _direct_snapshot()
 
@@ -1771,6 +1800,7 @@ def test_no_reference_lifecycle_matches_scalar_consistency_and_classification() 
             assert encoded_objects == scalar.classify_object_properties()
             assert encoded_data == scalar.classify_data_properties()
             assert encoded_realization == scalar.realize()
+            assert encoded_digest == scalar.permanent_program_sha256
             assert len(encoded_digest) == 64
             assert encoded_digest != "0" * 64
         finally:

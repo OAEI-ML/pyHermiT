@@ -16,6 +16,7 @@ use std::mem::size_of;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use super::canonical_program::CanonicalClauseProgram;
 use super::complex_roles::ComplexRolePhase;
 use super::data_inclusions::DataInclusionPhase;
 use super::data_role_hierarchy::DataRoleHierarchyPhase;
@@ -396,7 +397,7 @@ impl EncodedPermanentProgram {
     ) -> ControlledResult<[u8; 32], E> {
         poll("permanent-program-digest-preflight").map_err(PermanentProgramError::Control)?;
         let mut writer = DigestWriter::new(poll);
-        let serialized = serde_json::to_writer(&mut writer, &self.program);
+        let serialized = serde_json::to_writer(&mut writer, &CanonicalClauseProgram(&self.program));
         if let Some(error) = writer.control_error.take() {
             return Err(PermanentProgramError::Control(error));
         }

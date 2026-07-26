@@ -4759,18 +4759,26 @@ fn create_encoded_session_v1(
                 poll("encoded-session-publication")?;
                 assembled
             };
+            let mut poll = |phase: &'static str| {
+                poll_encoded_session_checkpoint(
+                    &cancellation_state,
+                    &mut checkpoint,
+                    cancel_at_checkpoint,
+                    phase,
+                )
+            };
+            let assembled_sha256 = assembled
+                .semantic_sha256_controlled(&mut poll)
+                .map_err(encoded_permanent_error)?;
             if metadata.program_sha256.iter().all(|byte| *byte == 0) {
-                let mut poll = |phase: &'static str| {
-                    poll_encoded_session_checkpoint(
-                        &cancellation_state,
-                        &mut checkpoint,
-                        cancel_at_checkpoint,
-                        phase,
-                    )
-                };
-                metadata.program_sha256 = assembled
-                    .semantic_sha256_controlled(&mut poll)
-                    .map_err(encoded_permanent_error)?;
+                metadata.program_sha256 = assembled_sha256;
+            } else if metadata.program_sha256 != assembled_sha256 {
+                return Err(NativeError::new(
+                    ErrorKind::Wire,
+                    "NATIVE_ENCODED_PARITY_MISMATCH",
+                    "encoded permanent-program digest differs from its metadata",
+                )
+                .with_context("section", "program_sha256"));
             }
             let ontology = DecodedOntology {
                 metadata,
