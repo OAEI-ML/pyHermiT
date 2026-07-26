@@ -44,6 +44,11 @@ const DATA_INTERSECTION_OF_TAG: u64 = 21;
 const DATA_UNION_OF_TAG: u64 = 22;
 const DATA_COMPLEMENT_OF_TAG: u64 = 23;
 const DATA_ONE_OF_TAG: u64 = 24;
+const DATATYPE_RESTRICTION_TAG: u64 = 25;
+const FACET_RESTRICTION_TAG: u64 = 20;
+const IRI_TAG: u64 = 1;
+const CANONICAL_NODE_COMPONENT: u8 = 1;
+const CANONICAL_TEXT_COMPONENT: u8 = 2;
 const CANONICAL_COLLECTION_COMPONENT: u8 = 6;
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const RDFS_LITERAL_DISPLAY: &str = "datatype:http://www.w3.org/2000/01/rdf-schema#Literal";
@@ -56,6 +61,17 @@ const OWL_RATIONAL_IRI: &str = "http://www.w3.org/2002/07/owl#rational";
 const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
 const RDF_XML_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral";
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
+const SUPPORTED_FACET_IRIS: [&str; 9] = [
+    "http://www.w3.org/2001/XMLSchema#length",
+    "http://www.w3.org/2001/XMLSchema#maxExclusive",
+    "http://www.w3.org/2001/XMLSchema#maxInclusive",
+    "http://www.w3.org/2001/XMLSchema#maxLength",
+    "http://www.w3.org/2001/XMLSchema#minExclusive",
+    "http://www.w3.org/2001/XMLSchema#minInclusive",
+    "http://www.w3.org/2001/XMLSchema#minLength",
+    "http://www.w3.org/2001/XMLSchema#pattern",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#langRange",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepresentableLiteralSemantics {
@@ -66,6 +82,18 @@ enum RepresentableLiteralSemantics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RepresentableDatatypeSemantics {
     literals: RepresentableLiteralSemantics,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DatatypeRestrictionKey<'a> {
+    datatype_key: &'a [u8],
+    facets: Vec<FacetRestrictionKey<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FacetRestrictionKey<'a> {
+    facet_iri: &'a str,
+    literal_key: &'a [u8],
 }
 
 #[derive(Serialize)]
@@ -760,6 +788,26 @@ fn data_range_semantics_are_supported_at(
                 remaining_depth.saturating_sub(1),
             );
     }
+    if let Some(restriction) = datatype_restriction_key(key) {
+        let Ok(datatype_index) = named
+            .data_range_domain
+            .values
+            .binary_search_by(|value| value.key.as_slice().cmp(restriction.datatype_key))
+        else {
+            return false;
+        };
+        let Some(datatype_iri) = named.data_range_domain.values[datatype_index]
+            .display
+            .strip_prefix("datatype:")
+        else {
+            return false;
+        };
+        return crate::datatypes::is_supported_datatype(datatype_iri)
+            && restriction.facets.iter().all(|facet| {
+                SUPPORTED_FACET_IRIS.contains(&facet.facet_iri)
+                    && source_literal_semantics_are_supported(named, facet.literal_key)
+            });
+    }
     if let Some((_, operands)) = data_range_boolean_operand_keys(key) {
         return operands.iter().all(|operand| {
             operand.len() < key.len()
@@ -860,6 +908,9 @@ fn data_range_semantics_are_unknown(
         return data_range_semantics_are_unknown(named, operand, remaining_depth.saturating_sub(1));
     }
     if data_range_enumeration_literal_keys(key).is_some() {
+        return false;
+    }
+    if datatype_restriction_key(key).is_some() {
         return false;
     }
     data_range_boolean_operand_keys(key).is_none_or(|(_, operands)| {
@@ -1138,6 +1189,69 @@ fn data_range_semantic_value(
                 .collect::<Vec<_>>(),
         }));
     }
+    if let Some(restriction) = datatype_restriction_key(key) {
+        let datatype_index = named
+            .data_range_domain
+            .values
+            .binary_search_by(|value| value.key.as_slice().cmp(restriction.datatype_key))
+            .map_err(|_| {
+                EncodedValidationError::invariant(
+                    "validated datatype restriction references a missing datatype",
+                )
+            })?;
+        let datatype_iri = named.data_range_domain.values[datatype_index]
+            .display
+            .strip_prefix("datatype:")
+            .filter(|iri| crate::datatypes::is_supported_datatype(iri))
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "validated datatype restriction has an unsupported base",
+                )
+            })?;
+        budget.claim_work(restriction.facets.len())?;
+        let mut canonical = Vec::new();
+        canonical
+            .try_reserve_exact(restriction.facets.len())
+            .map_err(|_| {
+                EncodedValidationError::resource("datatype restriction facet allocation failed")
+            })?;
+        for facet in restriction.facets {
+            if !SUPPORTED_FACET_IRIS.contains(&facet.facet_iri) {
+                return Err(EncodedValidationError::invariant(
+                    "validated datatype restriction has an unsupported facet",
+                ));
+            }
+            let value = serde_json::json!({
+                "facet_iri": facet.facet_iri,
+                "record": "facet_semantic",
+                "schema_version": 1,
+                "value": source_literal_semantic_value(named, facet.literal_key)?,
+            });
+            let encoded = serde_json::to_vec(&value).map_err(|_| {
+                EncodedValidationError::invariant("datatype restriction facet JSON encoding failed")
+            })?;
+            canonical.push((encoded, value));
+        }
+        canonical.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        canonical.dedup_by(|left, right| left.0 == right.0);
+        if canonical.is_empty() {
+            return Err(EncodedValidationError::invariant(
+                "validated datatype restriction has no facets",
+            ));
+        }
+        return Ok(serde_json::json!({
+            "datatype_iri": datatype_iri,
+            "facets": canonical
+                .into_iter()
+                .map(|(_, facet)| facet)
+                .collect::<Vec<_>>(),
+            "kind": "restriction",
+            "operands": [],
+            "record": "data_range_semantic",
+            "schema_version": 1,
+            "values": [],
+        }));
+    }
     let (tag, operand_keys) = data_range_boolean_operand_keys(key).ok_or_else(|| {
         EncodedValidationError::invariant(
             "validated datatype payload contains an unassembled data range",
@@ -1403,7 +1517,8 @@ fn numeric_literal_datatype_is_supported(iri: &str) -> bool {
 
 fn data_range_complement_operand_key(candidate: &[u8]) -> Option<&[u8]> {
     let (tag, after_tag) = decode_canonical_varint(candidate, 0)?;
-    if tag != DATA_COMPLEMENT_OF_TAG || candidate.get(after_tag) != Some(&1) {
+    if tag != DATA_COMPLEMENT_OF_TAG || candidate.get(after_tag) != Some(&CANONICAL_NODE_COMPONENT)
+    {
         return None;
     }
     let (length, after_length) = decode_canonical_varint(candidate, after_tag + 1)?;
@@ -1412,6 +1527,64 @@ fn data_range_complement_operand_key(candidate: &[u8]) -> Option<&[u8]> {
     (end == candidate.len())
         .then(|| candidate.get(after_length..end))
         .flatten()
+}
+
+fn datatype_restriction_key(candidate: &[u8]) -> Option<DatatypeRestrictionKey<'_>> {
+    let (tag, after_tag) = decode_canonical_varint(candidate, 0)?;
+    if tag != DATATYPE_RESTRICTION_TAG {
+        return None;
+    }
+    let (datatype_key, cursor) = canonical_node_component(candidate, after_tag)?;
+    let (facet_keys, cursor) = canonical_collection_items(candidate, cursor, 1)?;
+    if cursor != candidate.len() {
+        return None;
+    }
+    let mut facets = Vec::new();
+    facets.try_reserve_exact(facet_keys.len()).ok()?;
+    for facet_key in facet_keys {
+        facets.push(facet_restriction_key(facet_key)?);
+    }
+    Some(DatatypeRestrictionKey {
+        datatype_key,
+        facets,
+    })
+}
+
+fn facet_restriction_key(candidate: &[u8]) -> Option<FacetRestrictionKey<'_>> {
+    let (tag, after_tag) = decode_canonical_varint(candidate, 0)?;
+    if tag != FACET_RESTRICTION_TAG {
+        return None;
+    }
+    let (iri_key, cursor) = canonical_node_component(candidate, after_tag)?;
+    let (literal_key, cursor) = canonical_node_component(candidate, cursor)?;
+    (cursor == candidate.len()).then_some(FacetRestrictionKey {
+        facet_iri: canonical_iri_text(iri_key)?,
+        literal_key,
+    })
+}
+
+fn canonical_iri_text(candidate: &[u8]) -> Option<&str> {
+    let (tag, after_tag) = decode_canonical_varint(candidate, 0)?;
+    if tag != IRI_TAG || candidate.get(after_tag) != Some(&CANONICAL_TEXT_COMPONENT) {
+        return None;
+    }
+    let (length, after_length) = decode_canonical_varint(candidate, after_tag + 1)?;
+    let length = usize::try_from(length).ok()?;
+    let end = after_length.checked_add(length)?;
+    (end == candidate.len())
+        .then(|| std::str::from_utf8(candidate.get(after_length..end)?).ok())
+        .flatten()
+}
+
+fn canonical_node_component(candidate: &[u8], cursor: usize) -> Option<(&[u8], usize)> {
+    if candidate.get(cursor) != Some(&CANONICAL_NODE_COMPONENT) {
+        return None;
+    }
+    let (length, after_length) = decode_canonical_varint(candidate, cursor + 1)?;
+    let length = usize::try_from(length).ok()?;
+    let end = after_length.checked_add(length)?;
+    let key = candidate.get(after_length..end)?;
+    (!key.is_empty()).then_some((key, end))
 }
 
 fn data_range_boolean_operand_keys(candidate: &[u8]) -> Option<(u64, Vec<&[u8]>)> {
@@ -1428,12 +1601,22 @@ fn canonical_collection_item_keys<'a>(
     minimum_count: usize,
 ) -> Option<(u64, Vec<&'a [u8]>)> {
     let (tag, after_tag) = decode_canonical_varint(candidate, 0)?;
-    if !accepted_tags.contains(&tag)
-        || candidate.get(after_tag) != Some(&CANONICAL_COLLECTION_COMPONENT)
-    {
+    if !accepted_tags.contains(&tag) {
         return None;
     }
-    let (count, mut cursor) = decode_canonical_varint(candidate, after_tag + 1)?;
+    let (items, cursor) = canonical_collection_items(candidate, after_tag, minimum_count)?;
+    (cursor == candidate.len()).then_some((tag, items))
+}
+
+fn canonical_collection_items(
+    candidate: &[u8],
+    cursor: usize,
+    minimum_count: usize,
+) -> Option<(Vec<&[u8]>, usize)> {
+    if candidate.get(cursor) != Some(&CANONICAL_COLLECTION_COMPONENT) {
+        return None;
+    }
+    let (count, mut cursor) = decode_canonical_varint(candidate, cursor + 1)?;
     let count = usize::try_from(count).ok()?;
     if count < minimum_count {
         return None;
@@ -1451,7 +1634,7 @@ fn canonical_collection_item_keys<'a>(
         items.push(item);
         cursor = end;
     }
-    (cursor == candidate.len()).then_some((tag, items))
+    Some((items, cursor))
 }
 
 fn decode_canonical_varint(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
@@ -3424,6 +3607,25 @@ mod tests {
         );
         assert!(data_range_enumeration_literal_keys(&[24, 6, 0]).is_none());
         assert!(data_range_enumeration_literal_keys(&[24, 6, 1, 1, 4, 0]).is_none());
+    }
+
+    #[test]
+    fn datatype_restriction_key_exposes_exact_facets() {
+        let facet = [20_u8, 1, 6, 1, 2, 3, b'i', b'r', b'i', 1, 1, 4];
+        let mut key = vec![25_u8, 1, 1, 2, 6, 1, 12];
+        key.extend_from_slice(&facet);
+        let restriction = datatype_restriction_key(&key).unwrap();
+        assert_eq!(restriction.datatype_key, &[2]);
+        assert_eq!(
+            restriction.facets,
+            vec![FacetRestrictionKey {
+                facet_iri: "iri",
+                literal_key: &[4],
+            }]
+        );
+        assert!(datatype_restriction_key(&[25, 1, 1, 2, 6, 0]).is_none());
+        key.push(0);
+        assert!(datatype_restriction_key(&key).is_none());
     }
 
     #[test]

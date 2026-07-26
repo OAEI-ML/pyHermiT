@@ -1189,40 +1189,152 @@ def test_enumerated_data_ranges_have_program_and_runtime_parity() -> None:
 
 
 @pytest.mark.parametrize(
-    "data_range",
+    "restriction",
     (
         (
-            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#int> "
+            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#integer> "
             "<http://www.w3.org/2001/XMLSchema#minInclusive> "
-            '"0"^^<http://www.w3.org/2001/XMLSchema#int>)'
+            '"0"^^<http://www.w3.org/2001/XMLSchema#integer> '
+            "<http://www.w3.org/2001/XMLSchema#maxExclusive> "
+            '"10"^^<http://www.w3.org/2001/XMLSchema#integer>)'
         ),
         (
-            "DataComplementOf(DatatypeRestriction("
-            "<http://www.w3.org/2001/XMLSchema#int> "
-            "<http://www.w3.org/2001/XMLSchema#minInclusive> "
-            '"0"^^<http://www.w3.org/2001/XMLSchema#int>))'
+            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#decimal> "
+            "<http://www.w3.org/2001/XMLSchema#minExclusive> "
+            '"0.5"^^<http://www.w3.org/2001/XMLSchema#decimal> '
+            "<http://www.w3.org/2001/XMLSchema#maxInclusive> "
+            '"9.5"^^<http://www.w3.org/2001/XMLSchema#decimal>)'
         ),
         (
-            "DataUnionOf(<http://www.w3.org/2001/XMLSchema#boolean> "
-            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#int> "
+            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#float> "
+            "<http://www.w3.org/2001/XMLSchema#minExclusive> "
+            '"-0"^^<http://www.w3.org/2001/XMLSchema#float> '
+            "<http://www.w3.org/2001/XMLSchema#maxInclusive> "
+            '"INF"^^<http://www.w3.org/2001/XMLSchema#float>)'
+        ),
+        (
+            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#dateTime> "
             "<http://www.w3.org/2001/XMLSchema#minInclusive> "
-            '"0"^^<http://www.w3.org/2001/XMLSchema#int>))'
+            '"2024-01-01T00:00:00Z"^^'
+            "<http://www.w3.org/2001/XMLSchema#dateTime> "
+            "<http://www.w3.org/2001/XMLSchema#maxExclusive> "
+            '"2025-01-01T00:00:00Z"^^'
+            "<http://www.w3.org/2001/XMLSchema#dateTime>)"
+        ),
+        (
+            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#hexBinary> "
+            "<http://www.w3.org/2001/XMLSchema#length> "
+            '"2"^^<http://www.w3.org/2001/XMLSchema#integer> '
+            "<http://www.w3.org/2001/XMLSchema#minLength> "
+            '"1"^^<http://www.w3.org/2001/XMLSchema#integer> '
+            "<http://www.w3.org/2001/XMLSchema#maxLength> "
+            '"3"^^<http://www.w3.org/2001/XMLSchema#integer>)'
+        ),
+        (
+            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#string> "
+            "<http://www.w3.org/2001/XMLSchema#length> "
+            '"3"^^<http://www.w3.org/2001/XMLSchema#integer> '
+            "<http://www.w3.org/2001/XMLSchema#pattern> "
+            '"[a-z]+")'
+        ),
+        (
+            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#anyURI> "
+            "<http://www.w3.org/2001/XMLSchema#minLength> "
+            '"1"^^<http://www.w3.org/2001/XMLSchema#integer> '
+            "<http://www.w3.org/2001/XMLSchema#pattern> "
+            '"https://.*")'
+        ),
+        (
+            "DatatypeRestriction("
+            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral> "
+            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#langRange> "
+            '"en")'
         ),
     ),
-    ids=("restriction", "complemented-restriction", "boolean-restriction"),
+    ids=(
+        "exact-numeric",
+        "decimal",
+        "ieee",
+        "date-time",
+        "binary-lengths",
+        "string",
+        "uri",
+        "language",
+    ),
 )
-def test_unassembled_datatype_facets_remain_fail_closed(data_range: str) -> None:
+def test_datatype_restriction_families_have_program_and_runtime_parity(
+    restriction: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:d))",
+            f"DataPropertyRange(:d {restriction})",
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    manifest = _manifest(snapshot, reference=compiled)
+    datatype_model = cast(
+        dict[str, object],
+        cast(dict[str, object], manifest["program"])["datatype_model"],
+    )
+    semantic_model = cast(
+        dict[str, object],
+        json.loads(cast(str, datatype_model["semantic_payload_json"])),
+    )
+    assert any(
+        cast(dict[str, object], value)["kind"] == "restriction"
+        for value in cast(list[object], semantic_model["data_ranges"])
+    )
+
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.classify_data_properties() == scalar.classify_data_properties()
+    finally:
+        encoded.close()
+        scalar.close()
+
+
+def test_nested_datatype_restrictions_have_exact_fail_closed_runtime_parity() -> None:
+    restriction = (
+        "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#integer> "
+        "<http://www.w3.org/2001/XMLSchema#minInclusive> "
+        '"0"^^<http://www.w3.org/2001/XMLSchema#integer>)'
+    )
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(DataProperty(:d))",
-            f"SubClassOf(:A DataSomeValuesFrom(:d {data_range}))",
+            "SubClassOf(:A DataSomeValuesFrom(:d DataUnionOf("
+            "<http://www.w3.org/2001/XMLSchema#boolean> "
+            f"DataComplementOf({restriction}))))",
         ),
         options=OPTIONS,
     )
-
-    with pytest.raises(BackendMismatchError, match="datatype semantic phase"):
-        _manifest(snapshot)
+    compiled = _compiled(snapshot)
+    _manifest(snapshot, reference=compiled)
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        with pytest.raises(UnsupportedDatatypeError) as encoded_error:
+            encoded.classify_classes()
+        with pytest.raises(UnsupportedDatatypeError) as scalar_error:
+            scalar.classify_classes()
+        assert str(encoded_error.value) == str(scalar_error.value)
+    finally:
+        encoded.close()
+        scalar.close()
 
 
 def test_ieee_literal_semantics_preserve_identity_ordering_and_runtime_parity() -> None:
@@ -1653,11 +1765,13 @@ def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactiona
 def test_direct_publication_fails_closed_for_unrepresented_semantics() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
+            "Declaration(Datatype(:bounded))",
             "Declaration(DataProperty(:p))",
-            "DataPropertyRange(:p DatatypeRestriction("
+            "DatatypeDefinition(:bounded DatatypeRestriction("
             "<http://www.w3.org/2001/XMLSchema#int> "
             "<http://www.w3.org/2001/XMLSchema#minInclusive> "
             '"0"^^<http://www.w3.org/2001/XMLSchema#int>))',
+            "DataPropertyRange(:p :bounded)",
         ),
         options=OPTIONS,
     )
