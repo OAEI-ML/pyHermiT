@@ -198,6 +198,7 @@ impl Drop for BusyGuard<'_> {
 #[pyclass(module = "pyhermit._native", frozen)]
 struct NativeSession {
     control: Arc<SessionControl>,
+    compiler_digest: Option<[u8; 32]>,
 }
 
 #[pymethods]
@@ -216,13 +217,31 @@ impl NativeSession {
             .map_err(|error| error.into_pyerr(py))
     }
 
+    #[getter]
+    fn compiler_digest(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.control
+            .run(|_owned| Ok(self.compiler_digest.map(|value| hex_digest(&value))))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
     fn _encoded_service_context_v1(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
         let control = Arc::clone(&self.control);
+        let compiler_digest = self.compiler_digest.ok_or_else(|| {
+            NativeError::new(
+                ErrorKind::Version,
+                "NATIVE_ENCODED_CONTEXT_UNAVAILABLE",
+                "native scalar-wire session has no encoded compiler digest",
+            )
+            .into_pyerr(py)
+        })?;
         control
             .run(|owned| {
                 py.detach(|| {
                     control.cancellation.poll()?;
-                    let encoded = service_context::encode_service_context(owned.ontology.as_ref())?;
+                    let encoded = service_context::encode_service_context(
+                        owned.ontology.as_ref(),
+                        &compiler_digest,
+                    )?;
                     control.cancellation.poll()?;
                     Ok(encoded)
                 })
@@ -4780,13 +4799,26 @@ fn create_encoded_session_v1(
                 )
                 .with_context("section", "program_sha256"));
             }
+            let compiler_digest = {
+                let mut poll = |phase: &'static str| {
+                    poll_encoded_session_checkpoint(
+                        &cancellation_state,
+                        &mut checkpoint,
+                        cancel_at_checkpoint,
+                        phase,
+                    )
+                };
+                assembled
+                    .compiler_sha256_controlled(&metadata, &mut poll)
+                    .map_err(encoded_permanent_error)?
+            };
             let ontology = DecodedOntology {
                 metadata,
                 program: assembled.program,
                 declared_entities: assembled.declared_entities,
                 named_individuals: assembled.named_individuals,
             };
-            construct_native_session(ontology, config, cancellation_state)
+            construct_native_session(ontology, config, cancellation_state, Some(compiler_digest))
         })
     }));
     match result {
@@ -4829,7 +4861,7 @@ fn create_session(
     let result = catch_unwind(AssertUnwindSafe(|| {
         py.detach(move || {
             let (ontology, config) = decode_session_inputs(ontology_wire, config_wire, &limits)?;
-            construct_native_session(ontology, config, cancellation_state)
+            construct_native_session(ontology, config, cancellation_state, None)
         })
     }));
     match result {
@@ -4847,6 +4879,7 @@ fn construct_native_session(
     ontology: DecodedOntology,
     config: DecodedConfig,
     cancellation_state: Arc<CancellationState>,
+    compiler_digest: Option<[u8; 32]>,
 ) -> NativeResult<NativeSession> {
     // Session construction preserves the WPR0 lifecycle contract: operation timeout and
     // observed-memory failures are surfaced by the first semantic operation, not while the
@@ -4868,6 +4901,7 @@ fn construct_native_session(
     )?;
     let scheduler = SessionScheduler::new(tableau, SessionLimits::default())?;
     Ok(NativeSession {
+        compiler_digest,
         control: Arc::new(SessionControl {
             owner_pid: std::process::id(),
             closed: AtomicBool::new(false),

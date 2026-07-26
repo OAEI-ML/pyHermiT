@@ -205,7 +205,7 @@ def _direct_session(
 ) -> Any:
     selected_config = ReasonerConfig() if config is None else config
     compiled = reference or _compiled(snapshot, config=selected_config)
-    return native._create_encoded_session_v1(
+    session = native._create_encoded_session_v1(
         slices=records or (_slice_record(snapshot),),
         metadata=encode_ontology_metadata(compiled),
         config=encode_config(selected_config),
@@ -213,6 +213,12 @@ def _direct_session(
         max_owned_bytes=max_owned_bytes,
         cancel_at_checkpoint=cancel_at_checkpoint,
     )
+    try:
+        assert session.compiler_digest == facade_module._canonical_compiler_digest(compiled)
+    except BaseException:
+        session.close()
+        raise
+    return session
 
 
 def _direct_lifecycle_session(
@@ -1737,6 +1743,8 @@ def test_direct_program_publication_constructs_the_same_native_session() -> None
     )
     try:
         assert encoded.ontology_fingerprint == scalar.ontology_fingerprint
+        assert encoded.compiler_digest == facade_module._canonical_compiler_digest(compiled)
+        assert scalar.compiler_digest is None
         assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
         assert encoded.classify_classes() == scalar.classify_classes()
         assert encoded.classify_object_properties() == scalar.classify_object_properties()
@@ -1766,9 +1774,13 @@ def test_direct_program_publication_rejects_false_program_digest_then_retries() 
 
     retry = _direct_session(snapshot, reference=compiled)
     try:
-        assert retry.permanent_program_sha256 == hashlib.sha256(
-            native_input._program_from_ontology(compiled).canonical_bytes()
-        ).hexdigest()
+        assert (
+            retry.permanent_program_sha256
+            == hashlib.sha256(
+                native_input._program_from_ontology(compiled).canonical_bytes()
+            ).hexdigest()
+        )
+        assert retry.compiler_digest == facade_module._canonical_compiler_digest(compiled)
     finally:
         retry.close()
 
@@ -1801,6 +1813,7 @@ def test_no_reference_lifecycle_matches_scalar_consistency_and_classification() 
             assert encoded_data == scalar.classify_data_properties()
             assert encoded_realization == scalar.realize()
             assert encoded_digest == scalar.permanent_program_sha256
+            assert encoded.compiler_digest == facade_module._canonical_compiler_digest(compiled)
             assert len(encoded_digest) == 64
             assert encoded_digest != "0" * 64
         finally:
@@ -1856,6 +1869,7 @@ def test_encoded_service_context_is_compact_strict_cancel_safe_and_close_safe() 
     payload = cast(dict[str, object], json.loads(encoded))
 
     assert set(payload) == {
+        "compiler_digest",
         "deterministic_program",
         "domains",
         "permanent_program_sha256",
@@ -1874,6 +1888,7 @@ def test_encoded_service_context_is_compact_strict_cancel_safe_and_close_safe() 
         query_scope_digest=session.ontology_fingerprint,
         signature=snapshot.signature(),
     )
+    assert context.compiler_digest == session.compiler_digest
     assert context.permanent_program_sha256 == session.permanent_program_sha256
     assert context.source_signature.issuperset(snapshot.signature())
 
@@ -1884,7 +1899,7 @@ def test_encoded_service_context_is_compact_strict_cancel_safe_and_close_safe() 
     assert session._encoded_service_context_v1() == encoded
 
     hostile = dict(payload)
-    hostile["schema_version"] = 2
+    hostile["schema_version"] = 3
     with pytest.raises(BackendMismatchError):
         decode_service_context(
             json.dumps(hostile, separators=(",", ":")).encode(),
@@ -2125,10 +2140,71 @@ def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(
         session.close()
 
 
+def test_facade_rejects_mismatched_compiler_digest_then_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _direct_snapshot()
+    config = ReasonerConfig()
+    expected_digest = facade_module._canonical_compiler_digest(_compiled(snapshot))
+    corrupt_digest = True
+    candidates: list[Any] = []
+
+    class CompilerDigestProxy:
+        def __init__(self, raw: object) -> None:
+            self._raw = raw
+
+        @property
+        def compiler_digest(self) -> str:
+            return "0" * 64
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._raw, name)
+
+    extension = ModuleType("encoded_compiler_digest_mismatch_extension")
+    extension.__version__ = native.__version__
+    extension.ABI_VERSION = native.ABI_VERSION
+    extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
+    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    extension.CancellationHandle = native.CancellationHandle
+    extension.self_test = native.self_test
+
+    def forbidden_scalar_constructor(*_args: object) -> object:
+        raise AssertionError("scalar native session constructor was called")
+
+    def direct_constructor(**kwargs: object) -> object:
+        raw = native._create_encoded_session_v1(**kwargs)
+        candidates.append(raw)
+        return CompilerDigestProxy(raw) if corrupt_digest else raw
+
+    extension.create_session = forbidden_scalar_constructor
+    extension._create_encoded_session_v1 = direct_constructor
+    factory = NativeBackendFactory(extension)
+    monkeypatch.setattr(
+        native_backend,
+        "negotiate_encoded_input",
+        lambda view, *_args, **_kwargs: _encoded_negotiation(view),
+    )
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+
+    with pytest.raises(BackendMismatchError) as rejected:
+        Reasoner(snapshot, config=config)
+    assert rejected.value.context["reason"] == "compiler_digest_mismatch"
+    assert len(candidates) == 1
+    assert candidates[0].closed
+
+    corrupt_digest = False
+    with Reasoner(snapshot, config=config) as retry:
+        assert retry.diagnostics()["compiler_digest"] == expected_digest
+        assert retry.is_consistent()
+    assert len(candidates) == 2
+    assert candidates[1].closed
+
+
 def test_facade_constructs_encoded_services_without_scalar_service_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = _direct_snapshot()
+    expected_compiler_digest = facade_module._canonical_compiler_digest(_compiled(snapshot))
     events: list[str] = []
 
     extension = ModuleType("encoded_lifecycle_facade_test_extension")
@@ -2180,7 +2256,8 @@ def test_facade_constructs_encoded_services_without_scalar_service_context(
         assert runtime.normalized is None
         assert runtime.program is None
         assert runtime.compiled is None
-        assert runtime.compiler_digest == runtime.session.permanent_program_sha256
+        assert runtime.compiler_digest == runtime.session.compiler_digest
+        assert runtime.compiler_digest == expected_compiler_digest
         diagnostics = reasoner.diagnostics()
         assert diagnostics["ingestion_path"] == "encoded-native"
         assert diagnostics["encoded_buffer_count"] > 0
@@ -2234,7 +2311,7 @@ def test_facade_constructs_encoded_services_without_scalar_service_context(
         )
         assert fresh is not None
         try:
-            assert fresh.permanent_program_sha256 == updated_digest
+            assert fresh.compiler_digest == updated_digest
         finally:
             fresh.close()
         reasoner.remove_axioms((addition,))

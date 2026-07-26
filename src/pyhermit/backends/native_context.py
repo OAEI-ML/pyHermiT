@@ -46,6 +46,7 @@ class NativeServiceContext:
     """Immutable source domains needed by facade services and result mapping."""
 
     query_scope_digest: str
+    compiler_digest: str
     permanent_program_sha256: str
     source_signature: frozenset[owl.Entity]
     source_literals: tuple[owl.Literal, ...]
@@ -93,6 +94,7 @@ def decode_service_context(
         ) from error
     payload = _mapping(root, "service context")
     if set(payload) != {
+        "compiler_digest",
         "deterministic_program",
         "domains",
         "permanent_program_sha256",
@@ -103,11 +105,13 @@ def decode_service_context(
             "native encoded service context has an incompatible shape",
             "encoded_service_context_invalid",
         )
-    if _integer(payload["schema_version"], "service context schema") != 1:
+    if _integer(payload["schema_version"], "service context schema") != 2:
         _fail(
             "native encoded service context schema is unsupported",
             "encoded_service_context_schema",
         )
+    compiler_digest = _text(payload["compiler_digest"], "compiler digest")
+    _digest(compiler_digest, "compiler_digest")
     program_digest = _text(payload["permanent_program_sha256"], "program digest")
     _digest(program_digest, "permanent_program_sha256")
     deterministic = _boolean(payload["deterministic_program"], "deterministic_program")
@@ -196,6 +200,7 @@ def decode_service_context(
     source_literals = _decode_literals(domains["source_literal"])
     return NativeServiceContext(
         query_scope_digest,
+        compiler_digest,
         program_digest,
         source_signature,
         tuple(source_literals.values()),

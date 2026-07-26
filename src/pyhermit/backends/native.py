@@ -145,6 +145,9 @@ class _ExtensionSession(Protocol):
     @property
     def permanent_program_sha256(self) -> str: ...
 
+    @property
+    def compiler_digest(self) -> str | None: ...
+
     def check(self, query: bytes | None) -> bytes: ...
 
     def _encoded_service_context_v1(self) -> bytes: ...
@@ -735,6 +738,28 @@ class NativeBackendSession:
         return actual
 
     @property
+    def compiler_digest(self) -> str:
+        self._require_usable()
+        actual = self._native.compiler_digest
+        if type(actual) is not str or len(actual) != 64:
+            self._poisoned = True
+            raise BackendMismatchError(
+                "native session returned an invalid compiler digest",
+                context={"reason": "compiler_digest_invalid"},
+            )
+        try:
+            decoded = bytes.fromhex(actual)
+        except ValueError:
+            decoded = b""
+        if len(decoded) != 32 or decoded.hex() != actual:
+            self._poisoned = True
+            raise BackendMismatchError(
+                "native session returned an invalid compiler digest",
+                context={"reason": "compiler_digest_invalid"},
+            )
+        return actual
+
+    @property
     def ingestion_counters(self) -> Mapping[str, bool | int]:
         """Return the immutable ledger captured for this session's input path."""
 
@@ -763,6 +788,11 @@ class NativeBackendSession:
                 raise BackendMismatchError(
                     "native service context is bound to a different permanent program",
                     context={"reason": "program_fingerprint_mismatch"},
+                )
+            if context.compiler_digest != self.compiler_digest:
+                raise BackendMismatchError(
+                    "native service context is bound to a different compiler manifest",
+                    context={"reason": "compiler_digest_mismatch"},
                 )
             self._cancellation.check()
             return context

@@ -720,7 +720,7 @@ class Reasoner:
             None,
             None,
             None,
-            context.permanent_program_sha256,
+            context.compiler_digest,
             session,
             executor,
             entailment,

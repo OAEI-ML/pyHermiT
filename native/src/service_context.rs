@@ -15,12 +15,13 @@ use serde::Serialize;
 use crate::error::{ErrorKind, NativeError, NativeResult};
 use crate::input_wire::{DecodedOntology, DecodedSymbolValue, SymbolKind};
 
-const SERVICE_CONTEXT_SCHEMA_VERSION: u16 = 1;
+const SERVICE_CONTEXT_SCHEMA_VERSION: u16 = 2;
 const MAX_SERVICE_CONTEXT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct ServiceContext {
     schema_version: u16,
+    compiler_digest: String,
     permanent_program_sha256: String,
     deterministic_program: bool,
     semantic_equality_possible: bool,
@@ -39,7 +40,10 @@ struct ServiceSymbol {
     key_hex: String,
 }
 
-pub(crate) fn encode_service_context(ontology: &DecodedOntology) -> NativeResult<Vec<u8>> {
+pub(crate) fn encode_service_context(
+    ontology: &DecodedOntology,
+    compiler_digest: &[u8; 32],
+) -> NativeResult<Vec<u8>> {
     let named_individuals = ontology
         .named_individuals
         .iter()
@@ -83,6 +87,7 @@ pub(crate) fn encode_service_context(ontology: &DecodedOntology) -> NativeResult
     let expressivity = program.expressivity;
     let encoded = serde_json::to_vec(&ServiceContext {
         schema_version: SERVICE_CONTEXT_SCHEMA_VERSION,
+        compiler_digest: crate::model::hex(compiler_digest),
         permanent_program_sha256: crate::model::hex(&ontology.metadata.program_sha256),
         deterministic_program: !expressivity.non_horn,
         semantic_equality_possible: expressivity.nominals

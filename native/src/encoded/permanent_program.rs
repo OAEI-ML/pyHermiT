@@ -16,7 +16,10 @@ use std::mem::size_of;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::canonical_program::CanonicalClauseProgram;
+use super::canonical_program::{
+    CanonicalClauseProgram, CanonicalCompilerComponent, CanonicalCompilerManifest,
+    CompilerComponentDigests,
+};
 use super::complex_roles::ComplexRolePhase;
 use super::data_inclusions::DataInclusionPhase;
 use super::data_role_hierarchy::DataRoleHierarchyPhase;
@@ -37,11 +40,13 @@ use crate::input_wire::{
     validate_decoded_program, validate_decoded_session_domains, DecodedAtom, DecodedClause,
     DecodedDatatypeModel, DecodedEntity, DecodedExpressivity, DecodedGroundAtom,
     DecodedGroundDisjunction, DecodedLiteralIdentity, DecodedPredicate, DecodedProgram,
-    DecodedProvenanceEntry, DecodedSymbolDomain, DecodedTerm, PredicateKind, SymbolKind, TermSort,
+    DecodedProvenanceEntry, DecodedSymbolDomain, DecodedTerm, OntologyMetadata, PredicateKind,
+    SymbolKind, TermSort,
 };
 
 const PERMANENT_PROGRAM_SCHEMA_VERSION: u16 = 1;
 const SEMANTIC_DIGEST_POLL_BYTES: usize = 8 * 1024;
+const COMPILER_DIGEST_PREFIX: &[u8] = b"pyhermit/compiler-digest/v1\0";
 const DATA_INTERSECTION_OF_TAG: u64 = 21;
 const DATA_UNION_OF_TAG: u64 = 22;
 const DATA_COMPLEMENT_OF_TAG: u64 = 23;
@@ -328,17 +333,32 @@ pub(crate) struct EncodedPermanentProgram {
 struct DigestWriter<'a, E, P> {
     digest: Sha256,
     poll: &'a mut P,
+    phase: &'static str,
     bytes_since_poll: usize,
+    bytes_written: usize,
+    byte_limit: Option<usize>,
+    byte_limit_exceeded: bool,
     control_error: Option<E>,
 }
 
 impl<'a, E, P> DigestWriter<'a, E, P> {
-    fn new(poll: &'a mut P) -> Self {
+    fn new(poll: &'a mut P, phase: &'static str) -> Self {
         Self {
             digest: Sha256::new(),
             poll,
+            phase,
             bytes_since_poll: 0,
+            bytes_written: 0,
+            byte_limit: None,
+            byte_limit_exceeded: false,
             control_error: None,
+        }
+    }
+
+    fn with_limit(poll: &'a mut P, phase: &'static str, byte_limit: usize) -> Self {
+        Self {
+            byte_limit: Some(byte_limit),
+            ..Self::new(poll, phase)
         }
     }
 }
@@ -354,6 +374,19 @@ where
             ));
         }
         let length = bytes.len();
+        let Some(total) = self.bytes_written.checked_add(length) else {
+            self.byte_limit_exceeded = true;
+            return Err(std::io::Error::other(
+                "permanent-program digest byte count overflowed",
+            ));
+        };
+        if self.byte_limit.is_some_and(|limit| total > limit) {
+            self.byte_limit_exceeded = true;
+            return Err(std::io::Error::other(
+                "permanent-program digest byte limit was exceeded",
+            ));
+        }
+        self.bytes_written = total;
         let mut remaining = bytes;
         while !remaining.is_empty() {
             let until_poll = SEMANTIC_DIGEST_POLL_BYTES - self.bytes_since_poll;
@@ -363,7 +396,7 @@ where
             remaining = &remaining[consumed..];
             if self.bytes_since_poll == SEMANTIC_DIGEST_POLL_BYTES {
                 self.bytes_since_poll = 0;
-                if let Err(error) = (self.poll)("permanent-program-digest") {
+                if let Err(error) = (self.poll)(self.phase) {
                     self.control_error = Some(error);
                     // `write_all` retries `Interrupted`; retain the typed control error
                     // separately and use a terminal I/O sentinel to unwind serialization.
@@ -396,7 +429,7 @@ impl EncodedPermanentProgram {
         poll: &mut impl FnMut(&'static str) -> Result<(), E>,
     ) -> ControlledResult<[u8; 32], E> {
         poll("permanent-program-digest-preflight").map_err(PermanentProgramError::Control)?;
-        let mut writer = DigestWriter::new(poll);
+        let mut writer = DigestWriter::new(poll, "permanent-program-digest");
         let serialized = serde_json::to_writer(&mut writer, &CanonicalClauseProgram(&self.program));
         if let Some(error) = writer.control_error.take() {
             return Err(PermanentProgramError::Control(error));
@@ -408,6 +441,135 @@ impl EncodedPermanentProgram {
         })?;
         let digest = writer.digest.finalize().into();
         poll("permanent-program-digest-publication").map_err(PermanentProgramError::Control)?;
+        Ok(digest)
+    }
+
+    pub(crate) fn compiler_sha256_controlled<E>(
+        &self,
+        metadata: &OntologyMetadata,
+        poll: &mut impl FnMut(&'static str) -> Result<(), E>,
+    ) -> ControlledResult<[u8; 32], E> {
+        poll("compiler-manifest-preflight").map_err(PermanentProgramError::Control)?;
+        let program = &self.program;
+        let digest_count = program
+            .clauses
+            .len()
+            .checked_add(program.ground_disjunctions.len())
+            .and_then(|value| value.checked_add(program.negative_facts.len()))
+            .and_then(|value| value.checked_add(program.positive_facts.len()))
+            .ok_or_else(|| {
+                PermanentProgramError::Encoded(EncodedValidationError::resource(
+                    "compiler-manifest component count overflowed",
+                ))
+            })?;
+        let digest_bytes = digest_count
+            .checked_mul(size_of::<[u8; 32]>())
+            .ok_or_else(|| {
+                PermanentProgramError::Encoded(EncodedValidationError::resource(
+                    "compiler-manifest component ownership overflowed",
+                ))
+            })?;
+        if digest_bytes > self.manifest_limit {
+            return Err(PermanentProgramError::Encoded(
+                EncodedValidationError::resource(
+                    "compiler-manifest component digests exceed the manifest byte limit",
+                ),
+            ));
+        }
+
+        let clauses = compiler_component_digests(
+            program
+                .clauses
+                .iter()
+                .map(CanonicalCompilerComponent::Clause),
+            program.clauses.len(),
+            poll,
+        )?;
+        let ground_disjunctions = compiler_component_digests(
+            program
+                .ground_disjunctions
+                .iter()
+                .map(CanonicalCompilerComponent::GroundDisjunction),
+            program.ground_disjunctions.len(),
+            poll,
+        )?;
+        let negative_facts = compiler_component_digests(
+            program
+                .negative_facts
+                .iter()
+                .map(CanonicalCompilerComponent::GroundAtom),
+            program.negative_facts.len(),
+            poll,
+        )?;
+        let positive_facts = compiler_component_digests(
+            program
+                .positive_facts
+                .iter()
+                .map(CanonicalCompilerComponent::GroundAtom),
+            program.positive_facts.len(),
+            poll,
+        )?;
+        let datatype_model = compiler_component_sha256(
+            &CanonicalCompilerComponent::DatatypeModel(&program.datatype_model),
+            poll,
+        )?;
+        let expressivity = compiler_component_sha256(
+            &CanonicalCompilerComponent::Expressivity(&program.expressivity),
+            poll,
+        )?;
+        let provenance = compiler_component_sha256(
+            &CanonicalCompilerComponent::Provenance(&program.provenance),
+            poll,
+        )?;
+        let role_model = compiler_component_sha256(
+            &CanonicalCompilerComponent::RoleModel(&program.role_model),
+            poll,
+        )?;
+        let symbols = compiler_component_sha256(
+            &CanonicalCompilerComponent::Symbols {
+                domains: &program.symbol_domains,
+                predicates: &program.predicates,
+            },
+            poll,
+        )?;
+        let manifest = CanonicalCompilerManifest {
+            metadata,
+            declared_entities: &self.declared_entities,
+            named_individuals: &self.named_individuals,
+            components: CompilerComponentDigests {
+                clauses: &clauses,
+                datatype_model: &datatype_model,
+                expressivity: &expressivity,
+                ground_disjunctions: &ground_disjunctions,
+                negative_facts: &negative_facts,
+                positive_facts: &positive_facts,
+                provenance: &provenance,
+                role_model: &role_model,
+                symbols: &symbols,
+            },
+        };
+        let mut writer =
+            DigestWriter::with_limit(poll, "compiler-manifest-digest", self.manifest_limit);
+        writer.digest.update(COMPILER_DIGEST_PREFIX);
+        writer.bytes_since_poll = COMPILER_DIGEST_PREFIX.len();
+        let serialized = serde_json::to_writer(&mut writer, &manifest);
+        if let Some(error) = writer.control_error.take() {
+            return Err(PermanentProgramError::Control(error));
+        }
+        if writer.byte_limit_exceeded {
+            return Err(PermanentProgramError::Encoded(
+                EncodedValidationError::resource(
+                    "compiler-manifest serialization exceeds the manifest byte limit",
+                ),
+            ));
+        }
+        serialized.map_err(|_| {
+            PermanentProgramError::Encoded(EncodedValidationError::invariant(
+                "compiler-manifest serialization failed",
+            ))
+        })?;
+        let digest = writer.digest.finalize().into();
+        poll("compiler-manifest-publication").map_err(PermanentProgramError::Control)?;
         Ok(digest)
     }
 
@@ -430,6 +592,41 @@ impl EncodedPermanentProgram {
         }
         Ok(encoded)
     }
+}
+
+fn compiler_component_digests<'a, E>(
+    components: impl IntoIterator<Item = CanonicalCompilerComponent<'a>>,
+    count: usize,
+    poll: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<Vec<[u8; 32]>, E> {
+    let mut digests = Vec::new();
+    digests.try_reserve_exact(count).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "compiler-manifest component digest allocation failed",
+        ))
+    })?;
+    for component in components {
+        poll("compiler-manifest-component").map_err(PermanentProgramError::Control)?;
+        digests.push(compiler_component_sha256(&component, poll)?);
+    }
+    Ok(digests)
+}
+
+fn compiler_component_sha256<E>(
+    component: &CanonicalCompilerComponent<'_>,
+    poll: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<[u8; 32], E> {
+    let mut writer = DigestWriter::new(poll, "compiler-manifest-component");
+    let serialized = serde_json::to_writer(&mut writer, component);
+    if let Some(error) = writer.control_error.take() {
+        return Err(PermanentProgramError::Control(error));
+    }
+    serialized.map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::invariant(
+            "compiler-manifest component serialization failed",
+        ))
+    })?;
+    Ok(writer.digest.finalize().into())
 }
 
 #[derive(Serialize)]
@@ -4044,7 +4241,7 @@ mod tests {
             checkpoints += 1;
             Ok::<(), ()>(())
         };
-        let mut writer = DigestWriter::new(&mut poll);
+        let mut writer = DigestWriter::new(&mut poll, "permanent-program-digest");
         writer.write_all(&payload).unwrap();
         let actual: [u8; 32] = writer.digest.clone().finalize().into();
         drop(writer);
@@ -4065,13 +4262,29 @@ mod tests {
                 Ok(())
             }
         };
-        let mut writer = DigestWriter::new(&mut poll);
+        let mut writer = DigestWriter::new(&mut poll, "permanent-program-digest");
         let payload = vec![7_u8; SEMANTIC_DIGEST_POLL_BYTES * 3];
         let error = writer.write_all(&payload).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
         assert_eq!(writer.control_error, Some("cancel digest"));
         assert_eq!(checkpoints, 2);
+    }
+
+    #[test]
+    fn digest_writer_enforces_the_manifest_byte_limit_before_overflow() {
+        let mut poll = |_| Ok::<(), ()>(());
+        let mut writer = DigestWriter::with_limit(&mut poll, "compiler-manifest-digest", 3);
+
+        writer.write_all(b"abc").unwrap();
+        let error = writer.write_all(b"d").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(writer.byte_limit_exceeded);
+        assert_eq!(writer.bytes_written, 3);
+        let actual: [u8; 32] = writer.digest.clone().finalize().into();
+        let expected: [u8; 32] = Sha256::digest(b"abc").into();
+        assert_eq!(crate::model::hex(&actual), crate::model::hex(&expected),);
     }
 
     #[test]

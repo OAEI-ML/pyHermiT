@@ -15,11 +15,45 @@ use crate::input_wire::{
     DecodedAtom, DecodedClause, DecodedDatatypeModel, DecodedExpressivity, DecodedGroundAtom,
     DecodedGroundDisjunction, DecodedLiteralIdentity, DecodedPredicate, DecodedProgram,
     DecodedProvenanceEntry, DecodedRoleAutomaton, DecodedRoleModel, DecodedRoleTransition,
-    DecodedSymbolDomain, DecodedSymbolValue, DecodedTerm, PredicateKind, SymbolKind, TermSort,
+    DecodedSymbolDomain, DecodedSymbolValue, DecodedTerm, OntologyMetadata, PredicateKind,
+    SymbolKind, TermSort,
 };
 use crate::model::IR_SCHEMA_VERSION;
 
 pub(crate) struct CanonicalClauseProgram<'a>(pub(crate) &'a DecodedProgram);
+
+pub(crate) enum CanonicalCompilerComponent<'a> {
+    Clause(&'a DecodedClause),
+    DatatypeModel(&'a DecodedDatatypeModel),
+    Expressivity(&'a DecodedExpressivity),
+    GroundAtom(&'a DecodedGroundAtom),
+    GroundDisjunction(&'a DecodedGroundDisjunction),
+    Provenance(&'a [DecodedProvenanceEntry]),
+    RoleModel(&'a DecodedRoleModel),
+    Symbols {
+        domains: &'a [DecodedSymbolDomain],
+        predicates: &'a [DecodedPredicate],
+    },
+}
+
+pub(crate) struct CompilerComponentDigests<'a> {
+    pub(crate) clauses: &'a [[u8; 32]],
+    pub(crate) datatype_model: &'a [u8; 32],
+    pub(crate) expressivity: &'a [u8; 32],
+    pub(crate) ground_disjunctions: &'a [[u8; 32]],
+    pub(crate) negative_facts: &'a [[u8; 32]],
+    pub(crate) positive_facts: &'a [[u8; 32]],
+    pub(crate) provenance: &'a [u8; 32],
+    pub(crate) role_model: &'a [u8; 32],
+    pub(crate) symbols: &'a [u8; 32],
+}
+
+pub(crate) struct CanonicalCompilerManifest<'a> {
+    pub(crate) metadata: &'a OntologyMetadata,
+    pub(crate) declared_entities: &'a [crate::input_wire::DecodedEntity],
+    pub(crate) named_individuals: &'a [u32],
+    pub(crate) components: CompilerComponentDigests<'a>,
+}
 
 trait CanonicalRecord {
     fn serialize_canonical<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -186,6 +220,145 @@ impl Serialize for CanonicalClauseProgram<'_> {
             },
         )?;
         record.serialize_field("type", "ClauseProgram")?;
+        record.end()
+    }
+}
+
+impl Serialize for CanonicalCompilerComponent<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Clause(value) => Record(*value).serialize(serializer),
+            Self::DatatypeModel(value) => Record(*value).serialize(serializer),
+            Self::Expressivity(value) => Record(*value).serialize(serializer),
+            Self::GroundAtom(value) => Record(*value).serialize(serializer),
+            Self::GroundDisjunction(value) => Record(*value).serialize(serializer),
+            Self::Provenance(value) => ProvenanceTable(value).serialize(serializer),
+            Self::RoleModel(value) => Record(*value).serialize(serializer),
+            Self::Symbols {
+                domains,
+                predicates,
+            } => SymbolTable {
+                domains,
+                predicates,
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl Serialize for CanonicalCompilerManifest<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut record = serializer.serialize_struct("CompilerManifest", 6)?;
+        record.serialize_field("components", &CompilerComponents(&self.components))?;
+        record.serialize_field("core", &CompilerCore(self.metadata))?;
+        record.serialize_field(
+            "declared_entities",
+            &CompilerEntities(self.declared_entities),
+        )?;
+        record.serialize_field("fingerprints", &CompilerFingerprints(self.metadata))?;
+        record.serialize_field("named_individuals", &self.named_individuals)?;
+        record.serialize_field("schema_version", &IR_SCHEMA_VERSION)?;
+        record.end()
+    }
+}
+
+struct CompilerComponents<'a>(&'a CompilerComponentDigests<'a>);
+
+impl Serialize for CompilerComponents<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let components = self.0;
+        let mut record = serializer.serialize_struct("CompilerComponents", 9)?;
+        record.serialize_field("clauses", &HexDigests(components.clauses))?;
+        record.serialize_field("datatype_model", &HexValue(components.datatype_model))?;
+        record.serialize_field("expressivity", &HexValue(components.expressivity))?;
+        record.serialize_field(
+            "ground_disjunctions",
+            &HexDigests(components.ground_disjunctions),
+        )?;
+        record.serialize_field("negative_facts", &HexDigests(components.negative_facts))?;
+        record.serialize_field("positive_facts", &HexDigests(components.positive_facts))?;
+        record.serialize_field("provenance", &HexValue(components.provenance))?;
+        record.serialize_field("role_model", &HexValue(components.role_model))?;
+        record.serialize_field("symbols", &HexValue(components.symbols))?;
+        record.end()
+    }
+}
+
+struct CompilerCore<'a>(&'a OntologyMetadata);
+
+impl Serialize for CompilerCore<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let metadata = self.0;
+        let mut record = serializer.serialize_struct("CompilerCore", 5)?;
+        record.serialize_field("adapter_protocol", &metadata.core_adapter_protocol_version)?;
+        record.serialize_field("api", &metadata.core_api_version)?;
+        record.serialize_field("model_schema", &metadata.core_model_schema_version)?;
+        record.serialize_field("package", &metadata.core_package_version)?;
+        record.serialize_field("wire", &metadata.core_wire_format_version)?;
+        record.end()
+    }
+}
+
+struct CompilerEntities<'a>(&'a [crate::input_wire::DecodedEntity]);
+
+impl Serialize for CompilerEntities<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for entity in self.0 {
+            sequence.serialize_element(&CompilerEntity(entity))?;
+        }
+        sequence.end()
+    }
+}
+
+struct CompilerEntity<'a>(&'a crate::input_wire::DecodedEntity);
+
+impl Serialize for CompilerEntity<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut record = serializer.serialize_struct("CompilerEntity", 3)?;
+        record.serialize_field("id", &self.0.entity_id)?;
+        record.serialize_field("iri", &self.0.iri)?;
+        record.serialize_field("kind", &self.0.kind)?;
+        record.end()
+    }
+}
+
+struct CompilerFingerprints<'a>(&'a OntologyMetadata);
+
+impl Serialize for CompilerFingerprints<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let metadata = self.0;
+        let mut record = serializer.serialize_struct("CompilerFingerprints", 3)?;
+        record.serialize_field("logical", &HexValue(&metadata.logical_fingerprint.digest))?;
+        record.serialize_field(
+            "signature",
+            &HexValue(&metadata.signature_fingerprint.digest),
+        )?;
+        record.serialize_field(
+            "structural",
+            &HexValue(&metadata.structural_fingerprint.digest),
+        )?;
         record.end()
     }
 }
@@ -511,6 +684,8 @@ const fn predicate_kind(kind: PredicateKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input_wire::{DecodedEntity, DecodedFingerprint};
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn canonical_terms_match_scalar_record_json_exactly() {
@@ -554,5 +729,79 @@ mod tests {
                 r#""query_local":false,"schema_version":1,"type":"SymbolValue"}"#,
             ),
         );
+    }
+
+    #[test]
+    fn canonical_compiler_manifest_matches_scalar_digest_fixture() {
+        let metadata = OntologyMetadata {
+            ontology_fingerprint: [99; 32],
+            structural_fingerprint: DecodedFingerprint {
+                schema: 1,
+                digest: [1; 32],
+            },
+            logical_fingerprint: DecodedFingerprint {
+                schema: 1,
+                digest: [2; 32],
+            },
+            signature_fingerprint: DecodedFingerprint {
+                schema: 1,
+                digest: [3; 32],
+            },
+            program_sha256: [4; 32],
+            core_package_version: "core-é".to_owned(),
+            core_api_version: (5, 6),
+            core_model_schema_version: 7,
+            core_wire_format_version: (8, 9),
+            core_adapter_protocol_version: 10,
+        };
+        let declared_entities = [DecodedEntity {
+            kind: "class".to_owned(),
+            iri: "urn:é".to_owned(),
+            entity_id: 11,
+        }];
+        let named_individuals = [12];
+        let clauses = [[13; 32]];
+        let datatype_model = [14; 32];
+        let expressivity = [15; 32];
+        let ground_disjunctions = [[16; 32]];
+        let negative_facts = [[17; 32]];
+        let positive_facts = [[18; 32]];
+        let provenance = [19; 32];
+        let role_model = [20; 32];
+        let symbols = [21; 32];
+        let manifest = CanonicalCompilerManifest {
+            metadata: &metadata,
+            declared_entities: &declared_entities,
+            named_individuals: &named_individuals,
+            components: CompilerComponentDigests {
+                clauses: &clauses,
+                datatype_model: &datatype_model,
+                expressivity: &expressivity,
+                ground_disjunctions: &ground_disjunctions,
+                negative_facts: &negative_facts,
+                positive_facts: &positive_facts,
+                provenance: &provenance,
+                role_model: &role_model,
+                symbols: &symbols,
+            },
+        };
+
+        let encoded = serde_json::to_vec(&manifest).unwrap();
+        let mut digest = Sha256::new();
+        digest.update(b"pyhermit/compiler-digest/v1\0");
+        digest.update(&encoded);
+        let actual: [u8; 32] = digest.finalize().into();
+
+        assert_eq!(
+            crate::model::hex(&actual),
+            "9853542da642730445222fccf4d10f4d29860e111e867778022e7b7f7639f1a3",
+        );
+        assert_eq!(encoded.len(), 1_213);
+        assert!(String::from_utf8(encoded.clone())
+            .unwrap()
+            .contains(r#""package":"core-é""#));
+        assert!(!String::from_utf8(encoded)
+            .unwrap()
+            .contains(&"63".repeat(32)));
     }
 }
