@@ -11,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
 import pyowl_core
+import pyowl_core.model as owl
 import pytest
 from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
 
@@ -20,6 +21,7 @@ from pyhermit import Reasoner, ReasonerConfig
 from pyhermit.backends import native as native_backend
 from pyhermit.backends import native_input
 from pyhermit.backends.native import NativeBackendFactory
+from pyhermit.backends.native_context import decode_service_context
 from pyhermit.backends.native_input import (
     encode_config,
     encode_encoded_session_metadata,
@@ -29,7 +31,7 @@ from pyhermit.backends.native_input import (
 from pyhermit.backends.native_wire import decode_check
 from pyhermit.backends.protocol import CompiledOntology
 from pyhermit.clauses.compiler import compile_captured_bundle
-from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE
+from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE, _validate_encoded_view
 from pyhermit.events import CancellationSource, CancellationToken
 from pyhermit.exceptions import (
     BackendMismatchError,
@@ -91,6 +93,19 @@ def _slice_record(
         buffers["item_lengths"],
         buffers["scalar_bytes"],
     )
+
+
+def _encoded_negotiation(view: pyowl_core.OntologyView) -> object:
+    encoded = produce_encoded_structural_view_v1(view)
+    lease = _validate_encoded_view(
+        view,
+        encoded,
+        pyowl_core.AxiomScope.CLOSURE,
+        document_key=None,
+        active=frozenset(),
+        validated={},
+    )
+    return SimpleNamespace(lease=lease)
 
 
 def _scope_map(replacements: dict[bytes, bytes]) -> memoryview:
@@ -262,6 +277,85 @@ def _direct_snapshot() -> pyowl_core.OntologyView:
         ),
         options=OPTIONS,
     )
+
+
+def _object_query_snapshot() -> pyowl_core.OntologyView:
+    return pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(Class(:D))",
+            "EquivalentClasses(:B :C)",
+            "SubClassOf(:A :B)",
+            "DisjointClasses(:C :D)",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(ObjectProperty(:q))",
+            "Declaration(ObjectProperty(:qInverse))",
+            "SubObjectPropertyOf(:p :q)",
+            "InverseObjectProperties(:q :qInverse)",
+            "ObjectPropertyDomain(:q :B)",
+            "ObjectPropertyRange(:q :D)",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(NamedIndividual(:j))",
+            "Declaration(NamedIndividual(:other))",
+            "ClassAssertion(:A :i)",
+            "ObjectPropertyAssertion(:p :i :j)",
+            "NegativeObjectPropertyAssertion(:q :j :i)",
+            "DifferentIndividuals(:i :other)",
+        ),
+        options=OPTIONS,
+    )
+
+
+def _object_service_results(reasoner: Reasoner) -> dict[str, object]:
+    base = "urn:test:permanent#"
+    a, b, c, d = (owl.Class(owl.IRI(f"{base}{local}")) for local in ("A", "B", "C", "D"))
+    p, q, _inverse = (
+        owl.ObjectProperty(owl.IRI(f"{base}{local}")) for local in ("p", "q", "qInverse")
+    )
+    i, j, other = (owl.NamedIndividual(owl.IRI(f"{base}{local}")) for local in ("i", "j", "other"))
+    impossible = owl.ObjectIntersectionOf(owl.CanonicalSet((c, d)))
+    entailed_axioms = (
+        owl.SubClassOf(a, c),
+        owl.SubObjectPropertyOf(p, q),
+        owl.ObjectPropertyDomain(q, b),
+        owl.ObjectPropertyRange(q, d),
+        owl.ClassAssertion(c, i),
+        owl.ObjectPropertyAssertion(q, i, j),
+        owl.NegativeObjectPropertyAssertion(q, j, i),
+        owl.DifferentIndividuals(owl.CanonicalSet((i, other))),
+    )
+    return {
+        "class_disjoint": reasoner.disjoint_classes(c),
+        "class_equivalent": reasoner.equivalent_classes(b),
+        "class_hierarchy": reasoner.class_hierarchy(),
+        "class_sub_direct": reasoner.subclasses(c, direct=True),
+        "class_subclass": reasoner.is_subclass(a, c),
+        "class_super": reasoner.superclasses(a),
+        "class_unsatisfiable": reasoner.unsatisfiable_classes(),
+        "consistent": reasoner.is_consistent(),
+        "different": reasoner.different_individuals(i),
+        "entails_all": reasoner.entails_all(entailed_axioms),
+        "entails_each": tuple(reasoner.entails(axiom) for axiom in entailed_axioms),
+        "has_object_relationship": reasoner.has_object_property_relationship(i, q, j),
+        "has_type": reasoner.has_type(i, c),
+        "instances": reasoner.instances(c),
+        "object_disjoint": reasoner.disjoint_object_properties(p),
+        "object_domain": reasoner.object_property_domains(q),
+        "object_equivalent": reasoner.equivalent_object_properties(q),
+        "object_hierarchy": reasoner.object_property_hierarchy(),
+        "object_instances": reasoner.object_property_instances(q),
+        "object_inverse": reasoner.inverse_object_properties(q),
+        "object_range": reasoner.object_property_ranges(q),
+        "object_sub": reasoner.sub_object_properties(q),
+        "object_super_direct": reasoner.super_object_properties(p, direct=True),
+        "object_values": reasoner.object_property_values(i, q),
+        "same": reasoner.same_individuals(i),
+        "satisfiable": reasoner.is_satisfiable(a),
+        "unsatisfiable_expression": reasoner.is_satisfiable(impossible),
+        "types": reasoner.types(i),
+    }
 
 
 def test_direct_assembly_publishes_one_complete_dense_scalar_equal_manifest() -> None:
@@ -584,6 +678,55 @@ def test_no_reference_lifecycle_matches_scalar_consistency_and_classification() 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_encoded_service_context_is_compact_strict_cancel_safe_and_close_safe() -> None:
+    snapshot = _direct_snapshot()
+    cancellation = native.CancellationHandle()
+    session = _direct_lifecycle_session(snapshot, cancellation=cancellation)
+    encoded = session._encoded_service_context_v1()
+    payload = cast(dict[str, object], json.loads(encoded))
+
+    assert set(payload) == {
+        "deterministic_program",
+        "domains",
+        "permanent_program_sha256",
+        "schema_version",
+        "semantic_equality_possible",
+    }
+    assert not {
+        "clauses",
+        "compiled_ontology",
+        "normalized",
+        "predicates",
+        "provenance",
+    }.intersection(payload)
+    context = decode_service_context(
+        encoded,
+        query_scope_digest=session.ontology_fingerprint,
+        signature=snapshot.signature(),
+    )
+    assert context.permanent_program_sha256 == session.permanent_program_sha256
+    assert context.source_signature.issuperset(snapshot.signature())
+
+    cancellation.interrupt("cancel encoded service context")
+    with pytest.raises(ReasonerInterruptedError):
+        session._encoded_service_context_v1()
+    cancellation.reset()
+    assert session._encoded_service_context_v1() == encoded
+
+    hostile = dict(payload)
+    hostile["schema_version"] = 2
+    with pytest.raises(BackendMismatchError):
+        decode_service_context(
+            json.dumps(hostile, separators=(",", ":")).encode(),
+            query_scope_digest=session.ontology_fingerprint,
+            signature=snapshot.signature(),
+        )
+
+    session.close()
+    with pytest.raises(DisposedReasonerError):
+        session._encoded_service_context_v1()
+
+
 def test_reversed_and_interleaved_slices_publish_identical_sessions() -> None:
     sources = (
         pyowl_core.load_snapshot(
@@ -786,20 +929,10 @@ def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(
         "encode_ontology_metadata",
         forbidden_reference_metadata,
     )
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
-    local_lease = SimpleNamespace(buffers=buffers)
-    root_slice = SimpleNamespace(
-        lease=local_lease,
-        posting_mode=0,
-        root_ids=memoryview(b""),
-        member_tokens=(),
-        anonymous_scope_maps=(),
-    )
-    lease = SimpleNamespace(root_slices=lambda: (root_slice,))
     monkeypatch.setattr(
         native_backend,
         "negotiate_encoded_input",
-        lambda *_args, **_kwargs: SimpleNamespace(lease=lease),
+        lambda view, *_args, **_kwargs: _encoded_negotiation(view),
     )
     factory = NativeBackendFactory(extension)
     session = factory._create_encoded_lifecycle_handoff(
@@ -817,7 +950,7 @@ def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(
         session.close()
 
 
-def test_facade_publishes_encoded_session_before_scalar_service_context(
+def test_facade_constructs_encoded_services_without_scalar_service_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = _direct_snapshot()
@@ -842,27 +975,15 @@ def test_facade_publishes_encoded_session_before_scalar_service_context(
     extension._create_encoded_session_v1 = direct_constructor
     factory = NativeBackendFactory(extension)
 
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
-    local_lease = SimpleNamespace(buffers=buffers)
-    root_slice = SimpleNamespace(
-        lease=local_lease,
-        posting_mode=0,
-        root_ids=memoryview(b""),
-        member_tokens=(),
-        anonymous_scope_maps=(),
-    )
-    lease = SimpleNamespace(root_slices=lambda: (root_slice,))
     monkeypatch.setattr(
         native_backend,
         "negotiate_encoded_input",
-        lambda *_args, **_kwargs: SimpleNamespace(lease=lease),
+        lambda view, *_args, **_kwargs: _encoded_negotiation(view),
     )
     monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
-    original_compile = facade_module.compile_captured_bundle
 
-    def observed_compile(*args: object, **kwargs: object) -> object:
-        events.append("scalar-service-context")
-        return original_compile(*args, **kwargs)
+    def forbidden_compile(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("scalar service context was compiled")
 
     def forbidden_ontology_wire(_ontology: CompiledOntology) -> bytes:
         raise AssertionError("proportional ontology wire was encoded")
@@ -870,7 +991,7 @@ def test_facade_publishes_encoded_session_before_scalar_service_context(
     def forbidden_reference_metadata(_ontology: CompiledOntology) -> bytes:
         raise AssertionError("Python reference-program metadata was encoded")
 
-    monkeypatch.setattr(facade_module, "compile_captured_bundle", observed_compile)
+    monkeypatch.setattr(facade_module, "compile_captured_bundle", forbidden_compile)
     monkeypatch.setattr(native_input, "encode_ontology", forbidden_ontology_wire)
     monkeypatch.setattr(
         native_input,
@@ -879,11 +1000,114 @@ def test_facade_publishes_encoded_session_before_scalar_service_context(
     )
 
     with Reasoner(snapshot, config=ReasonerConfig()) as reasoner:
-        assert events[:2] == ["encoded-session", "scalar-service-context"]
+        assert events == ["encoded-session"]
+        runtime = cast(Any, reasoner)._runtime
+        assert runtime.normalized is None
+        assert runtime.program is None
+        assert runtime.compiled is None
+        assert runtime.compiler_digest == runtime.session.permanent_program_sha256
         assert reasoner.is_consistent()
         hierarchy = reasoner.class_hierarchy()
         assert hierarchy.nodes[hierarchy.top_node]
         assert hierarchy.nodes[hierarchy.bottom_node]
+        assert reasoner.object_property_hierarchy().nodes
+        assert reasoner.data_property_hierarchy().nodes
+        base = "urn:test:permanent#"
+        a = owl.Class(owl.IRI(f"{base}A"))
+        b = owl.Class(owl.IRI(f"{base}B"))
+        c = owl.Class(owl.IRI(f"{base}C"))
+        p = owl.ObjectProperty(owl.IRI(f"{base}p"))
+        i = owl.NamedIndividual(owl.IRI(f"{base}i"))
+        j = owl.NamedIndividual(owl.IRI(f"{base}j"))
+        assert reasoner.is_satisfiable(a)
+        assert reasoner.is_subclass(a, b)
+        assert reasoner.entails(owl.SubClassOf(a, b))
+        assert a in set().union(*reasoner.subclasses(b))
+        assert b in set().union(*reasoner.types(i))
+        assert i in reasoner.instances(b)
+        assert j in reasoner.object_property_values(i, p)
+        before_update = len(events)
+        initial_digest = reasoner.diagnostics()["compiler_digest"]
+        addition = owl.SubClassOf(c, a)
+        reasoner.add_axioms((addition,))
+        reasoner.flush()
+        assert len(events) == before_update + 1
+        assert c in set().union(*reasoner.subclasses(a))
+        updated_digest = reasoner.diagnostics()["compiler_digest"]
+        assert updated_digest != initial_digest
+        fresh = factory._create_encoded_lifecycle_handoff(
+            capture_ontology(reasoner.ontology).captured,
+            ReasonerConfig(),
+            CancellationToken(),
+        )
+        assert fresh is not None
+        try:
+            assert fresh.permanent_program_sha256 == updated_digest
+        finally:
+            fresh.close()
+        reasoner.remove_axioms((addition,))
+        reasoner.flush()
+        assert len(events) == before_update + 3
+        assert reasoner.diagnostics()["compiler_digest"] == initial_digest
+
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_encoded_services_match_scalar_object_query_families_without_scalar_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _object_query_snapshot()
+    with Reasoner(snapshot, config=ReasonerConfig(backend="python")) as reference:
+        expected = _object_service_results(reference)
+
+    extension = ModuleType("encoded_query_family_test_extension")
+    extension.__version__ = native.__version__
+    extension.ABI_VERSION = native.ABI_VERSION
+    extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
+    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    extension.CancellationHandle = native.CancellationHandle
+    extension.self_test = native.self_test
+
+    def forbidden_scalar_constructor(*_args: object) -> object:
+        raise AssertionError("scalar native session constructor was called")
+
+    def forbidden_compile(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("scalar service context was compiled")
+
+    def forbidden_ontology_wire(_ontology: CompiledOntology) -> bytes:
+        raise AssertionError("proportional ontology wire was encoded")
+
+    def forbidden_reference_metadata(_ontology: CompiledOntology) -> bytes:
+        raise AssertionError("Python reference-program metadata was encoded")
+
+    extension.create_session = forbidden_scalar_constructor
+    extension._create_encoded_session_v1 = native._create_encoded_session_v1
+    factory = NativeBackendFactory(extension)
+
+    monkeypatch.setattr(
+        native_backend,
+        "negotiate_encoded_input",
+        lambda view, *_args, **_kwargs: _encoded_negotiation(view),
+    )
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+    monkeypatch.setattr(
+        facade_module,
+        "compile_captured_bundle",
+        forbidden_compile,
+    )
+    monkeypatch.setattr(
+        native_input,
+        "encode_ontology",
+        forbidden_ontology_wire,
+    )
+    monkeypatch.setattr(
+        native_input,
+        "encode_ontology_metadata",
+        forbidden_reference_metadata,
+    )
+
+    with Reasoner(snapshot, config=ReasonerConfig()) as candidate:
+        assert _object_service_results(candidate) == expected
 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 

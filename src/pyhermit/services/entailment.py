@@ -15,7 +15,7 @@ from pyhermit.config import FreshEntityPolicy
 from pyhermit.exceptions import FreshEntityError, InconsistentOntologyError
 from pyhermit.normalize import DataRangeInclusion, NormalizedOntology
 
-from .checks import CompiledQueryExecutor, QueryPlan
+from .checks import CompiledQueryExecutor, EncodedQueryExecutor, QueryExecutor, QueryPlan
 
 _OBJECT_PROPERTIES = (owl.ObjectProperty, owl.ObjectInverseOf)
 _INDIVIDUALS = (owl.NamedIndividual, owl.AnonymousIndividual)
@@ -90,19 +90,24 @@ class EntailmentService:
         "_executor",
         "_force_reductions",
         "_fresh_policy",
+        "_normalization_digest",
+        "_normalized",
+        "_program_is_deterministic",
+        "_semantic_equality_possible",
         "_signature",
         "_signature_bytes",
+        "_source_literals",
     )
 
     def __init__(
         self,
-        executor: CompiledQueryExecutor,
+        executor: QueryExecutor,
         *,
         fresh_entities: FreshEntityPolicy | str = FreshEntityPolicy.ALLOW,
         force_reductions: bool = False,
     ) -> None:
-        if not isinstance(executor, CompiledQueryExecutor):
-            raise TypeError("executor must be CompiledQueryExecutor")
+        if not isinstance(executor, (CompiledQueryExecutor, EncodedQueryExecutor)):
+            raise TypeError("executor must be a supported query executor")
         selected_fresh_entities: FreshEntityPolicy
         if isinstance(fresh_entities, FreshEntityPolicy):
             selected_fresh_entities = fresh_entities
@@ -117,25 +122,51 @@ class EntailmentService:
         self._fresh_policy = selected_fresh_entities
         self._force_reductions = force_reductions
         self._consistent: bool | None = None
-        signature = _source_signature(executor.normalized) | _BUILTIN_ENTITIES
+        if isinstance(executor, EncodedQueryExecutor):
+            context = executor.service_context
+            normalized: NormalizedOntology | None = None
+            signature = set(context.source_signature) | _BUILTIN_ENTITIES
+            source_literals = context.source_literals
+            asserted: frozenset[bytes] = frozenset()
+            datatype_definitions: frozenset[bytes] = frozenset()
+            normalization_digest = context.query_scope_digest
+            deterministic_program = context.deterministic_program
+            semantic_equality_possible = context.semantic_equality_possible
+        else:
+            normalized = executor.normalized
+            signature = _source_signature(normalized) | _BUILTIN_ENTITIES
+            source_literals = _source_literals(normalized)
+            asserted = frozenset(
+                value.statement.canonical_bytes()
+                for value in normalized.records
+                if not value.generated and isinstance(value.statement, owl.LOGICAL_AXIOM_TYPES)
+            )
+            datatype_definitions = frozenset(
+                value.statement.datatype.canonical_bytes()
+                for value in normalized.records
+                if isinstance(value.statement, owl.DatatypeDefinition)
+            )
+            normalization_digest = normalized.digest
+            deterministic_program = not executor.program.expressivity.non_horn
+            semantic_equality_possible = _semantic_equality_possible(normalized)
+        self._normalized = normalized
+        self._normalization_digest = normalization_digest
+        self._program_is_deterministic = deterministic_program
+        self._semantic_equality_possible = semantic_equality_possible
         self._signature = frozenset(signature)
         self._signature_bytes = frozenset(value.canonical_bytes() for value in signature)
-        self._asserted = frozenset(
-            value.statement.canonical_bytes()
-            for value in executor.normalized.records
-            if not value.generated and isinstance(value.statement, owl.LOGICAL_AXIOM_TYPES)
-        )
-        self._datatype_definitions = frozenset(
-            value.statement.datatype.canonical_bytes()
-            for value in executor.normalized.records
-            if isinstance(value.statement, owl.DatatypeDefinition)
-        )
+        self._source_literals = tuple(source_literals)
+        self._asserted = asserted
+        self._datatype_definitions = datatype_definitions
 
     @property
     def normalized(self) -> NormalizedOntology:
         """The immutable normalized ontology captured by this service."""
 
-        return self._executor.normalized
+        normalized = self._normalized
+        if normalized is None:
+            raise RuntimeError("encoded native services do not retain a normalized ontology")
+        return normalized
 
     @property
     def source_signature(self) -> frozenset[owl.Entity]:
@@ -144,10 +175,18 @@ class EntailmentService:
         return self._signature
 
     @property
+    def source_literals(self) -> tuple[owl.Literal, ...]:
+        return self._source_literals
+
+    @property
     def deterministic_program(self) -> bool:
         """Whether the permanent clause program has no disjunctive choice points."""
 
-        return not self._executor.program.expressivity.non_horn
+        return self._program_is_deterministic
+
+    @property
+    def semantic_equality_possible(self) -> bool:
+        return self._semantic_equality_possible
 
     def is_consistent(self) -> bool:
         retained = self._consistent
@@ -165,6 +204,14 @@ class EntailmentService:
                 return True
             if expression == owl.OWL_NOTHING:
                 return False
+            if isinstance(expression, owl.Class) and isinstance(
+                self._executor, EncodedQueryExecutor
+            ):
+                unsatisfiable = self._executor.semantic_shortcut(
+                    owl.SubClassOf(expression, owl.OWL_NOTHING)
+                )
+                if unsatisfiable is not None:
+                    return not unsatisfiable
         witnesses = self._witnesses(expression, "satisfiable")
         plan = QueryPlan(
             (owl.ClassAssertion(expression, witnesses.anonymous("root")),),
@@ -185,6 +232,15 @@ class EntailmentService:
         shortcut = None if self._force_reductions else _subclass_shortcut(sub, sup)
         if shortcut is not None:
             return shortcut
+        if (
+            not self._force_reductions
+            and isinstance(self._executor, EncodedQueryExecutor)
+            and isinstance(sub, owl.Class)
+            and isinstance(sup, owl.Class)
+        ):
+            native_shortcut = self._executor.semantic_shortcut(owl.SubClassOf(sub, sup))
+            if native_shortcut is not None:
+                return native_shortcut
         witnesses = self._witnesses_pair(sub, sup, "subclass")
         return not self._executor.check(_subclass_plan(sub, sup, witnesses, "subclass")).satisfiable
 
@@ -298,6 +354,10 @@ class EntailmentService:
             shortcut = _axiom_shortcut(axiom)
             if shortcut is not None:
                 return shortcut
+            if isinstance(self._executor, EncodedQueryExecutor):
+                native_shortcut = self._executor.semantic_shortcut(axiom)
+                if native_shortcut is not None:
+                    return native_shortcut
         method_name = _REDUCTION_METHODS[type(axiom)]
         method = cast(Callable[[owl.LogicalAxiom], Reduction], getattr(self, method_name))
         return method(axiom)
@@ -732,7 +792,7 @@ class EntailmentService:
 
     def _witnesses(self, value: owl.StructuralNode, purpose: str) -> _WitnessFactory:
         return _WitnessFactory(
-            self._executor.normalized.digest,
+            self._normalization_digest,
             value.canonical_bytes(),
             purpose,
             self._signature_bytes,
@@ -746,7 +806,7 @@ class EntailmentService:
     ) -> _WitnessFactory:
         payload = first.canonical_bytes() + b"\x00" + second.canonical_bytes()
         return _WitnessFactory(
-            self._executor.normalized.digest,
+            self._normalization_digest,
             payload,
             purpose,
             self._signature_bytes,
@@ -761,7 +821,7 @@ class EntailmentService:
             for value in values
         )
         return _WitnessFactory(
-            self._executor.normalized.digest,
+            self._normalization_digest,
             payload,
             "anonymous-forest",
             self._signature_bytes,
@@ -1039,6 +1099,49 @@ def _source_signature(normalized: NormalizedOntology) -> set[owl.Entity]:
             if isinstance(node, owl.Entity) and node.canonical_bytes() not in generated
         )
     return result
+
+
+def _source_literals(normalized: NormalizedOntology) -> tuple[owl.Literal, ...]:
+    values: dict[bytes, owl.Literal] = {}
+    for record in normalized.records:
+        statement = record.statement
+        if isinstance(statement, DataRangeInclusion):
+            nodes: Iterable[owl.StructuralNode] = itertools.chain(
+                owl.walk(statement.sub_range),
+                owl.walk(statement.super_range),
+            )
+        else:
+            nodes = owl.walk(statement)
+        for node in nodes:
+            if isinstance(node, owl.Literal):
+                values[node.canonical_bytes()] = node
+    return tuple(values[key] for key in sorted(values))
+
+
+def _semantic_equality_possible(normalized: NormalizedOntology) -> bool:
+    equality_axioms = (
+        owl.FunctionalObjectProperty,
+        owl.InverseFunctionalObjectProperty,
+        owl.HasKey,
+    )
+    equality_expressions = (
+        owl.ObjectOneOf,
+        owl.ObjectMaxCardinality,
+        owl.ObjectExactCardinality,
+    )
+    for record in normalized.records:
+        statement = record.statement
+        if isinstance(statement, equality_axioms):
+            return True
+        if isinstance(statement, DataRangeInclusion):
+            continue
+        if any(isinstance(node, equality_expressions) for node in owl.walk(statement)):
+            return True
+    return any(
+        isinstance(node, equality_expressions)
+        for definition in normalized.definitions
+        for node in owl.walk(definition.expression)
+    )
 
 
 def _require_class_expression(value: object) -> None:

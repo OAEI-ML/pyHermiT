@@ -119,6 +119,29 @@ class CompiledResultMapper:
             "source literal",
         )
 
+    @classmethod
+    def from_domain_mappings(
+        cls,
+        *,
+        classes: Mapping[int, owl.Class],
+        object_properties: Mapping[int, owl.ObjectPropertyExpression],
+        data_properties: Mapping[int, owl.DataProperty],
+        individuals: Mapping[int, owl.NamedIndividual],
+        source_literals: Mapping[int, owl.Literal],
+    ) -> CompiledResultMapper:
+        """Construct from an already validated native source-domain context."""
+
+        values = (classes, object_properties, data_properties, individuals, source_literals)
+        if not all(isinstance(value, Mapping) for value in values):
+            raise TypeError("native result domains must be mappings")
+        mapper = object.__new__(cls)
+        mapper._classes = MappingProxyType(dict(classes))
+        mapper._object_properties = MappingProxyType(dict(object_properties))
+        mapper._data_properties = MappingProxyType(dict(data_properties))
+        mapper._individuals = MappingProxyType(dict(individuals))
+        mapper._source_literals = MappingProxyType(dict(source_literals))
+        return mapper
+
     @property
     def class_ids(self) -> Mapping[int, owl.Class]:
         return self._classes

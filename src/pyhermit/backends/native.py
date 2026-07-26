@@ -13,14 +13,15 @@ from __future__ import annotations
 import importlib
 import json
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
 from types import ModuleType
 from typing import NoReturn, Protocol, TypeVar, cast
 
-from pyowl_core import OntologyView
+from pyowl_core import Entity, OntologyView
 
 from pyhermit._version import __version__
+from pyhermit.backends.native_context import NativeServiceContext, decode_service_context
 from pyhermit.backends.native_events import NativeSessionEvent, decode_events
 from pyhermit.backends.native_wire import (
     decode_check,
@@ -100,6 +101,8 @@ class _ExtensionSession(Protocol):
     def permanent_program_sha256(self) -> str: ...
 
     def check(self, query: bytes | None) -> bytes: ...
+
+    def _encoded_service_context_v1(self) -> bytes: ...
 
     def check_many(self, queries: Sequence[bytes]) -> bytes: ...
 
@@ -661,6 +664,36 @@ class NativeBackendSession:
                 context={"reason": "program_fingerprint_invalid"},
             )
         return actual
+
+    def _encoded_service_context(
+        self,
+        signature: Iterable[Entity],
+    ) -> NativeServiceContext:
+        self._begin_call()
+        exporter = getattr(self._native, "_encoded_service_context_v1", None)
+        if not callable(exporter):
+            raise BackendVersionError(
+                "native encoded service-context surface is incomplete",
+                context={"reason": "session_surface_invalid"},
+            )
+        try:
+            encoded = exporter()
+            _require_bytes(encoded, "encoded service context")
+            context = decode_service_context(
+                encoded,
+                query_scope_digest=self.ontology_fingerprint,
+                signature=signature,
+            )
+            if context.permanent_program_sha256 != self.permanent_program_sha256:
+                raise BackendMismatchError(
+                    "native service context is bound to a different permanent program",
+                    context={"reason": "program_fingerprint_mismatch"},
+                )
+            self._cancellation.check()
+            return context
+        except (BackendMismatchError, TypeError, ValueError):
+            self._poisoned = True
+            raise
 
     def check(self, query: CompiledQuery | None = None) -> CheckResult:
         self._begin_call()

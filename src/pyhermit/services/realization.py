@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import itertools
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TypeAlias, TypeVar
@@ -22,7 +22,6 @@ from pyhermit.exceptions import (
     InconsistentOntologyError,
     ReasonerInterruptedError,
 )
-from pyhermit.normalize import DataRangeInclusion
 
 from .classification import ClassificationService
 from .entailment import EntailmentService
@@ -721,20 +720,7 @@ class RealizationService:
 
 
 def _source_literals(service: EntailmentService) -> tuple[owl.Literal, ...]:
-    values: dict[bytes, owl.Literal] = {}
-    for record in service.normalized.records:
-        statement = record.statement
-        if isinstance(statement, DataRangeInclusion):
-            nodes: Iterable[owl.StructuralNode] = itertools.chain(
-                owl.walk(statement.sub_range),
-                owl.walk(statement.super_range),
-            )
-        else:
-            nodes = owl.walk(statement)
-        for node in nodes:
-            if isinstance(node, owl.Literal):
-                values[node.canonical_bytes()] = node
-    return tuple(values[key] for key in sorted(values))
+    return service.source_literals
 
 
 def _object_property_candidates(
@@ -756,29 +742,7 @@ def _data_property_candidates(service: EntailmentService) -> frozenset[owl.DataP
 
 
 def _semantic_equality_possible(service: EntailmentService) -> bool:
-    equality_axioms = (
-        owl.FunctionalObjectProperty,
-        owl.InverseFunctionalObjectProperty,
-        owl.HasKey,
-    )
-    equality_expressions = (
-        owl.ObjectOneOf,
-        owl.ObjectMaxCardinality,
-        owl.ObjectExactCardinality,
-    )
-    for record in service.normalized.records:
-        statement = record.statement
-        if isinstance(statement, equality_axioms):
-            return True
-        if isinstance(statement, DataRangeInclusion):
-            continue
-        if any(isinstance(node, equality_expressions) for node in owl.walk(statement)):
-            return True
-    return any(
-        isinstance(node, equality_expressions)
-        for definition in service.normalized.definitions
-        for node in owl.walk(definition.expression)
-    )
+    return service.semantic_equality_possible
 
 
 def _representative(values: frozenset[T]) -> T:

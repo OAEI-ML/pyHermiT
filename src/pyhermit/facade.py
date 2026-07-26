@@ -50,6 +50,7 @@ from pyhermit.core import (
 )
 from pyhermit.events import CancellationSource
 from pyhermit.exceptions import (
+    BackendVersionError,
     ConcurrentMutationError,
     DisposedReasonerError,
 )
@@ -58,7 +59,9 @@ from pyhermit.normalize import NormalizedOntology
 from pyhermit.services import (
     ClassificationService,
     CompiledQueryExecutor,
+    EncodedQueryExecutor,
     EntailmentService,
+    QueryExecutor,
 )
 from pyhermit.services.realization import IndividualResults, RealizationService
 
@@ -76,12 +79,12 @@ class InferenceType(str, Enum):
 
 @dataclass(slots=True)
 class _Runtime:
-    normalized: NormalizedOntology
-    program: ClauseProgram
-    compiled: CompiledOntology
+    normalized: NormalizedOntology | None
+    program: ClauseProgram | None
+    compiled: CompiledOntology | None
     compiler_digest: str
     session: BackendSession
-    executor: CompiledQueryExecutor
+    executor: QueryExecutor
     entailment: EntailmentService
     classification: ClassificationService
     realization: RealizationService
@@ -572,13 +575,18 @@ class Reasoner:
         compile_started = perf_counter()
         session = self._create_encoded_lifecycle_session(validated.captured)
         try:
+            if session is not None:
+                return self._encoded_services(
+                    validated,
+                    session,
+                    compile_started=compile_started,
+                )
             bundle = compile_captured_bundle(
                 validated.captured,
                 self._config,
                 cancelled=self._cancelled,
             )
-            if session is None:
-                session = self._create_backend_session(validated.view, bundle[2])
+            session = self._create_backend_session(validated.view, bundle[2])
             return self._services(bundle, session, compile_started=compile_started)
         except BaseException:
             if session is not None:
@@ -625,6 +633,62 @@ class Reasoner:
             )
         return session
 
+    def _encoded_services(
+        self,
+        validated: ValidatedOntology,
+        session: BackendSession,
+        *,
+        compile_started: float,
+    ) -> _Runtime:
+        context_loader = getattr(session, "_encoded_service_context", None)
+        if not callable(context_loader):
+            raise BackendVersionError(
+                "encoded native session has no service-context exporter",
+                context={"reason": "session_surface_invalid"},
+            )
+        context = context_loader(validated.view.signature())
+        executor = EncodedQueryExecutor(
+            context,
+            session,
+            temporary_check=self._temporary_encoded_check,
+            cancelled=self._cancelled,
+        )
+        entailment = EntailmentService(
+            executor,
+            fresh_entities=self._config.fresh_entities,
+        )
+        classification = ClassificationService(
+            entailment,
+            config=self._config,
+            cancelled=self._cancelled,
+        )
+        realization = RealizationService(
+            entailment,
+            classification,
+            config=self._config,
+            cancelled=self._cancelled,
+        )
+        mapper = executor.result_mapper
+        self._install_native_providers(
+            session,
+            classification,
+            realization,
+            mapper,
+        )
+        return _Runtime(
+            None,
+            None,
+            None,
+            context.permanent_program_sha256,
+            session,
+            executor,
+            entailment,
+            classification,
+            realization,
+            mapper,
+            perf_counter() - compile_started,
+        )
+
     def _services(
         self,
         bundle: tuple[NormalizedOntology, ClauseProgram, CompiledOntology],
@@ -663,21 +727,13 @@ class Reasoner:
                 source_literals=realization.source_literals,
             )
             result_mapper = mapper
-            classification._install_coarse_hierarchy_providers(
-                classes=lambda: mapper.class_hierarchy(session.classify_classes()),
-                object_properties=lambda: mapper.object_property_hierarchy(
-                    session.classify_object_properties()
-                ),
-                data_properties=lambda: mapper.data_property_hierarchy(
-                    session.classify_data_properties()
-                ),
+            self._install_native_providers(
+                session,
+                classification,
+                realization,
+                mapper,
             )
 
-            def coarse_realization() -> MappedRealization:
-                class_hierarchy = classification.class_hierarchy()
-                return mapper.realization(session.realize(), class_hierarchy)
-
-            realization._install_coarse_provider(coarse_realization)
         return _Runtime(
             normalized,
             program,
@@ -692,6 +748,29 @@ class Reasoner:
             perf_counter() - compile_started,
         )
 
+    @staticmethod
+    def _install_native_providers(
+        session: BackendSession,
+        classification: ClassificationService,
+        realization: RealizationService,
+        mapper: CompiledResultMapper,
+    ) -> None:
+        classification._install_coarse_hierarchy_providers(
+            classes=lambda: mapper.class_hierarchy(session.classify_classes()),
+            object_properties=lambda: mapper.object_property_hierarchy(
+                session.classify_object_properties()
+            ),
+            data_properties=lambda: mapper.data_property_hierarchy(
+                session.classify_data_properties()
+            ),
+        )
+
+        def coarse_realization() -> MappedRealization:
+            class_hierarchy = classification.class_hierarchy()
+            return mapper.realization(session.realize(), class_hierarchy)
+
+        realization._install_coarse_provider(coarse_realization)
+
     def _temporary_check(self, axioms: tuple[owl.AxiomNode, ...]) -> CheckResult:
         overlay = pyowl_core.apply_delta(
             self._validated.view,
@@ -704,6 +783,26 @@ class Reasoner:
             cancelled=self._cancelled,
         )
         session = self._create_backend_session(overlay, bundle[2])
+        try:
+            return session.check()
+        finally:
+            session.close()
+
+    def _temporary_encoded_check(
+        self,
+        axioms: tuple[owl.AxiomNode, ...],
+    ) -> CheckResult:
+        overlay = pyowl_core.apply_delta(
+            self._validated.view,
+            pyowl_core.OntologyDelta(add_axioms=owl.CanonicalSet(axioms)),
+        )
+        captured = capture_compatible_view(overlay)
+        session = self._create_encoded_lifecycle_session(captured)
+        if session is None:
+            raise BackendVersionError(
+                "encoded query compilation lost its negotiated native capability",
+                context={"reason": "encoded_session_capability_lost"},
+            )
         try:
             return session.check()
         finally:
@@ -733,12 +832,42 @@ class Reasoner:
             _profile_validator=profile_validator if callable(profile_validator) else None,
         )
         compile_started = perf_counter()
+        old = self._runtime
+        if old.program is None:
+            session = self._create_encoded_lifecycle_session(validated.captured)
+            if session is None:
+                raise BackendVersionError(
+                    "encoded update compilation lost its negotiated native capability",
+                    context={"reason": "encoded_session_capability_lost"},
+                )
+            try:
+                runtime = self._encoded_services(
+                    validated,
+                    session,
+                    compile_started=compile_started,
+                )
+            except BaseException:
+                session.close()
+                raise
+            try:
+                old.session.close()
+            except BaseException:
+                session.close()
+                raise
+            self._validated = validated
+            self._runtime = runtime
+            self._pending_additions.clear()
+            self._pending_removals.clear()
+            self._precomputed.clear()
+            return
+
         bundle = compile_captured_bundle(
             validated.captured,
             self._config,
             cancelled=self._cancelled,
         )
-        old = self._runtime
+        if old.program is None:
+            raise RuntimeError("scalar update path lost its compiled program")
         delta = compile_delta_plan(
             old.program,
             bundle[1],

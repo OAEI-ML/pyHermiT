@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from .checks import CompiledQueryExecutor, QueryPlan, TemporaryQueryChecker
+from .checks import (
+    CompiledQueryExecutor,
+    EncodedQueryExecutor,
+    QueryExecutor,
+    QueryPlan,
+    TemporaryQueryChecker,
+)
 from .classification import ClassificationDomain, ClassificationService
 from .entailment import ENTAILMENT_REDUCTION_TYPES, EntailmentService
 
@@ -11,7 +17,9 @@ __all__ = [
     "ClassificationDomain",
     "ClassificationService",
     "CompiledQueryExecutor",
+    "EncodedQueryExecutor",
     "EntailmentService",
+    "QueryExecutor",
     "QueryPlan",
     "TemporaryQueryChecker",
 ]

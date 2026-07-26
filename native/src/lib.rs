@@ -35,6 +35,7 @@ mod realization_bridge;
 pub mod result_wire;
 pub mod roles;
 pub mod rules;
+mod service_context;
 pub mod services;
 pub mod session;
 pub mod store;
@@ -212,6 +213,20 @@ impl NativeSession {
     fn permanent_program_sha256(&self, py: Python<'_>) -> PyResult<String> {
         self.control
             .run(|owned| Ok(hex_digest(&owned.ontology.metadata.program_sha256)))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    fn _encoded_service_context_v1(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        let control = Arc::clone(&self.control);
+        control
+            .run(|owned| {
+                py.detach(|| {
+                    control.cancellation.poll()?;
+                    let encoded = service_context::encode_service_context(owned.ontology.as_ref())?;
+                    control.cancellation.poll()?;
+                    Ok(encoded)
+                })
+            })
             .map_err(|error| error.into_pyerr(py))
     }
 
