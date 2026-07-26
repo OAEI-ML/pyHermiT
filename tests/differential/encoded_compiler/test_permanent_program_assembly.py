@@ -1020,15 +1020,70 @@ def test_representative_named_datatype_ranges_have_runtime_parity(
         scalar.close()
 
 
-def test_unassembled_datatype_facets_remain_fail_closed() -> None:
+def test_complemented_named_datatype_ranges_have_program_and_runtime_parity() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(NamedIndividual(:i))",
+            "SubClassOf(:A DataSomeValuesFrom(:d DataComplementOf("
+            "<http://www.w3.org/2001/XMLSchema#int>)))",
+            "SubClassOf(DataAllValuesFrom(:d DataComplementOf("
+            "<http://www.w3.org/2001/XMLSchema#string>)) :B)",
+            "SubClassOf(:A DataMinCardinality(2 :e DataComplementOf("
+            "<http://www.w3.org/2001/XMLSchema#boolean>)))",
+            "SubClassOf(DataMaxCardinality(3 :e DataComplementOf("
+            "<http://www.w3.org/2001/XMLSchema#decimal>)) :B)",
+            "SubClassOf(:A DataExactCardinality(1 :e DataComplementOf("
+            "<http://www.w3.org/2001/XMLSchema#integer>)))",
+            "DataPropertyRange(:e DataComplementOf("
+            "<http://www.w3.org/2001/XMLSchema#double>))",
+            "ClassAssertion(:A :i)",
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    _manifest(snapshot, reference=compiled)
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.classify_classes() == scalar.classify_classes()
+        assert encoded.classify_data_properties() == scalar.classify_data_properties()
+    finally:
+        encoded.close()
+        scalar.close()
+
+
+@pytest.mark.parametrize(
+    "data_range",
+    (
+        (
+            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#int> "
+            "<http://www.w3.org/2001/XMLSchema#minInclusive> "
+            '"0"^^<http://www.w3.org/2001/XMLSchema#int>)'
+        ),
+        (
+            "DataComplementOf(DatatypeRestriction("
+            "<http://www.w3.org/2001/XMLSchema#int> "
+            "<http://www.w3.org/2001/XMLSchema#minInclusive> "
+            '"0"^^<http://www.w3.org/2001/XMLSchema#int>))'
+        ),
+    ),
+    ids=("restriction", "complemented-restriction"),
+)
+def test_unassembled_datatype_facets_remain_fail_closed(data_range: str) -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(DataProperty(:d))",
-            "SubClassOf(:A DataSomeValuesFrom(:d DatatypeRestriction("
-            "<http://www.w3.org/2001/XMLSchema#int> "
-            "<http://www.w3.org/2001/XMLSchema#minInclusive> "
-            '"0"^^<http://www.w3.org/2001/XMLSchema#int>)))',
+            f"SubClassOf(:A DataSomeValuesFrom(:d {data_range}))",
         ),
         options=OPTIONS,
     )

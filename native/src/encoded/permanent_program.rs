@@ -548,7 +548,7 @@ fn validate_semantic_coverage(
             "permanent-program source literal semantics are incomplete",
         ));
     }
-    let Some(top) = named
+    let Some(_top) = named
         .data_range_domain
         .values
         .iter()
@@ -556,12 +556,12 @@ fn validate_semantic_coverage(
     else {
         return Err(EncodedValidationError::protocol(UNSUPPORTED));
     };
-    if named.data_range_domain.values.iter().any(|value| {
-        value.display.strip_prefix("datatype:").map_or_else(
-            || !data_range_key_is_complement_of(&value.key, &top.key),
-            |iri| !crate::datatypes::is_supported_datatype(iri),
-        )
-    }) {
+    if named
+        .data_range_domain
+        .values
+        .iter()
+        .any(|value| !data_range_semantics_are_supported(named, &value.key))
+    {
         return Err(EncodedValidationError::protocol(UNSUPPORTED));
     }
     let literals = if named.source_literal_domain.values.is_empty()
@@ -574,6 +574,31 @@ fn validate_semantic_coverage(
         return Err(EncodedValidationError::protocol(UNSUPPORTED));
     };
     Ok(RepresentableDatatypeSemantics { literals })
+}
+
+fn data_range_semantics_are_supported(named: &NamedProgramParts, key: &[u8]) -> bool {
+    let mut current = key;
+    for _ in 0..=named.data_range_domain.values.len() {
+        let Ok(index) = named
+            .data_range_domain
+            .values
+            .binary_search_by(|value| value.key.as_slice().cmp(current))
+        else {
+            return false;
+        };
+        let value = &named.data_range_domain.values[index];
+        if let Some(iri) = value.display.strip_prefix("datatype:") {
+            return crate::datatypes::is_supported_datatype(iri);
+        }
+        let Some(operand) = data_range_complement_operand_key(current) else {
+            return false;
+        };
+        if operand.len() >= current.len() {
+            return false;
+        }
+        current = operand;
+    }
+    false
 }
 
 fn supported_literal_domains_are_complete(named: &NamedProgramParts) -> bool {
@@ -693,19 +718,16 @@ fn freeze_datatype_semantic_payload(
     named: &NamedProgramParts,
     budget: &mut Budget,
 ) -> EncodedResult<String> {
-    let top = named
+    if !named
         .data_range_domain
         .values
         .iter()
-        .find(|value| value.display == RDFS_LITERAL_DISPLAY)
-        .ok_or_else(|| {
-            EncodedValidationError::invariant("representable datatype domain lost rdfs:Literal")
-        })?;
-    let top_payload = named_datatype_semantic_payload(
-        RDFS_LITERAL_DISPLAY
-            .strip_prefix("datatype:")
-            .unwrap_or_default(),
-    )?;
+        .any(|value| value.display == RDFS_LITERAL_DISPLAY)
+    {
+        return Err(EncodedValidationError::invariant(
+            "representable datatype domain lost rdfs:Literal",
+        ));
+    }
     let mut ranges = Vec::new();
     ranges
         .try_reserve_exact(named.data_range_domain.values.len())
@@ -715,28 +737,12 @@ fn freeze_datatype_semantic_payload(
             )
         })?;
     for value in &named.data_range_domain.values {
-        budget.claim_work(1)?;
-        let payload = if let Some(iri) = value.display.strip_prefix("datatype:") {
-            if !crate::datatypes::is_supported_datatype(iri) {
-                return Err(EncodedValidationError::invariant(
-                    "validated datatype payload contains an unsupported named datatype",
-                ));
-            }
-            named_datatype_semantic_payload(iri)?
-        } else if data_range_key_is_complement_of(&value.key, &top.key) {
-            format!(
-                concat!(
-                    "{{\"datatype_iri\":null,\"facets\":[],\"kind\":\"complement\",",
-                    "\"operands\":[{0}],\"record\":\"data_range_semantic\",",
-                    "\"schema_version\":1,\"values\":[]}}"
-                ),
-                top_payload
-            )
-        } else {
-            return Err(EncodedValidationError::invariant(
-                "validated datatype payload contains an unassembled data range",
-            ));
-        };
+        let payload = data_range_semantic_payload(
+            named,
+            &value.key,
+            named.data_range_domain.values.len().saturating_add(1),
+            budget,
+        )?;
         ranges.push(payload);
     }
     let range_bytes = ranges.iter().map(String::len).sum::<usize>();
@@ -763,6 +769,62 @@ fn freeze_datatype_semantic_payload(
     );
     budget.claim_owned(payload.capacity())?;
     Ok(payload)
+}
+
+fn data_range_semantic_payload(
+    named: &NamedProgramParts,
+    key: &[u8],
+    remaining_depth: usize,
+    budget: &mut Budget,
+) -> EncodedResult<String> {
+    if remaining_depth == 0 {
+        return Err(EncodedValidationError::invariant(
+            "validated datatype complement nesting is cyclic",
+        ));
+    }
+    budget.claim_work(1)?;
+    let index = named
+        .data_range_domain
+        .values
+        .binary_search_by(|value| value.key.as_slice().cmp(key))
+        .map_err(|_| {
+            EncodedValidationError::invariant(
+                "validated datatype payload references a missing operand",
+            )
+        })?;
+    let value = &named.data_range_domain.values[index];
+    if let Some(iri) = value.display.strip_prefix("datatype:") {
+        if !crate::datatypes::is_supported_datatype(iri) {
+            return Err(EncodedValidationError::invariant(
+                "validated datatype payload contains an unsupported named datatype",
+            ));
+        }
+        return named_datatype_semantic_payload(iri);
+    }
+    let operand_key = data_range_complement_operand_key(key).ok_or_else(|| {
+        EncodedValidationError::invariant(
+            "validated datatype payload contains an unassembled data range",
+        )
+    })?;
+    if operand_key.len() >= key.len() {
+        return Err(EncodedValidationError::invariant(
+            "validated datatype complement operand does not decrease",
+        ));
+    }
+    let operand = data_range_semantic_payload(
+        named,
+        operand_key,
+        remaining_depth.saturating_sub(1),
+        budget,
+    )?;
+    Ok(format!(
+        concat!(
+            "{{\"datatype_iri\":null,\"facets\":[],\"kind\":\"complement\",",
+            "\"operands\":[{0}],\"record\":\"data_range_semantic\",",
+            "\"schema_version\":1,\"values\":[]}}"
+        ),
+        operand
+    ))
 }
 
 fn named_datatype_semantic_payload(iri: &str) -> EncodedResult<String> {
@@ -892,18 +954,17 @@ fn canonical_signed_hex(value: &str, negative_allowed: bool) -> bool {
     negative_allowed || digits.iter().any(|value| *value != b'0')
 }
 
-fn data_range_key_is_complement_of(candidate: &[u8], operand: &[u8]) -> bool {
-    let Some((tag, after_tag)) = decode_canonical_varint(candidate, 0) else {
-        return false;
-    };
+fn data_range_complement_operand_key(candidate: &[u8]) -> Option<&[u8]> {
+    let (tag, after_tag) = decode_canonical_varint(candidate, 0)?;
     if tag != DATA_COMPLEMENT_OF_TAG || candidate.get(after_tag) != Some(&1) {
-        return false;
+        return None;
     }
-    let Some((length, after_length)) = decode_canonical_varint(candidate, after_tag + 1) else {
-        return false;
-    };
-    usize::try_from(length).ok() == Some(operand.len())
-        && candidate.get(after_length..) == Some(operand)
+    let (length, after_length) = decode_canonical_varint(candidate, after_tag + 1)?;
+    let length = usize::try_from(length).ok()?;
+    let end = after_length.checked_add(length)?;
+    (end == candidate.len())
+        .then(|| candidate.get(after_length..end))
+        .flatten()
 }
 
 fn decode_canonical_varint(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
@@ -2828,20 +2889,20 @@ mod tests {
     }
 
     #[test]
-    fn empty_data_range_key_is_bound_to_the_default_range() {
+    fn complemented_data_range_key_exposes_exact_operand() {
         let operand = [4_u8, 5, 6];
-        assert!(data_range_key_is_complement_of(
-            &[23, 1, 3, 4, 5, 6],
-            &operand
-        ));
-        assert!(!data_range_key_is_complement_of(
-            &[23, 1, 3, 4, 5, 7],
-            &operand
-        ));
-        assert!(!data_range_key_is_complement_of(
-            &[23, 1, 0x83, 0, 4, 5, 6],
-            &operand
-        ));
+        assert_eq!(
+            data_range_complement_operand_key(&[23, 1, 3, 4, 5, 6]),
+            Some(operand.as_slice())
+        );
+        assert_ne!(
+            data_range_complement_operand_key(&[23, 1, 3, 4, 5, 7]),
+            Some(operand.as_slice())
+        );
+        assert_eq!(
+            data_range_complement_operand_key(&[23, 1, 0x83, 0, 4, 5, 6]),
+            None
+        );
     }
 
     #[test]
