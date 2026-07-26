@@ -31,6 +31,7 @@ from pyhermit.backends.native_input import (
 from pyhermit.backends.native_wire import decode_check
 from pyhermit.backends.protocol import CompiledOntology
 from pyhermit.clauses.compiler import compile_captured_bundle
+from pyhermit.datatypes import SUPPORTED_DATATYPES
 from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE, _validate_encoded_view
 from pyhermit.events import CancellationSource, CancellationToken
 from pyhermit.exceptions import (
@@ -911,13 +912,68 @@ def test_xsd_string_literal_semantics_have_exact_program_and_session_parity() ->
         scalar.close()
 
 
-def test_unassembled_data_range_semantics_remain_fail_closed() -> None:
+@pytest.mark.parametrize("datatype_iri", sorted(SUPPORTED_DATATYPES))
+def test_supported_named_datatype_ranges_have_exact_program_parity(
+    datatype_iri: str,
+) -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(DataProperty(:d))",
-            "SubClassOf(:A DataSomeValuesFrom("
-            ":d <http://www.w3.org/2001/XMLSchema#int>))",
+            f"SubClassOf(:A DataSomeValuesFrom(:d <{datatype_iri}>))",
+        ),
+        options=OPTIONS,
+    )
+
+    _manifest(snapshot)
+
+
+@pytest.mark.parametrize(
+    "datatype_iri",
+    (
+        "http://www.w3.org/2001/XMLSchema#int",
+        "http://www.w3.org/2001/XMLSchema#boolean",
+        "http://www.w3.org/2001/XMLSchema#dateTime",
+    ),
+    ids=("integer", "boolean", "date-time"),
+)
+def test_representative_named_datatype_ranges_have_runtime_parity(
+    datatype_iri: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:i))",
+            f"SubClassOf(:A DataSomeValuesFrom(:d <{datatype_iri}>))",
+            "ClassAssertion(:A :i)",
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.classify_data_properties() == scalar.classify_data_properties()
+    finally:
+        encoded.close()
+        scalar.close()
+
+
+def test_unassembled_datatype_facets_remain_fail_closed() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(DataProperty(:d))",
+            "SubClassOf(:A DataSomeValuesFrom(:d DatatypeRestriction("
+            "<http://www.w3.org/2001/XMLSchema#int> "
+            "<http://www.w3.org/2001/XMLSchema#minInclusive> "
+            '"0"^^<http://www.w3.org/2001/XMLSchema#int>)))',
         ),
         options=OPTIONS,
     )

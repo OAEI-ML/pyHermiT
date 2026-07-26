@@ -42,43 +42,17 @@ const DATA_COMPLEMENT_OF_TAG: u64 = 23;
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const RDFS_LITERAL_DISPLAY: &str = "datatype:http://www.w3.org/2000/01/rdf-schema#Literal";
 const XSD_STRING_IRI: &str = "http://www.w3.org/2001/XMLSchema#string";
-const XSD_STRING_DISPLAY: &str = "datatype:http://www.w3.org/2001/XMLSchema#string";
-const DEFAULT_DATATYPE_SEMANTICS: &str = concat!(
-    "{\"data_ranges\":[{\"datatype_iri\":",
-    "\"http://www.w3.org/2000/01/rdf-schema#Literal\",",
-    "\"facets\":[],\"kind\":\"datatype\",\"operands\":[],",
-    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]}],",
-    "\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}"
-);
-const DEFAULT_WITH_EMPTY_DATATYPE_SEMANTICS: &str = concat!(
-    "{\"data_ranges\":[{\"datatype_iri\":",
-    "\"http://www.w3.org/2000/01/rdf-schema#Literal\",",
-    "\"facets\":[],\"kind\":\"datatype\",\"operands\":[],",
-    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]},",
-    "{\"datatype_iri\":null,\"facets\":[],\"kind\":\"complement\",\"operands\":[",
-    "{\"datatype_iri\":\"http://www.w3.org/2000/01/rdf-schema#Literal\",",
-    "\"facets\":[],\"kind\":\"datatype\",\"operands\":[],",
-    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]}],",
-    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]}],",
-    "\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}"
-);
-const STRING_AND_DEFAULT_DATATYPE_SEMANTICS: &str = concat!(
-    "{\"data_ranges\":[{\"datatype_iri\":",
-    "\"http://www.w3.org/2001/XMLSchema#string\",",
-    "\"facets\":[],\"kind\":\"datatype\",\"operands\":[],",
-    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]},",
-    "{\"datatype_iri\":\"http://www.w3.org/2000/01/rdf-schema#Literal\",",
-    "\"facets\":[],\"kind\":\"datatype\",\"operands\":[],",
-    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]}],",
-    "\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}"
-);
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RepresentableDatatypeSemantics {
-    Default,
-    DefaultWithEmpty,
-    StringAndDefault,
+enum RepresentableLiteralSemantics {
+    None,
+    XsdString,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RepresentableDatatypeSemantics {
+    literals: RepresentableLiteralSemantics,
 }
 
 /// Complete set of already-owned phases produced by the coarse structural call.
@@ -368,6 +342,8 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
     let mut budget = Budget::new(limits, input_owned).map_err(PermanentProgramError::Encoded)?;
     let literal_identities = freeze_literal_identities(&named, datatype_semantics, &mut budget)
         .map_err(PermanentProgramError::Encoded)?;
+    let semantic_payload_json = freeze_datatype_semantic_payload(&named, &mut budget)
+        .map_err(PermanentProgramError::Encoded)?;
     let declared_entities = named.declared_entities;
     let named_individuals = named.named_individuals;
     let symbol_domains = freeze_symbol_domains(
@@ -438,15 +414,6 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
         semantic_evidence,
     )
     .map_err(PermanentProgramError::Encoded)?;
-    let semantic_payload_json = match datatype_semantics {
-        RepresentableDatatypeSemantics::Default => DEFAULT_DATATYPE_SEMANTICS,
-        RepresentableDatatypeSemantics::DefaultWithEmpty => DEFAULT_WITH_EMPTY_DATATYPE_SEMANTICS,
-        RepresentableDatatypeSemantics::StringAndDefault => STRING_AND_DEFAULT_DATATYPE_SEMANTICS,
-    }
-    .to_owned();
-    budget
-        .claim_owned(semantic_payload_json.capacity())
-        .map_err(PermanentProgramError::Encoded)?;
     let datatype_model = DecodedDatatypeModel {
         literal_identities,
         datatype_definitions: Vec::new(),
@@ -565,34 +532,35 @@ fn validate_semantic_coverage(
     else {
         return Err(EncodedValidationError::protocol(UNSUPPORTED));
     };
-    match named.data_range_domain.values.as_slice() {
-        [_] if named.source_literal_domain.values.is_empty()
-            && named.data_value_domain.values.is_empty() =>
-        {
-            Ok(RepresentableDatatypeSemantics::Default)
-        }
-        [first, second]
-            if first.display == RDFS_LITERAL_DISPLAY
-                && data_range_key_is_complement_of(&second.key, &top.key)
-                && named.source_literal_domain.values.is_empty()
-                && named.data_value_domain.values.is_empty() =>
-        {
-            Ok(RepresentableDatatypeSemantics::DefaultWithEmpty)
-        }
-        [first, second]
-            if first.display == XSD_STRING_DISPLAY
-                && second.display == RDFS_LITERAL_DISPLAY
-                && plain_string_literal_domains_are_complete(named) =>
-        {
-            Ok(RepresentableDatatypeSemantics::StringAndDefault)
-        }
-        _ => Err(EncodedValidationError::protocol(UNSUPPORTED)),
+    if named.data_range_domain.values.iter().any(|value| {
+        value.display.strip_prefix("datatype:").map_or_else(
+            || !data_range_key_is_complement_of(&value.key, &top.key),
+            |iri| !crate::datatypes::is_supported_datatype(iri),
+        )
+    }) {
+        return Err(EncodedValidationError::protocol(UNSUPPORTED));
     }
+    let literals = if named.source_literal_domain.values.is_empty()
+        && named.data_value_domain.values.is_empty()
+    {
+        RepresentableLiteralSemantics::None
+    } else if plain_string_literal_domains_are_complete(named) {
+        RepresentableLiteralSemantics::XsdString
+    } else {
+        return Err(EncodedValidationError::protocol(UNSUPPORTED));
+    };
+    Ok(RepresentableDatatypeSemantics { literals })
 }
 
 fn plain_string_literal_domains_are_complete(named: &NamedProgramParts) -> bool {
+    if named.source_literal_domain.values.is_empty()
+        || named.data_value_domain.values.is_empty()
+        || named.source_data_identity_ids.len() != named.source_literal_domain.values.len()
+    {
+        return false;
+    }
     let source_suffix = format!("^^{XSD_STRING_IRI}");
-    named
+    let complete = named
         .source_literal_domain
         .values
         .iter()
@@ -609,6 +577,12 @@ fn plain_string_literal_domains_are_complete(named: &NamedProgramParts) -> bool 
             };
             source.display.ends_with(&source_suffix)
                 && decode_plain_string_data_identity(&data_value.key).is_some()
+        });
+    complete
+        && (0..named.data_value_domain.values.len()).all(|data_index| {
+            u32::try_from(data_index).ok().is_some_and(|identifier| {
+                named.source_data_identity_ids.contains(&Some(identifier))
+            })
         })
 }
 
@@ -617,7 +591,7 @@ fn freeze_literal_identities(
     semantics: RepresentableDatatypeSemantics,
     budget: &mut Budget,
 ) -> EncodedResult<Vec<DecodedLiteralIdentity>> {
-    if semantics != RepresentableDatatypeSemantics::StringAndDefault {
+    if semantics.literals != RepresentableLiteralSemantics::XsdString {
         if named.source_literal_domain.values.is_empty() {
             return Ok(Vec::new());
         }
@@ -690,6 +664,95 @@ fn freeze_literal_identities(
         });
     }
     Ok(identities)
+}
+
+fn freeze_datatype_semantic_payload(
+    named: &NamedProgramParts,
+    budget: &mut Budget,
+) -> EncodedResult<String> {
+    let top = named
+        .data_range_domain
+        .values
+        .iter()
+        .find(|value| value.display == RDFS_LITERAL_DISPLAY)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("representable datatype domain lost rdfs:Literal")
+        })?;
+    let top_payload = named_datatype_semantic_payload(
+        RDFS_LITERAL_DISPLAY
+            .strip_prefix("datatype:")
+            .unwrap_or_default(),
+    )?;
+    let mut ranges = Vec::new();
+    ranges
+        .try_reserve_exact(named.data_range_domain.values.len())
+        .map_err(|_| {
+            EncodedValidationError::resource(
+                "permanent-program datatype range payload allocation failed",
+            )
+        })?;
+    for value in &named.data_range_domain.values {
+        budget.claim_work(1)?;
+        let payload = if let Some(iri) = value.display.strip_prefix("datatype:") {
+            if !crate::datatypes::is_supported_datatype(iri) {
+                return Err(EncodedValidationError::invariant(
+                    "validated datatype payload contains an unsupported named datatype",
+                ));
+            }
+            named_datatype_semantic_payload(iri)?
+        } else if data_range_key_is_complement_of(&value.key, &top.key) {
+            format!(
+                concat!(
+                    "{{\"datatype_iri\":null,\"facets\":[],\"kind\":\"complement\",",
+                    "\"operands\":[{0}],\"record\":\"data_range_semantic\",",
+                    "\"schema_version\":1,\"values\":[]}}"
+                ),
+                top_payload
+            )
+        } else {
+            return Err(EncodedValidationError::invariant(
+                "validated datatype payload contains an unassembled data range",
+            ));
+        };
+        ranges.push(payload);
+    }
+    let range_bytes = ranges.iter().map(String::len).sum::<usize>();
+    let separator_bytes = ranges.len().saturating_sub(1);
+    let capacity = "{\"data_ranges\":[],\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}"
+        .len()
+        .saturating_add(range_bytes)
+        .saturating_add(separator_bytes);
+    let mut payload = String::new();
+    payload.try_reserve_exact(capacity).map_err(|_| {
+        EncodedValidationError::resource(
+            "permanent-program datatype model payload allocation failed",
+        )
+    })?;
+    payload.push_str("{\"data_ranges\":[");
+    for (index, range) in ranges.into_iter().enumerate() {
+        if index != 0 {
+            payload.push(',');
+        }
+        payload.push_str(&range);
+    }
+    payload.push_str(
+        "],\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}",
+    );
+    budget.claim_owned(payload.capacity())?;
+    Ok(payload)
+}
+
+fn named_datatype_semantic_payload(iri: &str) -> EncodedResult<String> {
+    let encoded_iri = serde_json::to_string(iri)
+        .map_err(|_| EncodedValidationError::invariant("datatype IRI JSON encoding failed"))?;
+    Ok(format!(
+        concat!(
+            "{{\"datatype_iri\":{0},\"facets\":[],\"kind\":\"datatype\",",
+            "\"operands\":[],\"record\":\"data_range_semantic\",",
+            "\"schema_version\":1,\"values\":[]}}"
+        ),
+        encoded_iri
+    ))
 }
 
 fn decode_plain_string_data_identity(key: &[u8]) -> Option<String> {
@@ -2612,24 +2675,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_datatype_payload_is_canonical_json() {
-        let value: serde_json::Value = serde_json::from_str(DEFAULT_DATATYPE_SEMANTICS).unwrap();
-        assert_eq!(
-            serde_json::to_string(&value).unwrap(),
-            DEFAULT_DATATYPE_SEMANTICS
-        );
-        let with_empty: serde_json::Value =
-            serde_json::from_str(DEFAULT_WITH_EMPTY_DATATYPE_SEMANTICS).unwrap();
-        assert_eq!(
-            serde_json::to_string(&with_empty).unwrap(),
-            DEFAULT_WITH_EMPTY_DATATYPE_SEMANTICS
-        );
-        let with_string: serde_json::Value =
-            serde_json::from_str(STRING_AND_DEFAULT_DATATYPE_SEMANTICS).unwrap();
-        assert_eq!(
-            serde_json::to_string(&with_string).unwrap(),
-            STRING_AND_DEFAULT_DATATYPE_SEMANTICS
-        );
+    fn named_datatype_payload_is_canonical_json() {
+        let payload =
+            named_datatype_semantic_payload("http://www.w3.org/2001/XMLSchema#int").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(serde_json::to_string(&value).unwrap(), payload);
     }
 
     #[test]

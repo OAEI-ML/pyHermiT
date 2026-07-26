@@ -2890,7 +2890,7 @@ fn is_valid_language_tag(language: &str) -> bool {
     index == parts.len()
 }
 
-fn is_supported_datatype(iri: &str) -> bool {
+pub(crate) fn is_supported_datatype(iri: &str) -> bool {
     iri == RDFS_LITERAL
         || numeric_datatype_spec(iri).is_some()
         || matches!(

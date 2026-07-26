@@ -25,6 +25,7 @@ pub use range::{
     IEEEInterval, IEEERange, LengthFacet, LengthInterval, LengthRange, NumericDomain,
     NumericInterval, NumericRange, OrderedFacet, RangeLimits,
 };
+pub(crate) use range_wire::is_supported_datatype;
 pub use range_wire::{
     decode_data_range_semantic, decode_datatype_range_model, NativeDataRange,
     NativeDataValueFamily, NativeDataWitness, NativeDatatypeRangeModel, NativeSymbolicDataWitness,
