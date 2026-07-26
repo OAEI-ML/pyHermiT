@@ -39,6 +39,7 @@ from pyhermit.exceptions import (
     DisposedReasonerError,
     ReasonerInterruptedError,
     ResourceLimitError,
+    UnsupportedDatatypeError,
 )
 from pyhermit.inputs import capture_ontology
 
@@ -1060,6 +1061,61 @@ def test_complemented_named_datatype_ranges_have_program_and_runtime_parity() ->
         scalar.close()
 
 
+def test_boolean_composite_named_datatype_ranges_have_program_and_runtime_parity() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "SubClassOf(:A DataSomeValuesFrom(:d DataIntersectionOf("
+            "<http://www.w3.org/2001/XMLSchema#int> "
+            "<http://www.w3.org/2001/XMLSchema#boolean>)))",
+            "SubClassOf(DataAllValuesFrom(:d DataUnionOf("
+            "<http://www.w3.org/2001/XMLSchema#string> "
+            "<http://www.w3.org/2001/XMLSchema#integer>)) :B)",
+            "SubClassOf(:A DataMinCardinality(2 :e DataIntersectionOf("
+            "<http://www.w3.org/2001/XMLSchema#boolean> "
+            "DataComplementOf(<http://www.w3.org/2001/XMLSchema#string>))))",
+            "SubClassOf(DataMaxCardinality(3 :e DataUnionOf("
+            "<http://www.w3.org/2001/XMLSchema#decimal> "
+            "<http://www.w3.org/2001/XMLSchema#double>)) :B)",
+            "SubClassOf(:A DataExactCardinality(1 :e DataIntersectionOf("
+            "<http://www.w3.org/2001/XMLSchema#string> "
+            "DataUnionOf(<http://www.w3.org/2001/XMLSchema#integer> "
+            "<http://www.w3.org/2001/XMLSchema#boolean>))))",
+            "DataPropertyRange(:e DataUnionOf("
+            "<http://www.w3.org/2001/XMLSchema#int> "
+            "DataComplementOf(<http://www.w3.org/2001/XMLSchema#boolean>)))",
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    _manifest(snapshot, reference=compiled)
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        with pytest.raises(UnsupportedDatatypeError) as encoded_classes:
+            encoded.classify_classes()
+        with pytest.raises(UnsupportedDatatypeError) as scalar_classes:
+            scalar.classify_classes()
+        assert str(encoded_classes.value) == str(scalar_classes.value)
+
+        with pytest.raises(UnsupportedDatatypeError) as encoded_data_properties:
+            encoded.classify_data_properties()
+        with pytest.raises(UnsupportedDatatypeError) as scalar_data_properties:
+            scalar.classify_data_properties()
+        assert str(encoded_data_properties.value) == str(scalar_data_properties.value)
+    finally:
+        encoded.close()
+        scalar.close()
+
+
 @pytest.mark.parametrize(
     "data_range",
     (
@@ -1074,8 +1130,14 @@ def test_complemented_named_datatype_ranges_have_program_and_runtime_parity() ->
             "<http://www.w3.org/2001/XMLSchema#minInclusive> "
             '"0"^^<http://www.w3.org/2001/XMLSchema#int>))'
         ),
+        (
+            "DataUnionOf(<http://www.w3.org/2001/XMLSchema#boolean> "
+            "DatatypeRestriction(<http://www.w3.org/2001/XMLSchema#int> "
+            "<http://www.w3.org/2001/XMLSchema#minInclusive> "
+            '"0"^^<http://www.w3.org/2001/XMLSchema#int>))'
+        ),
     ),
-    ids=("restriction", "complemented-restriction"),
+    ids=("restriction", "complemented-restriction", "boolean-restriction"),
 )
 def test_unassembled_datatype_facets_remain_fail_closed(data_range: str) -> None:
     snapshot = pyowl_core.load_snapshot(

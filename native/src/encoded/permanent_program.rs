@@ -40,7 +40,10 @@ use crate::input_wire::{
 };
 
 const PERMANENT_PROGRAM_SCHEMA_VERSION: u16 = 1;
+const DATA_INTERSECTION_OF_TAG: u64 = 21;
+const DATA_UNION_OF_TAG: u64 = 22;
 const DATA_COMPLEMENT_OF_TAG: u64 = 23;
+const CANONICAL_COLLECTION_COMPONENT: u8 = 6;
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const RDFS_LITERAL_DISPLAY: &str = "datatype:http://www.w3.org/2000/01/rdf-schema#Literal";
 const XSD_STRING_IRI: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -502,6 +505,8 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
         .map_err(PermanentProgramError::Encoded)?;
     let semantic_payload_json = freeze_datatype_semantic_payload(&named, &mut budget)
         .map_err(PermanentProgramError::Encoded)?;
+    let unknown_datatype_ids =
+        freeze_unknown_datatype_ids(&named, &mut budget).map_err(PermanentProgramError::Encoded)?;
     let declared_entities = named.declared_entities;
     let named_individuals = named.named_individuals;
     let symbol_domains = freeze_symbol_domains(
@@ -562,6 +567,10 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
     poll("permanent-program-facts").map_err(PermanentProgramError::Control)?;
 
     let role_model = role_model.role_model;
+    let expressivity_evidence = RepresentableExpressivityEvidence {
+        source: semantic_evidence,
+        unknown_datatypes: !unknown_datatype_ids.is_empty(),
+    };
     let expressivity = derive_representable_expressivity(
         &predicates,
         &clauses,
@@ -569,13 +578,13 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
         &negative_facts,
         &provenance,
         &role_model,
-        semantic_evidence,
+        expressivity_evidence,
     )
     .map_err(PermanentProgramError::Encoded)?;
     let datatype_model = DecodedDatatypeModel {
         literal_identities,
         datatype_definitions: Vec::new(),
-        unknown_datatype_ids: Vec::new(),
+        unknown_datatype_ids,
         semantic_payload_json,
     };
     let program = DecodedProgram {
@@ -716,28 +725,111 @@ fn validate_semantic_coverage(
 }
 
 fn data_range_semantics_are_supported(named: &NamedProgramParts, key: &[u8]) -> bool {
-    let mut current = key;
-    for _ in 0..=named.data_range_domain.values.len() {
-        let Ok(index) = named
-            .data_range_domain
-            .values
-            .binary_search_by(|value| value.key.as_slice().cmp(current))
-        else {
-            return false;
-        };
-        let value = &named.data_range_domain.values[index];
-        if let Some(iri) = value.display.strip_prefix("datatype:") {
-            return crate::datatypes::is_supported_datatype(iri);
-        }
-        let Some(operand) = data_range_complement_operand_key(current) else {
-            return false;
-        };
-        if operand.len() >= current.len() {
-            return false;
-        }
-        current = operand;
+    data_range_semantics_are_supported_at(
+        named,
+        key,
+        named.data_range_domain.values.len().saturating_add(1),
+    )
+}
+
+fn data_range_semantics_are_supported_at(
+    named: &NamedProgramParts,
+    key: &[u8],
+    remaining_depth: usize,
+) -> bool {
+    if remaining_depth == 0 {
+        return false;
+    }
+    let Ok(index) = named
+        .data_range_domain
+        .values
+        .binary_search_by(|value| value.key.as_slice().cmp(key))
+    else {
+        return false;
+    };
+    let value = &named.data_range_domain.values[index];
+    if let Some(iri) = value.display.strip_prefix("datatype:") {
+        return crate::datatypes::is_supported_datatype(iri) || value.generated;
+    }
+    if let Some(operand) = data_range_complement_operand_key(key) {
+        return operand.len() < key.len()
+            && data_range_semantics_are_supported_at(
+                named,
+                operand,
+                remaining_depth.saturating_sub(1),
+            );
+    }
+    if let Some((_, operands)) = data_range_boolean_operand_keys(key) {
+        return operands.iter().all(|operand| {
+            operand.len() < key.len()
+                && data_range_semantics_are_supported_at(
+                    named,
+                    operand,
+                    remaining_depth.saturating_sub(1),
+                )
+        });
     }
     false
+}
+
+fn freeze_unknown_datatype_ids(
+    named: &NamedProgramParts,
+    budget: &mut Budget,
+) -> EncodedResult<Vec<u32>> {
+    let mut identifiers = Vec::new();
+    identifiers
+        .try_reserve_exact(named.data_range_domain.values.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("unknown datatype identifier allocation failed")
+        })?;
+    for value in &named.data_range_domain.values {
+        budget.claim_work(1)?;
+        if data_range_semantics_are_unknown(
+            named,
+            &value.key,
+            named.data_range_domain.values.len().saturating_add(1),
+        ) {
+            identifiers.push(value.identifier);
+        }
+    }
+    budget.claim_owned(
+        identifiers
+            .capacity()
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("unknown datatype identifier ownership overflowed")
+            })?,
+    )?;
+    Ok(identifiers)
+}
+
+fn data_range_semantics_are_unknown(
+    named: &NamedProgramParts,
+    key: &[u8],
+    remaining_depth: usize,
+) -> bool {
+    if remaining_depth == 0 {
+        return true;
+    }
+    let Ok(index) = named
+        .data_range_domain
+        .values
+        .binary_search_by(|value| value.key.as_slice().cmp(key))
+    else {
+        return true;
+    };
+    let value = &named.data_range_domain.values[index];
+    if value.display.starts_with("datatype:") {
+        return value.generated;
+    }
+    if let Some(operand) = data_range_complement_operand_key(key) {
+        return data_range_semantics_are_unknown(named, operand, remaining_depth.saturating_sub(1));
+    }
+    data_range_boolean_operand_keys(key).is_none_or(|(_, operands)| {
+        operands.iter().any(|operand| {
+            data_range_semantics_are_unknown(named, operand, remaining_depth.saturating_sub(1))
+        })
+    })
 }
 
 fn supported_literal_domains_are_complete(named: &NamedProgramParts) -> bool {
@@ -916,9 +1008,20 @@ fn data_range_semantic_payload(
     remaining_depth: usize,
     budget: &mut Budget,
 ) -> EncodedResult<String> {
+    let value = data_range_semantic_value(named, key, remaining_depth, budget)?;
+    serde_json::to_string(&value)
+        .map_err(|_| EncodedValidationError::invariant("datatype range JSON encoding failed"))
+}
+
+fn data_range_semantic_value(
+    named: &NamedProgramParts,
+    key: &[u8],
+    remaining_depth: usize,
+    budget: &mut Budget,
+) -> EncodedResult<serde_json::Value> {
     if remaining_depth == 0 {
         return Err(EncodedValidationError::invariant(
-            "validated datatype complement nesting is cyclic",
+            "validated datatype range nesting is cyclic",
         ));
     }
     budget.claim_work(1)?;
@@ -933,50 +1036,127 @@ fn data_range_semantic_payload(
         })?;
     let value = &named.data_range_domain.values[index];
     if let Some(iri) = value.display.strip_prefix("datatype:") {
-        if !crate::datatypes::is_supported_datatype(iri) {
+        if crate::datatypes::is_supported_datatype(iri) {
+            return Ok(named_datatype_semantic_value(iri, false));
+        }
+        if value.generated {
+            return Ok(named_datatype_semantic_value(iri, true));
+        }
+        return Err(EncodedValidationError::invariant(
+            "validated datatype payload contains an unsupported named datatype",
+        ));
+    }
+    if let Some(operand_key) = data_range_complement_operand_key(key) {
+        if operand_key.len() >= key.len() {
             return Err(EncodedValidationError::invariant(
-                "validated datatype payload contains an unsupported named datatype",
+                "validated datatype complement operand does not decrease",
             ));
         }
-        return named_datatype_semantic_payload(iri);
+        let operand = data_range_semantic_value(
+            named,
+            operand_key,
+            remaining_depth.saturating_sub(1),
+            budget,
+        )?;
+        return Ok(serde_json::json!({
+            "datatype_iri": null,
+            "facets": [],
+            "kind": "complement",
+            "operands": [operand],
+            "record": "data_range_semantic",
+            "schema_version": 1,
+            "values": [],
+        }));
     }
-    let operand_key = data_range_complement_operand_key(key).ok_or_else(|| {
+    let (tag, operand_keys) = data_range_boolean_operand_keys(key).ok_or_else(|| {
         EncodedValidationError::invariant(
             "validated datatype payload contains an unassembled data range",
         )
     })?;
-    if operand_key.len() >= key.len() {
+    let kind = match tag {
+        DATA_INTERSECTION_OF_TAG => "intersection",
+        DATA_UNION_OF_TAG => "union",
+        _ => {
+            return Err(EncodedValidationError::invariant(
+                "validated datatype Boolean range changed tag",
+            ))
+        }
+    };
+    budget.claim_work(operand_keys.len())?;
+    let mut operands = Vec::new();
+    operands
+        .try_reserve_exact(operand_keys.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("datatype Boolean operand allocation failed")
+        })?;
+    for operand_key in operand_keys {
+        if operand_key.len() >= key.len() {
+            return Err(EncodedValidationError::invariant(
+                "validated datatype Boolean operand does not decrease",
+            ));
+        }
+        let operand = data_range_semantic_value(
+            named,
+            operand_key,
+            remaining_depth.saturating_sub(1),
+            budget,
+        )?;
+        if operand.get("kind").and_then(serde_json::Value::as_str) == Some(kind) {
+            let nested = operand
+                .get("operands")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "validated datatype Boolean operand lost its children",
+                    )
+                })?;
+            operands.extend(nested.iter().cloned());
+        } else {
+            operands.push(operand);
+        }
+    }
+    let mut canonical = Vec::new();
+    canonical.try_reserve_exact(operands.len()).map_err(|_| {
+        EncodedValidationError::resource("datatype Boolean canonicalization allocation failed")
+    })?;
+    for operand in operands {
+        let encoded = serde_json::to_vec(&operand).map_err(|_| {
+            EncodedValidationError::invariant("datatype Boolean operand JSON encoding failed")
+        })?;
+        canonical.push((encoded, operand));
+    }
+    budget.claim_work(canonical.len())?;
+    canonical.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    canonical.dedup_by(|left, right| left.0 == right.0);
+    if canonical.len() < 2 {
         return Err(EncodedValidationError::invariant(
-            "validated datatype complement operand does not decrease",
+            "validated datatype Boolean range no longer has two distinct operands",
         ));
     }
-    let operand = data_range_semantic_payload(
-        named,
-        operand_key,
-        remaining_depth.saturating_sub(1),
-        budget,
-    )?;
-    Ok(format!(
-        concat!(
-            "{{\"datatype_iri\":null,\"facets\":[],\"kind\":\"complement\",",
-            "\"operands\":[{0}],\"record\":\"data_range_semantic\",",
-            "\"schema_version\":1,\"values\":[]}}"
-        ),
-        operand
-    ))
+    Ok(serde_json::json!({
+        "datatype_iri": null,
+        "facets": [],
+        "kind": kind,
+        "operands": canonical
+            .into_iter()
+            .map(|(_, operand)| operand)
+            .collect::<Vec<_>>(),
+        "record": "data_range_semantic",
+        "schema_version": 1,
+        "values": [],
+    }))
 }
 
-fn named_datatype_semantic_payload(iri: &str) -> EncodedResult<String> {
-    let encoded_iri = serde_json::to_string(iri)
-        .map_err(|_| EncodedValidationError::invariant("datatype IRI JSON encoding failed"))?;
-    Ok(format!(
-        concat!(
-            "{{\"datatype_iri\":{0},\"facets\":[],\"kind\":\"datatype\",",
-            "\"operands\":[],\"record\":\"data_range_semantic\",",
-            "\"schema_version\":1,\"values\":[]}}"
-        ),
-        encoded_iri
-    ))
+fn named_datatype_semantic_value(iri: &str, opaque: bool) -> serde_json::Value {
+    serde_json::json!({
+        "datatype_iri": iri,
+        "facets": [],
+        "kind": if opaque { "opaque" } else { "datatype" },
+        "operands": [],
+        "record": "data_range_semantic",
+        "schema_version": 1,
+        "values": [],
+    })
 }
 
 fn literal_semantic_values(
@@ -1097,6 +1277,34 @@ fn data_range_complement_operand_key(candidate: &[u8]) -> Option<&[u8]> {
     (end == candidate.len())
         .then(|| candidate.get(after_length..end))
         .flatten()
+}
+
+fn data_range_boolean_operand_keys(candidate: &[u8]) -> Option<(u64, Vec<&[u8]>)> {
+    let (tag, after_tag) = decode_canonical_varint(candidate, 0)?;
+    if !matches!(tag, DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG)
+        || candidate.get(after_tag) != Some(&CANONICAL_COLLECTION_COMPONENT)
+    {
+        return None;
+    }
+    let (count, mut cursor) = decode_canonical_varint(candidate, after_tag + 1)?;
+    let count = usize::try_from(count).ok()?;
+    if count < 2 {
+        return None;
+    }
+    let mut operands = Vec::new();
+    operands.try_reserve_exact(count).ok()?;
+    for _ in 0..count {
+        let (length, after_length) = decode_canonical_varint(candidate, cursor)?;
+        let length = usize::try_from(length).ok()?;
+        let end = after_length.checked_add(length)?;
+        let operand = candidate.get(after_length..end)?;
+        if operand.is_empty() {
+            return None;
+        }
+        operands.push(operand);
+        cursor = end;
+    }
+    (cursor == candidate.len()).then_some((tag, operands))
 }
 
 fn decode_canonical_varint(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
@@ -2277,6 +2485,12 @@ fn freeze_facts<E>(
     Ok((positive, negative))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RepresentableExpressivityEvidence {
+    source: ProgramSemanticEvidence,
+    unknown_datatypes: bool,
+}
+
 fn derive_representable_expressivity(
     predicates: &[DecodedPredicate],
     clauses: &[DecodedClause],
@@ -2284,8 +2498,12 @@ fn derive_representable_expressivity(
     negative_facts: &[DecodedGroundAtom],
     provenance: &[DecodedProvenanceEntry],
     roles: &crate::input_wire::DecodedRoleModel,
-    source: ProgramSemanticEvidence,
+    evidence: RepresentableExpressivityEvidence,
 ) -> EncodedResult<DecodedExpressivity> {
+    let RepresentableExpressivityEvidence {
+        source,
+        unknown_datatypes,
+    } = evidence;
     let nominals = predicates.iter().any(|predicate| {
         matches!(
             predicate.kind,
@@ -2365,7 +2583,7 @@ fn derive_representable_expressivity(
         inverse_roles: source.inverse_roles,
         nominals: source.nominals || nominals,
         datatypes,
-        unknown_datatypes: false,
+        unknown_datatypes,
         complex_roles: !roles.complex_inclusions.is_empty() || !roles.automata.is_empty(),
         number_restrictions: source.number_restrictions || number_restrictions,
         keys: source.keys || keys,
@@ -3014,8 +3232,11 @@ mod tests {
 
     #[test]
     fn named_datatype_payload_is_canonical_json() {
-        let payload =
-            named_datatype_semantic_payload("http://www.w3.org/2001/XMLSchema#int").unwrap();
+        let payload = serde_json::to_string(&named_datatype_semantic_value(
+            "http://www.w3.org/2001/XMLSchema#int",
+            false,
+        ))
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(serde_json::to_string(&value).unwrap(), payload);
     }
@@ -3035,6 +3256,16 @@ mod tests {
             data_range_complement_operand_key(&[23, 1, 0x83, 0, 4, 5, 6]),
             None
         );
+    }
+
+    #[test]
+    fn boolean_data_range_key_exposes_exact_operands() {
+        let key = [21_u8, 6, 2, 1, 4, 1, 5];
+        let (tag, operands) = data_range_boolean_operand_keys(&key).unwrap();
+        assert_eq!(tag, DATA_INTERSECTION_OF_TAG);
+        assert_eq!(operands, vec![&[4][..], &[5][..]]);
+        assert!(data_range_boolean_operand_keys(&[22, 6, 1, 1, 4]).is_none());
+        assert!(data_range_boolean_operand_keys(&[22, 6, 2, 1, 4, 1, 5, 0]).is_none());
     }
 
     #[test]
