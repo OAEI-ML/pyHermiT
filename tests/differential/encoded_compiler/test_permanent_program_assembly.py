@@ -870,7 +870,7 @@ def test_default_data_property_schema_has_complete_program_parity() -> None:
         scalar.close()
 
 
-def test_source_datatype_semantics_are_not_silently_optimized_away() -> None:
+def test_plain_literal_source_semantics_have_exact_program_parity() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:p))",
@@ -880,8 +880,7 @@ def test_source_datatype_semantics_are_not_silently_optimized_away() -> None:
         options=OPTIONS,
     )
 
-    with pytest.raises(BackendMismatchError, match="datatype semantic phase"):
-        _manifest(snapshot)
+    _manifest(snapshot)
 
 
 def test_xsd_string_literal_semantics_have_exact_program_and_session_parity() -> None:
@@ -1141,6 +1140,85 @@ def test_ieee_literal_semantics_preserve_identity_ordering_and_runtime_parity() 
         "+0",
         "+1",
     ]
+
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.realize() == scalar.realize()
+    finally:
+        encoded.close()
+        scalar.close()
+
+
+def test_remaining_nonnumeric_literal_families_have_program_and_runtime_parity() -> None:
+    assertions = (
+        'DataPropertyAssertion(:p :i "  alpha   beta  "^^'
+        "<http://www.w3.org/2001/XMLSchema#token>)",
+        'DataPropertyAssertion(:p :i "alpha beta"^^'
+        "<http://www.w3.org/2001/XMLSchema#string>)",
+        'DataPropertyAssertion(:p :i "alpha beta"^^'
+        "<http://www.w3.org/2001/XMLSchema#normalizedString>)",
+        'DataPropertyAssertion(:p :i "en-US"^^'
+        "<http://www.w3.org/2001/XMLSchema#language>)",
+        'DataPropertyAssertion(:p :i "a:b"^^'
+        "<http://www.w3.org/2001/XMLSchema#Name>)",
+        'DataPropertyAssertion(:p :i "alpha"^^'
+        "<http://www.w3.org/2001/XMLSchema#NCName>)",
+        'DataPropertyAssertion(:p :i "a:b"^^'
+        "<http://www.w3.org/2001/XMLSchema#NMTOKEN>)",
+        'DataPropertyAssertion(:p :i "colour"@en-GB)',
+        'DataPropertyAssertion(:p :i "0aFF"^^'
+        "<http://www.w3.org/2001/XMLSchema#hexBinary>)",
+        'DataPropertyAssertion(:p :i " C v 8 = "^^'
+        "<http://www.w3.org/2001/XMLSchema#base64Binary>)",
+        'DataPropertyAssertion(:p :i "../café?q=one two"^^'
+        "<http://www.w3.org/2001/XMLSchema#anyURI>)",
+        'DataPropertyAssertion(:p :i "<a y=\\"2\\" x=\\"1\\"/>"^^'
+        "<http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral>)",
+        'DataPropertyAssertion(:p :i "2000-01-01T01:00:00+01:00"^^'
+        "<http://www.w3.org/2001/XMLSchema#dateTime>)",
+        'DataPropertyAssertion(:p :i "2000-01-01T01:00:00+01:00"^^'
+        "<http://www.w3.org/2001/XMLSchema#dateTimeStamp>)",
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            *assertions,
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    manifest = _manifest(snapshot, reference=compiled)
+    datatype_model = cast(dict[str, object], manifest["program"])["datatype_model"]
+    identities = cast(
+        list[dict[str, object]],
+        cast(dict[str, object], datatype_model)["literal_identities"],
+    )
+    assert len(identities) == len(assertions)
+    payloads = [
+        cast(
+            dict[str, object],
+            json.loads(cast(str, identity["semantic_payload_json"])),
+        )
+        for identity in identities
+    ]
+    assert {
+        cast(list[object], payload["data_identity"])[0] for payload in payloads
+    }.issuperset(
+        {
+            "plain-string-v1",
+            "binary-identity-v1",
+            "any-uri-v1",
+            "xml-literal-c14n-v1",
+            "date-time-identity-v1",
+        }
+    )
 
     encoded = _direct_lifecycle_session(snapshot)
     scalar = native.create_session(
@@ -1442,8 +1520,10 @@ def test_direct_publication_fails_closed_for_unrepresented_semantics() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:p))",
-            "Declaration(NamedIndividual(:i))",
-            'DataPropertyAssertion(:p :i "value")',
+            "DataPropertyRange(:p DatatypeRestriction("
+            "<http://www.w3.org/2001/XMLSchema#int> "
+            "<http://www.w3.org/2001/XMLSchema#minInclusive> "
+            '"0"^^<http://www.w3.org/2001/XMLSchema#int>))',
         ),
         options=OPTIONS,
     )

@@ -49,6 +49,8 @@ const XSD_FLOAT_IRI: &str = "http://www.w3.org/2001/XMLSchema#float";
 const XSD_DOUBLE_IRI: &str = "http://www.w3.org/2001/XMLSchema#double";
 const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema#";
 const OWL_RATIONAL_IRI: &str = "http://www.w3.org/2002/07/owl#rational";
+const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
+const RDF_XML_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral";
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,6 +75,143 @@ struct LiteralSemanticPayload<'a> {
     record: &'static str,
     schema_version: u16,
 }
+
+#[derive(Clone, Copy)]
+enum LiteralLanguageRule {
+    Forbidden,
+    Identity,
+}
+
+#[derive(Clone, Copy)]
+struct LiteralIdentityRule {
+    datatype_iri: &'static str,
+    identity_tag: &'static str,
+    arity: usize,
+    discriminator: Option<(usize, &'static str)>,
+    language: LiteralLanguageRule,
+}
+
+const LITERAL_IDENTITY_RULES: &[LiteralIdentityRule] = &[
+    LiteralIdentityRule {
+        datatype_iri: XSD_STRING_IRI,
+        identity_tag: "plain-string-v1",
+        arity: 3,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#normalizedString",
+        identity_tag: "plain-string-v1",
+        arity: 3,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#token",
+        identity_tag: "plain-string-v1",
+        arity: 3,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#language",
+        identity_tag: "plain-string-v1",
+        arity: 3,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#Name",
+        identity_tag: "plain-string-v1",
+        arity: 3,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#NCName",
+        identity_tag: "plain-string-v1",
+        arity: 3,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#NMTOKEN",
+        identity_tag: "plain-string-v1",
+        arity: 3,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: RDF_PLAIN_LITERAL_IRI,
+        identity_tag: "plain-string-v1",
+        arity: 3,
+        discriminator: None,
+        language: LiteralLanguageRule::Identity,
+    },
+    LiteralIdentityRule {
+        datatype_iri: XSD_BOOLEAN_IRI,
+        identity_tag: "boolean",
+        arity: 2,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: XSD_FLOAT_IRI,
+        identity_tag: "ieee-identity-v1",
+        arity: 3,
+        discriminator: Some((1, "float32")),
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: XSD_DOUBLE_IRI,
+        identity_tag: "ieee-identity-v1",
+        arity: 3,
+        discriminator: Some((1, "float64")),
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#hexBinary",
+        identity_tag: "binary-identity-v1",
+        arity: 3,
+        discriminator: Some((1, "hexBinary")),
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#base64Binary",
+        identity_tag: "binary-identity-v1",
+        arity: 3,
+        discriminator: Some((1, "base64Binary")),
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#anyURI",
+        identity_tag: "any-uri-v1",
+        arity: 2,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: RDF_XML_LITERAL_IRI,
+        identity_tag: "xml-literal-c14n-v1",
+        arity: 2,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#dateTime",
+        identity_tag: "date-time-identity-v1",
+        arity: 5,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+    LiteralIdentityRule {
+        datatype_iri: "http://www.w3.org/2001/XMLSchema#dateTimeStamp",
+        identity_tag: "date-time-identity-v1",
+        arity: 5,
+        discriminator: None,
+        language: LiteralLanguageRule::Forbidden,
+    },
+];
 
 /// Complete set of already-owned phases produced by the coarse structural call.
 pub(crate) struct EncodedSliceProgram {
@@ -850,62 +989,76 @@ fn literal_semantic_values(
         return None;
     }
     let fields = data_identity.as_array()?;
-    let tag = fields.first()?.as_str()?;
-    let comparison_tag = match tag {
-        "plain-string-v1"
-            if source.datatype_iri == XSD_STRING_IRI
-                && source.language.is_none()
-                && fields.len() == 3
-                && fields.get(1)?.as_str() == Some(source.lexical_form.as_str())
-                && fields.get(2)?.is_null() =>
-        {
-            "plain-string-comparison-v1"
+    if !literal_identity_matches_source(source, fields) {
+        return None;
+    }
+    let comparison = crate::datatypes::comparison_fields_for_identity(
+        fields,
+        crate::datatypes::DatatypeLimits::default(),
+        &crate::datatypes::NeverCancel,
+    )
+    .ok()?;
+    Some((data_identity, serde_json::Value::Array(comparison)))
+}
+
+fn literal_identity_matches_source(
+    source: &SourceLiteralSemanticSeed,
+    fields: &[serde_json::Value],
+) -> bool {
+    let Some(tag) = fields.first().and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if numeric_literal_datatype_is_supported(&source.datatype_iri) {
+        return source.language.is_none() && tag == "numeric-rational-hex-v1" && fields.len() == 3;
+    }
+    let Some(rule) = LITERAL_IDENTITY_RULES
+        .iter()
+        .find(|rule| rule.datatype_iri == source.datatype_iri)
+    else {
+        return false;
+    };
+    if tag != rule.identity_tag || fields.len() != rule.arity {
+        return false;
+    }
+    if let Some((index, expected)) = rule.discriminator {
+        if fields.get(index).and_then(serde_json::Value::as_str) != Some(expected) {
+            return false;
         }
-        "boolean"
-            if source.datatype_iri == XSD_BOOLEAN_IRI
-                && source.language.is_none()
-                && fields.len() == 2
-                && fields.get(1)?.as_bool().is_some()
-                && if fields.get(1)?.as_bool()? {
+    }
+    let language_matches = match rule.language {
+        LiteralLanguageRule::Forbidden => {
+            source.language.is_none()
+                && (tag != "plain-string-v1"
+                    || fields.get(2).is_some_and(serde_json::Value::is_null))
+        }
+        LiteralLanguageRule::Identity => match &source.language {
+            Some(language) => {
+                fields.get(2).and_then(serde_json::Value::as_str) == Some(language.as_str())
+            }
+            None => fields.get(2).is_some_and(serde_json::Value::is_null),
+        },
+    };
+    if !language_matches {
+        return false;
+    }
+    if source.datatype_iri == XSD_STRING_IRI
+        && fields.get(1).and_then(serde_json::Value::as_str) != Some(source.lexical_form.as_str())
+    {
+        return false;
+    }
+    if source.datatype_iri == XSD_BOOLEAN_IRI {
+        return fields
+            .get(1)
+            .and_then(serde_json::Value::as_bool)
+            .is_some_and(|value| {
+                if value {
                     matches!(source.lexical_form.as_str(), "true" | "1")
                 } else {
                     matches!(source.lexical_form.as_str(), "false" | "0")
-                } =>
-        {
-            "boolean-equality"
-        }
-        "numeric-rational-hex-v1"
-            if numeric_literal_datatype_is_supported(&source.datatype_iri)
-                && source.language.is_none()
-                && fields.len() == 3
-                && canonical_signed_hex(fields.get(1)?.as_str()?, true)
-                && canonical_signed_hex(fields.get(2)?.as_str()?, false) =>
-        {
-            "ordered-numeric-rational-hex-v1"
-        }
-        "ieee-identity-v1"
-            if source.language.is_none()
-                && fields.len() == 3
-                && fields.get(1)?.as_str()
-                    == Some(match source.datatype_iri.as_str() {
-                        XSD_FLOAT_IRI => "float32",
-                        XSD_DOUBLE_IRI => "float64",
-                        _ => return None,
-                    }) =>
-        {
-            let comparison = crate::datatypes::comparison_fields_for_identity(
-                fields,
-                crate::datatypes::DatatypeLimits::default(),
-                &crate::datatypes::NeverCancel,
-            )
-            .ok()?;
-            return Some((data_identity, serde_json::Value::Array(comparison)));
-        }
-        _ => return None,
-    };
-    let mut comparison = data_identity.clone();
-    *comparison.as_array_mut()?.first_mut()? = serde_json::Value::String(comparison_tag.to_owned());
-    Some((data_identity, comparison))
+                }
+            });
+    }
+    true
 }
 
 fn numeric_literal_datatype_is_supported(iri: &str) -> bool {
@@ -931,27 +1084,6 @@ fn numeric_literal_datatype_is_supported(iri: &str) -> bool {
                 | "unsignedByte"
         )
     })
-}
-
-fn canonical_signed_hex(value: &str, negative_allowed: bool) -> bool {
-    let bytes = value.as_bytes();
-    let Some(sign @ (b'+' | b'-')) = bytes.first().copied() else {
-        return false;
-    };
-    if sign == b'-' && !negative_allowed {
-        return false;
-    }
-    let digits = &bytes[1..];
-    if digits.is_empty()
-        || !digits
-            .iter()
-            .all(|value| value.is_ascii_digit() || matches!(value, b'a'..=b'f'))
-        || (digits.len() > 1 && digits.first() == Some(&b'0'))
-        || (sign == b'-' && digits == b"0")
-    {
-        return false;
-    }
-    negative_allowed || digits.iter().any(|value| *value != b'0')
 }
 
 fn data_range_complement_operand_key(candidate: &[u8]) -> Option<&[u8]> {
