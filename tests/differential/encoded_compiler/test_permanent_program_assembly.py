@@ -371,9 +371,26 @@ def _object_service_results(reasoner: Reasoner) -> dict[str, object]:
             family: (
                 reasoner.is_satisfiable(expression),
                 reasoner.is_subclass(expression, b),
+                reasoner.is_subclass(b, expression),
                 reasoner.entails(owl.ClassAssertion(expression, i)),
+                reasoner.entails(owl.SubClassOf(expression, b)),
+                reasoner.entails(owl.SubClassOf(b, expression)),
+                reasoner.entails(
+                    owl.EquivalentClasses(owl.CanonicalSet((expression, b)))
+                ),
+                reasoner.entails(
+                    owl.DisjointClasses(owl.CanonicalSet((expression, b)))
+                ),
                 reasoner.has_type(i, expression),
+                reasoner.has_type(i, expression, direct=True),
                 reasoner.instances(expression),
+                reasoner.instances(expression, direct=True),
+                reasoner.equivalent_classes(expression),
+                reasoner.superclasses(expression),
+                reasoner.superclasses(expression, direct=True),
+                reasoner.subclasses(expression),
+                reasoner.subclasses(expression, direct=True),
+                reasoner.disjoint_classes(expression),
             )
             for family, expression in expressions.items()
         },
