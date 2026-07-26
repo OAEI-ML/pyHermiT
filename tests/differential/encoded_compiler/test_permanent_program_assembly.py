@@ -1116,6 +1116,78 @@ def test_boolean_composite_named_datatype_ranges_have_program_and_runtime_parity
         scalar.close()
 
 
+def test_enumerated_data_ranges_have_program_and_runtime_parity() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "SubClassOf(:A DataSomeValuesFrom(:d DataOneOf("
+            '"1"^^<http://www.w3.org/2001/XMLSchema#integer> '
+            '"+1"^^<http://www.w3.org/2001/XMLSchema#integer> '
+            '"alpha" '
+            '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>)))',
+            "SubClassOf(DataAllValuesFrom(:d DataComplementOf(DataOneOf("
+            '"beta" '
+            '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>))) :B)',
+            "SubClassOf(:A DataMinCardinality(2 :e DataOneOf("
+            '"-0"^^<http://www.w3.org/2001/XMLSchema#float> '
+            '"+0"^^<http://www.w3.org/2001/XMLSchema#float>)))',
+            "DataPropertyRange(:e DataUnionOf(DataOneOf("
+            '"2024-01-01T00:00:00Z"^^'
+            "<http://www.w3.org/2001/XMLSchema#dateTime> "
+            '"0A"^^<http://www.w3.org/2001/XMLSchema#hexBinary>) '
+            "<http://www.w3.org/2001/XMLSchema#string>))",
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    manifest = _manifest(snapshot, reference=compiled)
+    datatype_model = cast(
+        dict[str, object],
+        cast(dict[str, object], manifest["program"])["datatype_model"],
+    )
+    semantic_model = cast(
+        dict[str, object],
+        json.loads(cast(str, datatype_model["semantic_payload_json"])),
+    )
+    enumerations = [
+        cast(dict[str, object], value)
+        for value in cast(list[object], semantic_model["data_ranges"])
+        if cast(dict[str, object], value)["kind"] == "enumeration"
+    ]
+    lexical_forms = {
+        cast(str, literal["lexical_form"])
+        for enumeration in enumerations
+        for literal in cast(list[dict[str, object]], enumeration["values"])
+    }
+    assert {"1", "+1", "alpha", "true", "-0", "+0"} <= lexical_forms
+
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        with pytest.raises(UnsupportedDatatypeError) as encoded_classes:
+            encoded.classify_classes()
+        with pytest.raises(UnsupportedDatatypeError) as scalar_classes:
+            scalar.classify_classes()
+        assert str(encoded_classes.value) == str(scalar_classes.value)
+
+        with pytest.raises(UnsupportedDatatypeError) as encoded_data_properties:
+            encoded.classify_data_properties()
+        with pytest.raises(UnsupportedDatatypeError) as scalar_data_properties:
+            scalar.classify_data_properties()
+        assert str(encoded_data_properties.value) == str(scalar_data_properties.value)
+    finally:
+        encoded.close()
+        scalar.close()
+
+
 @pytest.mark.parametrize(
     "data_range",
     (

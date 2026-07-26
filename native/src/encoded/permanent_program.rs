@@ -43,6 +43,7 @@ const PERMANENT_PROGRAM_SCHEMA_VERSION: u16 = 1;
 const DATA_INTERSECTION_OF_TAG: u64 = 21;
 const DATA_UNION_OF_TAG: u64 = 22;
 const DATA_COMPLEMENT_OF_TAG: u64 = 23;
+const DATA_ONE_OF_TAG: u64 = 24;
 const CANONICAL_COLLECTION_COMPONENT: u8 = 6;
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const RDFS_LITERAL_DISPLAY: &str = "datatype:http://www.w3.org/2000/01/rdf-schema#Literal";
@@ -769,7 +770,40 @@ fn data_range_semantics_are_supported_at(
                 )
         });
     }
+    if let Some(literals) = data_range_enumeration_literal_keys(key) {
+        return literals
+            .iter()
+            .all(|literal| source_literal_semantics_are_supported(named, literal));
+    }
     false
+}
+
+fn source_literal_semantics_are_supported(named: &NamedProgramParts, key: &[u8]) -> bool {
+    let Ok(source_index) = named
+        .source_literal_domain
+        .values
+        .binary_search_by(|value| value.key.as_slice().cmp(key))
+    else {
+        return false;
+    };
+    let Some(data_identity_id) = named
+        .source_data_identity_ids
+        .get(source_index)
+        .copied()
+        .flatten()
+    else {
+        return false;
+    };
+    let Some(source) = named.source_literal_semantics.get(source_index) else {
+        return false;
+    };
+    let Some(data_value) = usize::try_from(data_identity_id)
+        .ok()
+        .and_then(|index| named.data_value_domain.values.get(index))
+    else {
+        return false;
+    };
+    literal_semantic_values(source, &data_value.key).is_some()
 }
 
 fn freeze_unknown_datatype_ids(
@@ -824,6 +858,9 @@ fn data_range_semantics_are_unknown(
     }
     if let Some(operand) = data_range_complement_operand_key(key) {
         return data_range_semantics_are_unknown(named, operand, remaining_depth.saturating_sub(1));
+    }
+    if data_range_enumeration_literal_keys(key).is_some() {
+        return false;
     }
     data_range_boolean_operand_keys(key).is_none_or(|(_, operands)| {
         operands.iter().any(|operand| {
@@ -908,7 +945,7 @@ fn freeze_literal_identities(
             .ok_or_else(|| {
                 EncodedValidationError::invariant("literal data identity is dangling")
             })?;
-        let (data_identity, comparison) =
+        let (comparison, semantic_payload) =
             literal_semantic_values(source_semantics, &data_value.key).ok_or_else(|| {
                 EncodedValidationError::invariant(
                     "representable literal data identity changed encoding",
@@ -917,17 +954,8 @@ fn freeze_literal_identities(
         let comparison_payload = serde_json::to_vec(&comparison)
             .map_err(|_| EncodedValidationError::invariant("literal comparison encoding failed"))?;
         let comparison_key = crate::model::hex(&Sha256::digest(&comparison_payload));
-        let semantic_payload_json = serde_json::to_string(&LiteralSemanticPayload {
-            comparison: &comparison,
-            compatibility: "owl2",
-            data_identity: &data_identity,
-            datatype_iri: &source_semantics.datatype_iri,
-            language: source_semantics.language.as_deref(),
-            lexical_form: &source_semantics.lexical_form,
-            record: "literal_semantic",
-            schema_version: 1,
-        })
-        .map_err(|_| EncodedValidationError::invariant("literal semantic encoding failed"))?;
+        let semantic_payload_json = serde_json::to_string(&semantic_payload)
+            .map_err(|_| EncodedValidationError::invariant("literal semantic encoding failed"))?;
         budget.claim_owned(
             comparison_key
                 .capacity()
@@ -1068,6 +1096,48 @@ fn data_range_semantic_value(
             "values": [],
         }));
     }
+    if let Some(literal_keys) = data_range_enumeration_literal_keys(key) {
+        budget.claim_work(literal_keys.len())?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(literal_keys.len()).map_err(|_| {
+            EncodedValidationError::resource("datatype enumeration value allocation failed")
+        })?;
+        for literal_key in literal_keys {
+            values.push(source_literal_semantic_value(named, literal_key)?);
+        }
+        let mut canonical = Vec::new();
+        canonical.try_reserve_exact(values.len()).map_err(|_| {
+            EncodedValidationError::resource(
+                "datatype enumeration canonicalization allocation failed",
+            )
+        })?;
+        for value in values {
+            let encoded = serde_json::to_vec(&value).map_err(|_| {
+                EncodedValidationError::invariant("datatype enumeration value JSON encoding failed")
+            })?;
+            canonical.push((encoded, value));
+        }
+        budget.claim_work(canonical.len())?;
+        canonical.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        canonical.dedup_by(|left, right| left.0 == right.0);
+        if canonical.is_empty() {
+            return Err(EncodedValidationError::invariant(
+                "validated datatype enumeration is empty",
+            ));
+        }
+        return Ok(serde_json::json!({
+            "datatype_iri": null,
+            "facets": [],
+            "kind": "enumeration",
+            "operands": [],
+            "record": "data_range_semantic",
+            "schema_version": 1,
+            "values": canonical
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>(),
+        }));
+    }
     let (tag, operand_keys) = data_range_boolean_operand_keys(key).ok_or_else(|| {
         EncodedValidationError::invariant(
             "validated datatype payload contains an unassembled data range",
@@ -1159,6 +1229,59 @@ fn named_datatype_semantic_value(iri: &str, opaque: bool) -> serde_json::Value {
     })
 }
 
+fn source_literal_semantic_value(
+    named: &NamedProgramParts,
+    key: &[u8],
+) -> EncodedResult<serde_json::Value> {
+    let source_index = named
+        .source_literal_domain
+        .values
+        .binary_search_by(|value| value.key.as_slice().cmp(key))
+        .map_err(|_| {
+            EncodedValidationError::invariant(
+                "validated datatype enumeration references a missing literal",
+            )
+        })?;
+    let data_identity_id = named
+        .source_data_identity_ids
+        .get(source_index)
+        .copied()
+        .flatten()
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "validated datatype enumeration literal lost its data identity",
+            )
+        })?;
+    let source = named
+        .source_literal_semantics
+        .get(source_index)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "validated datatype enumeration literal lost its source semantics",
+            )
+        })?;
+    let data_value = named
+        .data_value_domain
+        .values
+        .get(usize::try_from(data_identity_id).map_err(|_| {
+            EncodedValidationError::invariant(
+                "validated datatype enumeration data identity exceeds usize",
+            )
+        })?)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "validated datatype enumeration data identity is dangling",
+            )
+        })?;
+    literal_semantic_values(source, &data_value.key)
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant(
+                "validated datatype enumeration literal changed semantic encoding",
+            )
+        })
+}
+
 fn literal_semantic_values(
     source: &SourceLiteralSemanticSeed,
     key: &[u8],
@@ -1178,7 +1301,19 @@ fn literal_semantic_values(
         &crate::datatypes::NeverCancel,
     )
     .ok()?;
-    Some((data_identity, serde_json::Value::Array(comparison)))
+    let comparison = serde_json::Value::Array(comparison);
+    let payload = serde_json::to_value(LiteralSemanticPayload {
+        comparison: &comparison,
+        compatibility: "owl2",
+        data_identity: &data_identity,
+        datatype_iri: &source.datatype_iri,
+        language: source.language.as_deref(),
+        lexical_form: &source.lexical_form,
+        record: "literal_semantic",
+        schema_version: 1,
+    })
+    .ok()?;
+    Some((comparison, payload))
 }
 
 fn literal_identity_matches_source(
@@ -1280,31 +1415,43 @@ fn data_range_complement_operand_key(candidate: &[u8]) -> Option<&[u8]> {
 }
 
 fn data_range_boolean_operand_keys(candidate: &[u8]) -> Option<(u64, Vec<&[u8]>)> {
+    canonical_collection_item_keys(candidate, &[DATA_INTERSECTION_OF_TAG, DATA_UNION_OF_TAG], 2)
+}
+
+fn data_range_enumeration_literal_keys(candidate: &[u8]) -> Option<Vec<&[u8]>> {
+    canonical_collection_item_keys(candidate, &[DATA_ONE_OF_TAG], 1).map(|(_, values)| values)
+}
+
+fn canonical_collection_item_keys<'a>(
+    candidate: &'a [u8],
+    accepted_tags: &[u64],
+    minimum_count: usize,
+) -> Option<(u64, Vec<&'a [u8]>)> {
     let (tag, after_tag) = decode_canonical_varint(candidate, 0)?;
-    if !matches!(tag, DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG)
+    if !accepted_tags.contains(&tag)
         || candidate.get(after_tag) != Some(&CANONICAL_COLLECTION_COMPONENT)
     {
         return None;
     }
     let (count, mut cursor) = decode_canonical_varint(candidate, after_tag + 1)?;
     let count = usize::try_from(count).ok()?;
-    if count < 2 {
+    if count < minimum_count {
         return None;
     }
-    let mut operands = Vec::new();
-    operands.try_reserve_exact(count).ok()?;
+    let mut items = Vec::new();
+    items.try_reserve_exact(count).ok()?;
     for _ in 0..count {
         let (length, after_length) = decode_canonical_varint(candidate, cursor)?;
         let length = usize::try_from(length).ok()?;
         let end = after_length.checked_add(length)?;
-        let operand = candidate.get(after_length..end)?;
-        if operand.is_empty() {
+        let item = candidate.get(after_length..end)?;
+        if item.is_empty() {
             return None;
         }
-        operands.push(operand);
+        items.push(item);
         cursor = end;
     }
-    (cursor == candidate.len()).then_some((tag, operands))
+    (cursor == candidate.len()).then_some((tag, items))
 }
 
 fn decode_canonical_varint(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
@@ -3266,6 +3413,17 @@ mod tests {
         assert_eq!(operands, vec![&[4][..], &[5][..]]);
         assert!(data_range_boolean_operand_keys(&[22, 6, 1, 1, 4]).is_none());
         assert!(data_range_boolean_operand_keys(&[22, 6, 2, 1, 4, 1, 5, 0]).is_none());
+    }
+
+    #[test]
+    fn enumeration_data_range_key_exposes_exact_literals() {
+        let key = [24_u8, 6, 2, 1, 4, 2, 5, 6];
+        assert_eq!(
+            data_range_enumeration_literal_keys(&key),
+            Some(vec![&[4][..], &[5, 6][..]])
+        );
+        assert!(data_range_enumeration_literal_keys(&[24, 6, 0]).is_none());
+        assert!(data_range_enumeration_literal_keys(&[24, 6, 1, 1, 4, 0]).is_none());
     }
 
     #[test]
