@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import gc
 import mmap
 import os
 import struct
@@ -14,8 +15,13 @@ from pathlib import Path
 import pyowl_core
 import pytest
 from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.exceptions import SnapshotInUseError
 
 import pyhermit._native as native
+from pyhermit import ReasonerConfig
+from pyhermit.backends.native_input import encode_config, encode_encoded_session_metadata
+from pyhermit.backends.native_wire import decode_check
+from pyhermit.core import capture_compatible_view
 from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE
 from pyhermit.exceptions import BackendPoisonedError, ReasonerInterruptedError
 
@@ -118,6 +124,43 @@ def test_mmap_columns_are_borrowed_for_one_call_and_release_cleanly(tmp_path: Pa
         if not mapping.closed:
             mapping.close()
         del encoded
+
+
+def test_mmap_direct_session_owns_program_after_handoff_release(tmp_path: Path) -> None:
+    source = pyowl_core.load_snapshot(
+        b"Prefix(:=<urn:lifecycle#>) Ontology(<urn:lifecycle> "
+        b"Declaration(Class(:A)) Declaration(Class(:B)) SubClassOf(:A :B))",
+        options=_OPTIONS,
+    )
+    path = tmp_path / "direct-session.pyocore"
+    path.write_bytes(pyowl_core.encode_snapshot(source))
+    mapped = pyowl_core.open_snapshot(path, mmap=True, verify=True)
+    config = ReasonerConfig()
+    captured = capture_compatible_view(mapped)
+    encoded = produce_encoded_structural_view_v1(mapped)
+    columns = dict(encoded.buffers)
+    slices = (_slice_record(columns),)
+
+    assert all(type(value.obj) is mmap.mmap for value in columns.values())
+    with pytest.raises(SnapshotInUseError):
+        mapped.close()
+
+    session = native._create_encoded_session_v1(
+        slices=slices,
+        metadata=encode_encoded_session_metadata(captured, config),
+        config=encode_config(config),
+        cancellation=native.CancellationHandle(),
+    )
+    del slices, columns, encoded, captured
+    gc.collect()
+    mapped.close()
+
+    try:
+        assert mapped.closed
+        assert decode_check(session.check(None)).satisfiable
+        assert session.classify_classes()
+    finally:
+        session.close()
 
 
 def test_contextual_multi_slice_call_releases_every_borrow_after_return() -> None:
