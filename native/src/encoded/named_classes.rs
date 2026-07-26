@@ -111,6 +111,7 @@ const BOTTOM_OBJECT_DISPLAY: &str =
 const TOP_DATA_DISPLAY: &str = "data_property:http://www.w3.org/2002/07/owl#topDataProperty";
 const BOTTOM_DATA_DISPLAY: &str = "data_property:http://www.w3.org/2002/07/owl#bottomDataProperty";
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
+const UNSUPPORTED_DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:unsupported-data-identity:v1\0";
 const ANY_URI_IDENTITY_PREFIX: &str = "[\"any-uri-v1\",";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const RDF_PLAIN_LITERAL_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
@@ -11176,7 +11177,12 @@ fn literal_symbol_domains<B: ByteSource>(
             "source-literal symbol count",
         )?;
         let key = canonical::canonical_node_key(model, node.id(), &[], budget)?;
-        let extracted = extract_literal(model, symbols, node, budget)?;
+        let mut extracted = extract_literal(model, symbols, node, budget)?;
+        if extracted.data_identity_key.is_none()
+            && !crate::datatypes::is_supported_datatype(&extracted.semantics.datatype_iri)
+        {
+            extracted.data_identity_key = Some(unsupported_data_identity_key(&key, budget)?);
+        }
         budget.claim_owned(size_of::<RawLiteralSymbol>())?;
         candidates.try_reserve(1).map_err(|_| {
             EncodedValidationError::resource("source-literal candidate allocation failed")
@@ -12975,6 +12981,27 @@ fn data_value_display(key: &[u8], budget: &mut PhaseBudget) -> EncodedResult<Str
     display.push_str("data-value:");
     display.push_str(&digest);
     Ok(display)
+}
+
+fn unsupported_data_identity_key(
+    source_literal_key: &[u8],
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<u8>> {
+    let key_len = UNSUPPORTED_DATA_IDENTITY_PREFIX
+        .len()
+        .checked_add(source_literal_key.len())
+        .ok_or_else(|| {
+            EncodedValidationError::resource("unsupported data-identity key length overflowed")
+        })?;
+    budget.claim_owned(key_len)?;
+    budget.claim_work(source_literal_key.len())?;
+    let mut key = Vec::new();
+    key.try_reserve_exact(key_len).map_err(|_| {
+        EncodedValidationError::resource("unsupported data-identity key allocation failed")
+    })?;
+    key.extend_from_slice(UNSUPPORTED_DATA_IDENTITY_PREFIX);
+    key.extend_from_slice(source_literal_key);
+    Ok(key)
 }
 
 fn text_field<B: ByteSource>(

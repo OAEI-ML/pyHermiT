@@ -40,6 +40,7 @@ from pyhermit.backends.native_input import (
 from pyhermit.backends.native_wire import decode_check
 from pyhermit.backends.protocol import CompiledOntology
 from pyhermit.clauses.compiler import compile_captured_bundle
+from pyhermit.config import UnsupportedDatatypePolicy
 from pyhermit.datatypes import SUPPORTED_DATATYPES
 from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE, _validate_encoded_view
 from pyhermit.events import CancellationSource, CancellationToken
@@ -143,10 +144,15 @@ def _composite_records(
     )
 
 
-def _compiled(snapshot: pyowl_core.OntologyView) -> CompiledOntology:
+def _compiled(
+    snapshot: pyowl_core.OntologyView,
+    *,
+    config: ReasonerConfig | None = None,
+) -> CompiledOntology:
+    selected_config = ReasonerConfig() if config is None else config
     _normalized, _program, ontology = compile_captured_bundle(
-        capture_ontology(snapshot).captured,
-        ReasonerConfig(),
+        capture_ontology(snapshot, config=selected_config).captured,
+        selected_config,
     )
     return ontology
 
@@ -179,14 +185,16 @@ def _direct_session(
     *,
     records: tuple[tuple[object, ...], ...] | None = None,
     reference: CompiledOntology | None = None,
+    config: ReasonerConfig | None = None,
     max_owned_bytes: int | None = None,
     cancel_at_checkpoint: int | None = None,
 ) -> Any:
-    compiled = reference or _compiled(snapshot)
+    selected_config = ReasonerConfig() if config is None else config
+    compiled = reference or _compiled(snapshot, config=selected_config)
     return native._create_encoded_session_v1(
         slices=records or (_slice_record(snapshot),),
         metadata=encode_ontology_metadata(compiled),
-        config=encode_config(ReasonerConfig()),
+        config=encode_config(selected_config),
         cancellation=native.CancellationHandle(),
         max_owned_bytes=max_owned_bytes,
         cancel_at_checkpoint=cancel_at_checkpoint,
@@ -1431,6 +1439,61 @@ def test_custom_datatype_definition_graphs_have_program_and_runtime_parity() -> 
     try:
         assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
         assert encoded.classify_data_properties() == scalar.classify_data_properties()
+    finally:
+        encoded.close()
+        scalar.close()
+
+
+def test_opaque_literal_semantics_have_exact_program_and_runtime_parity() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Datatype(:opaque))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(NamedIndividual(:i))",
+            "DataPropertyRange(:d :opaque)",
+            'DataPropertyAssertion(:d :i "unparsed source"^^:opaque)',
+        ),
+        options=OPTIONS,
+    )
+    config = ReasonerConfig(
+        unsupported_datatypes=UnsupportedDatatypePolicy.IGNORE_WITH_WARNING,
+    )
+    compiled = _compiled(snapshot, config=config)
+    manifest = _manifest(snapshot, reference=compiled)
+    datatype_model = cast(
+        dict[str, object],
+        cast(dict[str, object], manifest["program"])["datatype_model"],
+    )
+    identities = cast(list[dict[str, object]], datatype_model["literal_identities"])
+    assert len(identities) == 1
+    semantic = cast(
+        dict[str, object],
+        json.loads(cast(str, identities[0]["semantic_payload_json"])),
+    )
+    assert semantic["record"] == "opaque_literal_semantic"
+    assert semantic["opaque_identity"] == [
+        "opaque-source-literal-v1",
+        "unparsed source",
+        "urn:test:permanent#opaque",
+        None,
+    ]
+    assert cast(list[int], datatype_model["unknown_datatype_ids"])
+
+    encoded = _direct_session(snapshot, reference=compiled, config=config)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(config),
+        native.CancellationHandle(),
+    )
+
+    def outcome(session: Any) -> tuple[str, object]:
+        try:
+            return ("result", _check_signature(session.check(None)))
+        except UnsupportedDatatypeError as error:
+            return ("unsupported", str(error))
+
+    try:
+        assert outcome(encoded) == outcome(scalar)
     finally:
         encoded.close()
         scalar.close()

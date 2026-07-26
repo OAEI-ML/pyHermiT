@@ -51,6 +51,8 @@ const CANONICAL_NODE_COMPONENT: u8 = 1;
 const CANONICAL_TEXT_COMPONENT: u8 = 2;
 const CANONICAL_COLLECTION_COMPONENT: u8 = 6;
 const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
+const UNSUPPORTED_DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:unsupported-data-identity:v1\0";
+const UNSUPPORTED_COMPARISON_PREFIX: &[u8] = b"pyhermit:datatype-comparison:unsupported:v1\0";
 const RDFS_LITERAL_DISPLAY: &str = "datatype:http://www.w3.org/2000/01/rdf-schema#Literal";
 const XSD_STRING_IRI: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_BOOLEAN_IRI: &str = "http://www.w3.org/2001/XMLSchema#boolean";
@@ -104,6 +106,17 @@ struct LiteralSemanticPayload<'a> {
     datatype_iri: &'a str,
     language: Option<&'a str>,
     lexical_form: &'a str,
+    record: &'static str,
+    schema_version: u16,
+}
+
+#[derive(Serialize)]
+struct OpaqueLiteralSemanticPayload<'a> {
+    compatibility: &'static str,
+    datatype_iri: &'a str,
+    language: Option<&'a str>,
+    lexical_form: &'a str,
+    opaque_identity: (&'static str, &'a str, &'a str, Option<&'a str>),
     record: &'static str,
     schema_version: u16,
 }
@@ -906,7 +919,7 @@ fn source_literal_semantics_are_supported(named: &NamedProgramParts, key: &[u8])
     else {
         return false;
     };
-    literal_semantic_values(source, &data_value.key).is_some()
+    literal_semantic_payload_value(source, key, &data_value.key).is_some()
 }
 
 fn datatype_definition_range_id(named: &NamedProgramParts, datatype_id: u32) -> Option<u32> {
@@ -1006,22 +1019,29 @@ fn supported_literal_domains_are_complete(named: &NamedProgramParts) -> bool {
     {
         return false;
     }
-    let complete = named
-        .source_literal_semantics
-        .iter()
-        .zip(named.source_data_identity_ids.iter())
-        .all(|(semantics, data_identity_id)| {
-            let Some(data_identity_id) = data_identity_id else {
-                return false;
-            };
-            let Some(data_value) = usize::try_from(*data_identity_id)
-                .ok()
-                .and_then(|index| named.data_value_domain.values.get(index))
-            else {
-                return false;
-            };
-            literal_semantic_values(semantics, &data_value.key).is_some()
-        });
+    let complete = (0..named.source_literal_domain.values.len()).all(|source_index| {
+        let Some(source) = named.source_literal_domain.values.get(source_index) else {
+            return false;
+        };
+        let Some(semantics) = named.source_literal_semantics.get(source_index) else {
+            return false;
+        };
+        let Some(data_identity_id) = named
+            .source_data_identity_ids
+            .get(source_index)
+            .copied()
+            .flatten()
+        else {
+            return false;
+        };
+        let Some(data_value) = usize::try_from(data_identity_id)
+            .ok()
+            .and_then(|index| named.data_value_domain.values.get(index))
+        else {
+            return false;
+        };
+        literal_semantic_payload_value(semantics, &source.key, &data_value.key).is_some()
+    });
     complete
         && (0..named.data_value_domain.values.len()).all(|data_index| {
             u32::try_from(data_index).ok().is_some_and(|identifier| {
@@ -1074,15 +1094,39 @@ fn freeze_literal_identities(
             .ok_or_else(|| {
                 EncodedValidationError::invariant("literal data identity is dangling")
             })?;
-        let (comparison, semantic_payload) =
-            literal_semantic_values(source_semantics, &data_value.key).ok_or_else(|| {
+        let source_literal = named
+            .source_literal_domain
+            .values
+            .get(source_index)
+            .ok_or_else(|| {
+                EncodedValidationError::invariant("source literal identifier is dangling")
+            })?;
+        let (comparison_key, semantic_payload) = if let Some((comparison, semantic_payload)) =
+            literal_semantic_values(source_semantics, &data_value.key)
+        {
+            let comparison_payload = serde_json::to_vec(&comparison).map_err(|_| {
+                EncodedValidationError::invariant("literal comparison encoding failed")
+            })?;
+            (
+                crate::model::hex(&Sha256::digest(&comparison_payload)),
+                semantic_payload,
+            )
+        } else {
+            let semantic_payload = opaque_literal_semantic_value(
+                source_semantics,
+                &source_literal.key,
+                &data_value.key,
+            )
+            .ok_or_else(|| {
                 EncodedValidationError::invariant(
                     "representable literal data identity changed encoding",
                 )
             })?;
-        let comparison_payload = serde_json::to_vec(&comparison)
-            .map_err(|_| EncodedValidationError::invariant("literal comparison encoding failed"))?;
-        let comparison_key = crate::model::hex(&Sha256::digest(&comparison_payload));
+            let mut comparison = Sha256::new();
+            comparison.update(UNSUPPORTED_COMPARISON_PREFIX);
+            comparison.update(&source_literal.key);
+            (crate::model::hex(&comparison.finalize()), semantic_payload)
+        };
         let semantic_payload_json = serde_json::to_string(&semantic_payload)
             .map_err(|_| EncodedValidationError::invariant("literal semantic encoding failed"))?;
         budget.claim_owned(
@@ -1522,13 +1566,11 @@ fn source_literal_semantic_value(
                 "validated datatype enumeration data identity is dangling",
             )
         })?;
-    literal_semantic_values(source, &data_value.key)
-        .map(|(_, payload)| payload)
-        .ok_or_else(|| {
-            EncodedValidationError::invariant(
-                "validated datatype enumeration literal changed semantic encoding",
-            )
-        })
+    literal_semantic_payload_value(source, key, &data_value.key).ok_or_else(|| {
+        EncodedValidationError::invariant(
+            "validated datatype enumeration literal changed semantic encoding",
+        )
+    })
 }
 
 fn literal_semantic_values(
@@ -1563,6 +1605,43 @@ fn literal_semantic_values(
     })
     .ok()?;
     Some((comparison, payload))
+}
+
+fn literal_semantic_payload_value(
+    source: &SourceLiteralSemanticSeed,
+    source_literal_key: &[u8],
+    data_identity_key: &[u8],
+) -> Option<serde_json::Value> {
+    literal_semantic_values(source, data_identity_key)
+        .map(|(_, payload)| payload)
+        .or_else(|| opaque_literal_semantic_value(source, source_literal_key, data_identity_key))
+}
+
+fn opaque_literal_semantic_value(
+    source: &SourceLiteralSemanticSeed,
+    source_literal_key: &[u8],
+    data_identity_key: &[u8],
+) -> Option<serde_json::Value> {
+    if crate::datatypes::is_supported_datatype(&source.datatype_iri)
+        || data_identity_key.strip_prefix(UNSUPPORTED_DATA_IDENTITY_PREFIX)? != source_literal_key
+    {
+        return None;
+    }
+    serde_json::to_value(OpaqueLiteralSemanticPayload {
+        compatibility: "owl2",
+        datatype_iri: &source.datatype_iri,
+        language: source.language.as_deref(),
+        lexical_form: &source.lexical_form,
+        opaque_identity: (
+            "opaque-source-literal-v1",
+            &source.lexical_form,
+            &source.datatype_iri,
+            source.language.as_deref(),
+        ),
+        record: "opaque_literal_semantic",
+        schema_version: 1,
+    })
+    .ok()
 }
 
 fn literal_identity_matches_source(
