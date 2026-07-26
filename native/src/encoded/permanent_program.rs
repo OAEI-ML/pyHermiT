@@ -45,6 +45,8 @@ const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const RDFS_LITERAL_DISPLAY: &str = "datatype:http://www.w3.org/2000/01/rdf-schema#Literal";
 const XSD_STRING_IRI: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_BOOLEAN_IRI: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+const XSD_FLOAT_IRI: &str = "http://www.w3.org/2001/XMLSchema#float";
+const XSD_DOUBLE_IRI: &str = "http://www.w3.org/2001/XMLSchema#double";
 const XSD_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema#";
 const OWL_RATIONAL_IRI: &str = "http://www.w3.org/2002/07/owl#rational";
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
@@ -818,6 +820,24 @@ fn literal_semantic_values(
                 && canonical_signed_hex(fields.get(2)?.as_str()?, false) =>
         {
             "ordered-numeric-rational-hex-v1"
+        }
+        "ieee-identity-v1"
+            if source.language.is_none()
+                && fields.len() == 3
+                && fields.get(1)?.as_str()
+                    == Some(match source.datatype_iri.as_str() {
+                        XSD_FLOAT_IRI => "float32",
+                        XSD_DOUBLE_IRI => "float64",
+                        _ => return None,
+                    }) =>
+        {
+            let comparison = crate::datatypes::comparison_fields_for_identity(
+                fields,
+                crate::datatypes::DatatypeLimits::default(),
+                &crate::datatypes::NeverCancel,
+            )
+            .ok()?;
+            return Some((data_identity, serde_json::Value::Array(comparison)));
         }
         _ => return None,
     };

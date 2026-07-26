@@ -1037,19 +1037,68 @@ def test_unassembled_datatype_facets_remain_fail_closed() -> None:
         _manifest(snapshot)
 
 
-def test_unassembled_ieee_literal_semantics_remain_fail_closed() -> None:
+def test_ieee_literal_semantics_preserve_identity_ordering_and_runtime_parity() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:p))",
             "Declaration(NamedIndividual(:i))",
             "DataPropertyAssertion(:p :i "
-            '"1.5"^^<http://www.w3.org/2001/XMLSchema#double>)',
+            '"-0"^^<http://www.w3.org/2001/XMLSchema#float>)',
+            "DataPropertyAssertion(:p :i "
+            '"+0"^^<http://www.w3.org/2001/XMLSchema#float>)',
+            "DataPropertyAssertion(:p :i "
+            '"NaN"^^<http://www.w3.org/2001/XMLSchema#float>)',
+            "DataPropertyAssertion(:p :i "
+            '"INF"^^<http://www.w3.org/2001/XMLSchema#float>)',
+            "DataPropertyAssertion(:p :i "
+            '"-INF"^^<http://www.w3.org/2001/XMLSchema#double>)',
+            "DataPropertyAssertion(:p :i "
+            '"1.401298464324817e-45"^^<http://www.w3.org/2001/XMLSchema#float>)',
         ),
         options=OPTIONS,
     )
+    compiled = _compiled(snapshot)
+    manifest = _manifest(snapshot, reference=compiled)
+    datatype_model = cast(dict[str, object], manifest["program"])["datatype_model"]
+    identities = cast(
+        list[dict[str, object]],
+        cast(dict[str, object], datatype_model)["literal_identities"],
+    )
+    payloads = {
+        cast(str, payload["lexical_form"]): (identity, payload)
+        for identity in identities
+        for payload in (
+            cast(
+                dict[str, object],
+                json.loads(cast(str, identity["semantic_payload_json"])),
+            ),
+        )
+    }
+    negative_zero, negative_zero_payload = payloads["-0"]
+    positive_zero, positive_zero_payload = payloads["+0"]
+    assert negative_zero["data_identity_id"] != positive_zero["data_identity_id"]
+    assert negative_zero["comparison_key"] == positive_zero["comparison_key"]
+    assert negative_zero_payload["comparison"] == positive_zero_payload["comparison"]
+    assert cast(dict[str, object], payloads["NaN"][1])["comparison"] == [
+        "ieee-comparison-v1",
+        "float32",
+        "nan",
+        "+0",
+        "+1",
+    ]
 
-    with pytest.raises(BackendMismatchError, match="datatype semantic phase"):
-        _manifest(snapshot)
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.realize() == scalar.realize()
+    finally:
+        encoded.close()
+        scalar.close()
 
 
 def test_reference_expressivity_mismatch_fails_closed_and_retry_succeeds() -> None:

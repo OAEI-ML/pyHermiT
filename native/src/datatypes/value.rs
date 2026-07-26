@@ -808,6 +808,48 @@ fn require_matching_pair(
     }
 }
 
+fn comparison_for_identity(identity: &DataIdentity) -> Result<ComparisonValue, DatatypeError> {
+    Ok(match identity {
+        DataIdentity::Numeric(value) => ComparisonValue::Numeric(value.clone()),
+        DataIdentity::Boolean(value) => ComparisonValue::Boolean(*value),
+        DataIdentity::IEEE { format, bits } => {
+            let (category, value) = ieee_comparison(*format, *bits)?;
+            ComparisonValue::IEEE {
+                format: *format,
+                category,
+                value,
+            }
+        }
+        DataIdentity::String { text, language } => ComparisonValue::String {
+            text: text.clone(),
+            language: language.clone(),
+        },
+        DataIdentity::Binary { kind, octets } => ComparisonValue::Binary {
+            kind: *kind,
+            octets: octets.clone(),
+        },
+        DataIdentity::Uri(value) => ComparisonValue::Uri(value.clone()),
+        DataIdentity::Xml(value) => ComparisonValue::Xml(value.clone()),
+        DataIdentity::DateTime {
+            local,
+            timezone_offset_minutes,
+            ..
+        } => ComparisonValue::DateTime {
+            local: local.clone(),
+            timezone_offset_minutes: *timezone_offset_minutes,
+        },
+    })
+}
+
+pub(crate) fn comparison_fields_for_identity(
+    fields: &[Value],
+    limits: DatatypeLimits,
+    control: &impl DatatypeControl,
+) -> Result<Vec<Value>, DatatypeError> {
+    let identity = decode_identity(fields, limits, control)?;
+    Ok(tagged_comparison(&comparison_for_identity(&identity)?))
+}
+
 fn ieee_comparison(
     format: IEEEFormat,
     bits: u64,
@@ -1240,8 +1282,7 @@ pub(super) fn tagged_identity(value: &DataIdentity) -> Vec<Value> {
     }
 }
 
-#[cfg(test)]
-pub(super) fn tagged_comparison(value: &ComparisonValue) -> Vec<Value> {
+pub(crate) fn tagged_comparison(value: &ComparisonValue) -> Vec<Value> {
     match value {
         ComparisonValue::Numeric(number) => vec![
             Value::String("ordered-numeric-rational-hex-v1".to_owned()),

@@ -49,6 +49,7 @@ pub use solver::{
     DatatypeWitness, DomainConstraint, DomainKind, EqualityConstraint, FixedValueConstraint,
     InequalityConstraint, SolveResult, SolverLimits,
 };
+pub(crate) use value::comparison_fields_for_identity;
 pub use value::{
     decode_literal_semantic, BinaryKind, ComparisonOrder, ComparisonValue, DataIdentity,
     DatatypeControl, DatatypeError, DatatypeErrorKind, DatatypeLimits, DecodedLiteral,

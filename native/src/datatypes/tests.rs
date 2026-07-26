@@ -133,6 +133,46 @@ fn ieee_signed_zero_nan_infinities_and_subnormal_values_are_bit_exact(
 }
 
 #[test]
+fn ieee_comparisons_derive_from_canonical_identity_and_reject_noncanonical_nan(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let comparison = |identity: Value| -> Result<Value, DatatypeError> {
+        comparison_fields_for_identity(
+            identity
+                .as_array()
+                .ok_or_else(|| DatatypeError::invalid("test identity is not an array"))?,
+            DatatypeLimits::default(),
+            &NeverCancel,
+        )
+        .map(Value::Array)
+    };
+    assert_eq!(
+        comparison(json!(["ieee-identity-v1", "float32", "80000000"]))?,
+        json!(["ieee-comparison-v1", "float32", "finite", "+0", "+1"])
+    );
+    assert_eq!(
+        comparison(json!(["ieee-identity-v1", "float32", "7fc00000"]))?,
+        json!(["ieee-comparison-v1", "float32", "nan", "+0", "+1"])
+    );
+    assert_eq!(
+        comparison(json!(["ieee-identity-v1", "float64", "fff0000000000000"]))?,
+        json!([
+            "ieee-comparison-v1",
+            "float64",
+            "negative-infinity",
+            "+0",
+            "+1"
+        ])
+    );
+    assert_eq!(
+        comparison(json!(["ieee-identity-v1", "float32", "ffc00000"]))
+            .err()
+            .map(|error| error.kind),
+        Some(DatatypeErrorKind::Invalid)
+    );
+    Ok(())
+}
+
+#[test]
 fn nonnumeric_families_are_disjoint_and_source_spellings_remain_available(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cases = [
