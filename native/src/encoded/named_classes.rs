@@ -291,7 +291,15 @@ pub struct NamedClassPhase {
     normalized_equalities: Vec<NormalizedEqualityFact>,
     normalized_inequalities: Vec<NormalizedInequalityFact>,
     source_data_identity_ids: Vec<Option<u32>>,
+    source_literal_semantics: Vec<SourceLiteralSemanticSeed>,
     manifest_limit: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SourceLiteralSemanticSeed {
+    pub lexical_form: String,
+    pub datatype_iri: String,
+    pub language: Option<String>,
 }
 
 pub(crate) struct NamedProgramParts {
@@ -302,6 +310,7 @@ pub(crate) struct NamedProgramParts {
     pub source_literal_domain: DecodedSymbolDomain,
     pub data_value_domain: DecodedSymbolDomain,
     pub source_data_identity_ids: Vec<Option<u32>>,
+    pub source_literal_semantics: Vec<SourceLiteralSemanticSeed>,
     pub declared_entities: Vec<DecodedEntity>,
     pub named_individuals: Vec<u32>,
     pub predicates: Vec<DecodedPredicate>,
@@ -323,6 +332,7 @@ impl NamedClassPhase {
             source_literal_domain: self.source_literal_domain,
             data_value_domain: self.data_value_domain,
             source_data_identity_ids: self.source_data_identity_ids,
+            source_literal_semantics: self.source_literal_semantics,
             declared_entities: self.declared_entities,
             named_individuals: self.named_individuals,
             predicates: self.predicates,
@@ -2030,13 +2040,17 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         scope_maps,
         &mut budget,
     )?;
-    let (source_literal_domain, data_value_domain, source_data_identity_ids) =
-        literal_symbol_domains(
-            model,
-            symbols,
-            &normalized_reachability.literal_nodes,
-            &mut budget,
-        )?;
+    let LiteralSymbolDomains {
+        source_literal_domain,
+        data_value_domain,
+        source_data_identity_ids,
+        source_literal_semantics,
+    } = literal_symbol_domains(
+        model,
+        symbols,
+        &normalized_reachability.literal_nodes,
+        &mut budget,
+    )?;
     let mut named_individuals = Vec::new();
     budget.claim_owned(
         individual_signature
@@ -3143,6 +3157,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         normalized_equalities: equalities,
         normalized_inequalities: inequalities,
         source_data_identity_ids,
+        source_literal_semantics,
         manifest_limit: limits.max_manifest_bytes,
     })
 }
@@ -11062,12 +11077,21 @@ struct RawLiteralSymbol {
     key: Vec<u8>,
     display: String,
     data_identity_key: Option<Vec<u8>>,
+    semantics: SourceLiteralSemanticSeed,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 struct ExtractedLiteral {
     display: String,
     data_identity_key: Option<Vec<u8>>,
+    semantics: SourceLiteralSemanticSeed,
+}
+
+struct LiteralSymbolDomains {
+    source_literal_domain: DecodedSymbolDomain,
+    data_value_domain: DecodedSymbolDomain,
+    source_data_identity_ids: Vec<Option<u32>>,
+    source_literal_semantics: Vec<SourceLiteralSemanticSeed>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -11111,7 +11135,7 @@ fn literal_symbol_domains<B: ByteSource>(
     symbols: &SymbolPhase,
     normalized_literal_nodes: &[NodeId],
     budget: &mut PhaseBudget,
-) -> EncodedResult<(DecodedSymbolDomain, DecodedSymbolDomain, Vec<Option<u32>>)> {
+) -> EncodedResult<LiteralSymbolDomains> {
     let mut candidates = Vec::<RawLiteralSymbol>::new();
     for node_index in 0..model.summary().node_count {
         budget.claim_work(1)?;
@@ -11143,6 +11167,7 @@ fn literal_symbol_domains<B: ByteSource>(
             key,
             display: extracted.display,
             data_identity_key: extracted.data_identity_key,
+            semantics: extracted.semantics,
         });
     }
     budget.claim_work(sort_work(candidates.len()))?;
@@ -11156,6 +11181,7 @@ fn literal_symbol_domains<B: ByteSource>(
             if previous.key == candidate.key {
                 if previous.display != candidate.display
                     || previous.data_identity_key != candidate.data_identity_key
+                    || previous.semantics != candidate.semantics
                 {
                     return Err(EncodedValidationError::invariant(
                         "source-literal key has conflicting metadata",
@@ -11216,10 +11242,15 @@ fn literal_symbol_domains<B: ByteSource>(
 
     let mut source_values = Vec::<DecodedSymbolValue>::new();
     let mut source_data_identity_ids = Vec::<Option<u32>>::new();
+    let mut source_literal_semantics = Vec::<SourceLiteralSemanticSeed>::new();
     budget.claim_owned(
         unique
             .len()
-            .checked_mul(size_of::<DecodedSymbolValue>() + size_of::<Option<u32>>())
+            .checked_mul(
+                size_of::<DecodedSymbolValue>()
+                    + size_of::<Option<u32>>()
+                    + size_of::<SourceLiteralSemanticSeed>(),
+            )
             .ok_or_else(|| {
                 EncodedValidationError::resource("source-literal symbol output overflowed")
             })?,
@@ -11231,6 +11262,11 @@ fn literal_symbol_domains<B: ByteSource>(
         .try_reserve_exact(unique.len())
         .map_err(|_| {
             EncodedValidationError::resource("source data-identity mapping allocation failed")
+        })?;
+    source_literal_semantics
+        .try_reserve_exact(unique.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("source literal semantic seed allocation failed")
         })?;
     for candidate in unique {
         let identifier = u32::try_from(source_values.len()).map_err(|_| {
@@ -11261,18 +11297,20 @@ fn literal_symbol_domains<B: ByteSource>(
             query_local: false,
         });
         source_data_identity_ids.push(data_identity_id);
+        source_literal_semantics.push(candidate.semantics);
     }
-    Ok((
-        DecodedSymbolDomain {
+    Ok(LiteralSymbolDomains {
+        source_literal_domain: DecodedSymbolDomain {
             kind: SymbolKind::SourceLiteral,
             values: source_values,
         },
-        DecodedSymbolDomain {
+        data_value_domain: DecodedSymbolDomain {
             kind: SymbolKind::DataValue,
             values: data_values,
         },
         source_data_identity_ids,
-    ))
+        source_literal_semantics,
+    })
 }
 
 fn extract_literal<B: ByteSource>(
@@ -11349,9 +11387,20 @@ fn extract_literal<B: ByteSource>(
     }
     let data_identity_key =
         literal_data_identity_key(&lexical, datatype_iri, language.as_deref(), budget)?;
+    budget.claim_owned(datatype_iri.len())?;
+    let mut owned_datatype_iri = String::new();
+    owned_datatype_iri
+        .try_reserve_exact(datatype_iri.len())
+        .map_err(|_| EncodedValidationError::resource("literal datatype IRI allocation failed"))?;
+    owned_datatype_iri.push_str(datatype_iri);
     Ok(ExtractedLiteral {
         display,
         data_identity_key,
+        semantics: SourceLiteralSemanticSeed {
+            lexical_form: lexical,
+            datatype_iri: owned_datatype_iri,
+            language,
+        },
     })
 }
 
@@ -23671,6 +23720,12 @@ fn merge_named_class_phases_impl(
         source_literal_domain.values.len(),
         &mut budget,
     )?;
+    let source_literal_semantics = merge_source_literal_semantics(
+        phases,
+        &source_literal_maps,
+        source_literal_domain.values.len(),
+        &mut budget,
+    )?;
     let class_signature = merge_class_signatures(
         phases,
         &entity_maps,
@@ -24009,6 +24064,7 @@ fn merge_named_class_phases_impl(
         normalized_equalities: equalities,
         normalized_inequalities: inequalities,
         source_data_identity_ids,
+        source_literal_semantics,
         manifest_limit: limits.max_manifest_bytes,
     })
 }
@@ -24189,6 +24245,77 @@ fn merge_source_data_identity_ids(
             value.ok_or_else(|| {
                 EncodedValidationError::invariant(
                     "merged source data-identity mapping is incomplete",
+                )
+            })
+        })
+        .collect()
+}
+
+fn merge_source_literal_semantics(
+    phases: &[(SymbolPhase, NamedClassPhase)],
+    source_literal_maps: &[Vec<u32>],
+    source_literal_count: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Vec<SourceLiteralSemanticSeed>> {
+    if source_literal_maps.len() != phases.len() {
+        return Err(EncodedValidationError::invariant(
+            "literal semantic mappings do not align with their slices",
+        ));
+    }
+    budget.claim_owned(
+        source_literal_count
+            .checked_mul(size_of::<Option<SourceLiteralSemanticSeed>>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("merged literal semantic mapping overflowed")
+            })?,
+    )?;
+    let mut merged = vec![None::<SourceLiteralSemanticSeed>; source_literal_count];
+    for (phase_index, (_, phase)) in phases.iter().enumerate() {
+        if phase.source_literal_semantics.len() != phase.source_literal_domain.values.len() {
+            return Err(EncodedValidationError::invariant(
+                "literal semantic seeds no longer cover their source domain",
+            ));
+        }
+        for (source_index, semantics) in phase.source_literal_semantics.iter().enumerate() {
+            budget.claim_work(1)?;
+            let global_source = mapped_id(
+                &source_literal_maps[phase_index],
+                u32::try_from(source_index).map_err(|_| {
+                    EncodedValidationError::resource("source-literal ID exceeds u32")
+                })?,
+                "source literal",
+            )?;
+            let slot = merged
+                .get_mut(usize::try_from(global_source).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "merged source-literal semantics are dangling",
+                    )
+                })?;
+            if let Some(existing) = slot {
+                if existing != semantics {
+                    return Err(EncodedValidationError::invariant(
+                        "merged source literal has conflicting semantic seeds",
+                    ));
+                }
+                continue;
+            }
+            budget.claim_owned(
+                semantics
+                    .lexical_form
+                    .len()
+                    .saturating_add(semantics.datatype_iri.len())
+                    .saturating_add(semantics.language.as_ref().map_or(0, String::len)),
+            )?;
+            *slot = Some(semantics.clone());
+        }
+    }
+    merged
+        .into_iter()
+        .map(|value| {
+            value.ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "merged source literal semantic mapping is incomplete",
                 )
             })
         })

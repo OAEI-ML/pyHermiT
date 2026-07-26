@@ -912,6 +912,61 @@ def test_xsd_string_literal_semantics_have_exact_program_and_session_parity() ->
         scalar.close()
 
 
+@pytest.mark.parametrize(
+    "assertions",
+    (
+        (
+            "DataPropertyAssertion(:p :i "
+            '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>)',
+            "DataPropertyAssertion(:p :i "
+            '"1"^^<http://www.w3.org/2001/XMLSchema#boolean>)',
+        ),
+        (
+            "DataPropertyAssertion(:p :i "
+            '"+01"^^<http://www.w3.org/2001/XMLSchema#int>)',
+            "DataPropertyAssertion(:p :i "
+            '"1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>)',
+            "DataPropertyAssertion(:p :i "
+            '"1/1"^^<http://www.w3.org/2002/07/owl#rational>)',
+        ),
+    ),
+    ids=("boolean-aliases", "cross-datatype-numeric-aliases"),
+)
+def test_boolean_and_exact_numeric_literal_semantics_have_program_and_session_parity(
+    assertions: tuple[str, ...],
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            *assertions,
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    manifest = _manifest(snapshot, reference=compiled)
+    datatype_model = cast(dict[str, object], manifest["program"])["datatype_model"]
+    identities = cast(
+        list[dict[str, object]],
+        cast(dict[str, object], datatype_model)["literal_identities"],
+    )
+    assert len(identities) == len(assertions)
+    assert len({identity["data_identity_id"] for identity in identities}) == 1
+
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.realize() == scalar.realize()
+    finally:
+        encoded.close()
+        scalar.close()
+
+
 @pytest.mark.parametrize("datatype_iri", sorted(SUPPORTED_DATATYPES))
 def test_supported_named_datatype_ranges_have_exact_program_parity(
     datatype_iri: str,
@@ -974,6 +1029,21 @@ def test_unassembled_datatype_facets_remain_fail_closed() -> None:
             "<http://www.w3.org/2001/XMLSchema#int> "
             "<http://www.w3.org/2001/XMLSchema#minInclusive> "
             '"0"^^<http://www.w3.org/2001/XMLSchema#int>)))',
+        ),
+        options=OPTIONS,
+    )
+
+    with pytest.raises(BackendMismatchError, match="datatype semantic phase"):
+        _manifest(snapshot)
+
+
+def test_unassembled_ieee_literal_semantics_remain_fail_closed() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            "DataPropertyAssertion(:p :i "
+            '"1.5"^^<http://www.w3.org/2001/XMLSchema#double>)',
         ),
         options=OPTIONS,
     )
