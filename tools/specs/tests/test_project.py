@@ -11,7 +11,7 @@ class ProjectMetadataTests(unittest.TestCase):
     def test_current_project_metadata_is_valid(self) -> None:
         summary = validate_project(repository_root())
 
-        self.assertEqual(summary["dependencies"], 23)
+        self.assertEqual(summary["dependencies"], 24)
         self.assertEqual(summary["reference_areas"], 12)
         self.assertEqual(summary["licensing_pending"], 1)
         self.assertEqual(summary["planned_native_targets"], 8)

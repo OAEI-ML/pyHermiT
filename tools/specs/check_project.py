@@ -359,6 +359,15 @@ def validate_project(root: Path) -> dict[str, int]:
     normalized = require_str(pyhermit.get("distribution_normalized_name"), "normalized name")
     if normalized != "pyhermit":
         raise ProjectCheckError("tool.pyhermit distribution name must be pyhermit")
+    rust_license_inventory = _table_path(
+        pyhermit,
+        "rust_production_license_manifest",
+        root,
+    )
+    if not rust_license_inventory.is_file():
+        raise ProjectCheckError(
+            f"Rust production license inventory is missing: {rust_license_inventory}"
+        )
     cargo = load_toml(root / "Cargo.toml")
     workspace_package = require_mapping(
         require_mapping(cargo.get("workspace"), "Cargo workspace").get("package"),

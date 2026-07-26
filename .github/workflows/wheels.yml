@@ -36,6 +36,13 @@ jobs:
           arguments: --all-features --locked
           command: check
 
+      - name: Bind the production Cargo closure and SPDX inventory
+        run: >-
+          python3 -m tools.packaging_probe.create_sbom
+          --namespace "https://github.com/OAEI-ML/pyHermiT/sbom/${GITHUB_SHA}/dependency-policy"
+          --output "$RUNNER_TEMP/rust-production-sbom.spdx.json"
+          --verify-cargo-metadata
+
   source-artifacts:
     name: Reproducible sdist and universal fallback
     runs-on: ubuntu-24.04

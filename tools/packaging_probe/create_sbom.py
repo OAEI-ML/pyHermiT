@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -13,10 +15,13 @@ from tools.packaging_probe.check_artifact import _runtime_version
 from tools.specs._compat import (
     load_toml,
     repository_root,
+    require_int,
     require_list,
     require_mapping,
     require_str,
 )
+
+_CRATES_IO_INDEX = "registry+https://github.com/rust-lang/crates.io-index"
 
 
 def _spdx_id(name: str, version: str) -> str:
@@ -25,39 +30,286 @@ def _spdx_id(name: str, version: str) -> str:
     return f"SPDXRef-Package-{token}-{digest}"
 
 
-def _cargo_packages(lock: Mapping[str, object]) -> list[dict[str, object]]:
-    packages: list[dict[str, object]] = []
+def _manifest_dependency_names(
+    manifest: Mapping[str, object],
+    table_names: Sequence[str],
+) -> set[str]:
+    names: set[str] = set()
+
+    def collect(raw: object, context: str) -> None:
+        table = require_mapping(raw, context)
+        for alias, value in table.items():
+            if not isinstance(alias, str):
+                raise ValueError(f"{context} contains a non-string dependency name")
+            dependency = (
+                require_str(value.get("package"), f"{context}.{alias}.package")
+                if isinstance(value, Mapping) and "package" in value
+                else alias
+            )
+            names.add(dependency)
+
+    for table_name in table_names:
+        collect(manifest.get(table_name, {}), f"Cargo.toml {table_name}")
+    targets = require_mapping(manifest.get("target", {}), "Cargo.toml target")
+    for target_name, raw_target in targets.items():
+        target = require_mapping(raw_target, f"Cargo.toml target.{target_name}")
+        for table_name in table_names:
+            collect(
+                target.get(table_name, {}),
+                f"Cargo.toml target.{target_name}.{table_name}",
+            )
+    return names
+
+
+def _locked_packages(lock: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
+    packages: dict[str, Mapping[str, object]] = {}
     for raw in require_list(lock.get("package"), "Cargo.lock package"):
         package = require_mapping(raw, "Cargo.lock package item")
         name = require_str(package.get("name"), "Cargo package name")
-        version = require_str(package.get("version"), "Cargo package version")
-        source = package.get("source")
-        checksum = package.get("checksum")
+        if name in packages:
+            raise ValueError(
+                f"Cargo.lock contains multiple versions of {name}; "
+                "the release inventory requires an unambiguous production closure"
+            )
+        packages[name] = package
+    return packages
+
+
+def _production_lock_packages(
+    manifest: Mapping[str, object],
+    lock: Mapping[str, object],
+    root_name: str,
+) -> list[Mapping[str, object]]:
+    locked = _locked_packages(lock)
+    root = locked.get(root_name)
+    if root is None:
+        raise ValueError(f"Cargo.lock does not contain the native root package {root_name}")
+    direct = _manifest_dependency_names(manifest, ("dependencies", "build-dependencies"))
+    root_dependencies = {
+        require_str(value, "native root locked dependency").split(" ", 1)[0]
+        for value in require_list(root.get("dependencies"), "native root dependencies")
+    }
+    if not direct <= root_dependencies:
+        raise ValueError(
+            f"Cargo.lock omits production dependencies: {sorted(direct - root_dependencies)}"
+        )
+
+    selected: dict[str, Mapping[str, object]] = {}
+    pending = sorted(direct, reverse=True)
+    while pending:
+        name = pending.pop()
+        if name in selected:
+            continue
+        package = locked.get(name)
+        if package is None:
+            raise ValueError(f"Cargo.lock dependency is dangling: {name}")
+        selected[name] = package
+        dependencies = require_list(
+            package.get("dependencies", []),
+            f"Cargo.lock {name} dependencies",
+        )
+        pending.extend(
+            require_str(value, f"Cargo.lock {name} dependency").split(" ", 1)[0]
+            for value in dependencies
+        )
+    return [selected[name] for name in sorted(selected)]
+
+
+def _cargo_packages(root: Path) -> list[dict[str, object]]:
+    pyproject = load_toml(root / "pyproject.toml")
+    tool = require_mapping(pyproject.get("tool"), "pyproject tool")
+    pyhermit = require_mapping(tool.get("pyhermit"), "pyproject tool.pyhermit")
+    inventory_path = root / require_str(
+        pyhermit.get("rust_production_license_manifest"),
+        "tool.pyhermit.rust_production_license_manifest",
+    )
+    inventory = load_toml(inventory_path)
+    if require_int(inventory.get("schema"), "Rust license inventory schema") != 1:
+        raise ValueError("Rust license inventory schema must be 1")
+    if require_str(inventory.get("closure"), "Rust dependency closure") != "normal-and-build":
+        raise ValueError("Rust license inventory must describe the normal-and-build closure")
+    manifest_path = root / require_str(inventory.get("manifest"), "Rust manifest path")
+    lock_path = root / require_str(inventory.get("lockfile"), "Rust lockfile path")
+    root_name = require_str(inventory.get("root"), "Rust root package")
+    production = _production_lock_packages(
+        load_toml(manifest_path),
+        load_toml(lock_path),
+        root_name,
+    )
+    audited: dict[tuple[str, str], tuple[str, str]] = {}
+    for raw in require_list(inventory.get("package"), "Rust license inventory package"):
+        audited_package = require_mapping(raw, "Rust license inventory package item")
+        name = require_str(audited_package.get("name"), "audited Rust package name")
+        version = require_str(audited_package.get("version"), "audited Rust package version")
+        checksum = require_str(audited_package.get("checksum"), "audited Rust package checksum")
+        license_expression = require_str(
+            audited_package.get("license"), "audited Rust package license"
+        )
+        key = (name, version)
+        if key in audited:
+            raise ValueError(f"duplicate audited Rust package: {name} {version}")
+        if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            raise ValueError(f"invalid audited Rust checksum: {name} {version}")
+        if license_expression == "NOASSERTION":
+            raise ValueError(f"Rust package has no declared license: {name} {version}")
+        audited[key] = (checksum, license_expression)
+
+    locked_keys = {
+        (
+            require_str(package.get("name"), "locked production package name"),
+            require_str(package.get("version"), "locked production package version"),
+        )
+        for package in production
+    }
+    if set(audited) != locked_keys:
+        raise ValueError(
+            "Rust license inventory differs from the locked production closure; "
+            f"missing={sorted(locked_keys - audited.keys())}, "
+            f"extra={sorted(audited.keys() - locked_keys)}"
+        )
+
+    packages: list[dict[str, object]] = []
+    for locked_package in production:
+        name = require_str(locked_package.get("name"), "Cargo package name")
+        version = require_str(locked_package.get("version"), "Cargo package version")
+        source = require_str(locked_package.get("source"), f"Cargo package source for {name}")
+        checksum = require_str(locked_package.get("checksum"), f"Cargo package checksum for {name}")
+        audited_checksum, license_expression = audited[(name, version)]
+        if source != _CRATES_IO_INDEX:
+            raise ValueError(f"production Rust package has an unaudited source: {name} {source}")
+        if checksum != audited_checksum:
+            raise ValueError(f"Rust package checksum differs from its audit: {name} {version}")
         record: dict[str, object] = {
             "SPDXID": _spdx_id(name, version),
             "name": name,
             "versionInfo": version,
-            "downloadLocation": source.removeprefix("registry+")
-            if isinstance(source, str)
-            else "NOASSERTION",
+            "downloadLocation": f"https://crates.io/api/v1/crates/{name}/{version}/download",
             "copyrightText": "NOASSERTION",
             "filesAnalyzed": False,
-            "licenseConcluded": "NOASSERTION",
-            "licenseDeclared": "NOASSERTION",
+            "licenseConcluded": license_expression,
+            "licenseDeclared": license_expression,
             "primaryPackagePurpose": "LIBRARY",
-        }
-        if isinstance(checksum, str) and re.fullmatch(r"[0-9a-f]{64}", checksum):
-            record["checksums"] = [{"algorithm": "SHA256", "checksumValue": checksum}]
-        if isinstance(source, str) and source.startswith("registry+"):
-            record["externalRefs"] = [
+            "checksums": [{"algorithm": "SHA256", "checksumValue": checksum}],
+            "externalRefs": [
                 {
                     "referenceCategory": "PACKAGE-MANAGER",
                     "referenceType": "purl",
                     "referenceLocator": f"pkg:cargo/{name}@{version}",
                 }
-            ]
+            ],
+        }
         packages.append(record)
     return sorted(packages, key=lambda item: (str(item["name"]), str(item["versionInfo"])))
+
+
+def verify_cargo_metadata(root: Path) -> int:
+    """Match the audited lock traversal to Cargo's independent normal/build graph."""
+
+    command = [
+        os.environ.get("CARGO", "cargo"),
+        "metadata",
+        "--manifest-path",
+        str(root / "native/Cargo.toml"),
+        "--locked",
+        "--offline",
+        "--format-version",
+        "1",
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise ValueError(
+            "Cargo metadata could not verify the Rust production closure: "
+            f"{completed.stdout.strip()}"
+        )
+    try:
+        metadata = require_mapping(json.loads(completed.stdout), "Cargo metadata")
+    except json.JSONDecodeError as error:
+        raise ValueError("Cargo metadata returned malformed JSON") from error
+    resolve = require_mapping(metadata.get("resolve"), "Cargo metadata resolve")
+    root_id = require_str(resolve.get("root"), "Cargo metadata root")
+    nodes = {
+        require_str(node.get("id"), "Cargo metadata node ID"): node
+        for node in (
+            require_mapping(raw, "Cargo metadata node")
+            for raw in require_list(resolve.get("nodes"), "Cargo metadata nodes")
+        )
+    }
+    metadata_packages = {
+        require_str(package.get("id"), "Cargo metadata package ID"): package
+        for package in (
+            require_mapping(raw, "Cargo metadata package")
+            for raw in require_list(metadata.get("packages"), "Cargo metadata packages")
+        )
+    }
+    selected: set[str] = set()
+    pending = [root_id]
+    while pending:
+        package_id = pending.pop()
+        if package_id in selected:
+            continue
+        node = nodes.get(package_id)
+        if node is None:
+            raise ValueError(f"Cargo metadata dependency node is dangling: {package_id}")
+        selected.add(package_id)
+        for raw in require_list(node.get("deps"), f"Cargo metadata {package_id} dependencies"):
+            dependency = require_mapping(raw, "Cargo metadata dependency")
+            kinds = [
+                require_mapping(value, "Cargo metadata dependency kind")
+                for value in require_list(
+                    dependency.get("dep_kinds"),
+                    "Cargo metadata dependency kinds",
+                )
+            ]
+            if any(kind.get("kind") != "dev" for kind in kinds):
+                pending.append(require_str(dependency.get("pkg"), "Cargo metadata dependency ID"))
+
+    root_package = metadata_packages.get(root_id)
+    if root_package is None:
+        raise ValueError("Cargo metadata omits its root package")
+    root_key = (
+        require_str(root_package.get("name"), "Cargo metadata root name"),
+        require_str(root_package.get("version"), "Cargo metadata root version"),
+    )
+    actual: dict[tuple[str, str], str] = {}
+    license_aliases = {"MIT/Apache-2.0": "MIT OR Apache-2.0"}
+    for package_id in selected:
+        package = metadata_packages.get(package_id)
+        if package is None:
+            raise ValueError(f"Cargo metadata package is dangling: {package_id}")
+        key = (
+            require_str(package.get("name"), "Cargo metadata package name"),
+            require_str(package.get("version"), "Cargo metadata package version"),
+        )
+        if key == root_key:
+            continue
+        license_expression = require_str(
+            package.get("license"),
+            f"Cargo metadata package license for {key[0]}",
+        )
+        actual[key] = license_aliases.get(license_expression, license_expression)
+
+    audited = {
+        (str(package["name"]), str(package["versionInfo"])): str(package["licenseDeclared"])
+        for package in _cargo_packages(root)
+    }
+    if actual != audited:
+        license_mismatches = sorted(
+            key for key in actual.keys() & audited.keys() if actual[key] != audited[key]
+        )
+        raise ValueError(
+            "Cargo metadata differs from the audited Rust production closure; "
+            f"missing={sorted(actual.keys() - audited.keys())}, "
+            f"extra={sorted(audited.keys() - actual.keys())}, "
+            f"licenses={license_mismatches}"
+        )
+    return len(actual)
 
 
 def create_sbom(root: Path, namespace: str) -> dict[str, object]:
@@ -99,7 +351,7 @@ def create_sbom(root: Path, namespace: str) -> dict[str, object]:
             "primaryPackagePurpose": "LIBRARY",
         },
     ]
-    cargo = _cargo_packages(load_toml(root / "native/Cargo.lock"))
+    cargo = _cargo_packages(root)
     packages.extend(cargo)
     relationships = [
         {
@@ -140,8 +392,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--verify-cargo-metadata",
+        action="store_true",
+        help="independently compare the audited closure with locked offline Cargo metadata",
+    )
     args = parser.parse_args(argv)
     try:
+        if args.verify_cargo_metadata:
+            verify_cargo_metadata(repository_root())
         document = create_sbom(repository_root(), args.namespace)
         args.output.write_text(
             json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
