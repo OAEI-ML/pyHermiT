@@ -318,7 +318,7 @@ pub struct ProfileIssue {
     pub provenance_sha256: Option<[u8; 32]>,
 }
 
-type AnonymousKey = [u8; 64];
+type AnonymousKey = Vec<u8>;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct AnonymousAssertion {
@@ -6267,50 +6267,7 @@ fn anonymous_key<B: ByteSource>(
             "validated anonymous individual lost its schema-1 shape",
         ));
     }
-    let fields = node.fields();
-    let scope = fixed_profile_bytes(
-        model,
-        fields.start,
-        "profile anonymous document scope",
-        budget,
-    )?;
-    let local_field = fields
-        .start
-        .checked_add(1)
-        .ok_or_else(|| EncodedValidationError::resource("profile field index overflowed"))?;
-    let local = fixed_profile_bytes(model, local_field, "profile anonymous local key", budget)?;
-    let scope = canonical::remap_anonymous_scope(scope, scope_maps, budget)?;
-    let mut key = [0_u8; 64];
-    key[..32].copy_from_slice(&scope);
-    key[32..].copy_from_slice(&local);
-    Ok(key)
-}
-
-fn fixed_profile_bytes<B: ByteSource>(
-    model: &ValidatedModel<B>,
-    field_index: usize,
-    name: &'static str,
-    budget: &mut PhaseBudget,
-) -> EncodedResult<[u8; 32]> {
-    let component = required_component(model.field(field_index)?, name)?;
-    let ComponentValue::Scalar(value) = model.resolve(component)? else {
-        return Err(EncodedValidationError::invariant(format!(
-            "validated encoded {name} is not scalar"
-        )));
-    };
-    if value.kind() != ComponentKind::Bytes || value.len() != 32 {
-        return Err(EncodedValidationError::invariant(format!(
-            "validated encoded {name} is not a 32-byte value"
-        )));
-    }
-    budget.claim_work(32)?;
-    let mut result = [0_u8; 32];
-    for (index, target) in result.iter_mut().enumerate() {
-        *target = value.byte(index).ok_or_else(|| {
-            EncodedValidationError::invariant(format!("validated encoded {name} disappeared"))
-        })?;
-    }
-    Ok(result)
+    canonical::canonical_node_key(model, identifier, scope_maps, budget)
 }
 
 fn append_anonymous_graph_issues<E>(
@@ -6375,10 +6332,10 @@ fn append_anonymous_graph_issues<E>(
     for (assertion_index, assertion) in assertions.iter().enumerate() {
         poll(control, "profile-anonymous-assertion")?;
         budget.claim_work(1)?;
-        match (assertion.source, assertion.target) {
+        match (&assertion.source, &assertion.target) {
             (Some(source), Some(target)) => {
-                let source_index = anonymous_index(vertices, &source, budget)?;
-                let target_index = anonymous_index(vertices, &target, budget)?;
+                let source_index = anonymous_index(vertices, source, budget)?;
+                let target_index = anonymous_index(vertices, target, budget)?;
                 let pair = if source_index <= target_index {
                     (source_index, target_index, assertion_index)
                 } else {
@@ -6405,7 +6362,7 @@ fn append_anonymous_graph_issues<E>(
                 }
             }
             (Some(value), None) | (None, Some(value)) => {
-                let index = anonymous_index(vertices, &value, budget)?;
+                let index = anonymous_index(vertices, value, budget)?;
                 named_link_counts[index] =
                     named_link_counts[index].checked_add(1).ok_or_else(|| {
                         EncodedValidationError::resource(
@@ -7253,7 +7210,7 @@ mod tests {
             .as_bytes()
             .to_vec();
         scalar_bytes.extend_from_slice(&[0x11; 32]);
-        scalar_bytes.extend_from_slice(&[0x22; 32]);
+        scalar_bytes.extend_from_slice(&[0x22; 5]);
         OwnedColumns {
             root_kinds: vec![2],
             root_ids: le32(&[4]),
@@ -7266,7 +7223,7 @@ mod tests {
             node_field_offsets: le64(&[0, 1, 3, 5, 7]),
             field_kinds: vec![2, 5, 1, 3, 3, 6, 6],
             field_values: le64(&[0, 14, 1, 30, 62, 0, 2]),
-            field_lengths: le64(&[14, 16, 0, 32, 32, 2, 0]),
+            field_lengths: le64(&[14, 16, 0, 32, 5, 2, 0]),
             item_kinds: vec![1, 1],
             item_values: le64(&[2, 3]),
             item_lengths: le64(&[0, 0]),
@@ -7498,7 +7455,7 @@ mod tests {
 
     #[test]
     fn anonymous_graph_rules_use_global_canonical_assertion_order() -> EncodedResult<()> {
-        let vertex = |value| [value; 64];
+        let vertex = |value| vec![value; 64];
         let assertion = |order: u8, provenance: u8, source: Option<u8>, target: Option<u8>| {
             AnonymousAssertion {
                 axiom_key: vec![order],

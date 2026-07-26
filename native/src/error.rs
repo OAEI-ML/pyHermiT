@@ -20,6 +20,7 @@ pub enum ErrorKind {
     Cancelled,
     Timeout,
     Resource,
+    Profile,
     UnsupportedDatatype,
     Inconsistent,
     Poisoned,
@@ -117,6 +118,7 @@ impl NativeError {
             ErrorKind::Cancelled => "ReasonerInterruptedError",
             ErrorKind::Timeout => "ReasonerTimeoutError",
             ErrorKind::Resource => "ResourceLimitError",
+            ErrorKind::Profile => "OntologyProfileError",
             ErrorKind::UnsupportedDatatype => "UnsupportedDatatypeError",
             ErrorKind::Inconsistent => "InconsistentOntologyError",
             ErrorKind::Poisoned => "BackendPoisonedError",
@@ -147,6 +149,21 @@ impl NativeError {
                         kwargs.set_item(field, integer)?;
                     }
                 }
+            }
+            ErrorKind::Profile => {
+                let issue_count = self
+                    .context
+                    .get("issue_count")
+                    .ok_or_else(|| PyValueError::new_err("native profile error lacks issue_count"))?
+                    .parse::<usize>()
+                    .map_err(|_| {
+                        PyValueError::new_err("native profile error has a noninteger issue_count")
+                    })?;
+                let context = PyDict::new(py);
+                context.set_item("issue_count", issue_count)?;
+                context.set_item("rule_ids", self.context.get("rule_ids"))?;
+                kwargs.set_item("code", self.code)?;
+                kwargs.set_item("context", context)?;
             }
             _ => {
                 kwargs.set_item("code", self.code)?;

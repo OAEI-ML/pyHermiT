@@ -41,6 +41,7 @@ from pyhermit.backends.native_wire import decode_check
 from pyhermit.backends.protocol import CompiledOntology
 from pyhermit.clauses.compiler import compile_captured_bundle
 from pyhermit.config import UnsupportedDatatypePolicy
+from pyhermit.core import capture_compatible_view
 from pyhermit.datatypes import SUPPORTED_DATATYPES
 from pyhermit.encoded_input import (
     ENCODED_BUFFER_WIDTHS,
@@ -51,6 +52,7 @@ from pyhermit.events import CancellationSource, CancellationToken
 from pyhermit.exceptions import (
     BackendMismatchError,
     DisposedReasonerError,
+    OntologyProfileError,
     ReasonerInterruptedError,
     ResourceLimitError,
     UnsupportedDatatypeError,
@@ -1781,6 +1783,41 @@ def test_no_reference_lifecycle_matches_scalar_consistency_and_classification() 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_direct_lifecycle_profile_gate_rejects_before_publication_and_allows_retry() -> None:
+    invalid = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(DataProperty(:p))",
+            "Declaration(DataProperty(:q))",
+            "SubClassOf(:A DataSomeValuesFrom(:p :q xsd:string))",
+        ),
+        options=OPTIONS,
+    )
+    config = ReasonerConfig()
+    captured = capture_compatible_view(invalid)
+
+    with pytest.raises(OntologyProfileError) as rejected:
+        native._create_encoded_session_v1(
+            slices=(_slice_record(invalid),),
+            metadata=encode_encoded_session_metadata(captured, config),
+            config=encode_config(config),
+            cancellation=native.CancellationHandle(),
+        )
+
+    assert rejected.value.code == "OWL2DL_PROFILE_VIOLATION"
+    assert rejected.value.context == {
+        "issue_count": 1,
+        "rule_ids": "OWL2_DATA_RANGE_ARITY",
+    }
+
+    retry = _direct_lifecycle_session(_direct_snapshot())
+    try:
+        assert retry.check(None)
+    finally:
+        retry.close()
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_encoded_service_context_is_compact_strict_cancel_safe_and_close_safe() -> None:
     snapshot = _direct_snapshot()
     cancellation = native.CancellationHandle()
@@ -1919,7 +1956,7 @@ def test_direct_publication_limit_and_cancellation_discard_then_retry() -> None:
             snapshot,
             records=records,
             reference=reference,
-            cancel_at_checkpoint=33,
+            cancel_at_checkpoint=73,
         )
     assert captured.value.context["phase"] == "permanent-program-clause"
 
@@ -1952,7 +1989,7 @@ def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactiona
         _direct_lifecycle_session(
             snapshot,
             records=records,
-            cancel_at_checkpoint=40,
+            cancel_at_checkpoint=80,
         )
     assert captured.value.context["phase"] == "encoded-session-digest"
 
@@ -1979,12 +2016,17 @@ def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactiona
         retry.close()
 
 
-def test_direct_publication_fails_closed_for_unrepresented_semantics() -> None:
+def test_direct_publication_rejects_profile_extensions_before_assembly() -> None:
     snapshot = _extension_snapshot()
     reference = _compiled(_direct_snapshot())
 
-    with pytest.raises(BackendMismatchError, match="unsupported extension"):
+    with pytest.raises(OntologyProfileError) as rejected:
         _direct_session(snapshot, reference=reference)
+
+    assert rejected.value.context == {
+        "issue_count": 1,
+        "rule_ids": "OWL2DL_EXTENSION_COMPONENT",
+    }
 
 
 def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(

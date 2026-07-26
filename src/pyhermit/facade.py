@@ -634,6 +634,8 @@ class Reasoner:
     def _create_encoded_lifecycle_session(
         self,
         captured: CapturedOntology,
+        *,
+        validate_profile: bool = True,
     ) -> BackendSession | None:
         create_encoded = getattr(self._factory, "_create_encoded_lifecycle_handoff", None)
         if not callable(create_encoded):
@@ -644,6 +646,7 @@ class Reasoner:
                 captured,
                 self._config,
                 self._cancellation.token,
+                validate_profile=validate_profile,
             ),
         )
 
@@ -837,7 +840,14 @@ class Reasoner:
             pyowl_core.OntologyDelta(add_axioms=owl.CanonicalSet(axioms)),
         )
         captured = capture_compatible_view(overlay)
-        session = self._create_encoded_lifecycle_session(captured)
+        # Query-reduction overlays contain private witness axioms rather than a
+        # replacement public ontology.  They are already derived from the
+        # validated source and therefore bypass the ontology-profile gate while
+        # retaining every structural/resource check in the native constructor.
+        session = self._create_encoded_lifecycle_session(
+            captured,
+            validate_profile=False,
+        )
         if session is None:
             raise BackendVersionError(
                 "encoded query compilation lost its negotiated native capability",

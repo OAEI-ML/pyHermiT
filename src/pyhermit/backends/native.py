@@ -574,6 +574,8 @@ class NativeBackendFactory:
         captured: CapturedOntology,
         config: ReasonerConfig,
         cancellation: CancellationToken,
+        *,
+        validate_profile: bool = True,
     ) -> NativeBackendSession | None:
         """Publish a direct native session before any Python program is constructed."""
 
@@ -585,6 +587,8 @@ class NativeBackendFactory:
             raise TypeError("config must be ReasonerConfig")
         if not isinstance(cancellation, CancellationToken):
             raise TypeError("cancellation must be CancellationToken")
+        if not isinstance(validate_profile, bool):
+            raise TypeError("validate_profile must be bool")
         cancellation.check()
         request = self._encoded_session_request(captured.view)
         if request is None:
@@ -611,6 +615,7 @@ class NativeBackendFactory:
                 metadata=metadata,
                 config=config_wire,
                 cancellation=handle,
+                validate_profile=validate_profile,
             ),
             ingestion_counters=ingestion_counters,
         )

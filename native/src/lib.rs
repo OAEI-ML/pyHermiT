@@ -621,6 +621,57 @@ fn encoded_profile_unsupported_datatype_policy(
     }
 }
 
+const fn encoded_profile_policy_from_config(
+    value: input_wire::UnsupportedDatatypeChoice,
+) -> encoded::profile::ProfileUnsupportedDatatypePolicy {
+    match value {
+        input_wire::UnsupportedDatatypeChoice::Error => {
+            encoded::profile::ProfileUnsupportedDatatypePolicy::Error
+        }
+        input_wire::UnsupportedDatatypeChoice::IgnoreWithWarning => {
+            encoded::profile::ProfileUnsupportedDatatypePolicy::IgnoreWithWarning
+        }
+    }
+}
+
+fn ensure_encoded_profile_conforms(
+    conforms: bool,
+    issues: &[encoded::profile::ProfileIssue],
+) -> NativeResult<()> {
+    let error_count = issues
+        .iter()
+        .filter(|issue| issue.severity == "error")
+        .count();
+    if conforms {
+        if error_count == 0 {
+            return Ok(());
+        }
+        return Err(NativeError::invariant(
+            "conforming encoded profile contains error diagnostics",
+        ));
+    }
+    if error_count == 0 {
+        return Err(NativeError::invariant(
+            "nonconforming encoded profile contains no error diagnostics",
+        ));
+    }
+    let mut rule_ids = issues
+        .iter()
+        .filter(|issue| issue.severity == "error")
+        .map(|issue| issue.rule_id)
+        .collect::<Vec<_>>();
+    rule_ids.sort_unstable();
+    rule_ids.dedup();
+    let codes = rule_ids.join(", ");
+    Err(NativeError::new(
+        ErrorKind::Profile,
+        "OWL2DL_PROFILE_VIOLATION",
+        format!("ontology is outside OWL 2 DL: {codes}"),
+    )
+    .with_context("issue_count", error_count.to_string())
+    .with_context("rule_ids", codes))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn borrowed_encoded_columns<'a, 'py>(
     root_kinds: &'a Bound<'py, PyAny>,
@@ -4621,15 +4672,18 @@ fn poll_encoded_session_checkpoint(
     metadata,
     config,
     cancellation,
+    validate_profile=true,
     max_owned_bytes=None,
     cancel_at_checkpoint=None
 ))]
+#[allow(clippy::too_many_arguments)]
 fn create_encoded_session_v1(
     py: Python<'_>,
     slices: &Bound<'_, PyAny>,
     metadata: &Bound<'_, PyBytes>,
     config: &Bound<'_, PyBytes>,
     cancellation: PyRef<'_, CancellationHandle>,
+    validate_profile: bool,
     max_owned_bytes: Option<usize>,
     cancel_at_checkpoint: Option<u64>,
 ) -> PyResult<NativeSession> {
@@ -4655,6 +4709,22 @@ fn create_encoded_session_v1(
         let cancellation_state = cancellation.state();
         let namespace = Some(metadata.logical_fingerprint.digest);
         let mut checkpoint = 0_u64;
+        if validate_profile {
+            let mut poll = |phase: &'static str| {
+                poll_encoded_session_checkpoint(
+                    &cancellation_state,
+                    &mut checkpoint,
+                    cancel_at_checkpoint,
+                    phase,
+                )
+            };
+            let profile = compile_encoded_profile_slices_controlled(
+                slices,
+                encoded_profile_policy_from_config(config.unsupported_datatypes),
+                &mut poll,
+            )?;
+            ensure_encoded_profile_conforms(profile.conforms, &profile.issues)?;
+        }
         let phases = {
             let mut poll = |phase: &'static str| {
                 poll_encoded_session_checkpoint(
@@ -5083,12 +5153,70 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
     use crate::program_bridge::LoadedRuleState;
 
     #[test]
     fn native_version_comes_from_the_python_distribution_source() {
         assert_eq!(python_package_version(), Some("0.1.0.dev0"));
+    }
+
+    #[test]
+    fn encoded_profile_gate_matches_the_scalar_error_summary() {
+        let issues = [
+            encoded::profile::ProfileIssue {
+                rule_id: "RULE_B",
+                severity: "error",
+                message: Cow::Borrowed("second"),
+                constructor: None,
+                document_keys: Vec::new(),
+                provenance_sha256: None,
+            },
+            encoded::profile::ProfileIssue {
+                rule_id: "RULE_A",
+                severity: "error",
+                message: Cow::Borrowed("first"),
+                constructor: None,
+                document_keys: Vec::new(),
+                provenance_sha256: None,
+            },
+            encoded::profile::ProfileIssue {
+                rule_id: "RULE_A",
+                severity: "error",
+                message: Cow::Borrowed("duplicate rule"),
+                constructor: None,
+                document_keys: Vec::new(),
+                provenance_sha256: None,
+            },
+            encoded::profile::ProfileIssue {
+                rule_id: "WARNING",
+                severity: "warning",
+                message: Cow::Borrowed("warning"),
+                constructor: None,
+                document_keys: Vec::new(),
+                provenance_sha256: None,
+            },
+        ];
+        let error = ensure_encoded_profile_conforms(false, &issues)
+            .err()
+            .unwrap_or_else(|| NativeError::invariant("expected profile rejection"));
+        assert_eq!(error.kind, ErrorKind::Profile);
+        assert_eq!(error.code, "OWL2DL_PROFILE_VIOLATION");
+        assert_eq!(
+            error.message,
+            "ontology is outside OWL 2 DL: RULE_A, RULE_B"
+        );
+        assert_eq!(
+            error.context.get("issue_count").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            error.context.get("rule_ids").map(String::as_str),
+            Some("RULE_A, RULE_B")
+        );
+        assert!(ensure_encoded_profile_conforms(true, &issues[3..]).is_ok());
     }
 
     fn decode_hex(value: &str) -> Vec<u8> {
