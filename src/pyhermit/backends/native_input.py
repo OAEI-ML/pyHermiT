@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Final, cast
 
-from pyhermit.backends.protocol import CompiledOntology
+from pyhermit.backends.protocol import CompiledOntology, FingerprintLike
 from pyhermit.clauses.model import (
     Atom,
     ClauseProgram,
@@ -53,6 +53,7 @@ from pyhermit.config import (
     ReasonerConfig,
     UnsupportedDatatypePolicy,
 )
+from pyhermit.core import CapturedOntology, compiler_cache_key
 
 SCHEMA_VERSION: Final = 1
 MAGIC: Final = b"PYHMINP\x00"
@@ -854,36 +855,86 @@ def _program_from_ontology(ontology: CompiledOntology) -> ClauseProgram:
 
 
 def _ontology_metadata(ontology: CompiledOntology, program: ClauseProgram) -> bytes:
-    core_package = _utf8(ontology.core_package_version, "core package version")
+    return _metadata_payload(
+        ontology_fingerprint=ontology.ontology_fingerprint,
+        structural_fingerprint=ontology.source_structural_fingerprint,
+        logical_fingerprint=ontology.source_logical_fingerprint,
+        signature_fingerprint=ontology.source_signature_fingerprint,
+        program_sha256=hashlib.sha256(program.canonical_bytes()).digest(),
+        core_package_version=ontology.core_package_version,
+        core_api_version=ontology.core_api_version,
+        core_model_schema_version=ontology.core_model_schema_version,
+        core_wire_format_version=ontology.core_wire_format_version,
+        core_adapter_protocol_version=ontology.core_adapter_protocol_version,
+    )
+
+
+def _metadata_payload(
+    *,
+    ontology_fingerprint: str,
+    structural_fingerprint: FingerprintLike,
+    logical_fingerprint: FingerprintLike,
+    signature_fingerprint: FingerprintLike,
+    program_sha256: bytes,
+    core_package_version: str,
+    core_api_version: tuple[int, int],
+    core_model_schema_version: int,
+    core_wire_format_version: tuple[int, int],
+    core_adapter_protocol_version: int,
+) -> bytes:
+    core_package = _utf8(core_package_version, "core package version")
     # Metadata owns this one short string directly to keep core provenance independent
     # from program symbol-pool layout.
     prefix = bytearray()
-    prefix.extend(_digest(ontology.ontology_fingerprint, "ontology_fingerprint"))
-    for name in (
-        "source_structural_fingerprint",
-        "source_logical_fingerprint",
-        "source_signature_fingerprint",
-    ):
-        fingerprint = getattr(ontology, name)
+    prefix.extend(_digest(ontology_fingerprint, "ontology_fingerprint"))
+    fingerprints = (
+        ("source_structural_fingerprint", structural_fingerprint),
+        ("source_logical_fingerprint", logical_fingerprint),
+        ("source_signature_fingerprint", signature_fingerprint),
+    )
+    for name, fingerprint in fingerprints:
+        if not isinstance(fingerprint, FingerprintLike):
+            raise TypeError(f"{name} must implement FingerprintLike")
         if fingerprint.algorithm != "sha256" or len(fingerprint.digest) != 32:
             raise NativeInputError(f"{name} must be a 32-byte SHA-256 fingerprint")
         prefix.extend(fingerprint.digest)
-    prefix.extend(hashlib.sha256(program.canonical_bytes()).digest())
-    for name in (
-        "source_structural_fingerprint",
-        "source_logical_fingerprint",
-        "source_signature_fingerprint",
-    ):
-        schema = getattr(ontology, name).schema
-        _u32(schema, f"{name} schema")
-        prefix.extend(struct.pack("<I", schema))
-    prefix.extend(struct.pack("<HH", *ontology.core_api_version))
-    prefix.extend(struct.pack("<I", ontology.core_model_schema_version))
-    prefix.extend(struct.pack("<HH", *ontology.core_wire_format_version))
-    prefix.extend(struct.pack("<I", ontology.core_adapter_protocol_version))
+    if type(program_sha256) is not bytes or len(program_sha256) != 32:
+        raise NativeInputError("program_sha256 must contain exactly 32 bytes")
+    prefix.extend(program_sha256)
+    for name, fingerprint in fingerprints:
+        _u32(fingerprint.schema, f"{name} schema")
+        prefix.extend(struct.pack("<I", fingerprint.schema))
+    prefix.extend(struct.pack("<HH", *core_api_version))
+    prefix.extend(struct.pack("<I", core_model_schema_version))
+    prefix.extend(struct.pack("<HH", *core_wire_format_version))
+    prefix.extend(struct.pack("<I", core_adapter_protocol_version))
     prefix.extend(struct.pack("<I", len(core_package)))
     prefix.extend(core_package)
     return bytes(prefix)
+
+
+def encode_encoded_session_metadata(
+    captured: CapturedOntology,
+    config: ReasonerConfig,
+) -> bytes:
+    """Encode compact view/config identity without constructing a Python program."""
+
+    _exact(captured, CapturedOntology, "captured ontology")
+    _exact(config, ReasonerConfig, "config")
+    return _metadata_payload(
+        ontology_fingerprint=compiler_cache_key(captured, config),
+        structural_fingerprint=cast(FingerprintLike, captured.structural_fingerprint),
+        logical_fingerprint=cast(FingerprintLike, captured.logical_fingerprint),
+        signature_fingerprint=cast(FingerprintLike, captured.signature_fingerprint),
+        # All-zero is the private direct-constructor marker requesting the
+        # canonical native assembled-program digest.
+        program_sha256=bytes(32),
+        core_package_version=captured.core_package_version,
+        core_api_version=captured.core_api_version,
+        core_model_schema_version=captured.core_model_schema_version,
+        core_wire_format_version=captured.core_wire_format_version,
+        core_adapter_protocol_version=captured.core_adapter_protocol_version,
+    )
 
 
 def _replace_pool_sections(encoder: _ProgramEncoder, sections: list[_Section]) -> list[_Section]:
@@ -997,6 +1048,7 @@ __all__ = [
     "SectionKind",
     "encode_config",
     "encode_delta",
+    "encode_encoded_session_metadata",
     "encode_ontology",
     "encode_ontology_metadata",
     "encode_query",

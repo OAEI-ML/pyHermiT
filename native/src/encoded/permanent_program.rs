@@ -113,12 +113,30 @@ pub(crate) struct EncodedPermanentProgram {
     manifest_limit: usize,
 }
 
+struct DigestWriter(Sha256);
+
+impl std::io::Write for DigestWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl EncodedPermanentProgram {
-    pub(crate) fn parity_manifest_json(&self) -> EncodedResult<Vec<u8>> {
-        let program_json = serde_json::to_vec(&self.program).map_err(|_| {
+    pub(crate) fn semantic_sha256(&self) -> EncodedResult<[u8; 32]> {
+        let mut writer = DigestWriter(Sha256::new());
+        serde_json::to_writer(&mut writer, &self.program).map_err(|_| {
             EncodedValidationError::invariant("permanent-program semantic serialization failed")
         })?;
-        let program_sha256: [u8; 32] = Sha256::digest(&program_json).into();
+        Ok(writer.0.finalize().into())
+    }
+
+    pub(crate) fn parity_manifest_json(&self) -> EncodedResult<Vec<u8>> {
+        let program_sha256 = self.semantic_sha256()?;
         let encoded = serde_json::to_vec(&PermanentProgramManifest {
             schema_version: PERMANENT_PROGRAM_SCHEMA_VERSION,
             program_sha256: crate::model::hex(&program_sha256),

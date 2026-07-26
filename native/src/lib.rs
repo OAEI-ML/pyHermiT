@@ -209,6 +209,13 @@ impl NativeSession {
     }
 
     #[getter]
+    fn permanent_program_sha256(&self, py: Python<'_>) -> PyResult<String> {
+        self.control
+            .run(|owned| Ok(hex_digest(&owned.ontology.metadata.program_sha256)))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    #[getter]
     fn closed(&self) -> bool {
         self.control.closed.load(Ordering::Acquire)
     }
@@ -4618,7 +4625,7 @@ fn create_encoded_session_v1(
             ));
         }
         let limits = DecodeLimits::default();
-        let metadata = decode_ontology_metadata(&copy_capped_bytes(
+        let mut metadata = decode_ontology_metadata(&copy_capped_bytes(
             metadata,
             MAX_ENCODED_SESSION_METADATA_BYTES,
             "encoded session metadata",
@@ -4667,6 +4674,23 @@ fn create_encoded_session_v1(
                 poll("encoded-session-publication")?;
                 assembled
             };
+            if metadata.program_sha256.iter().all(|byte| *byte == 0) {
+                poll_encoded_session_checkpoint(
+                    &cancellation_state,
+                    &mut checkpoint,
+                    cancel_at_checkpoint,
+                    "encoded-session-digest-preflight",
+                )?;
+                metadata.program_sha256 = assembled
+                    .semantic_sha256()
+                    .map_err(encoded_validation_error)?;
+                poll_encoded_session_checkpoint(
+                    &cancellation_state,
+                    &mut checkpoint,
+                    cancel_at_checkpoint,
+                    "encoded-session-digest",
+                )?;
+            }
             let ontology = DecodedOntology {
                 metadata,
                 program: assembled.program,

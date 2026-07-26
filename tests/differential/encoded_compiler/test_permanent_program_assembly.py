@@ -15,12 +15,14 @@ import pytest
 from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
 
 import pyhermit._native as native
+import pyhermit.facade as facade_module
 from pyhermit import Reasoner, ReasonerConfig
 from pyhermit.backends import native as native_backend
 from pyhermit.backends import native_input
 from pyhermit.backends.native import NativeBackendFactory
 from pyhermit.backends.native_input import (
     encode_config,
+    encode_encoded_session_metadata,
     encode_ontology,
     encode_ontology_metadata,
 )
@@ -31,6 +33,7 @@ from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE
 from pyhermit.events import CancellationSource, CancellationToken
 from pyhermit.exceptions import (
     BackendMismatchError,
+    DisposedReasonerError,
     ReasonerInterruptedError,
     ResourceLimitError,
 )
@@ -159,6 +162,27 @@ def _direct_session(
         metadata=encode_ontology_metadata(compiled),
         config=encode_config(ReasonerConfig()),
         cancellation=native.CancellationHandle(),
+        max_owned_bytes=max_owned_bytes,
+        cancel_at_checkpoint=cancel_at_checkpoint,
+    )
+
+
+def _direct_lifecycle_session(
+    snapshot: pyowl_core.OntologyView,
+    *,
+    records: tuple[tuple[object, ...], ...] | None = None,
+    config: ReasonerConfig | None = None,
+    cancellation: native.CancellationHandle | None = None,
+    max_owned_bytes: int | None = None,
+    cancel_at_checkpoint: int | None = None,
+) -> Any:
+    selected_config = ReasonerConfig() if config is None else config
+    captured = capture_ontology(snapshot, config=selected_config).captured
+    return native._create_encoded_session_v1(
+        slices=records or (_slice_record(snapshot),),
+        metadata=encode_encoded_session_metadata(captured, selected_config),
+        config=encode_config(selected_config),
+        cancellation=native.CancellationHandle() if cancellation is None else cancellation,
         max_owned_bytes=max_owned_bytes,
         cancel_at_checkpoint=cancel_at_checkpoint,
     )
@@ -521,6 +545,45 @@ def test_direct_program_publication_constructs_the_same_native_session() -> None
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_no_reference_lifecycle_matches_scalar_consistency_and_classification() -> None:
+    snapshot = _direct_snapshot()
+
+    encoded = _direct_lifecycle_session(snapshot)
+    try:
+        encoded_digest = encoded.permanent_program_sha256
+        encoded_check = _check_signature(encoded.check(None))
+        encoded_classes = encoded.classify_classes()
+        encoded_objects = encoded.classify_object_properties()
+        encoded_data = encoded.classify_data_properties()
+        encoded_realization = encoded.realize()
+
+        # Construct the scalar reference only after the direct session has already
+        # saturated and answered every coarse operation above.
+        compiled = _compiled(snapshot)
+        scalar = native.create_session(
+            encode_ontology(compiled),
+            encode_config(ReasonerConfig()),
+            native.CancellationHandle(),
+        )
+        try:
+            assert encoded.ontology_fingerprint == scalar.ontology_fingerprint
+            assert encoded_check == _check_signature(scalar.check(None))
+            assert encoded_classes == scalar.classify_classes()
+            assert encoded_objects == scalar.classify_object_properties()
+            assert encoded_data == scalar.classify_data_properties()
+            assert encoded_realization == scalar.realize()
+            assert len(encoded_digest) == 64
+            assert encoded_digest != "0" * 64
+        finally:
+            scalar.close()
+    finally:
+        encoded.close()
+
+    with pytest.raises(DisposedReasonerError):
+        encoded.check(None)
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_reversed_and_interleaved_slices_publish_identical_sessions() -> None:
     sources = (
         pyowl_core.load_snapshot(
@@ -622,6 +685,54 @@ def test_direct_publication_limit_and_cancellation_discard_then_retry() -> None:
         retry.close()
 
 
+def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactional() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "SubClassOf(:A :B)",
+        ),
+        options=OPTIONS,
+    )
+    records = (_slice_record(snapshot),)
+
+    with pytest.raises(ResourceLimitError):
+        _direct_lifecycle_session(
+            snapshot,
+            records=records,
+            max_owned_bytes=1,
+        )
+    with pytest.raises(ReasonerInterruptedError) as captured:
+        _direct_lifecycle_session(
+            snapshot,
+            records=records,
+            cancel_at_checkpoint=40,
+        )
+    assert captured.value.context["phase"] == "encoded-session-digest"
+
+    interrupted = native.CancellationHandle()
+    interrupted.interrupt("cancel before encoded lifecycle construction")
+    with pytest.raises(ReasonerInterruptedError):
+        _direct_lifecycle_session(
+            snapshot,
+            records=records,
+            cancellation=interrupted,
+        )
+
+    first = _direct_lifecycle_session(snapshot, records=records)
+    first_digest = first.permanent_program_sha256
+    first.close()
+    with pytest.raises(DisposedReasonerError):
+        first.check(None)
+
+    retry = _direct_lifecycle_session(snapshot, records=records)
+    try:
+        assert retry.permanent_program_sha256 == first_digest
+        assert _check_signature(retry.check(None))[0]
+    finally:
+        retry.close()
+
+
 def test_direct_publication_fails_closed_for_unrepresented_semantics() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -636,11 +747,12 @@ def test_direct_publication_fails_closed_for_unrepresented_semantics() -> None:
         _direct_session(snapshot)
 
 
-def test_advertised_adapter_uses_no_scalar_wire_fallback(
+def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = _direct_snapshot()
-    compiled = _compiled(snapshot)
+    config = ReasonerConfig()
+    captured = capture_ontology(snapshot, config=config).captured
     direct_calls = 0
 
     extension = ModuleType("encoded_session_test_extension")
@@ -665,7 +777,15 @@ def test_advertised_adapter_uses_no_scalar_wire_fallback(
     def forbidden_ontology_wire(_ontology: CompiledOntology) -> bytes:
         raise AssertionError("proportional ontology wire was encoded")
 
+    def forbidden_reference_metadata(_ontology: CompiledOntology) -> bytes:
+        raise AssertionError("Python reference-program metadata was encoded")
+
     monkeypatch.setattr(native_input, "encode_ontology", forbidden_ontology_wire)
+    monkeypatch.setattr(
+        native_input,
+        "encode_ontology_metadata",
+        forbidden_reference_metadata,
+    )
     buffers = produce_encoded_structural_view_v1(snapshot).buffers
     local_lease = SimpleNamespace(buffers=buffers)
     root_slice = SimpleNamespace(
@@ -682,19 +802,90 @@ def test_advertised_adapter_uses_no_scalar_wire_fallback(
         lambda *_args, **_kwargs: SimpleNamespace(lease=lease),
     )
     factory = NativeBackendFactory(extension)
-    session = factory._create_encoded_session_handoff(
-        snapshot,
-        compiled,
-        ReasonerConfig(),
+    session = factory._create_encoded_lifecycle_handoff(
+        captured,
+        config,
         CancellationToken(),
     )
     assert session is not None
     try:
         assert direct_calls == 1
-        assert session.ontology_fingerprint == compiled.ontology_fingerprint
+        assert session.ontology_fingerprint
+        assert session.permanent_program_sha256 != "0" * 64
         assert session.check(None).satisfiable
     finally:
         session.close()
+
+
+def test_facade_publishes_encoded_session_before_scalar_service_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _direct_snapshot()
+    events: list[str] = []
+
+    extension = ModuleType("encoded_lifecycle_facade_test_extension")
+    extension.__version__ = native.__version__
+    extension.ABI_VERSION = native.ABI_VERSION
+    extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
+    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    extension.CancellationHandle = native.CancellationHandle
+    extension.self_test = native.self_test
+
+    def forbidden_scalar_constructor(*_args: object) -> object:
+        raise AssertionError("scalar native session constructor was called")
+
+    def direct_constructor(**kwargs: object) -> object:
+        events.append("encoded-session")
+        return native._create_encoded_session_v1(**kwargs)
+
+    extension.create_session = forbidden_scalar_constructor
+    extension._create_encoded_session_v1 = direct_constructor
+    factory = NativeBackendFactory(extension)
+
+    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    local_lease = SimpleNamespace(buffers=buffers)
+    root_slice = SimpleNamespace(
+        lease=local_lease,
+        posting_mode=0,
+        root_ids=memoryview(b""),
+        member_tokens=(),
+        anonymous_scope_maps=(),
+    )
+    lease = SimpleNamespace(root_slices=lambda: (root_slice,))
+    monkeypatch.setattr(
+        native_backend,
+        "negotiate_encoded_input",
+        lambda *_args, **_kwargs: SimpleNamespace(lease=lease),
+    )
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+    original_compile = facade_module.compile_captured_bundle
+
+    def observed_compile(*args: object, **kwargs: object) -> object:
+        events.append("scalar-service-context")
+        return original_compile(*args, **kwargs)
+
+    def forbidden_ontology_wire(_ontology: CompiledOntology) -> bytes:
+        raise AssertionError("proportional ontology wire was encoded")
+
+    def forbidden_reference_metadata(_ontology: CompiledOntology) -> bytes:
+        raise AssertionError("Python reference-program metadata was encoded")
+
+    monkeypatch.setattr(facade_module, "compile_captured_bundle", observed_compile)
+    monkeypatch.setattr(native_input, "encode_ontology", forbidden_ontology_wire)
+    monkeypatch.setattr(
+        native_input,
+        "encode_ontology_metadata",
+        forbidden_reference_metadata,
+    )
+
+    with Reasoner(snapshot, config=ReasonerConfig()) as reasoner:
+        assert events[:2] == ["encoded-session", "scalar-service-context"]
+        assert reasoner.is_consistent()
+        hierarchy = reasoner.class_hierarchy()
+        assert hierarchy.nodes[hierarchy.top_node]
+        assert hierarchy.nodes[hierarchy.bottom_node]
+
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
 def test_facade_session_dispatch_never_replays_an_observed_encoded_failure() -> None:

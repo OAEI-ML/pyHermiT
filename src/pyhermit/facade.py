@@ -43,7 +43,11 @@ from pyhermit.clauses import (
     compile_delta_plan,
 )
 from pyhermit.config import ReasonerConfig
-from pyhermit.core import COMPILER_CACHE_SCHEMA_VERSION, capture_compatible_view
+from pyhermit.core import (
+    COMPILER_CACHE_SCHEMA_VERSION,
+    CapturedOntology,
+    capture_compatible_view,
+)
 from pyhermit.events import CancellationSource
 from pyhermit.exceptions import (
     ConcurrentMutationError,
@@ -566,17 +570,36 @@ class Reasoner:
         if callable(validate_encoded):
             validate_encoded(validated.view)
         compile_started = perf_counter()
-        bundle = compile_captured_bundle(
-            validated.captured,
-            self._config,
-            cancelled=self._cancelled,
-        )
-        session = self._create_backend_session(validated.view, bundle[2])
+        session = self._create_encoded_lifecycle_session(validated.captured)
         try:
+            bundle = compile_captured_bundle(
+                validated.captured,
+                self._config,
+                cancelled=self._cancelled,
+            )
+            if session is None:
+                session = self._create_backend_session(validated.view, bundle[2])
             return self._services(bundle, session, compile_started=compile_started)
         except BaseException:
-            session.close()
+            if session is not None:
+                session.close()
             raise
+
+    def _create_encoded_lifecycle_session(
+        self,
+        captured: CapturedOntology,
+    ) -> BackendSession | None:
+        create_encoded = getattr(self._factory, "_create_encoded_lifecycle_handoff", None)
+        if not callable(create_encoded):
+            return None
+        return cast(
+            BackendSession | None,
+            create_encoded(
+                captured,
+                self._config,
+                self._cancellation.token,
+            ),
+        )
 
     def _create_backend_session(
         self,

@@ -42,7 +42,7 @@ from pyhermit.backends.protocol import (
 )
 from pyhermit.backends.verify import VerifyBackendFactory
 from pyhermit.config import ReasonerConfig, UnsupportedDatatypePolicy
-from pyhermit.core import current_core_versions
+from pyhermit.core import CapturedOntology, compiler_cache_key, current_core_versions
 from pyhermit.encoded_input import (
     ENCODED_BUFFER_WIDTHS,
     ENCODED_NATIVE_FEATURE,
@@ -96,6 +96,9 @@ class _ExtensionSession(Protocol):
     @property
     def ontology_fingerprint(self) -> str: ...
 
+    @property
+    def permanent_program_sha256(self) -> str: ...
+
     def check(self, query: bytes | None) -> bytes: ...
 
     def check_many(self, queries: Sequence[bytes]) -> bytes: ...
@@ -118,6 +121,12 @@ class _ExtensionSession(Protocol):
 
 
 class _InputCodec(Protocol):
+    def encode_encoded_session_metadata(
+        self,
+        captured: CapturedOntology,
+        config: ReasonerConfig,
+    ) -> bytes: ...
+
     def encode_ontology(self, ontology: CompiledOntology) -> bytes: ...
 
     def encode_ontology_metadata(self, ontology: CompiledOntology) -> bytes: ...
@@ -413,21 +422,18 @@ class NativeBackendFactory:
         _require_bytes(ontology_wire, "encoded ontology")
         _require_bytes(config_wire, "encoded configuration")
         return self._construct_adapter_session(
-            ontology,
+            ontology.ontology_fingerprint,
             config,
             cancellation,
             codec,
             lambda handle: self._create_session(ontology_wire, config_wire, handle),
         )
 
-    def _create_encoded_session_handoff(
+    def _encoded_session_request(
         self,
         view: OntologyView,
-        ontology: CompiledOntology,
-        config: ReasonerConfig,
-        cancellation: CancellationToken,
-    ) -> NativeBackendSession | None:
-        """Create a session without handing the proportional private IR to Rust."""
+    ) -> tuple[Callable[..., object], tuple[tuple[object, ...], ...]] | None:
+        """Resolve one negotiated direct-session request without consuming it."""
 
         if ENCODED_NATIVE_FEATURE not in self._info.complete_features:
             return None
@@ -439,13 +445,6 @@ class NativeBackendFactory:
             )
         if not isinstance(view, OntologyView):
             raise TypeError("view must be OntologyView")
-        if not isinstance(ontology, CompiledOntology):
-            raise TypeError("ontology must be CompiledOntology")
-        if not isinstance(config, ReasonerConfig):
-            raise TypeError("config must be ReasonerConfig")
-        if not isinstance(cancellation, CancellationToken):
-            raise TypeError("cancellation must be CancellationToken")
-        cancellation.check()
         negotiation = negotiate_encoded_input(
             view,
             {ENCODED_SCHEMA_NAME: ENCODED_SCHEMA_VERSION},
@@ -460,7 +459,32 @@ class NativeBackendFactory:
                 "native encoded session constructor received no root-slice plan",
                 context={"reason": "encoded_session_slices_missing"},
             )
-        slices = _encoded_slice_records(root_slices)
+        return constructor, _encoded_slice_records(root_slices)
+
+    def _create_encoded_session_handoff(
+        self,
+        view: OntologyView,
+        ontology: CompiledOntology,
+        config: ReasonerConfig,
+        cancellation: CancellationToken,
+    ) -> NativeBackendSession | None:
+        """Create a session without handing the proportional private IR to Rust."""
+
+        if ENCODED_NATIVE_FEATURE not in self._info.complete_features:
+            return None
+        if not isinstance(view, OntologyView):
+            raise TypeError("view must be OntologyView")
+        if not isinstance(ontology, CompiledOntology):
+            raise TypeError("ontology must be CompiledOntology")
+        if not isinstance(config, ReasonerConfig):
+            raise TypeError("config must be ReasonerConfig")
+        if not isinstance(cancellation, CancellationToken):
+            raise TypeError("cancellation must be CancellationToken")
+        cancellation.check()
+        request = self._encoded_session_request(view)
+        if request is None:
+            return None
+        constructor, slices = request
         codec = _load_input_codec()
         metadata_encoder = getattr(codec, "encode_ontology_metadata", None)
         if not callable(metadata_encoder):
@@ -473,7 +497,52 @@ class NativeBackendFactory:
         _require_bytes(metadata, "encoded ontology metadata")
         _require_bytes(config_wire, "encoded configuration")
         return self._construct_adapter_session(
-            ontology,
+            ontology.ontology_fingerprint,
+            config,
+            cancellation,
+            codec,
+            lambda handle: constructor(
+                slices=slices,
+                metadata=metadata,
+                config=config_wire,
+                cancellation=handle,
+            ),
+        )
+
+    def _create_encoded_lifecycle_handoff(
+        self,
+        captured: CapturedOntology,
+        config: ReasonerConfig,
+        cancellation: CancellationToken,
+    ) -> NativeBackendSession | None:
+        """Publish a direct native session before any Python program is constructed."""
+
+        if ENCODED_NATIVE_FEATURE not in self._info.complete_features:
+            return None
+        if not isinstance(captured, CapturedOntology):
+            raise TypeError("captured must be CapturedOntology")
+        if not isinstance(config, ReasonerConfig):
+            raise TypeError("config must be ReasonerConfig")
+        if not isinstance(cancellation, CancellationToken):
+            raise TypeError("cancellation must be CancellationToken")
+        cancellation.check()
+        request = self._encoded_session_request(captured.view)
+        if request is None:
+            return None
+        constructor, slices = request
+        codec = _load_input_codec()
+        metadata_encoder = getattr(codec, "encode_encoded_session_metadata", None)
+        if not callable(metadata_encoder):
+            raise BackendVersionError(
+                "native encoded-session metadata codec surface is incomplete",
+                context={"reason": "input_codec_invalid"},
+            )
+        metadata = metadata_encoder(captured, config)
+        config_wire = codec.encode_config(config)
+        _require_bytes(metadata, "encoded ontology metadata")
+        _require_bytes(config_wire, "encoded configuration")
+        return self._construct_adapter_session(
+            compiler_cache_key(captured, config),
             config,
             cancellation,
             codec,
@@ -487,7 +556,7 @@ class NativeBackendFactory:
 
     def _construct_adapter_session(
         self,
-        ontology: CompiledOntology,
+        expected_fingerprint: str,
         config: ReasonerConfig,
         cancellation: CancellationToken,
         codec: _InputCodec,
@@ -512,7 +581,7 @@ class NativeBackendFactory:
                 codec,
                 cancellation,
                 observer_id,
-                ontology.ontology_fingerprint,
+                expected_fingerprint,
                 config.progress,
             )
             cancellation.check()
@@ -568,6 +637,28 @@ class NativeBackendSession:
             raise BackendMismatchError(
                 "native session is bound to a different compiled ontology",
                 context={"reason": "ontology_fingerprint_mismatch"},
+            )
+        return actual
+
+    @property
+    def permanent_program_sha256(self) -> str:
+        self._require_usable()
+        actual = self._native.permanent_program_sha256
+        if type(actual) is not str or len(actual) != 64:
+            self._poisoned = True
+            raise BackendMismatchError(
+                "native session returned an invalid permanent-program digest",
+                context={"reason": "program_fingerprint_invalid"},
+            )
+        try:
+            decoded = bytes.fromhex(actual)
+        except ValueError:
+            decoded = b""
+        if len(decoded) != 32 or decoded.hex() != actual:
+            self._poisoned = True
+            raise BackendMismatchError(
+                "native session returned an invalid permanent-program digest",
+                context={"reason": "program_fingerprint_invalid"},
             )
         return actual
 
