@@ -25,6 +25,12 @@ type BindingKey = (TermSort, u32);
 type Bindings = BTreeMap<BindingKey, NodeHandle>;
 type DisjunctRank = (u8, PredicateKind, u32, Vec<(u32, u32, u32)>);
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AppliedDelta {
+    pub(crate) processed_rows: u64,
+    pub(crate) rule_matches: u64,
+}
+
 const DEFAULT_MAX_RULE_CHECKPOINTS: u32 = 8;
 const DEFAULT_MAX_RULE_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
 const BTREE_ENTRY_OVERHEAD_BYTES: u64 = 256;
@@ -504,11 +510,11 @@ impl RuleEngine {
     }
 
     /// Advance one immutable delta generation and execute every matching plan.
-    pub fn apply_next_delta(
+    pub(crate) fn apply_next_delta(
         &mut self,
         kernel: &mut TableauKernel,
         cancellation: Arc<CancellationState>,
-    ) -> NativeResult<u64> {
+    ) -> NativeResult<AppliedDelta> {
         if !self.initialized {
             return Err(NativeError::wire(
                 "native hyperresolution engine must be initialized first",
@@ -522,7 +528,7 @@ impl RuleEngine {
         &mut self,
         kernel: &mut TableauKernel,
         cancellation: Arc<CancellationState>,
-    ) -> NativeResult<u64> {
+    ) -> NativeResult<AppliedDelta> {
         cancellation.poll()?;
         kernel.prepare_next_delta()?;
         let generation = kernel.read_generation();
@@ -603,7 +609,11 @@ impl RuleEngine {
             }
         }
         cancellation.poll()?;
-        u64::try_from(rows.len()).map_err(|_| NativeError::invariant("delta row count exceeds u64"))
+        Ok(AppliedDelta {
+            processed_rows: u64::try_from(rows.len())
+                .map_err(|_| NativeError::invariant("delta row count exceeds u64"))?,
+            rule_matches: match_count,
+        })
     }
 
     /// Run delta generations until no new facts remain or a clash is installed.
@@ -614,8 +624,8 @@ impl RuleEngine {
     ) -> NativeResult<u64> {
         let mut generations = 0_u64;
         while kernel.clash().is_none() {
-            let processed = self.apply_next_delta(kernel, Arc::clone(&cancellation))?;
-            if processed == 0 {
+            let delta = self.apply_next_delta(kernel, Arc::clone(&cancellation))?;
+            if delta.processed_rows == 0 {
                 return Ok(generations);
             }
             generations = generations.checked_add(1).ok_or_else(|| {
@@ -1983,7 +1993,10 @@ mod tests {
         assert!(has_fact(&kernel, 0, &[node])?);
         assert!(has_fact(&kernel, 1, &[node])?);
         assert!(has_fact(&kernel, 2, &[node])?);
-        assert_eq!(engine.apply_next_delta(&mut kernel, cancellation()?)?, 0);
+        assert_eq!(
+            engine.apply_next_delta(&mut kernel, cancellation()?)?,
+            AppliedDelta::default()
+        );
         kernel.check_invariants()
     }
 
@@ -2012,6 +2025,61 @@ mod tests {
 
         assert!(has_fact(&kernel, 0, &[node, node])?);
         assert!(has_fact(&kernel, 1, &[node])?);
+        kernel.check_invariants()
+    }
+
+    #[test]
+    fn processed_delta_count_survives_equality_retiring_its_input_row() -> NativeResult<()> {
+        let variable = Term::variable(0, TermSort::Object);
+        let equality = RulePredicate::new(
+            1,
+            PredicateKind::Equality,
+            vec![TermSort::Object, TermSort::Object],
+        )?;
+        let clause = RuleClause::new(
+            0,
+            vec![RuleAtom::new(0, vec![variable.clone()])?],
+            vec![RuleAtom::new(1, vec![variable, Term::individual(1)])?],
+            vec![0],
+            vec![0],
+        )?;
+        let program = RuleProgram::new(vec![concept(0)?, equality], vec![clause])?;
+        let mut kernel = TableauKernel::new();
+        let source = kernel.create_node(NodeKind::Root, None, false, Some(0), None, None)?;
+        let target = kernel.create_node(NodeKind::Root, None, true, Some(1), None, None)?;
+        let mut engine = RuleEngine::new(
+            program,
+            BTreeMap::from([(0, source), (1, target)]),
+            BTreeMap::new(),
+            true,
+        )?;
+        engine.initialize(&mut kernel, cancellation()?)?;
+        let seeded = engine.apply_next_delta(&mut kernel, cancellation()?)?;
+        assert!(seeded.processed_rows >= 2);
+        assert_eq!(seeded.rule_matches, 0);
+        engine.dispatch_ground_atom(
+            &mut kernel,
+            atom(0, source)?,
+            DependencySet::empty(),
+            false,
+            &[],
+        )?;
+
+        let delta = engine.apply_next_delta(&mut kernel, cancellation()?)?;
+
+        assert_eq!(
+            delta,
+            AppliedDelta {
+                processed_rows: 1,
+                rule_matches: 1,
+            }
+        );
+        let retired_generation = kernel.read_generation();
+        assert!(kernel.active_fact_ids().into_iter().all(|row_id| {
+            kernel
+                .fact(row_id)
+                .is_ok_and(|row| row.derivation_generation != retired_generation)
+        }));
         kernel.check_invariants()
     }
 

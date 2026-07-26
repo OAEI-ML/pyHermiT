@@ -316,6 +316,22 @@ def _object_service_results(reasoner: Reasoner) -> dict[str, object]:
     )
     i, j, other = (owl.NamedIndividual(owl.IRI(f"{base}{local}")) for local in ("i", "j", "other"))
     impossible = owl.ObjectIntersectionOf(owl.CanonicalSet((c, d)))
+    expressions = {
+        "named": a,
+        "intersection-negation": owl.ObjectIntersectionOf(
+            owl.CanonicalSet((a, owl.ObjectComplementOf(b)))
+        ),
+        "union": owl.ObjectUnionOf(owl.CanonicalSet((a, d))),
+        "complement": owl.ObjectComplementOf(d),
+        "one-of": owl.ObjectOneOf(owl.CanonicalSet((i, j))),
+        "some": owl.ObjectSomeValuesFrom(p, d),
+        "all": owl.ObjectAllValuesFrom(q, d),
+        "has-value": owl.ObjectHasValue(p, j),
+        "has-self": owl.ObjectHasSelf(q),
+        "minimum": owl.ObjectMinCardinality(2, p, d),
+        "maximum": owl.ObjectMaxCardinality(1, p, d),
+        "exact": owl.ObjectExactCardinality(1, p, d),
+    }
     entailed_axioms = (
         owl.SubClassOf(a, c),
         owl.SubObjectPropertyOf(p, q),
@@ -351,6 +367,16 @@ def _object_service_results(reasoner: Reasoner) -> dict[str, object]:
         "object_sub": reasoner.sub_object_properties(q),
         "object_super_direct": reasoner.super_object_properties(p, direct=True),
         "object_values": reasoner.object_property_values(i, q),
+        "object_expression_queries": {
+            family: (
+                reasoner.is_satisfiable(expression),
+                reasoner.is_subclass(expression, b),
+                reasoner.entails(owl.ClassAssertion(expression, i)),
+                reasoner.has_type(i, expression),
+                reasoner.instances(expression),
+            )
+            for family, expression in expressions.items()
+        },
         "same": reasoner.same_individuals(i),
         "satisfiable": reasoner.is_satisfiable(a),
         "unsatisfiable_expression": reasoner.is_satisfiable(impossible),

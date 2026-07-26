@@ -237,28 +237,13 @@ impl NativeTableau for ProductionTableau {
         control.poll()?;
         let cancellation = Arc::clone(&self.cancellation);
         let active = self.active_mut();
-        let matches = active
+        let delta = active
             .engine
             .apply_next_delta(&mut active.kernel, cancellation)?;
-        let generation = active.kernel.read_generation();
-        let rows =
-            active
-                .kernel
-                .active_fact_ids()
-                .into_iter()
-                .try_fold(0_u64, |count, row_id| {
-                    if active.kernel.fact(row_id)?.derivation_generation == generation {
-                        count.checked_add(1).ok_or_else(|| {
-                            NativeError::invariant("native delta-row counter overflow")
-                        })
-                    } else {
-                        Ok(count)
-                    }
-                })?;
         control.poll()?;
         Ok(DeltaPhaseResult {
-            processed_rows: rows,
-            rule_matches: matches,
+            processed_rows: delta.processed_rows,
+            rule_matches: delta.rule_matches,
             role_propagations: 0,
         })
     }
