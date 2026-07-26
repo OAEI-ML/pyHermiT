@@ -35,8 +35,8 @@ use super::{EncodedResult, EncodedValidationError};
 use crate::input_wire::{
     validate_decoded_program, validate_decoded_session_domains, DecodedAtom, DecodedClause,
     DecodedDatatypeModel, DecodedEntity, DecodedExpressivity, DecodedGroundAtom,
-    DecodedLiteralIdentity, DecodedPredicate, DecodedProgram, DecodedProvenanceEntry,
-    DecodedSymbolDomain, DecodedTerm, PredicateKind, SymbolKind, TermSort,
+    DecodedGroundDisjunction, DecodedLiteralIdentity, DecodedPredicate, DecodedProgram,
+    DecodedProvenanceEntry, DecodedSymbolDomain, DecodedTerm, PredicateKind, SymbolKind, TermSort,
 };
 
 const PERMANENT_PROGRAM_SCHEMA_VERSION: u16 = 1;
@@ -399,6 +399,17 @@ struct PendingClause {
     value: DecodedClause,
 }
 
+struct PendingGroundDisjunction {
+    atoms: Vec<DecodedAtom>,
+    provenance_ids: Vec<u32>,
+}
+
+struct FrozenClauses {
+    clauses: Vec<DecodedClause>,
+    promoted_facts: Vec<DecodedGroundAtom>,
+    ground_disjunctions: Vec<DecodedGroundDisjunction>,
+}
+
 struct Budget {
     limits: PermanentProgramLimits,
     live_bytes: usize,
@@ -586,7 +597,11 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
     poll("permanent-program-predicates").map_err(PermanentProgramError::Control)?;
     let (provenance, provenance_maps) = freeze_provenance(&mut fragments, &mut budget, poll)?;
     poll("permanent-program-provenance").map_err(PermanentProgramError::Control)?;
-    let (clauses, promoted_facts) = freeze_clauses(
+    let FrozenClauses {
+        clauses,
+        promoted_facts,
+        ground_disjunctions,
+    } = freeze_clauses(
         &mut fragments,
         &predicate_maps,
         &provenance_maps,
@@ -613,6 +628,7 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
     let expressivity_evidence = RepresentableExpressivityEvidence {
         source: semantic_evidence,
         unknown_datatypes: !unknown_datatype_ids.is_empty(),
+        ground_disjunctions: !ground_disjunctions.is_empty(),
     };
     let expressivity = derive_representable_expressivity(
         &predicates,
@@ -636,7 +652,7 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
         clauses,
         positive_facts,
         negative_facts,
-        ground_disjunctions: Vec::new(),
+        ground_disjunctions,
         role_model,
         datatype_model,
         expressivity,
@@ -2111,6 +2127,26 @@ fn ground_atom_nested_owned_bytes(value: &DecodedGroundAtom) -> usize {
         )
 }
 
+fn pending_ground_disjunction_nested_owned_bytes(value: &PendingGroundDisjunction) -> usize {
+    value
+        .atoms
+        .capacity()
+        .saturating_mul(size_of::<DecodedAtom>())
+        .saturating_add(
+            value
+                .atoms
+                .iter()
+                .map(atom_nested_owned_bytes)
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            value
+                .provenance_ids
+                .capacity()
+                .saturating_mul(size_of::<u32>()),
+        )
+}
+
 fn freeze_predicates<E>(
     fragments: &mut [Fragment],
     budget: &mut Budget,
@@ -2568,7 +2604,7 @@ fn freeze_clauses<E>(
     provenance: &[DecodedProvenanceEntry],
     budget: &mut Budget,
     poll: &mut impl FnMut(&'static str) -> Result<(), E>,
-) -> ControlledResult<(Vec<DecodedClause>, Vec<DecodedGroundAtom>), E> {
+) -> ControlledResult<FrozenClauses, E> {
     let total = fragments
         .iter()
         .try_fold(0_usize, |count, fragment| {
@@ -2607,6 +2643,7 @@ fn freeze_clauses<E>(
                 .saturating_mul(size_of::<DecodedGroundAtom>()),
         )
         .map_err(PermanentProgramError::Encoded)?;
+    let mut pending_disjunctions = Vec::<PendingGroundDisjunction>::new();
     for (fragment_index, fragment) in fragments.iter_mut().enumerate() {
         let source_capacity = fragment
             .clauses
@@ -2655,11 +2692,27 @@ fn freeze_clauses<E>(
                 })
             {
                 if clause.head.len() > 1 {
-                    return Err(PermanentProgramError::Encoded(
-                        EncodedValidationError::protocol(
-                            "permanent-program ground disjunctions require an encoded disjunction phase",
-                        ),
-                    ));
+                    clause.head.sort_by(compare_atom_identity);
+                    let body_capacity = clause
+                        .body
+                        .capacity()
+                        .saturating_mul(size_of::<DecodedAtom>());
+                    push_counted(
+                        &mut pending_disjunctions,
+                        PendingGroundDisjunction {
+                            atoms: std::mem::take(&mut clause.head),
+                            provenance_ids: std::mem::take(&mut clause.provenance_ids),
+                        },
+                        budget,
+                    )
+                    .map_err(PermanentProgramError::Encoded)?;
+                    budget
+                        .release(body_capacity)
+                        .map_err(PermanentProgramError::Encoded)?;
+                    budget
+                        .claim_work(1)
+                        .map_err(PermanentProgramError::Encoded)?;
+                    continue;
                 }
                 let atom = clause.head.pop().ok_or_else(|| {
                     PermanentProgramError::Encoded(EncodedValidationError::invariant(
@@ -2780,7 +2833,113 @@ fn freeze_clauses<E>(
     budget
         .release_temporary(selected_capacity)
         .map_err(PermanentProgramError::Encoded)?;
-    Ok((output, promoted_facts))
+    let ground_disjunctions = freeze_ground_disjunctions(pending_disjunctions, budget)
+        .map_err(PermanentProgramError::Encoded)?;
+    Ok(FrozenClauses {
+        clauses: output,
+        promoted_facts,
+        ground_disjunctions,
+    })
+}
+
+fn freeze_ground_disjunctions(
+    mut pending: Vec<PendingGroundDisjunction>,
+    budget: &mut Budget,
+) -> EncodedResult<Vec<DecodedGroundDisjunction>> {
+    pending.sort_by(|left, right| compare_atom_identity_slices(&left.atoms, &right.atoms));
+    let pending_capacity = pending
+        .capacity()
+        .saturating_mul(size_of::<PendingGroundDisjunction>());
+    let mut merged = Vec::<PendingGroundDisjunction>::new();
+    merged.try_reserve_exact(pending.len()).map_err(|_| {
+        EncodedValidationError::resource(
+            "permanent-program ground-disjunction merge allocation failed",
+        )
+    })?;
+    let merged_capacity = merged
+        .capacity()
+        .saturating_mul(size_of::<PendingGroundDisjunction>());
+    budget.claim_temporary(merged_capacity)?;
+    for candidate in pending {
+        if let Some(known) = merged
+            .last_mut()
+            .filter(|known| known.atoms == candidate.atoms)
+        {
+            let discarded_bytes = pending_ground_disjunction_nested_owned_bytes(&candidate);
+            merge_sorted_ids(&mut known.provenance_ids, candidate.provenance_ids, budget)?;
+            budget.release(discarded_bytes)?;
+        } else {
+            merged.push(candidate);
+        }
+    }
+    budget.release_temporary(pending_capacity)?;
+    Budget::count(
+        merged.len(),
+        budget.limits.max_clauses,
+        "ground disjunction count",
+    )?;
+    let disjunct_count = merged.iter().try_fold(0_usize, |count, value| {
+        count.checked_add(value.atoms.len()).ok_or_else(|| {
+            EncodedValidationError::resource("permanent-program ground-disjunct count overflowed")
+        })
+    })?;
+    Budget::count(
+        disjunct_count,
+        budget.limits.max_facts,
+        "ground disjunct count",
+    )?;
+
+    let mut output = Vec::<DecodedGroundDisjunction>::new();
+    output.try_reserve_exact(merged.len()).map_err(|_| {
+        EncodedValidationError::resource(
+            "permanent-program ground-disjunction output allocation failed",
+        )
+    })?;
+    budget.claim_owned(
+        output
+            .capacity()
+            .saturating_mul(size_of::<DecodedGroundDisjunction>()),
+    )?;
+    for (identifier, candidate) in merged.into_iter().enumerate() {
+        let atom_capacity = candidate
+            .atoms
+            .capacity()
+            .saturating_mul(size_of::<DecodedAtom>());
+        let mut disjuncts = Vec::<DecodedGroundAtom>::new();
+        disjuncts
+            .try_reserve_exact(candidate.atoms.len())
+            .map_err(|_| {
+                EncodedValidationError::resource(
+                    "permanent-program ground-disjunct output allocation failed",
+                )
+            })?;
+        budget.claim_owned(
+            disjuncts
+                .capacity()
+                .saturating_mul(size_of::<DecodedGroundAtom>()),
+        )?;
+        for atom in candidate.atoms {
+            let provenance_ids = clone_ids_owned(&candidate.provenance_ids, budget)?;
+            disjuncts.push(DecodedGroundAtom {
+                predicate_id: atom.predicate_id,
+                arguments: atom.arguments,
+                provenance_ids,
+            });
+        }
+        budget.release(atom_capacity)?;
+        sort_ground_atoms(&mut disjuncts, budget)?;
+        output.push(DecodedGroundDisjunction {
+            disjunction_id: u32::try_from(identifier).map_err(|_| {
+                EncodedValidationError::resource(
+                    "permanent-program ground-disjunction ID exceeds u32",
+                )
+            })?,
+            disjuncts,
+            provenance_ids: candidate.provenance_ids,
+        });
+    }
+    budget.release_temporary(merged_capacity)?;
+    Ok(output)
 }
 
 fn retain_complement_exclusions(
@@ -3040,6 +3199,7 @@ fn freeze_facts<E>(
 struct RepresentableExpressivityEvidence {
     source: ProgramSemanticEvidence,
     unknown_datatypes: bool,
+    ground_disjunctions: bool,
 }
 
 fn derive_representable_expressivity(
@@ -3054,6 +3214,7 @@ fn derive_representable_expressivity(
     let RepresentableExpressivityEvidence {
         source,
         unknown_datatypes,
+        ground_disjunctions,
     } = evidence;
     let nominals = predicates.iter().any(|predicate| {
         matches!(
@@ -3092,7 +3253,7 @@ fn derive_representable_expressivity(
             break;
         }
     }
-    let non_horn = clauses.iter().any(|clause| clause.head.len() > 1);
+    let non_horn = ground_disjunctions || clauses.iter().any(|clause| clause.head.len() > 1);
     let datatypes = predicates.iter().any(|predicate| {
         matches!(
             predicate.kind,
@@ -3224,6 +3385,16 @@ fn merge_sorted_ids(
     destination.dedup();
     let after = destination.capacity().saturating_mul(size_of::<u32>());
     budget.resize_allocation(before, after)
+}
+
+fn clone_ids_owned(values: &[u32], budget: &mut Budget) -> EncodedResult<Vec<u32>> {
+    let mut cloned = Vec::new();
+    cloned.try_reserve_exact(values.len()).map_err(|_| {
+        EncodedValidationError::resource("permanent-program provenance clone allocation failed")
+    })?;
+    budget.claim_owned(cloned.capacity().saturating_mul(size_of::<u32>()))?;
+    cloned.extend_from_slice(values);
+    Ok(cloned)
 }
 
 fn push_counted<T>(values: &mut Vec<T>, value: T, budget: &mut Budget) -> EncodedResult<()> {
@@ -3459,6 +3630,22 @@ fn compare_ground_identity(left: &DecodedGroundAtom, right: &DecodedGroundAtom) 
     left.predicate_id
         .cmp(&right.predicate_id)
         .then_with(|| compare_term_slices(&left.arguments, &right.arguments))
+}
+
+fn compare_atom_identity(left: &DecodedAtom, right: &DecodedAtom) -> Ordering {
+    left.predicate_id
+        .cmp(&right.predicate_id)
+        .then_with(|| compare_term_slices(&left.arguments, &right.arguments))
+}
+
+fn compare_atom_identity_slices(left: &[DecodedAtom], right: &[DecodedAtom]) -> Ordering {
+    for (left, right) in left.iter().zip(right) {
+        let order = compare_atom_identity(left, right);
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
 }
 
 fn compare_term_slices(left: &[DecodedTerm], right: &[DecodedTerm]) -> Ordering {
@@ -3847,6 +4034,131 @@ mod tests {
         assert!(datatype_restriction_key(&[25, 1, 1, 2, 6, 0]).is_none());
         key.push(0);
         assert!(datatype_restriction_key(&key).is_none());
+    }
+
+    #[test]
+    fn ground_clauses_freeze_to_canonical_merged_disjunctions() {
+        let predicates = vec![
+            DecodedPredicate {
+                predicate_id: 0,
+                kind: PredicateKind::Concept,
+                argument_sorts: vec![TermSort::Object],
+                symbol_id: Some(0),
+                role_id: None,
+                cardinality: None,
+                filler_predicate_id: None,
+                annotation: Vec::new(),
+                internal_key: None,
+            },
+            DecodedPredicate {
+                predicate_id: 1,
+                kind: PredicateKind::Concept,
+                argument_sorts: vec![TermSort::Object],
+                symbol_id: Some(1),
+                role_id: None,
+                cardinality: None,
+                filler_predicate_id: None,
+                annotation: Vec::new(),
+                internal_key: None,
+            },
+        ];
+        let make_atom = |predicate_id, individual_id| DecodedAtom {
+            predicate_id,
+            arguments: vec![DecodedTerm::Individual { individual_id }],
+        };
+        let mut fragments = [Fragment {
+            predicates: Vec::new(),
+            clauses: vec![
+                DecodedClause {
+                    clause_id: 0,
+                    body: Vec::new(),
+                    head: vec![make_atom(1, 0), make_atom(0, 1)],
+                    provenance_ids: vec![1],
+                    join_order: Vec::new(),
+                },
+                DecodedClause {
+                    clause_id: 1,
+                    body: Vec::new(),
+                    head: vec![make_atom(0, 1), make_atom(1, 0)],
+                    provenance_ids: vec![2],
+                    join_order: Vec::new(),
+                },
+                DecodedClause {
+                    clause_id: 2,
+                    body: Vec::new(),
+                    head: vec![make_atom(1, 1), make_atom(0, 0)],
+                    provenance_ids: vec![1],
+                    join_order: Vec::new(),
+                },
+            ],
+            positive_facts: Vec::new(),
+            negative_facts: Vec::new(),
+            provenance: Vec::new(),
+        }];
+        let provenance = vec![
+            DecodedProvenanceEntry {
+                provenance_id: 0,
+                source_sha256: vec![Sha256::digest(BUILTIN_PROVENANCE_INPUT).into()],
+                generated: true,
+            },
+            DecodedProvenanceEntry {
+                provenance_id: 1,
+                source_sha256: vec![[1; 32]],
+                generated: false,
+            },
+            DecodedProvenanceEntry {
+                provenance_id: 2,
+                source_sha256: vec![[2; 32]],
+                generated: false,
+            },
+        ];
+        let mut budget = Budget::new(PermanentProgramLimits::default(), 1024 * 1024).unwrap();
+        let FrozenClauses {
+            clauses,
+            promoted_facts: facts,
+            ground_disjunctions: disjunctions,
+        } = freeze_clauses(
+            &mut fragments,
+            &[vec![0, 1]],
+            &[vec![0, 1, 2]],
+            &predicates,
+            &provenance,
+            &mut budget,
+            &mut |_| Ok::<(), ()>(()),
+        )
+        .unwrap();
+
+        assert!(clauses.is_empty());
+        assert!(facts.is_empty());
+        assert_eq!(disjunctions.len(), 2);
+        assert_eq!(disjunctions[0].disjunction_id, 0);
+        assert_eq!(disjunctions[0].provenance_ids, vec![1]);
+        assert_eq!(
+            disjunctions[0]
+                .disjuncts
+                .iter()
+                .map(|atom| atom.predicate_id)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+        );
+        assert!(disjunctions[0]
+            .disjuncts
+            .iter()
+            .all(|atom| atom.provenance_ids == [1]));
+        assert_eq!(disjunctions[1].disjunction_id, 1);
+        assert_eq!(disjunctions[1].provenance_ids, vec![1, 2]);
+        assert_eq!(
+            disjunctions[1]
+                .disjuncts
+                .iter()
+                .map(|atom| atom.predicate_id)
+                .collect::<Vec<_>>(),
+            vec![1, 0],
+        );
+        assert!(disjunctions[1]
+            .disjuncts
+            .iter()
+            .all(|atom| atom.provenance_ids == [1, 2]));
     }
 
     #[test]
