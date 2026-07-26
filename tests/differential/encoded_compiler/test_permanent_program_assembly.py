@@ -42,7 +42,11 @@ from pyhermit.backends.protocol import CompiledOntology
 from pyhermit.clauses.compiler import compile_captured_bundle
 from pyhermit.config import UnsupportedDatatypePolicy
 from pyhermit.datatypes import SUPPORTED_DATATYPES
-from pyhermit.encoded_input import ENCODED_NATIVE_FEATURE, _validate_encoded_view
+from pyhermit.encoded_input import (
+    ENCODED_BUFFER_WIDTHS,
+    ENCODED_NATIVE_FEATURE,
+    _validate_encoded_view,
+)
 from pyhermit.events import CancellationSource, CancellationToken
 from pyhermit.exceptions import (
     BackendMismatchError,
@@ -2039,6 +2043,12 @@ def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(
         assert session.ontology_fingerprint
         assert session.permanent_program_sha256 != "0" * 64
         assert session.check(None).satisfiable
+        counters = session.ingestion_counters
+        assert counters["encoded_buffer_count"] == len(ENCODED_BUFFER_WIDTHS)
+        assert counters["encoded_buffer_bytes"] > 0
+        assert counters["encoded_detached_buffer_count"] == counters["encoded_buffer_count"]
+        assert counters["encoded_zero_copy_buffers"] == counters["encoded_buffer_count"]
+        assert counters["encoded_private_ir_bytes"] == 0
     finally:
         session.close()
 
@@ -2099,6 +2109,15 @@ def test_facade_constructs_encoded_services_without_scalar_service_context(
         assert runtime.program is None
         assert runtime.compiled is None
         assert runtime.compiler_digest == runtime.session.permanent_program_sha256
+        diagnostics = reasoner.diagnostics()
+        assert diagnostics["ingestion_path"] == "encoded-native"
+        assert diagnostics["encoded_buffer_count"] > 0
+        assert diagnostics["encoded_buffer_bytes"] > 0
+        assert (
+            diagnostics["encoded_detached_buffer_count"]
+            == diagnostics["encoded_buffer_count"]
+            == diagnostics["encoded_zero_copy_buffers"]
+        )
         assert reasoner.is_consistent()
         hierarchy = reasoner.class_hierarchy()
         assert hierarchy.nodes[hierarchy.top_node]
@@ -2128,6 +2147,14 @@ def test_facade_constructs_encoded_services_without_scalar_service_context(
         assert c in set().union(*reasoner.subclasses(a))
         updated_digest = reasoner.diagnostics()["compiler_digest"]
         assert updated_digest != initial_digest
+        updated_diagnostics = reasoner.diagnostics()
+        assert updated_diagnostics["ingestion_path"] == "encoded-native"
+        assert updated_diagnostics["encoded_segment_count"] > 0
+        assert updated_diagnostics["encoded_referenced_view_count"] > 0
+        assert (
+            updated_diagnostics["encoded_detached_buffer_count"]
+            >= updated_diagnostics["encoded_zero_copy_buffers"]
+        )
         fresh = factory._create_encoded_lifecycle_handoff(
             capture_ontology(reasoner.ontology).captured,
             ReasonerConfig(),

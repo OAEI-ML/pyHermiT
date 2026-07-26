@@ -67,6 +67,22 @@ from pyhermit.services.realization import IndividualResults, RealizationService
 
 EntityT = TypeVar("EntityT", bound=owl.Entity)
 
+_ENCODED_DIAGNOSTIC_DEFAULTS: Mapping[str, bool | int] = MappingProxyType(
+    {
+        "encoded_buffer_bytes": 0,
+        "encoded_buffer_count": 0,
+        "encoded_compiler_gil_released": False,
+        "encoded_detached_buffer_count": 0,
+        "encoded_indexed_buffer_count": 0,
+        "encoded_posting_bytes": 0,
+        "encoded_private_ir_bytes": 0,
+        "encoded_referenced_view_count": 0,
+        "encoded_segment_count": 0,
+        "encoded_staging_copy_bytes": 0,
+        "encoded_zero_copy_buffers": 0,
+    }
+)
+
 
 class InferenceType(str, Enum):
     CLASS_HIERARCHY = "class_hierarchy"
@@ -90,6 +106,7 @@ class _Runtime:
     realization: RealizationService
     result_mapper: CompiledResultMapper | None
     consumer_compile_seconds: float
+    ingestion_diagnostics: Mapping[str, bool | int]
 
 
 def _canonical_compiler_digest(compiled: CompiledOntology) -> str:
@@ -109,6 +126,30 @@ def _canonical_compiler_digest(compiled: CompiledOntology) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(b"pyhermit/compiler-digest/v1\0" + encoded).hexdigest()
+
+
+def _encoded_session_diagnostics(session: BackendSession) -> Mapping[str, bool | int]:
+    values = getattr(session, "ingestion_counters", None)
+    if not isinstance(values, Mapping) or values.keys() != _ENCODED_DIAGNOSTIC_DEFAULTS.keys():
+        raise BackendVersionError(
+            "encoded native session has no complete ingestion ledger",
+            context={"reason": "session_surface_invalid"},
+        )
+    canonical: dict[str, bool | int] = {}
+    for key, expected in _ENCODED_DIAGNOSTIC_DEFAULTS.items():
+        value = values[key]
+        if type(value) is not type(expected) or (type(value) is int and value < 0):
+            raise BackendVersionError(
+                "encoded native session returned an invalid ingestion ledger",
+                context={"reason": "session_surface_invalid"},
+            )
+        canonical[key] = value
+    if canonical["encoded_buffer_count"] == 0:
+        raise BackendVersionError(
+            "encoded native session reported no structural buffers",
+            context={"reason": "session_surface_invalid"},
+        )
+    return MappingProxyType(canonical)
 
 
 class Reasoner:
@@ -182,24 +223,21 @@ class Reasoner:
         with self._state_lock:
             compiler_digest = self._runtime.compiler_digest
             consumer_compile_seconds = self._runtime.consumer_compile_seconds
+            ingestion_diagnostics = self._runtime.ingestion_diagnostics
+            encoded_native = self._runtime.program is None
             backend = self._factory.info
         values: dict[str, bool | int | float | str] = {
             "compiler_cache_schema_version": COMPILER_CACHE_SCHEMA_VERSION,
             "compiler_digest": compiler_digest,
             "consumer_compile_seconds": consumer_compile_seconds,
-            "encoded_buffer_bytes": 0,
-            "encoded_buffer_count": 0,
-            "encoded_compiler_gil_released": False,
-            "encoded_detached_buffer_count": 0,
-            "encoded_indexed_buffer_count": 0,
-            "encoded_posting_bytes": 0,
-            "encoded_private_ir_bytes": 0,
-            "encoded_referenced_view_count": 0,
-            "encoded_segment_count": 0,
-            "encoded_staging_copy_bytes": 0,
-            "encoded_zero_copy_buffers": 0,
+            **_ENCODED_DIAGNOSTIC_DEFAULTS,
+            **ingestion_diagnostics,
             "implementation_version": backend.implementation_version,
-            "ingestion_path": ("scalar-python" if backend.name == "python" else "scalar-wire"),
+            "ingestion_path": (
+                "encoded-native"
+                if encoded_native
+                else ("scalar-python" if backend.name == "python" else "scalar-wire")
+            ),
             "ir_schema_version": backend.ir_schema_version,
         }
         if backend.name in {"native", "verify"}:
@@ -687,6 +725,7 @@ class Reasoner:
             realization,
             mapper,
             perf_counter() - compile_started,
+            _encoded_session_diagnostics(session),
         )
 
     def _services(
@@ -746,6 +785,7 @@ class Reasoner:
             realization,
             result_mapper,
             perf_counter() - compile_started,
+            _ENCODED_DIAGNOSTIC_DEFAULTS,
         )
 
     @staticmethod

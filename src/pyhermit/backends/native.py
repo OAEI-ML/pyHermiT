@@ -13,9 +13,9 @@ from __future__ import annotations
 import importlib
 import json
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import NoReturn, Protocol, TypeVar, cast
 
 from pyowl_core import Entity, OntologyView
@@ -78,6 +78,51 @@ _SESSION_METHODS = (
     "reset_query_state",
 )
 _T = TypeVar("_T")
+
+
+class _EncodedSegmentLease(Protocol):
+    root_ids: memoryview
+    anonymous_scope_map: memoryview
+
+
+class _EncodedCompilerLease(Protocol):
+    buffers: Mapping[str, memoryview]
+    segments: tuple[_EncodedSegmentLease, ...]
+
+    def local_leases(self) -> tuple[_EncodedCompilerLease, ...]: ...
+
+
+def _encoded_ingestion_counters(lease: object) -> Mapping[str, bool | int]:
+    """Freeze the shared zero-copy ledger for one negotiated compiler handoff."""
+
+    compiler_lease = cast(_EncodedCompilerLease, lease)
+    local_leases = compiler_lease.local_leases()
+    buffer_count = sum(len(value.buffers) for value in local_leases)
+    buffer_bytes = sum(buffer.nbytes for value in local_leases for buffer in value.buffers.values())
+    segments = tuple(
+        segment for value in local_leases for segment in getattr(value, "segments", ())
+    )
+    posting_bytes = sum(segment.root_ids.nbytes for segment in segments)
+    staging_copy_bytes = sum(segment.anonymous_scope_map.nbytes for segment in segments)
+    sidecar_count = sum(
+        int(segment.root_ids.nbytes != 0) + int(segment.anonymous_scope_map.nbytes != 0)
+        for segment in segments
+    )
+    return MappingProxyType(
+        {
+            "encoded_buffer_bytes": buffer_bytes,
+            "encoded_buffer_count": buffer_count,
+            "encoded_compiler_gil_released": False,
+            "encoded_detached_buffer_count": buffer_count + sidecar_count,
+            "encoded_indexed_buffer_count": 0,
+            "encoded_posting_bytes": posting_bytes,
+            "encoded_private_ir_bytes": 0,
+            "encoded_referenced_view_count": max(0, len(local_leases) - 1),
+            "encoded_segment_count": len(segments),
+            "encoded_staging_copy_bytes": staging_copy_bytes,
+            "encoded_zero_copy_buffers": buffer_count,
+        }
+    )
 
 
 class _CancellationHandle(Protocol):
@@ -435,7 +480,14 @@ class NativeBackendFactory:
     def _encoded_session_request(
         self,
         view: OntologyView,
-    ) -> tuple[Callable[..., object], tuple[tuple[object, ...], ...]] | None:
+    ) -> (
+        tuple[
+            Callable[..., object],
+            tuple[tuple[object, ...], ...],
+            Mapping[str, bool | int],
+        ]
+        | None
+    ):
         """Resolve one negotiated direct-session request without consuming it."""
 
         if ENCODED_NATIVE_FEATURE not in self._info.complete_features:
@@ -462,7 +514,11 @@ class NativeBackendFactory:
                 "native encoded session constructor received no root-slice plan",
                 context={"reason": "encoded_session_slices_missing"},
             )
-        return constructor, _encoded_slice_records(root_slices)
+        return (
+            constructor,
+            _encoded_slice_records(root_slices),
+            _encoded_ingestion_counters(lease),
+        )
 
     def _create_encoded_session_handoff(
         self,
@@ -487,7 +543,7 @@ class NativeBackendFactory:
         request = self._encoded_session_request(view)
         if request is None:
             return None
-        constructor, slices = request
+        constructor, slices, ingestion_counters = request
         codec = _load_input_codec()
         metadata_encoder = getattr(codec, "encode_ontology_metadata", None)
         if not callable(metadata_encoder):
@@ -510,6 +566,7 @@ class NativeBackendFactory:
                 config=config_wire,
                 cancellation=handle,
             ),
+            ingestion_counters=ingestion_counters,
         )
 
     def _create_encoded_lifecycle_handoff(
@@ -532,7 +589,7 @@ class NativeBackendFactory:
         request = self._encoded_session_request(captured.view)
         if request is None:
             return None
-        constructor, slices = request
+        constructor, slices, ingestion_counters = request
         codec = _load_input_codec()
         metadata_encoder = getattr(codec, "encode_encoded_session_metadata", None)
         if not callable(metadata_encoder):
@@ -555,6 +612,7 @@ class NativeBackendFactory:
                 config=config_wire,
                 cancellation=handle,
             ),
+            ingestion_counters=ingestion_counters,
         )
 
     def _construct_adapter_session(
@@ -564,6 +622,8 @@ class NativeBackendFactory:
         cancellation: CancellationToken,
         codec: _InputCodec,
         invoke: Callable[[object], object],
+        *,
+        ingestion_counters: Mapping[str, bool | int] | None = None,
     ) -> NativeBackendSession:
         cancellation.check()
         remaining = cancellation.remaining_seconds
@@ -586,6 +646,7 @@ class NativeBackendFactory:
                 observer_id,
                 expected_fingerprint,
                 config.progress,
+                ingestion_counters,
             )
             cancellation.check()
             return adapter
@@ -606,6 +667,7 @@ class NativeBackendSession:
         "_closed",
         "_codec",
         "_expected_fingerprint",
+        "_ingestion_counters",
         "_native",
         "_observer_id",
         "_poisoned",
@@ -620,6 +682,7 @@ class NativeBackendSession:
         observer_id: int,
         expected_fingerprint: str,
         progress: ProgressCallback | None,
+        ingestion_counters: Mapping[str, bool | int] | None = None,
     ) -> None:
         self._native = native
         self._codec = codec
@@ -627,6 +690,7 @@ class NativeBackendSession:
         self._observer_id = observer_id
         self._expected_fingerprint = expected_fingerprint
         self._progress = progress
+        self._ingestion_counters = MappingProxyType(dict(ingestion_counters or {}))
         self._closed = False
         self._poisoned = False
         _ = self.ontology_fingerprint
@@ -664,6 +728,12 @@ class NativeBackendSession:
                 context={"reason": "program_fingerprint_invalid"},
             )
         return actual
+
+    @property
+    def ingestion_counters(self) -> Mapping[str, bool | int]:
+        """Return the immutable ledger captured for this session's input path."""
+
+        return self._ingestion_counters
 
     def _encoded_service_context(
         self,
