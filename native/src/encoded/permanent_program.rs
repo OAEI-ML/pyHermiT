@@ -32,13 +32,17 @@ use super::simple_roles::SimpleRolePhase;
 use super::{EncodedResult, EncodedValidationError};
 use crate::input_wire::{
     validate_decoded_program, validate_decoded_session_domains, DecodedAtom, DecodedClause,
-    DecodedDatatypeModel, DecodedEntity, DecodedExpressivity, DecodedGroundAtom, DecodedPredicate,
-    DecodedProgram, DecodedProvenanceEntry, DecodedSymbolDomain, DecodedTerm, PredicateKind,
-    SymbolKind, TermSort,
+    DecodedDatatypeModel, DecodedEntity, DecodedExpressivity, DecodedGroundAtom,
+    DecodedLiteralIdentity, DecodedPredicate, DecodedProgram, DecodedProvenanceEntry,
+    DecodedSymbolDomain, DecodedTerm, PredicateKind, SymbolKind, TermSort,
 };
 
 const PERMANENT_PROGRAM_SCHEMA_VERSION: u16 = 1;
+const DATA_COMPLEMENT_OF_TAG: u64 = 23;
+const DATA_IDENTITY_PREFIX: &[u8] = b"pyhermit:data-identity:v1\0";
 const RDFS_LITERAL_DISPLAY: &str = "datatype:http://www.w3.org/2000/01/rdf-schema#Literal";
+const XSD_STRING_IRI: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_STRING_DISPLAY: &str = "datatype:http://www.w3.org/2001/XMLSchema#string";
 const DEFAULT_DATATYPE_SEMANTICS: &str = concat!(
     "{\"data_ranges\":[{\"datatype_iri\":",
     "\"http://www.w3.org/2000/01/rdf-schema#Literal\",",
@@ -46,7 +50,36 @@ const DEFAULT_DATATYPE_SEMANTICS: &str = concat!(
     "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]}],",
     "\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}"
 );
+const DEFAULT_WITH_EMPTY_DATATYPE_SEMANTICS: &str = concat!(
+    "{\"data_ranges\":[{\"datatype_iri\":",
+    "\"http://www.w3.org/2000/01/rdf-schema#Literal\",",
+    "\"facets\":[],\"kind\":\"datatype\",\"operands\":[],",
+    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]},",
+    "{\"datatype_iri\":null,\"facets\":[],\"kind\":\"complement\",\"operands\":[",
+    "{\"datatype_iri\":\"http://www.w3.org/2000/01/rdf-schema#Literal\",",
+    "\"facets\":[],\"kind\":\"datatype\",\"operands\":[],",
+    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]}],",
+    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]}],",
+    "\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}"
+);
+const STRING_AND_DEFAULT_DATATYPE_SEMANTICS: &str = concat!(
+    "{\"data_ranges\":[{\"datatype_iri\":",
+    "\"http://www.w3.org/2001/XMLSchema#string\",",
+    "\"facets\":[],\"kind\":\"datatype\",\"operands\":[],",
+    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]},",
+    "{\"datatype_iri\":\"http://www.w3.org/2000/01/rdf-schema#Literal\",",
+    "\"facets\":[],\"kind\":\"datatype\",\"operands\":[],",
+    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]}],",
+    "\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}"
+);
 const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepresentableDatatypeSemantics {
+    Default,
+    DefaultWithEmpty,
+    StringAndDefault,
+}
 
 /// Complete set of already-owned phases produced by the coarse structural call.
 pub(crate) struct EncodedSliceProgram {
@@ -321,7 +354,8 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
         role_automata,
     ));
     let named = named_classes.into_program_parts();
-    validate_semantic_coverage(&named).map_err(PermanentProgramError::Encoded)?;
+    let datatype_semantics =
+        validate_semantic_coverage(&named).map_err(PermanentProgramError::Encoded)?;
     let semantic_evidence = named.semantic_evidence;
     let input_owned = permanent_input_owned_bytes(
         &named,
@@ -332,6 +366,8 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
     )
     .map_err(PermanentProgramError::Encoded)?;
     let mut budget = Budget::new(limits, input_owned).map_err(PermanentProgramError::Encoded)?;
+    let literal_identities = freeze_literal_identities(&named, datatype_semantics, &mut budget)
+        .map_err(PermanentProgramError::Encoded)?;
     let declared_entities = named.declared_entities;
     let named_individuals = named.named_individuals;
     let symbol_domains = freeze_symbol_domains(
@@ -402,12 +438,17 @@ pub(crate) fn assemble_encoded_permanent_program<E>(
         semantic_evidence,
     )
     .map_err(PermanentProgramError::Encoded)?;
-    let semantic_payload_json = DEFAULT_DATATYPE_SEMANTICS.to_owned();
+    let semantic_payload_json = match datatype_semantics {
+        RepresentableDatatypeSemantics::Default => DEFAULT_DATATYPE_SEMANTICS,
+        RepresentableDatatypeSemantics::DefaultWithEmpty => DEFAULT_WITH_EMPTY_DATATYPE_SEMANTICS,
+        RepresentableDatatypeSemantics::StringAndDefault => STRING_AND_DEFAULT_DATATYPE_SEMANTICS,
+    }
+    .to_owned();
     budget
         .claim_owned(semantic_payload_json.capacity())
         .map_err(PermanentProgramError::Encoded)?;
     let datatype_model = DecodedDatatypeModel {
-        literal_identities: Vec::new(),
+        literal_identities,
         datatype_definitions: Vec::new(),
         unknown_datatype_ids: Vec::new(),
         semantic_payload_json,
@@ -502,22 +543,195 @@ fn freeze_symbol_domains(
     Ok(values)
 }
 
-fn validate_semantic_coverage(named: &NamedProgramParts) -> EncodedResult<()> {
+fn validate_semantic_coverage(
+    named: &NamedProgramParts,
+) -> EncodedResult<RepresentableDatatypeSemantics> {
+    const UNSUPPORTED: &str = "permanent-program source semantics require a datatype semantic phase for non-default ranges or literals";
     if named.semantic_evidence.unsupported_extension {
         return Err(EncodedValidationError::protocol(
             "permanent-program source semantics contain an unsupported extension",
         ));
     }
-    if !named.source_literal_domain.values.is_empty()
-        || !named.data_value_domain.values.is_empty()
-        || named.data_range_domain.values.len() != 1
-        || named.data_range_domain.values[0].display != RDFS_LITERAL_DISPLAY
-    {
-        return Err(EncodedValidationError::protocol(
-            "permanent-program source semantics require a datatype semantic phase for non-default ranges or literals",
+    if named.source_data_identity_ids.len() != named.source_literal_domain.values.len() {
+        return Err(EncodedValidationError::invariant(
+            "permanent-program source literal identities are incomplete",
         ));
     }
-    Ok(())
+    let Some(top) = named
+        .data_range_domain
+        .values
+        .iter()
+        .find(|value| value.display == RDFS_LITERAL_DISPLAY)
+    else {
+        return Err(EncodedValidationError::protocol(UNSUPPORTED));
+    };
+    match named.data_range_domain.values.as_slice() {
+        [_] if named.source_literal_domain.values.is_empty()
+            && named.data_value_domain.values.is_empty() =>
+        {
+            Ok(RepresentableDatatypeSemantics::Default)
+        }
+        [first, second]
+            if first.display == RDFS_LITERAL_DISPLAY
+                && data_range_key_is_complement_of(&second.key, &top.key)
+                && named.source_literal_domain.values.is_empty()
+                && named.data_value_domain.values.is_empty() =>
+        {
+            Ok(RepresentableDatatypeSemantics::DefaultWithEmpty)
+        }
+        [first, second]
+            if first.display == XSD_STRING_DISPLAY
+                && second.display == RDFS_LITERAL_DISPLAY
+                && plain_string_literal_domains_are_complete(named) =>
+        {
+            Ok(RepresentableDatatypeSemantics::StringAndDefault)
+        }
+        _ => Err(EncodedValidationError::protocol(UNSUPPORTED)),
+    }
+}
+
+fn plain_string_literal_domains_are_complete(named: &NamedProgramParts) -> bool {
+    let source_suffix = format!("^^{XSD_STRING_IRI}");
+    named
+        .source_literal_domain
+        .values
+        .iter()
+        .zip(named.source_data_identity_ids.iter())
+        .all(|(source, data_identity_id)| {
+            let Some(data_identity_id) = data_identity_id else {
+                return false;
+            };
+            let Some(data_value) = usize::try_from(*data_identity_id)
+                .ok()
+                .and_then(|index| named.data_value_domain.values.get(index))
+            else {
+                return false;
+            };
+            source.display.ends_with(&source_suffix)
+                && decode_plain_string_data_identity(&data_value.key).is_some()
+        })
+}
+
+fn freeze_literal_identities(
+    named: &NamedProgramParts,
+    semantics: RepresentableDatatypeSemantics,
+    budget: &mut Budget,
+) -> EncodedResult<Vec<DecodedLiteralIdentity>> {
+    if semantics != RepresentableDatatypeSemantics::StringAndDefault {
+        if named.source_literal_domain.values.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(EncodedValidationError::invariant(
+            "representable datatype shape retained unsupported literals",
+        ));
+    }
+    let mut identities = Vec::new();
+    identities
+        .try_reserve_exact(named.source_literal_domain.values.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("permanent-program literal identity allocation failed")
+        })?;
+    budget.claim_owned(
+        identities
+            .capacity()
+            .saturating_mul(size_of::<DecodedLiteralIdentity>()),
+    )?;
+    for (source_index, data_identity_id) in
+        named.source_data_identity_ids.iter().copied().enumerate()
+    {
+        budget.claim_work(1)?;
+        let data_identity_id = data_identity_id.ok_or_else(|| {
+            EncodedValidationError::invariant("representable string literal lost its data identity")
+        })?;
+        let data_value = named
+            .data_value_domain
+            .values
+            .get(usize::try_from(data_identity_id).map_err(|_| {
+                EncodedValidationError::invariant("string data identity exceeds usize")
+            })?)
+            .ok_or_else(|| EncodedValidationError::invariant("string data identity is dangling"))?;
+        let text = decode_plain_string_data_identity(&data_value.key).ok_or_else(|| {
+            EncodedValidationError::invariant("representable string data identity changed encoding")
+        })?;
+        let encoded_text = serde_json::to_string(&text).map_err(|_| {
+            EncodedValidationError::invariant("string literal JSON encoding failed")
+        })?;
+        let comparison_payload = serde_json::to_vec(&(
+            "plain-string-comparison-v1",
+            text.as_str(),
+            Option::<&str>::None,
+        ))
+        .map_err(|_| {
+            EncodedValidationError::invariant("string literal comparison encoding failed")
+        })?;
+        let comparison_key = crate::model::hex(&Sha256::digest(&comparison_payload));
+        let semantic_payload_json = format!(
+            concat!(
+                "{{\"comparison\":[\"plain-string-comparison-v1\",{0},null],",
+                "\"compatibility\":\"owl2\",\"data_identity\":[\"plain-string-v1\",",
+                "{0},null],\"datatype_iri\":\"{1}\",",
+                "\"language\":null,\"lexical_form\":{0},",
+                "\"record\":\"literal_semantic\",\"schema_version\":1}}"
+            ),
+            encoded_text, XSD_STRING_IRI
+        );
+        budget.claim_owned(
+            comparison_key
+                .capacity()
+                .saturating_add(semantic_payload_json.capacity()),
+        )?;
+        identities.push(DecodedLiteralIdentity {
+            source_literal_id: u32::try_from(source_index).map_err(|_| {
+                EncodedValidationError::resource("source literal identifier exceeds u32")
+            })?,
+            data_identity_id,
+            comparison_key,
+            semantic_payload_json,
+        });
+    }
+    Ok(identities)
+}
+
+fn decode_plain_string_data_identity(key: &[u8]) -> Option<String> {
+    let payload = key.strip_prefix(DATA_IDENTITY_PREFIX)?;
+    let (tag, text, language): (String, String, Option<String>) =
+        serde_json::from_slice(payload).ok()?;
+    (tag == "plain-string-v1" && language.is_none()).then_some(text)
+}
+
+fn data_range_key_is_complement_of(candidate: &[u8], operand: &[u8]) -> bool {
+    let Some((tag, after_tag)) = decode_canonical_varint(candidate, 0) else {
+        return false;
+    };
+    if tag != DATA_COMPLEMENT_OF_TAG || candidate.get(after_tag) != Some(&1) {
+        return false;
+    }
+    let Some((length, after_length)) = decode_canonical_varint(candidate, after_tag + 1) else {
+        return false;
+    };
+    usize::try_from(length).ok() == Some(operand.len())
+        && candidate.get(after_length..) == Some(operand)
+}
+
+fn decode_canonical_varint(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
+    let mut value = 0_u64;
+    let mut shift = 0_u32;
+    for index in start..bytes.len().min(start.saturating_add(10)) {
+        let byte = bytes[index];
+        let payload = u64::from(byte & 0x7f);
+        if shift == 63 && payload > 1 {
+            return None;
+        }
+        value |= payload.checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            if index > start && payload == 0 {
+                return None;
+            }
+            return Some((value, index + 1));
+        }
+        shift = shift.checked_add(7)?;
+    }
+    None
 }
 
 fn permanent_input_owned_bytes(
@@ -567,6 +781,13 @@ fn permanent_input_owned_bytes(
             .named_individuals
             .capacity()
             .checked_mul(size_of::<u32>()),
+    )?;
+    add_bytes(
+        &mut total,
+        named
+            .source_data_identity_ids
+            .capacity()
+            .checked_mul(size_of::<Option<u32>>()),
     )?;
     for predicates in [&named.predicates, &role_clauses.predicates] {
         add_bytes(
@@ -2397,6 +2618,35 @@ mod tests {
             serde_json::to_string(&value).unwrap(),
             DEFAULT_DATATYPE_SEMANTICS
         );
+        let with_empty: serde_json::Value =
+            serde_json::from_str(DEFAULT_WITH_EMPTY_DATATYPE_SEMANTICS).unwrap();
+        assert_eq!(
+            serde_json::to_string(&with_empty).unwrap(),
+            DEFAULT_WITH_EMPTY_DATATYPE_SEMANTICS
+        );
+        let with_string: serde_json::Value =
+            serde_json::from_str(STRING_AND_DEFAULT_DATATYPE_SEMANTICS).unwrap();
+        assert_eq!(
+            serde_json::to_string(&with_string).unwrap(),
+            STRING_AND_DEFAULT_DATATYPE_SEMANTICS
+        );
+    }
+
+    #[test]
+    fn empty_data_range_key_is_bound_to_the_default_range() {
+        let operand = [4_u8, 5, 6];
+        assert!(data_range_key_is_complement_of(
+            &[23, 1, 3, 4, 5, 6],
+            &operand
+        ));
+        assert!(!data_range_key_is_complement_of(
+            &[23, 1, 3, 4, 5, 7],
+            &operand
+        ));
+        assert!(!data_range_key_is_complement_of(
+            &[23, 1, 0x83, 0, 4, 5, 6],
+            &operand
+        ));
     }
 
     #[test]

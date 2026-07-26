@@ -401,6 +401,91 @@ def _object_service_results(reasoner: Reasoner) -> dict[str, object]:
     }
 
 
+def _data_query_snapshot() -> pyowl_core.OntologyView:
+    return pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(DataProperty(:f))",
+            "Declaration(DataProperty(:g))",
+            "SubDataPropertyOf(:d :e)",
+            "EquivalentDataProperties(:e :f)",
+            "DisjointDataProperties(:d :g)",
+            "FunctionalDataProperty(:e)",
+            "DataPropertyDomain(:e :A)",
+            "DataPropertyRange(:e <http://www.w3.org/2000/01/rdf-schema#Literal>)",
+            "Declaration(NamedIndividual(:i))",
+            "ClassAssertion(:A :i)",
+            "SubClassOf(:A DataSomeValuesFrom("
+            ":d <http://www.w3.org/2000/01/rdf-schema#Literal>))",
+        ),
+        options=OPTIONS,
+    )
+
+
+def _data_service_results(reasoner: Reasoner) -> dict[str, object]:
+    base = "urn:test:permanent#"
+    a, b = (owl.Class(owl.IRI(f"{base}{local}")) for local in ("A", "B"))
+    d, e, f, g = (
+        owl.DataProperty(owl.IRI(f"{base}{local}")) for local in ("d", "e", "f", "g")
+    )
+    i = owl.NamedIndividual(owl.IRI(f"{base}i"))
+    expressions = {
+        "some": owl.DataSomeValuesFrom((d,), owl.RDFS_LITERAL),
+        "all": owl.DataAllValuesFrom((e,), owl.RDFS_LITERAL),
+        "minimum": owl.DataMinCardinality(2, d, owl.RDFS_LITERAL),
+        "maximum": owl.DataMaxCardinality(1, e, owl.RDFS_LITERAL),
+        "exact": owl.DataExactCardinality(1, d, owl.RDFS_LITERAL),
+    }
+    entailed_axioms = (
+        owl.SubDataPropertyOf(d, e),
+        owl.EquivalentDataProperties(owl.CanonicalSet((e, f))),
+        owl.DisjointDataProperties(owl.CanonicalSet((d, g))),
+        owl.FunctionalDataProperty(e),
+        owl.DataPropertyDomain(e, a),
+    )
+    return {
+        "data_disjoint": reasoner.disjoint_data_properties(d),
+        "data_domain": reasoner.data_property_domains(e),
+        "data_equivalent": reasoner.equivalent_data_properties(e),
+        "data_hierarchy": reasoner.data_property_hierarchy(),
+        "data_sub": reasoner.sub_data_properties(e),
+        "data_super_direct": reasoner.super_data_properties(d, direct=True),
+        "data_values": reasoner.data_property_values(i, d),
+        "entails_all": reasoner.entails_all(entailed_axioms),
+        "entails_each": tuple(reasoner.entails(axiom) for axiom in entailed_axioms),
+        "expression_queries": {
+            family: (
+                reasoner.is_satisfiable(expression),
+                reasoner.is_subclass(expression, b),
+                reasoner.is_subclass(b, expression),
+                reasoner.entails(owl.ClassAssertion(expression, i)),
+                reasoner.entails(owl.SubClassOf(expression, b)),
+                reasoner.entails(owl.SubClassOf(b, expression)),
+                reasoner.entails(
+                    owl.EquivalentClasses(owl.CanonicalSet((expression, b)))
+                ),
+                reasoner.entails(
+                    owl.DisjointClasses(owl.CanonicalSet((expression, b)))
+                ),
+                reasoner.has_type(i, expression),
+                reasoner.has_type(i, expression, direct=True),
+                reasoner.instances(expression),
+                reasoner.instances(expression, direct=True),
+                reasoner.equivalent_classes(expression),
+                reasoner.superclasses(expression),
+                reasoner.superclasses(expression, direct=True),
+                reasoner.subclasses(expression),
+                reasoner.subclasses(expression, direct=True),
+                reasoner.disjoint_classes(expression),
+            )
+            for family, expression in expressions.items()
+        },
+    }
+
+
 def test_direct_assembly_publishes_one_complete_dense_scalar_equal_manifest() -> None:
     snapshot = _direct_snapshot()
 
@@ -798,13 +883,41 @@ def test_source_datatype_semantics_are_not_silently_optimized_away() -> None:
         _manifest(snapshot)
 
 
-def test_nondefault_data_range_semantics_remain_fail_closed() -> None:
+def test_xsd_string_literal_semantics_have_exact_program_and_session_parity() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            "DataPropertyAssertion(:p :i "
+            '"hello world"^^<http://www.w3.org/2001/XMLSchema#string>)',
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    manifest = _manifest(snapshot, reference=compiled)
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.realize() == scalar.realize()
+        datatype_model = cast(dict[str, object], manifest["program"])["datatype_model"]
+        assert len(cast(dict[str, object], datatype_model)["literal_identities"]) == 1
+    finally:
+        encoded.close()
+        scalar.close()
+
+
+def test_unassembled_data_range_semantics_remain_fail_closed() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(DataProperty(:d))",
             "SubClassOf(:A DataSomeValuesFrom("
-            ":d <http://www.w3.org/2001/XMLSchema#string>))",
+            ":d <http://www.w3.org/2001/XMLSchema#int>))",
         ),
         options=OPTIONS,
     )
@@ -1327,6 +1440,57 @@ def test_encoded_services_match_scalar_object_query_families_without_scalar_call
 
     with Reasoner(snapshot, config=ReasonerConfig()) as candidate:
         assert _object_service_results(candidate) == expected
+
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_encoded_services_match_scalar_data_query_families_without_scalar_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _data_query_snapshot()
+    with Reasoner(snapshot, config=ReasonerConfig(backend="python")) as reference:
+        expected = _data_service_results(reference)
+
+    extension = ModuleType("encoded_data_query_family_test_extension")
+    extension.__version__ = native.__version__
+    extension.ABI_VERSION = native.ABI_VERSION
+    extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
+    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    extension.CancellationHandle = native.CancellationHandle
+    extension.self_test = native.self_test
+
+    def forbidden_scalar_constructor(*_args: object) -> object:
+        raise AssertionError("scalar native session constructor was called")
+
+    def forbidden_compile(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("scalar service context was compiled")
+
+    def forbidden_ontology_wire(_ontology: CompiledOntology) -> bytes:
+        raise AssertionError("proportional ontology wire was encoded")
+
+    def forbidden_reference_metadata(_ontology: CompiledOntology) -> bytes:
+        raise AssertionError("Python reference-program metadata was encoded")
+
+    extension.create_session = forbidden_scalar_constructor
+    extension._create_encoded_session_v1 = native._create_encoded_session_v1
+    factory = NativeBackendFactory(extension)
+
+    monkeypatch.setattr(
+        native_backend,
+        "negotiate_encoded_input",
+        lambda view, *_args, **_kwargs: _encoded_negotiation(view),
+    )
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+    monkeypatch.setattr(facade_module, "compile_captured_bundle", forbidden_compile)
+    monkeypatch.setattr(native_input, "encode_ontology", forbidden_ontology_wire)
+    monkeypatch.setattr(
+        native_input,
+        "encode_ontology_metadata",
+        forbidden_reference_metadata,
+    )
+
+    with Reasoner(snapshot, config=ReasonerConfig()) as candidate:
+        assert _data_service_results(candidate) == expected
 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 

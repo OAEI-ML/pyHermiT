@@ -416,6 +416,9 @@ fn build_counterexample_query(
     let first_local_predicate_id = u32::try_from(ontology.program.predicates.len())
         .map_err(|_| NativeError::wire("classification predicate boundary exceeds u32"))?;
     let mut predicates = ontology.program.predicates.clone();
+    if domain == ClassificationDomain::DataProperties {
+        ensure_data_inequality_predicate(&mut predicates)?;
+    }
     let mut facts = Vec::new();
 
     let first_individual = append_query_symbol(
@@ -725,6 +728,46 @@ fn ensure_predicate(
     Ok(predicate_id)
 }
 
+fn ensure_data_inequality_predicate(predicates: &mut Vec<DecodedPredicate>) -> NativeResult<u32> {
+    let matches = predicates
+        .iter()
+        .filter(|predicate| {
+            predicate.kind == PredicateKind::Inequality
+                && predicate.argument_sorts == [TermSort::Data, TermSort::Data]
+                && predicate.symbol_id.is_none()
+                && predicate.role_id.is_none()
+                && predicate.cardinality.is_none()
+                && predicate.filler_predicate_id.is_none()
+                && predicate.annotation.is_empty()
+                && predicate.internal_key.is_none()
+        })
+        .map(|predicate| predicate.predicate_id)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [identifier] => return Ok(*identifier),
+        [] => {}
+        _ => {
+            return Err(NativeError::wire(
+                "classification program contains duplicate data-inequality predicates",
+            ));
+        }
+    }
+    let predicate_id = u32::try_from(predicates.len())
+        .map_err(|_| NativeError::wire("classification predicate ID exceeds u32"))?;
+    predicates.push(DecodedPredicate {
+        predicate_id,
+        kind: PredicateKind::Inequality,
+        argument_sorts: vec![TermSort::Data, TermSort::Data],
+        symbol_id: None,
+        role_id: None,
+        cardinality: None,
+        filler_predicate_id: None,
+        annotation: Vec::new(),
+        internal_key: None,
+    });
+    Ok(predicate_id)
+}
+
 fn canonical_atoms(values: Vec<DecodedAtom>) -> NativeResult<Vec<DecodedAtom>> {
     let mut keyed = values
         .into_iter()
@@ -982,6 +1025,30 @@ mod tests {
             ClassificationDomain::DataProperties,
             &elements,
         ));
+    }
+
+    #[test]
+    fn data_classification_reuses_one_compiled_inequality_predicate() {
+        let mut predicates = vec![role(
+            0,
+            10,
+            PredicateKind::DataRole,
+            vec![TermSort::Object, TermSort::Data],
+        )];
+
+        let first = ensure_data_inequality_predicate(&mut predicates)
+            .expect("data inequality should be appended");
+        let second = ensure_data_inequality_predicate(&mut predicates)
+            .expect("data inequality should be reused");
+
+        assert_eq!(first, 1);
+        assert_eq!(second, first);
+        assert_eq!(predicates.len(), 2);
+        assert_eq!(predicates[1].kind, PredicateKind::Inequality);
+        assert_eq!(
+            predicates[1].argument_sorts,
+            [TermSort::Data, TermSort::Data]
+        );
     }
 
     #[test]
