@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from types import SimpleNamespace
 
 import pytest
 
 from pyhermit.backends.protocol import (
     BackendInfo,
     CheckResult,
+    CompiledOntology,
     DeltaOutcome,
     HierarchyIds,
     RealizationIds,
@@ -275,3 +277,125 @@ def test_verify_factory_forwards_the_private_encoded_gate(
 
     assert native.validated == [view]
     assert native.profile_validated == [(view, profile, policy)]
+
+
+def test_verify_factory_pairs_direct_native_compilation_with_scalar_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_digest = "ab" * 32
+    native_session = _Session()
+    native_session.compiler_digest = expected_digest
+    native_session.ingestion_counters = {"encoded_buffer_count": 1}
+    context = SimpleNamespace(compiler_digest=expected_digest)
+    native_session._encoded_service_context = lambda _signature: context
+
+    class NativeFactory(_Factory):
+        def __init__(self) -> None:
+            super().__init__("native", native_session)
+            self.direct_calls: list[tuple[object, object, object, bool]] = []
+
+        def _create_encoded_lifecycle_handoff(
+            self,
+            captured: object,
+            config: object,
+            cancellation: object,
+            *,
+            validate_profile: bool,
+        ) -> _Session:
+            self.direct_calls.append((captured, config, cancellation, validate_profile))
+            return native_session
+
+    native = NativeFactory()
+    python = _Factory("python", _Session())
+    monkeypatch.setattr("pyhermit.backends.verify.PythonBackendFactory", lambda: python)
+    captured = object()
+    compiled = object.__new__(CompiledOntology)
+    config = ReasonerConfig()
+    cancellation = CancellationToken()
+
+    def compile_bundle(
+        actual_captured: object,
+        actual_config: object,
+        *,
+        cancelled: Callable[[], bool],
+    ) -> tuple[object, object, CompiledOntology]:
+        assert actual_captured is captured
+        assert actual_config is config
+        assert cancelled() is False
+        return object(), object(), compiled
+
+    def compiler_digest(actual: object) -> str:
+        assert actual is compiled
+        return expected_digest
+
+    monkeypatch.setattr("pyhermit.backends.verify.compile_captured_bundle", compile_bundle)
+    monkeypatch.setattr("pyhermit.backends.verify.canonical_compiler_digest", compiler_digest)
+    factory = VerifyBackendFactory(native)  # type: ignore[arg-type]
+
+    session = factory._create_encoded_lifecycle_handoff(  # type: ignore[arg-type]
+        captured,
+        config,
+        cancellation,
+        validate_profile=False,
+    )
+
+    assert session is not None
+    assert native.direct_calls == [(captured, config, cancellation, False)]
+    assert session.compiler_digest == expected_digest
+    assert session.ingestion_counters == {"encoded_buffer_count": 1}
+    assert session._encoded_service_context(object()) is context
+    assert session.check() == CheckResult(True)
+    session.close()
+    assert native_session.closed
+    assert python.session.closed
+    with pytest.raises(DisposedReasonerError):
+        _ = session.compiler_digest
+
+
+def test_verify_factory_discards_native_candidate_on_compiler_digest_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_session = _Session()
+    native_session.compiler_digest = "00" * 32
+
+    class NativeFactory(_Factory):
+        def _create_encoded_lifecycle_handoff(
+            self,
+            _captured: object,
+            _config: object,
+            _cancellation: object,
+            *,
+            validate_profile: bool,
+        ) -> _Session:
+            assert validate_profile
+            return native_session
+
+    native = NativeFactory("native", native_session)
+    python = _Factory("python", _Session())
+    monkeypatch.setattr("pyhermit.backends.verify.PythonBackendFactory", lambda: python)
+    monkeypatch.setattr(
+        "pyhermit.backends.verify.compile_captured_bundle",
+        lambda *_args, **_kwargs: (object(), object(), object()),
+    )
+    monkeypatch.setattr(
+        "pyhermit.backends.verify.canonical_compiler_digest",
+        lambda _compiled: "11" * 32,
+    )
+    factory = VerifyBackendFactory(native)  # type: ignore[arg-type]
+
+    with pytest.raises(BackendMismatchError) as caught:
+        factory._create_encoded_lifecycle_handoff(  # type: ignore[arg-type]
+            object(),
+            ReasonerConfig(),
+            CancellationToken(),
+        )
+
+    assert caught.value.code == "VERIFY_BACKEND_MISMATCH"
+    assert caught.value.context == {
+        "native": "str",
+        "operation": "compiler_digest",
+        "python": "str",
+        "reason": "compiler_digest_mismatch",
+    }
+    assert native_session.closed
+    assert python.config is None

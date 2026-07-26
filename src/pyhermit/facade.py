@@ -5,8 +5,6 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 
 from __future__ import annotations
 
-import hashlib
-import json
 import threading
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
@@ -36,6 +34,9 @@ from pyhermit.backends.protocol import (
 )
 from pyhermit.backends.protocol import (
     CompiledDelta as BackendCompiledDelta,
+)
+from pyhermit.backends.protocol import (
+    canonical_compiler_digest as _canonical_compiler_digest,
 )
 from pyhermit.clauses import (
     ClauseProgram,
@@ -107,25 +108,6 @@ class _Runtime:
     result_mapper: CompiledResultMapper | None
     consumer_compile_seconds: float
     ingestion_diagnostics: Mapping[str, bool | int]
-
-
-def _canonical_compiler_digest(compiled: CompiledOntology) -> str:
-    """Hash the complete compiler manifest without the path-specific session key."""
-
-    manifest = compiled.canonical_manifest()
-    fingerprints = manifest.get("fingerprints")
-    if not isinstance(fingerprints, dict) or "ontology" not in fingerprints:
-        raise RuntimeError("compiled ontology manifest lost its fingerprint contract")
-    canonical_fingerprints = dict(fingerprints)
-    del canonical_fingerprints["ontology"]
-    manifest["fingerprints"] = canonical_fingerprints
-    encoded = json.dumps(
-        manifest,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(b"pyhermit/compiler-digest/v1\0" + encoded).hexdigest()
 
 
 def _encoded_session_diagnostics(session: BackendSession) -> Mapping[str, bool | int]:
@@ -688,6 +670,38 @@ class Reasoner:
                 context={"reason": "session_surface_invalid"},
             )
         context = context_loader(validated.view.signature())
+        if self._factory.info.name == "verify":
+            scalar_bundle = getattr(session, "_encoded_scalar_bundle", None)
+            if (
+                not isinstance(scalar_bundle, tuple)
+                or len(scalar_bundle) != 3
+                or not isinstance(scalar_bundle[0], NormalizedOntology)
+                or not isinstance(scalar_bundle[1], ClauseProgram)
+                or not isinstance(scalar_bundle[2], CompiledOntology)
+            ):
+                raise BackendVersionError(
+                    "encoded verify session has no complete scalar compiler shadow",
+                    context={"reason": "session_surface_invalid"},
+                )
+            scalar_runtime = self._services(
+                scalar_bundle,
+                session,
+                compile_started=compile_started,
+            )
+            return _Runtime(
+                None,
+                None,
+                None,
+                context.compiler_digest,
+                session,
+                scalar_runtime.executor,
+                scalar_runtime.entailment,
+                scalar_runtime.classification,
+                scalar_runtime.realization,
+                scalar_runtime.result_mapper,
+                scalar_runtime.consumer_compile_seconds,
+                _encoded_session_diagnostics(session),
+            )
         executor = EncodedQueryExecutor(
             context,
             session,

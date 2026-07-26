@@ -25,6 +25,7 @@ from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
 from pyowl_core.extensions import swrl
 
 import pyhermit._native as native
+import pyhermit.backends.verify as verify_backend
 import pyhermit.facade as facade_module
 from pyhermit import Reasoner, ReasonerConfig
 from pyhermit.backends import native as native_backend
@@ -39,6 +40,7 @@ from pyhermit.backends.native_input import (
 )
 from pyhermit.backends.native_wire import decode_check
 from pyhermit.backends.protocol import CompiledOntology
+from pyhermit.backends.verify import VerifyBackendFactory
 from pyhermit.clauses.compiler import compile_captured_bundle
 from pyhermit.config import UnsupportedDatatypePolicy
 from pyhermit.core import capture_compatible_view
@@ -2319,6 +2321,94 @@ def test_facade_constructs_encoded_services_without_scalar_service_context(
         assert len(events) == before_update + 3
         assert reasoner.diagnostics()["compiler_digest"] == initial_digest
 
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_verify_facade_pairs_direct_native_compiler_with_scalar_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _direct_snapshot()
+    config = ReasonerConfig(backend="verify")
+    expected_digest = facade_module._canonical_compiler_digest(
+        _compiled(snapshot, config=config)
+    )
+    native_candidates: list[Any] = []
+    native_compiles = 0
+    scalar_compiles = 0
+
+    extension = ModuleType("encoded_verify_lifecycle_extension")
+    extension.__version__ = native.__version__
+    extension.ABI_VERSION = native.ABI_VERSION
+    extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
+    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    extension.CancellationHandle = native.CancellationHandle
+    extension.self_test = native.self_test
+
+    def forbidden_scalar_constructor(*_args: object) -> object:
+        raise AssertionError("scalar native session constructor was called")
+
+    def direct_constructor(**kwargs: object) -> object:
+        nonlocal native_compiles
+        native_compiles += 1
+        candidate = native._create_encoded_session_v1(**kwargs)
+        native_candidates.append(candidate)
+        return candidate
+
+    extension.create_session = forbidden_scalar_constructor
+    extension._create_encoded_session_v1 = direct_constructor
+    factory = VerifyBackendFactory(NativeBackendFactory(extension))
+    original_scalar_compile = verify_backend.compile_captured_bundle
+
+    def tracked_scalar_compile(*args: object, **kwargs: object) -> object:
+        nonlocal scalar_compiles
+        scalar_compiles += 1
+        return original_scalar_compile(*args, **kwargs)
+
+    monkeypatch.setattr(verify_backend, "compile_captured_bundle", tracked_scalar_compile)
+    monkeypatch.setattr(
+        native_backend,
+        "negotiate_encoded_input",
+        lambda view, *_args, **_kwargs: _encoded_negotiation(view),
+    )
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+
+    def forbidden_facade_scalar_compile(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("facade scalar-wire bundle was compiled")
+
+    monkeypatch.setattr(
+        facade_module,
+        "compile_captured_bundle",
+        forbidden_facade_scalar_compile,
+    )
+
+    with Reasoner(snapshot, config=config) as reasoner:
+        runtime = cast(Any, reasoner)._runtime
+        assert runtime.normalized is None
+        assert runtime.program is None
+        assert runtime.compiled is None
+        assert runtime.session.compiler_digest == expected_digest
+        assert reasoner.diagnostics()["compiler_digest"] == expected_digest
+        assert reasoner.diagnostics()["ingestion_path"] == "encoded-native"
+        assert reasoner.diagnostics()["encoded_buffer_count"] > 0
+        assert reasoner.is_consistent()
+        assert reasoner.class_hierarchy().nodes
+        base = "urn:test:permanent#"
+        class_a = owl.Class(owl.IRI(f"{base}A"))
+        class_c = owl.Class(owl.IRI(f"{base}C"))
+        addition = owl.SubClassOf(class_c, class_a)
+        reasoner.add_axioms((addition,))
+        reasoner.flush()
+        assert reasoner.is_subclass(class_c, class_a)
+        assert reasoner.diagnostics()["compiler_digest"] != expected_digest
+        assert reasoner.diagnostics()["ingestion_path"] == "encoded-native"
+        reasoner.remove_axioms((addition,))
+        reasoner.flush()
+        assert reasoner.diagnostics()["compiler_digest"] == expected_digest
+
+    assert native_compiles == 3
+    assert scalar_compiles == 3
+    assert len(native_candidates) == 3
+    assert all(candidate.closed for candidate in native_candidates)
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

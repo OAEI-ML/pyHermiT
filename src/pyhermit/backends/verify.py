@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from typing import TypeVar, cast
@@ -28,9 +28,12 @@ from pyhermit.backends.protocol import (
     DeltaOutcome,
     HierarchyIds,
     RealizationIds,
+    canonical_compiler_digest,
 )
 from pyhermit.backends.python import PythonBackendFactory
+from pyhermit.clauses.compiler import compile_captured_bundle
 from pyhermit.config import ReasonerConfig
+from pyhermit.core import CapturedOntology
 from pyhermit.events import CancellationToken
 from pyhermit.exceptions import (
     BackendMismatchError,
@@ -105,6 +108,73 @@ class VerifyBackendFactory:
         if callable(hook):
             hook(view, profile, unsupported_datatypes)
 
+    def _create_encoded_lifecycle_handoff(
+        self,
+        captured: CapturedOntology,
+        config: ReasonerConfig,
+        cancellation: CancellationToken,
+        *,
+        validate_profile: bool = True,
+    ) -> VerifyBackendSession | None:
+        """Pair the direct native compiler with an independent scalar shadow."""
+
+        hook = getattr(self._native, "_create_encoded_lifecycle_handoff", None)
+        if not callable(hook):
+            return None
+        native = hook(
+            captured,
+            config,
+            cancellation,
+            validate_profile=validate_profile,
+        )
+        if native is None:
+            return None
+
+        def cancelled() -> bool:
+            cancellation.check()
+            return False
+
+        try:
+            scalar_bundle = compile_captured_bundle(
+                captured,
+                config,
+                cancelled=cancelled,
+            )
+            compiled = scalar_bundle[2]
+            expected_digest = canonical_compiler_digest(compiled)
+            actual_digest = getattr(native, "compiler_digest", None)
+            if type(actual_digest) is not str or actual_digest != expected_digest:
+                raise BackendMismatchError(
+                    "encoded native and scalar compiler manifests disagree in verify mode",
+                    code="VERIFY_BACKEND_MISMATCH",
+                    context={
+                        "native": type(actual_digest).__name__,
+                        "operation": "compiler_digest",
+                        "python": "str",
+                        "reason": "compiler_digest_mismatch",
+                    },
+                )
+            shadow_config = replace(config, progress=None, warnings=None)
+            python = self._python.create_session(compiled, shadow_config, cancellation)
+        except BaseException:
+            with suppress(Exception):
+                native.close()
+            raise
+        try:
+            return VerifyBackendSession(
+                native,
+                python,
+                cancellation,
+                compiler_digest=expected_digest,
+                scalar_bundle=scalar_bundle,
+            )
+        except BaseException:
+            with suppress(Exception):
+                native.close()
+            with suppress(Exception):
+                python.close()
+            raise
+
     def create_session(
         self,
         ontology: CompiledOntology,
@@ -138,11 +208,13 @@ class VerifyBackendSession:
     __slots__ = (
         "_cancellation",
         "_closed",
+        "_compiler_digest",
         "_lock",
         "_mismatch_operation",
         "_native",
         "_owner_pid",
         "_python",
+        "_scalar_bundle",
     )
 
     def __init__(
@@ -150,6 +222,9 @@ class VerifyBackendSession:
         native: BackendSession,
         python: BackendSession,
         cancellation: CancellationToken | None = None,
+        *,
+        compiler_digest: str | None = None,
+        scalar_bundle: tuple[object, object, CompiledOntology] | None = None,
     ) -> None:
         for name, session in (("native", native), ("python", python)):
             if not all(
@@ -170,6 +245,20 @@ class VerifyBackendSession:
         self._native = native
         self._python = python
         self._cancellation = cancellation
+        if compiler_digest is not None and (
+            type(compiler_digest) is not str
+            or len(compiler_digest) != 64
+            or bytes.fromhex(compiler_digest).hex() != compiler_digest
+        ):
+            raise ValueError("compiler_digest must be a lowercase SHA-256 digest or None")
+        self._compiler_digest = compiler_digest
+        if scalar_bundle is not None and (
+            not isinstance(scalar_bundle, tuple)
+            or len(scalar_bundle) != 3
+            or not isinstance(scalar_bundle[2], CompiledOntology)
+        ):
+            raise TypeError("scalar_bundle must end in CompiledOntology or be None")
+        self._scalar_bundle = scalar_bundle
         self._owner_pid = os.getpid()
         self._lock = threading.Lock()
         self._closed = False
@@ -184,6 +273,68 @@ class VerifyBackendSession:
             lambda: self._native.ontology_fingerprint,
             lambda: self._python.ontology_fingerprint,
         )
+
+    @property
+    def compiler_digest(self) -> str:
+        digest = self._compiler_digest
+        if digest is None:
+            raise BackendVersionError(
+                "scalar verify session has no encoded compiler digest",
+                context={"reason": "session_surface_invalid"},
+            )
+        return cast(
+            str,
+            self._compare(
+                "compiler_digest",
+                lambda: getattr(self._native, "compiler_digest", None),
+                lambda: digest,
+            ),
+        )
+
+    @property
+    def ingestion_counters(self) -> Mapping[str, bool | int]:
+        _ = self.compiler_digest
+        counters = getattr(self._native, "ingestion_counters", None)
+        if not isinstance(counters, Mapping):
+            raise BackendVersionError(
+                "encoded verify session has no ingestion ledger",
+                context={"reason": "session_surface_invalid"},
+            )
+        return cast(Mapping[str, bool | int], counters)
+
+    @property
+    def _encoded_scalar_bundle(self) -> tuple[object, object, CompiledOntology]:
+        bundle = self._scalar_bundle
+        if bundle is None:
+            raise BackendVersionError(
+                "scalar verify session has no encoded compiler shadow",
+                context={"reason": "session_surface_invalid"},
+            )
+        return bundle
+
+    def _encoded_service_context(self, signature: object) -> object:
+        digest = self.compiler_digest
+        loader = getattr(self._native, "_encoded_service_context", None)
+        if not callable(loader):
+            raise BackendVersionError(
+                "encoded verify session has no service-context exporter",
+                context={"reason": "session_surface_invalid"},
+            )
+        with self._operation("encoded_service_context"):
+            context = loader(signature)
+            if getattr(context, "compiler_digest", None) != digest:
+                self._mismatch_operation = "compiler_digest"
+                raise BackendMismatchError(
+                    "encoded verify service context differs from the scalar compiler manifest",
+                    code="VERIFY_BACKEND_MISMATCH",
+                    context={
+                        "native": type(getattr(context, "compiler_digest", None)).__name__,
+                        "operation": "compiler_digest",
+                        "python": "str",
+                        "reason": "compiler_digest_mismatch",
+                    },
+                )
+            return context
 
     def check(self, query: CompiledQuery | None = None) -> CheckResult:
         return self._compare(

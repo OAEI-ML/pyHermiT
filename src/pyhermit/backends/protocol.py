@@ -93,6 +93,27 @@ def _ir_digest(value: CanonicalIR) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def canonical_compiler_digest(compiled: CompiledOntology) -> str:
+    """Hash the complete compiler manifest without its path-specific session key."""
+
+    if not isinstance(compiled, CompiledOntology):
+        raise TypeError("compiled must be CompiledOntology")
+    manifest = compiled.canonical_manifest()
+    fingerprints = manifest.get("fingerprints")
+    if not isinstance(fingerprints, dict) or "ontology" not in fingerprints:
+        raise RuntimeError("compiled ontology manifest lost its fingerprint contract")
+    canonical_fingerprints = dict(fingerprints)
+    del canonical_fingerprints["ontology"]
+    manifest["fingerprints"] = canonical_fingerprints
+    encoded = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(b"pyhermit/compiler-digest/v1\0" + encoded).hexdigest()
+
+
 @dataclass(frozen=True, slots=True, order=True)
 class EntityRef:
     kind: str
@@ -711,4 +732,5 @@ __all__ = [
     "RealizationIds",
     "ReasoningStatistics",
     "canonical_backend_json",
+    "canonical_compiler_digest",
 ]
