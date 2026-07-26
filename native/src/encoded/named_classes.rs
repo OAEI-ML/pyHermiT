@@ -230,7 +230,6 @@ pub(crate) struct ProgramSemanticEvidence {
     pub keys: bool,
     pub abox: bool,
     pub bottom_properties: bool,
-    pub ground_disjunctions: bool,
     pub unsupported_extension: bool,
 }
 
@@ -243,7 +242,6 @@ impl ProgramSemanticEvidence {
         self.keys |= other.keys;
         self.abox |= other.abox;
         self.bottom_properties |= other.bottom_properties;
-        self.ground_disjunctions |= other.ground_disjunctions;
         self.unsupported_extension |= other.unsupported_extension;
     }
 }
@@ -1847,7 +1845,6 @@ fn source_semantic_evidence<B: ByteSource>(
             | DATA_SOME_VALUES_FROM_TAG
             | DATA_ALL_VALUES_FROM_TAG
             | DATA_HAS_VALUE_TAG => evidence.datatypes = true,
-            OBJECT_UNION_OF_TAG if assertion_context => evidence.ground_disjunctions = true,
             ENTITY_TAG => {
                 let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
                     EncodedValidationError::invariant(

@@ -514,11 +514,6 @@ fn validate_semantic_coverage(
             "permanent-program source semantics contain an unsupported extension",
         ));
     }
-    if named.semantic_evidence.ground_disjunctions {
-        return Err(EncodedValidationError::protocol(
-            "permanent-program source semantics require a ground-disjunction phase",
-        ));
-    }
     if named.semantic_evidence.datatypes {
         return Err(EncodedValidationError::protocol(
             "permanent-program source semantics require a datatype semantic phase",

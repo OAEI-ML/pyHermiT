@@ -559,7 +559,7 @@ def test_hostile_reference_wire_fails_closed_without_poisoning_retry() -> None:
     assert _manifest(snapshot, reference=reference) == baseline
 
 
-def test_shared_dag_keeps_assertion_context_and_fences_ground_disjunctions() -> None:
+def test_shared_union_dag_has_exact_scalar_program_without_ground_disjunctions() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
@@ -576,8 +576,93 @@ def test_shared_dag_keeps_assertion_context_and_fences_ground_disjunctions() -> 
     )
     assert list(node_tags).count(31) == 1
 
-    with pytest.raises(BackendMismatchError, match="ground-disjunction"):
-        _manifest(snapshot)
+    manifest = _manifest(snapshot)
+
+    assert cast(dict[str, object], manifest["program"])["ground_disjunctions"] == []
+
+
+@pytest.mark.parametrize(
+    "expression",
+    (
+        ":A",
+        "ObjectIntersectionOf(:A :B)",
+        "ObjectUnionOf(:A :B)",
+        "ObjectComplementOf(:A)",
+        "ObjectOneOf(:i :j)",
+        "ObjectSomeValuesFrom(:p :A)",
+        "ObjectAllValuesFrom(:p :A)",
+        "ObjectHasValue(:p :i)",
+        "ObjectHasSelf(:p)",
+        "ObjectMinCardinality(2 :p :A)",
+        "ObjectMaxCardinality(2 :p :A)",
+        "ObjectExactCardinality(2 :p :A)",
+    ),
+    ids=(
+        "named",
+        "intersection",
+        "union",
+        "complement",
+        "one-of",
+        "some",
+        "all",
+        "has-value",
+        "has-self",
+        "minimum",
+        "maximum",
+        "exact",
+    ),
+)
+def test_supported_object_expression_families_have_complete_program_parity(
+    expression: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(NamedIndividual(:i))",
+            "Declaration(NamedIndividual(:j))",
+            f"SubClassOf({expression} :C)",
+            f"SubClassOf(:C {expression})",
+            f"ClassAssertion({expression} :i)",
+        ),
+        options=OPTIONS,
+    )
+
+    manifest = _manifest(snapshot)
+
+    _assert_dense_program(cast(dict[str, object], manifest["program"]))
+
+
+def test_conjunction_with_negated_superclass_is_inconsistent_with_scalar_parity() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(NamedIndividual(:i))",
+            "SubClassOf(:A :B)",
+            "ClassAssertion(ObjectIntersectionOf(:A ObjectComplementOf(:B)) :i)",
+        ),
+        options=OPTIONS,
+    )
+    compiled = _compiled(snapshot)
+    _manifest(snapshot, reference=compiled)
+    encoded = _direct_lifecycle_session(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        encoded_check = _check_signature(encoded.check(None))
+        scalar_check = _check_signature(scalar.check(None))
+
+        assert encoded_check == scalar_check
+        assert not encoded_check[0]
+    finally:
+        encoded.close()
+        scalar.close()
 
 
 def test_source_datatype_semantics_are_not_silently_optimized_away() -> None:
