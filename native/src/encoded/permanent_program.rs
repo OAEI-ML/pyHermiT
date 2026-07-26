@@ -1,0 +1,2431 @@
+//! Transactional assembly of owned encoded compiler phases.
+//!
+//! The structural phases deliberately publish fragment-local predicate, clause,
+//! and provenance identifiers.  This module is the one place that joins those
+//! fragments into the dense namespace accepted by the native input model.  It
+//! remains private compiler substrate: incomplete semantic sections fail closed
+//! and no session or advertised capability is created here.
+// SPDX-License-Identifier: LGPL-3.0-or-later
+
+#![forbid(unsafe_code)]
+
+use std::cmp::Ordering;
+use std::io::Write as _;
+use std::mem::size_of;
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use super::complex_roles::ComplexRolePhase;
+use super::data_inclusions::DataInclusionPhase;
+use super::data_role_hierarchy::DataRoleHierarchyPhase;
+use super::data_roles::DataRolePhase;
+use super::named_classes::{NamedClassPhase, NamedProgramParts, ProgramSemanticEvidence};
+use super::object_role_hierarchy::ObjectRoleHierarchyPhase;
+use super::object_roles::ObjectRolePhase;
+use super::role_automata::RoleAutomataPhase;
+use super::role_characteristics::RoleCharacteristicPhase;
+use super::role_clauses::RoleClausePhase;
+use super::role_model::RoleModelPhase;
+use super::role_semantics::RoleSemanticsPhase;
+use super::simple_roles::SimpleRolePhase;
+use super::{EncodedResult, EncodedValidationError};
+use crate::input_wire::{
+    validate_decoded_program, DecodedAtom, DecodedClause, DecodedDatatypeModel,
+    DecodedExpressivity, DecodedGroundAtom, DecodedPredicate, DecodedProgram,
+    DecodedProvenanceEntry, DecodedSymbolDomain, DecodedTerm, PredicateKind, SymbolKind, TermSort,
+};
+
+const PERMANENT_PROGRAM_SCHEMA_VERSION: u16 = 1;
+const RDFS_LITERAL_DISPLAY: &str = "datatype:http://www.w3.org/2000/01/rdf-schema#Literal";
+const DEFAULT_DATATYPE_SEMANTICS: &str = concat!(
+    "{\"data_ranges\":[{\"datatype_iri\":",
+    "\"http://www.w3.org/2000/01/rdf-schema#Literal\",",
+    "\"facets\":[],\"kind\":\"datatype\",\"operands\":[],",
+    "\"record\":\"data_range_semantic\",\"schema_version\":1,\"values\":[]}],",
+    "\"definitions\":[],\"record\":\"datatype_semantic_model\",\"schema_version\":1}"
+);
+const BUILTIN_PROVENANCE_INPUT: &[u8] = b"pyhermit:clausification:builtins:v1";
+
+/// Complete set of already-owned phases produced by the coarse structural call.
+pub(crate) struct EncodedSliceProgram {
+    pub(crate) named_classes: NamedClassPhase,
+    pub(crate) object_roles: ObjectRolePhase,
+    pub(crate) data_roles: DataRolePhase,
+    pub(crate) data_inclusions: DataInclusionPhase,
+    pub(crate) data_role_hierarchy: DataRoleHierarchyPhase,
+    pub(crate) simple_roles: SimpleRolePhase,
+    pub(crate) complex_roles: ComplexRolePhase,
+    pub(crate) role_characteristics: RoleCharacteristicPhase,
+    pub(crate) object_role_hierarchy: ObjectRoleHierarchyPhase,
+    pub(crate) role_semantics: RoleSemanticsPhase,
+    pub(crate) role_automata: RoleAutomataPhase,
+    pub(crate) role_model: RoleModelPhase,
+    pub(crate) role_clauses: RoleClausePhase,
+}
+
+#[allow(clippy::struct_field_names)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PermanentProgramLimits {
+    pub max_predicates: usize,
+    pub max_clauses: usize,
+    pub max_facts: usize,
+    pub max_provenance: usize,
+    pub max_owned_bytes: usize,
+    pub max_work: u64,
+    pub max_manifest_bytes: usize,
+}
+
+impl Default for PermanentProgramLimits {
+    fn default() -> Self {
+        Self {
+            max_predicates: 100_000_000,
+            max_clauses: 100_000_000,
+            max_facts: 100_000_000,
+            max_provenance: 100_000_000,
+            max_owned_bytes: 512 * 1024 * 1024,
+            max_work: 2_000_000_000,
+            max_manifest_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum PermanentProgramError<E> {
+    Encoded(EncodedValidationError),
+    Control(E),
+}
+
+impl<E> From<EncodedValidationError> for PermanentProgramError<E> {
+    fn from(error: EncodedValidationError) -> Self {
+        Self::Encoded(error)
+    }
+}
+
+type ControlledResult<T, E> = Result<T, PermanentProgramError<E>>;
+
+/// One fully owned, validator-approved permanent-program candidate.
+pub(crate) struct EncodedPermanentProgram {
+    pub(crate) program: DecodedProgram,
+    manifest_limit: usize,
+}
+
+impl EncodedPermanentProgram {
+    pub(crate) fn parity_manifest_json(&self) -> EncodedResult<Vec<u8>> {
+        let program_json = serde_json::to_vec(&self.program).map_err(|_| {
+            EncodedValidationError::invariant("permanent-program semantic serialization failed")
+        })?;
+        let program_sha256: [u8; 32] = Sha256::digest(&program_json).into();
+        let encoded = serde_json::to_vec(&PermanentProgramManifest {
+            schema_version: PERMANENT_PROGRAM_SCHEMA_VERSION,
+            program_sha256: crate::model::hex(&program_sha256),
+            program: &self.program,
+        })
+        .map_err(|_| {
+            EncodedValidationError::invariant(
+                "permanent-program parity manifest serialization failed",
+            )
+        })?;
+        if encoded.len() > self.manifest_limit {
+            return Err(EncodedValidationError::resource(
+                "permanent-program parity manifest exceeds its byte limit",
+            ));
+        }
+        Ok(encoded)
+    }
+}
+
+#[derive(Serialize)]
+struct PermanentProgramManifest<'a> {
+    schema_version: u16,
+    program_sha256: String,
+    program: &'a DecodedProgram,
+}
+
+struct PendingPredicate {
+    key: Vec<u8>,
+    value: DecodedPredicate,
+    fragment: usize,
+    local_id: usize,
+}
+
+struct Fragment {
+    predicates: Vec<DecodedPredicate>,
+    clauses: Vec<DecodedClause>,
+    positive_facts: Vec<DecodedGroundAtom>,
+    negative_facts: Vec<DecodedGroundAtom>,
+    provenance: Vec<DecodedProvenanceEntry>,
+}
+
+struct PendingProvenance {
+    value: DecodedProvenanceEntry,
+    fragment: usize,
+    local_id: usize,
+}
+
+struct PendingClause {
+    key: Vec<u8>,
+    value: DecodedClause,
+}
+
+struct Budget {
+    limits: PermanentProgramLimits,
+    live_bytes: usize,
+    peak_bytes: usize,
+    work: u64,
+}
+
+impl Budget {
+    fn new(limits: PermanentProgramLimits, live_bytes: usize) -> EncodedResult<Self> {
+        let value = Self {
+            limits,
+            live_bytes,
+            peak_bytes: live_bytes,
+            work: 0,
+        };
+        if live_bytes > limits.max_owned_bytes {
+            return Err(EncodedValidationError::resource(
+                "permanent-program input exceeds its peak owned-byte limit",
+            ));
+        }
+        Ok(value)
+    }
+
+    fn claim_owned(&mut self, amount: usize) -> EncodedResult<()> {
+        self.allocate(amount)
+    }
+
+    fn claim_temporary(&mut self, amount: usize) -> EncodedResult<()> {
+        self.allocate(amount)
+    }
+
+    fn release_temporary(&mut self, amount: usize) -> EncodedResult<()> {
+        self.release(amount)
+    }
+
+    fn allocate(&mut self, amount: usize) -> EncodedResult<()> {
+        self.live_bytes = self.live_bytes.checked_add(amount).ok_or_else(|| {
+            EncodedValidationError::resource("permanent-program live-byte count overflowed")
+        })?;
+        self.peak_bytes = self.peak_bytes.max(self.live_bytes);
+        if self.peak_bytes > self.limits.max_owned_bytes {
+            return Err(EncodedValidationError::resource(
+                "permanent-program assembly exceeds its peak owned-byte limit",
+            ));
+        }
+        Ok(())
+    }
+
+    fn release(&mut self, amount: usize) -> EncodedResult<()> {
+        self.live_bytes = self.live_bytes.checked_sub(amount).ok_or_else(|| {
+            EncodedValidationError::invariant("permanent-program live-byte accounting underflowed")
+        })?;
+        Ok(())
+    }
+
+    fn resize_allocation(&mut self, before: usize, after: usize) -> EncodedResult<()> {
+        if after >= before {
+            self.allocate(after - before)
+        } else {
+            self.release(before - after)
+        }
+    }
+
+    fn claim_work(&mut self, amount: usize) -> EncodedResult<()> {
+        let amount = u64::try_from(amount)
+            .map_err(|_| EncodedValidationError::resource("permanent-program work exceeds u64"))?;
+        let following = self.work.checked_add(amount).ok_or_else(|| {
+            EncodedValidationError::resource("permanent-program work count overflowed")
+        })?;
+        if following > self.limits.max_work {
+            return Err(EncodedValidationError::resource(
+                "permanent-program assembly exceeds its work limit",
+            ));
+        }
+        self.work = following;
+        Ok(())
+    }
+
+    fn count(observed: usize, allowed: usize, name: &'static str) -> EncodedResult<()> {
+        if observed > allowed {
+            Err(EncodedValidationError::resource(format!(
+                "permanent-program {name} exceeds its limit"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Consume every fragment and publish one dense program only after final validation.
+pub(crate) fn assemble_encoded_permanent_program<E>(
+    phases: EncodedSliceProgram,
+    limits: PermanentProgramLimits,
+    poll: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<EncodedPermanentProgram, E> {
+    poll("permanent-program-preflight").map_err(PermanentProgramError::Control)?;
+    let EncodedSliceProgram {
+        named_classes,
+        object_roles,
+        data_roles,
+        data_inclusions,
+        data_role_hierarchy,
+        simple_roles,
+        complex_roles,
+        role_characteristics,
+        object_role_hierarchy,
+        role_semantics,
+        role_automata,
+        role_model,
+        role_clauses,
+    } = phases;
+    let DataRolePhase {
+        data_property_domain,
+        bottom_data_property_id,
+        ..
+    } = data_roles;
+    let ObjectRolePhase {
+        object_role_domain,
+        inverse_role_ids: discarded_inverse_role_ids,
+        ..
+    } = object_roles;
+    drop(discarded_inverse_role_ids);
+    drop((
+        data_inclusions,
+        data_role_hierarchy,
+        simple_roles,
+        complex_roles,
+        role_characteristics,
+        object_role_hierarchy,
+        role_semantics,
+        role_automata,
+    ));
+    let named = named_classes.into_program_parts();
+    validate_semantic_coverage(&named, bottom_data_property_id, &role_clauses)
+        .map_err(PermanentProgramError::Encoded)?;
+    let semantic_evidence = named.semantic_evidence;
+    let input_owned = permanent_input_owned_bytes(
+        &named,
+        &data_property_domain,
+        &object_role_domain,
+        &role_clauses,
+        &role_model.role_model,
+    )
+    .map_err(PermanentProgramError::Encoded)?;
+    let mut budget = Budget::new(limits, input_owned).map_err(PermanentProgramError::Encoded)?;
+    let symbol_domains = freeze_symbol_domains(
+        named.class_domain,
+        data_property_domain,
+        named.data_range_domain,
+        named.data_value_domain,
+        named.entity_domain,
+        named.individual_domain,
+        object_role_domain,
+        named.source_literal_domain,
+        &mut budget,
+    )
+    .map_err(PermanentProgramError::Encoded)?;
+    poll("permanent-program-symbols").map_err(PermanentProgramError::Control)?;
+
+    let mut fragments = [
+        Fragment {
+            predicates: named.predicates,
+            clauses: named.clauses,
+            positive_facts: named.positive_facts,
+            negative_facts: named.negative_facts,
+            provenance: named.provenance,
+        },
+        Fragment {
+            predicates: role_clauses.predicates,
+            clauses: role_clauses.clauses,
+            positive_facts: Vec::new(),
+            negative_facts: Vec::new(),
+            provenance: role_clauses.provenance,
+        },
+    ];
+    let (predicates, predicate_maps) = freeze_predicates(&mut fragments, &mut budget, poll)?;
+    poll("permanent-program-predicates").map_err(PermanentProgramError::Control)?;
+    let (provenance, provenance_maps) = freeze_provenance(&mut fragments, &mut budget, poll)?;
+    poll("permanent-program-provenance").map_err(PermanentProgramError::Control)?;
+    let (clauses, promoted_facts) = freeze_clauses(
+        &mut fragments,
+        &predicate_maps,
+        &provenance_maps,
+        &predicates,
+        &provenance,
+        &mut budget,
+        poll,
+    )?;
+    poll("permanent-program-clauses").map_err(PermanentProgramError::Control)?;
+    let (positive_facts, negative_facts) = freeze_facts(
+        &mut fragments,
+        promoted_facts,
+        &predicate_maps,
+        &provenance_maps,
+        &predicates,
+        &mut budget,
+        poll,
+    )?;
+    release_remap_storage(predicate_maps, &mut budget).map_err(PermanentProgramError::Encoded)?;
+    release_remap_storage(provenance_maps, &mut budget).map_err(PermanentProgramError::Encoded)?;
+    poll("permanent-program-facts").map_err(PermanentProgramError::Control)?;
+
+    let role_model = role_model.role_model;
+    let expressivity = derive_representable_expressivity(
+        &predicates,
+        &clauses,
+        &positive_facts,
+        &negative_facts,
+        &provenance,
+        &role_model,
+        semantic_evidence,
+    )
+    .map_err(PermanentProgramError::Encoded)?;
+    let semantic_payload_json = DEFAULT_DATATYPE_SEMANTICS.to_owned();
+    budget
+        .claim_owned(semantic_payload_json.capacity())
+        .map_err(PermanentProgramError::Encoded)?;
+    let datatype_model = DecodedDatatypeModel {
+        literal_identities: Vec::new(),
+        datatype_definitions: Vec::new(),
+        unknown_datatype_ids: Vec::new(),
+        semantic_payload_json,
+    };
+    let program = DecodedProgram {
+        symbol_domains,
+        predicates,
+        clauses,
+        positive_facts,
+        negative_facts,
+        ground_disjunctions: Vec::new(),
+        role_model,
+        datatype_model,
+        expressivity,
+        provenance,
+    };
+    validate_decoded_program(&program).map_err(|error| {
+        PermanentProgramError::Encoded(EncodedValidationError::invariant(format!(
+            "assembled permanent program failed the decoded-program validator: {}",
+            error.message
+        )))
+    })?;
+    poll("permanent-program-publication").map_err(PermanentProgramError::Control)?;
+    Ok(EncodedPermanentProgram {
+        program,
+        manifest_limit: limits.max_manifest_bytes,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn freeze_symbol_domains(
+    class_domain: DecodedSymbolDomain,
+    data_property_domain: DecodedSymbolDomain,
+    data_range_domain: DecodedSymbolDomain,
+    data_value_domain: DecodedSymbolDomain,
+    entity_domain: DecodedSymbolDomain,
+    individual_domain: DecodedSymbolDomain,
+    object_role_domain: DecodedSymbolDomain,
+    source_literal_domain: DecodedSymbolDomain,
+    budget: &mut Budget,
+) -> EncodedResult<Vec<DecodedSymbolDomain>> {
+    let mut values = vec![
+        class_domain,
+        data_property_domain,
+        data_range_domain,
+        data_value_domain,
+        entity_domain,
+        individual_domain,
+        object_role_domain,
+        source_literal_domain,
+    ];
+    let expected = [
+        SymbolKind::ClassExpression,
+        SymbolKind::DataProperty,
+        SymbolKind::DataRange,
+        SymbolKind::DataValue,
+        SymbolKind::Entity,
+        SymbolKind::Individual,
+        SymbolKind::ObjectRole,
+        SymbolKind::SourceLiteral,
+    ];
+    if values.iter().map(|value| value.kind).ne(expected) {
+        return Err(EncodedValidationError::invariant(
+            "permanent-program symbol domains have the wrong kinds",
+        ));
+    }
+    budget.claim_owned(
+        values
+            .capacity()
+            .saturating_mul(size_of::<DecodedSymbolDomain>()),
+    )?;
+    for domain in &mut values {
+        for (identifier, value) in domain.values.iter_mut().enumerate() {
+            if usize::try_from(value.identifier).ok() != Some(identifier) {
+                return Err(EncodedValidationError::invariant(
+                    "permanent-program symbol IDs are not dense",
+                ));
+            }
+            budget.claim_work(1)?;
+        }
+    }
+    Ok(values)
+}
+
+fn validate_semantic_coverage(
+    named: &NamedProgramParts,
+    bottom_data_property_id: u32,
+    role_clauses: &RoleClausePhase,
+) -> EncodedResult<()> {
+    if named.semantic_evidence.unsupported_extension {
+        return Err(EncodedValidationError::protocol(
+            "permanent-program source semantics contain an unsupported extension",
+        ));
+    }
+    if named.semantic_evidence.ground_disjunctions {
+        return Err(EncodedValidationError::protocol(
+            "permanent-program source semantics require a ground-disjunction phase",
+        ));
+    }
+    if named.semantic_evidence.datatypes {
+        return Err(EncodedValidationError::protocol(
+            "permanent-program source semantics require a datatype semantic phase",
+        ));
+    }
+    if !named.source_literal_domain.values.is_empty()
+        || !named.data_value_domain.values.is_empty()
+        || named.data_range_domain.values.len() != 1
+        || named.data_range_domain.values[0].display != RDFS_LITERAL_DISPLAY
+    {
+        return Err(EncodedValidationError::protocol(
+            "permanent-program datatype semantics are not representable by the current encoded phases",
+        ));
+    }
+    let unsupported_named_datatype = named.predicates.iter().any(|predicate| {
+        matches!(
+            predicate.kind,
+            PredicateKind::DataRange
+                | PredicateKind::NegatedDataRange
+                | PredicateKind::AtLeastData
+                | PredicateKind::NegatedDataRole
+        ) || (predicate.kind == PredicateKind::DataRole
+            && predicate.role_id != Some(bottom_data_property_id))
+    });
+    let unsupported_role_datatype = role_clauses.predicates.iter().any(|predicate| {
+        predicate.kind == PredicateKind::DataRole
+            && predicate.role_id != Some(bottom_data_property_id)
+    });
+    if unsupported_named_datatype || unsupported_role_datatype {
+        return Err(EncodedValidationError::protocol(
+            "permanent-program datatype constraints require an encoded datatype semantic phase",
+        ));
+    }
+    Ok(())
+}
+
+fn permanent_input_owned_bytes(
+    named: &NamedProgramParts,
+    data_property_domain: &DecodedSymbolDomain,
+    object_role_domain: &DecodedSymbolDomain,
+    role_clauses: &RoleClausePhase,
+    role_model: &crate::input_wire::DecodedRoleModel,
+) -> EncodedResult<usize> {
+    let mut total = 0_usize;
+    for domain in [
+        &named.class_domain,
+        data_property_domain,
+        &named.data_range_domain,
+        &named.data_value_domain,
+        &named.entity_domain,
+        &named.individual_domain,
+        object_role_domain,
+        &named.source_literal_domain,
+    ] {
+        add_bytes(
+            &mut total,
+            domain
+                .values
+                .capacity()
+                .checked_mul(size_of::<crate::input_wire::DecodedSymbolValue>()),
+        )?;
+        for value in &domain.values {
+            add_bytes(&mut total, Some(value.key.capacity()))?;
+            add_bytes(&mut total, Some(value.display.capacity()))?;
+        }
+    }
+    for predicates in [&named.predicates, &role_clauses.predicates] {
+        add_bytes(
+            &mut total,
+            predicates
+                .capacity()
+                .checked_mul(size_of::<DecodedPredicate>()),
+        )?;
+        for predicate in predicates {
+            add_bytes(&mut total, Some(predicate_nested_owned_bytes(predicate)))?;
+        }
+    }
+    for clauses in [&named.clauses, &role_clauses.clauses] {
+        add_bytes(
+            &mut total,
+            clauses.capacity().checked_mul(size_of::<DecodedClause>()),
+        )?;
+        for clause in clauses {
+            add_bytes(&mut total, Some(clause_nested_owned_bytes(clause)))?;
+        }
+    }
+    for facts in [&named.positive_facts, &named.negative_facts] {
+        add_bytes(
+            &mut total,
+            facts.capacity().checked_mul(size_of::<DecodedGroundAtom>()),
+        )?;
+        for fact in facts {
+            add_bytes(&mut total, Some(ground_atom_nested_owned_bytes(fact)))?;
+        }
+    }
+    for provenance in [&named.provenance, &role_clauses.provenance] {
+        add_bytes(
+            &mut total,
+            provenance
+                .capacity()
+                .checked_mul(size_of::<DecodedProvenanceEntry>()),
+        )?;
+        for entry in provenance {
+            add_bytes(&mut total, Some(provenance_nested_owned_bytes(entry)))?;
+        }
+    }
+    for values in [
+        role_model.inverse_role_ids.capacity(),
+        role_model.non_simple_components.capacity(),
+    ] {
+        add_bytes(&mut total, values.checked_mul(size_of::<u32>()))?;
+    }
+    for capacity in [
+        role_model.simple_inclusions.capacity(),
+        role_model.data_inclusions.capacity(),
+    ] {
+        add_bytes(&mut total, capacity.checked_mul(size_of::<(u32, u32)>()))?;
+    }
+    add_bytes(
+        &mut total,
+        role_model
+            .complex_inclusions
+            .capacity()
+            .checked_mul(size_of::<(Vec<u32>, u32)>()),
+    )?;
+    for (chain, _) in &role_model.complex_inclusions {
+        add_bytes(&mut total, chain.capacity().checked_mul(size_of::<u32>()))?;
+    }
+    add_bytes(
+        &mut total,
+        role_model
+            .automata
+            .capacity()
+            .checked_mul(size_of::<crate::input_wire::DecodedRoleAutomaton>()),
+    )?;
+    for automaton in &role_model.automata {
+        add_bytes(
+            &mut total,
+            automaton
+                .final_states
+                .capacity()
+                .checked_mul(size_of::<u32>()),
+        )?;
+        add_bytes(
+            &mut total,
+            automaton
+                .transitions
+                .capacity()
+                .checked_mul(size_of::<crate::input_wire::DecodedRoleTransition>()),
+        )?;
+    }
+    Ok(total)
+}
+
+fn add_bytes(total: &mut usize, amount: Option<usize>) -> EncodedResult<()> {
+    let amount = amount.ok_or_else(|| {
+        EncodedValidationError::resource("permanent-program owned-byte count overflowed")
+    })?;
+    *total = total.checked_add(amount).ok_or_else(|| {
+        EncodedValidationError::resource("permanent-program owned-byte count overflowed")
+    })?;
+    Ok(())
+}
+
+fn predicate_nested_owned_bytes(value: &DecodedPredicate) -> usize {
+    value
+        .argument_sorts
+        .capacity()
+        .saturating_mul(size_of::<TermSort>())
+        .saturating_add(value.annotation.capacity().saturating_mul(size_of::<u32>()))
+        .saturating_add(value.internal_key.as_ref().map_or(0, String::capacity))
+}
+
+fn provenance_nested_owned_bytes(value: &DecodedProvenanceEntry) -> usize {
+    value
+        .source_sha256
+        .capacity()
+        .saturating_mul(size_of::<[u8; 32]>())
+}
+
+fn clause_nested_owned_bytes(value: &DecodedClause) -> usize {
+    value
+        .body
+        .capacity()
+        .saturating_mul(size_of::<DecodedAtom>())
+        .saturating_add(
+            value
+                .head
+                .capacity()
+                .saturating_mul(size_of::<DecodedAtom>()),
+        )
+        .saturating_add(
+            value
+                .provenance_ids
+                .capacity()
+                .saturating_mul(size_of::<u32>()),
+        )
+        .saturating_add(value.join_order.capacity().saturating_mul(size_of::<u32>()))
+        .saturating_add(
+            value
+                .body
+                .iter()
+                .chain(&value.head)
+                .map(atom_nested_owned_bytes)
+                .sum::<usize>(),
+        )
+}
+
+fn atom_nested_owned_bytes(value: &DecodedAtom) -> usize {
+    value
+        .arguments
+        .capacity()
+        .saturating_mul(size_of::<DecodedTerm>())
+}
+
+fn ground_atom_nested_owned_bytes(value: &DecodedGroundAtom) -> usize {
+    value
+        .arguments
+        .capacity()
+        .saturating_mul(size_of::<DecodedTerm>())
+        .saturating_add(
+            value
+                .provenance_ids
+                .capacity()
+                .saturating_mul(size_of::<u32>()),
+        )
+}
+
+fn freeze_predicates<E>(
+    fragments: &mut [Fragment],
+    budget: &mut Budget,
+    poll: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(Vec<DecodedPredicate>, Vec<Vec<u32>>), E> {
+    let total = fragments
+        .iter()
+        .try_fold(0_usize, |count, fragment| {
+            count.checked_add(fragment.predicates.len())
+        })
+        .ok_or_else(|| {
+            PermanentProgramError::Encoded(EncodedValidationError::resource(
+                "permanent-program predicate count overflowed",
+            ))
+        })?;
+    Budget::count(
+        total,
+        budget.limits.max_predicates,
+        "source predicate count",
+    )
+    .map_err(PermanentProgramError::Encoded)?;
+    let mut maps = fragments
+        .iter()
+        .map(|fragment| vec![u32::MAX; fragment.predicates.len()])
+        .collect::<Vec<_>>();
+    let remap_bytes = maps
+        .capacity()
+        .saturating_mul(size_of::<Vec<u32>>())
+        .saturating_add(
+            maps.iter()
+                .map(|values| values.capacity().saturating_mul(size_of::<u32>()))
+                .sum::<usize>(),
+        );
+    budget
+        .claim_temporary(remap_bytes)
+        .map_err(PermanentProgramError::Encoded)?;
+    let mut pending = Vec::<PendingPredicate>::new();
+    pending.try_reserve_exact(total).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program predicate staging allocation failed",
+        ))
+    })?;
+    budget
+        .claim_temporary(
+            pending
+                .capacity()
+                .saturating_mul(size_of::<PendingPredicate>()),
+        )
+        .map_err(PermanentProgramError::Encoded)?;
+    for (fragment_index, fragment) in fragments.iter_mut().enumerate() {
+        let source_capacity = fragment
+            .predicates
+            .capacity()
+            .saturating_mul(size_of::<DecodedPredicate>());
+        let keys =
+            predicate_keys(&fragment.predicates, budget).map_err(PermanentProgramError::Encoded)?;
+        let key_vector_bytes = keys.capacity().saturating_mul(size_of::<Vec<u8>>());
+        for (index, (predicate, key)) in std::mem::take(&mut fragment.predicates)
+            .into_iter()
+            .zip(keys)
+            .enumerate()
+        {
+            if index % 256 == 0 {
+                poll("permanent-program-predicate").map_err(PermanentProgramError::Control)?;
+            }
+            pending.push(PendingPredicate {
+                key,
+                value: predicate,
+                fragment: fragment_index,
+                local_id: index,
+            });
+            budget
+                .claim_work(1)
+                .map_err(PermanentProgramError::Encoded)?;
+        }
+        budget
+            .release_temporary(key_vector_bytes)
+            .map_err(PermanentProgramError::Encoded)?;
+        budget
+            .release(source_capacity)
+            .map_err(PermanentProgramError::Encoded)?;
+    }
+    pending.sort_by(|left, right| left.key.cmp(&right.key));
+    budget
+        .claim_work(pending.len())
+        .map_err(PermanentProgramError::Encoded)?;
+    let pending_capacity = pending
+        .capacity()
+        .saturating_mul(size_of::<PendingPredicate>());
+    let mut selected = Vec::<PendingPredicate>::new();
+    selected.try_reserve_exact(pending.len()).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program predicate selection allocation failed",
+        ))
+    })?;
+    budget
+        .claim_temporary(
+            selected
+                .capacity()
+                .saturating_mul(size_of::<PendingPredicate>()),
+        )
+        .map_err(PermanentProgramError::Encoded)?;
+    for candidate in pending {
+        let identifier = if let Some(known) = selected.last() {
+            if known.key == candidate.key {
+                if !same_predicate_shape(known, &candidate) {
+                    return Err(PermanentProgramError::Encoded(
+                        EncodedValidationError::invariant(
+                            "equal permanent-program predicate keys have conflicting payloads",
+                        ),
+                    ));
+                }
+                u32::try_from(selected.len() - 1).map_err(|_| {
+                    PermanentProgramError::Encoded(EncodedValidationError::resource(
+                        "permanent-program predicate ID exceeds u32",
+                    ))
+                })?
+            } else {
+                u32::try_from(selected.len()).map_err(|_| {
+                    PermanentProgramError::Encoded(EncodedValidationError::resource(
+                        "permanent-program predicate ID exceeds u32",
+                    ))
+                })?
+            }
+        } else {
+            0
+        };
+        maps[candidate.fragment][candidate.local_id] = identifier;
+        if usize::try_from(identifier).ok() == Some(selected.len()) {
+            selected.push(candidate);
+        } else {
+            budget
+                .release_temporary(candidate.key.capacity())
+                .map_err(PermanentProgramError::Encoded)?;
+            budget
+                .release(predicate_nested_owned_bytes(&candidate.value))
+                .map_err(PermanentProgramError::Encoded)?;
+        }
+    }
+    budget
+        .release_temporary(pending_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    Budget::count(
+        selected.len(),
+        budget.limits.max_predicates,
+        "predicate count",
+    )
+    .map_err(PermanentProgramError::Encoded)?;
+    let mut predicates = Vec::new();
+    predicates.try_reserve_exact(selected.len()).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program predicate output allocation failed",
+        ))
+    })?;
+    budget
+        .claim_owned(
+            predicates
+                .capacity()
+                .saturating_mul(size_of::<DecodedPredicate>()),
+        )
+        .map_err(PermanentProgramError::Encoded)?;
+    let selected_capacity = selected
+        .capacity()
+        .saturating_mul(size_of::<PendingPredicate>());
+    for (identifier, candidate) in selected.into_iter().enumerate() {
+        let mut value = candidate.value;
+        value.predicate_id = u32::try_from(identifier).map_err(|_| {
+            PermanentProgramError::Encoded(EncodedValidationError::resource(
+                "permanent-program predicate ID exceeds u32",
+            ))
+        })?;
+        value.filler_predicate_id = value
+            .filler_predicate_id
+            .map(|local| map_id(local, &maps[candidate.fragment], "filler predicate"))
+            .transpose()
+            .map_err(PermanentProgramError::Encoded)?;
+        budget
+            .release_temporary(candidate.key.capacity())
+            .map_err(PermanentProgramError::Encoded)?;
+        predicates.push(value);
+    }
+    budget
+        .release_temporary(selected_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    Ok((predicates, maps))
+}
+
+fn predicate_keys(
+    predicates: &[DecodedPredicate],
+    budget: &mut Budget,
+) -> EncodedResult<Vec<Vec<u8>>> {
+    let mut states = vec![0_u8; predicates.len()];
+    let mut keys = vec![Vec::new(); predicates.len()];
+    budget.claim_temporary(states.capacity())?;
+    budget.claim_temporary(keys.capacity().saturating_mul(size_of::<Vec<u8>>()))?;
+    for (index, predicate) in predicates.iter().enumerate() {
+        if usize::try_from(predicate.predicate_id).ok() != Some(index) {
+            return Err(EncodedValidationError::invariant(
+                "fragment predicate IDs are not dense",
+            ));
+        }
+        build_predicate_key(index, predicates, &mut states, &mut keys, budget)?;
+    }
+    budget.release_temporary(states.capacity())?;
+    // The caller owns the key-vector buffer and each populated key allocation.
+    Ok(keys)
+}
+
+fn build_predicate_key(
+    index: usize,
+    predicates: &[DecodedPredicate],
+    states: &mut [u8],
+    keys: &mut [Vec<u8>],
+    budget: &mut Budget,
+) -> EncodedResult<()> {
+    match states[index] {
+        2 => return Ok(()),
+        1 => {
+            return Err(EncodedValidationError::invariant(
+                "fragment predicate filler graph contains a cycle",
+            ))
+        }
+        _ => states[index] = 1,
+    }
+    let predicate = &predicates[index];
+    let filler = if let Some(identifier) = predicate.filler_predicate_id {
+        let filler_index = usize::try_from(identifier).map_err(|_| {
+            EncodedValidationError::invariant("fragment filler predicate ID exceeds usize")
+        })?;
+        if filler_index >= predicates.len() || filler_index == index {
+            return Err(EncodedValidationError::invariant(
+                "fragment filler predicate is dangling or self-referential",
+            ));
+        }
+        build_predicate_key(filler_index, predicates, states, keys, budget)?;
+        let digest: [u8; 32] = Sha256::digest(&keys[filler_index]).into();
+        Some(digest)
+    } else {
+        None
+    };
+    let mut key = Vec::<u8>::new();
+    key.extend_from_slice(b"{\"annotation\":[");
+    write_u32_values(&mut key, &predicate.annotation)?;
+    key.extend_from_slice(b"],\"argument_sorts\":[");
+    for (index, sort) in predicate.argument_sorts.iter().enumerate() {
+        if index > 0 {
+            key.push(b',');
+        }
+        write!(&mut key, "\"{}\"", term_sort_name(*sort)).map_err(|_| {
+            EncodedValidationError::invariant("permanent-program predicate key write failed")
+        })?;
+    }
+    key.extend_from_slice(b"],\"cardinality\":");
+    write_option_u32(&mut key, predicate.cardinality)?;
+    key.extend_from_slice(b",\"filler\":");
+    if let Some(digest) = filler {
+        key.push(b'"');
+        write_hex(&mut key, &digest);
+        key.push(b'"');
+    } else {
+        key.extend_from_slice(b"null");
+    }
+    key.extend_from_slice(b",\"internal_key\":");
+    if let Some(value) = &predicate.internal_key {
+        serde_json::to_writer(&mut key, value).map_err(|_| {
+            EncodedValidationError::invariant(
+                "permanent-program predicate internal key cannot be serialized",
+            )
+        })?;
+    } else {
+        key.extend_from_slice(b"null");
+    }
+    write!(
+        &mut key,
+        ",\"kind\":\"{}\",\"role_id\":",
+        predicate_kind_name(predicate.kind)
+    )
+    .map_err(|_| {
+        EncodedValidationError::invariant("permanent-program predicate key write failed")
+    })?;
+    write_option_u32(&mut key, predicate.role_id)?;
+    key.extend_from_slice(b",\"symbol_id\":");
+    write_option_u32(&mut key, predicate.symbol_id)?;
+    key.push(b'}');
+    budget.claim_temporary(key.capacity())?;
+    budget.claim_work(1)?;
+    keys[index] = key;
+    states[index] = 2;
+    Ok(())
+}
+
+fn same_predicate_shape(left: &PendingPredicate, right: &PendingPredicate) -> bool {
+    left.key == right.key
+        && left.value.kind == right.value.kind
+        && left.value.argument_sorts == right.value.argument_sorts
+        && left.value.symbol_id == right.value.symbol_id
+        && left.value.role_id == right.value.role_id
+        && left.value.cardinality == right.value.cardinality
+        && left.value.annotation == right.value.annotation
+        && left.value.internal_key == right.value.internal_key
+}
+
+fn freeze_provenance<E>(
+    fragments: &mut [Fragment],
+    budget: &mut Budget,
+    poll: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(Vec<DecodedProvenanceEntry>, Vec<Vec<u32>>), E> {
+    let total = fragments
+        .iter()
+        .try_fold(0_usize, |count, fragment| {
+            count.checked_add(fragment.provenance.len())
+        })
+        .ok_or_else(|| {
+            PermanentProgramError::Encoded(EncodedValidationError::resource(
+                "permanent-program provenance count overflowed",
+            ))
+        })?;
+    let mut maps = fragments
+        .iter()
+        .map(|fragment| vec![u32::MAX; fragment.provenance.len()])
+        .collect::<Vec<_>>();
+    let remap_bytes = maps
+        .capacity()
+        .saturating_mul(size_of::<Vec<u32>>())
+        .saturating_add(
+            maps.iter()
+                .map(|values| values.capacity().saturating_mul(size_of::<u32>()))
+                .sum::<usize>(),
+        );
+    budget
+        .claim_temporary(remap_bytes)
+        .map_err(PermanentProgramError::Encoded)?;
+    let mut pending = Vec::<PendingProvenance>::new();
+    pending.try_reserve_exact(total).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program provenance staging allocation failed",
+        ))
+    })?;
+    budget
+        .claim_temporary(
+            pending
+                .capacity()
+                .saturating_mul(size_of::<PendingProvenance>()),
+        )
+        .map_err(PermanentProgramError::Encoded)?;
+    for (fragment_index, fragment) in fragments.iter_mut().enumerate() {
+        let source_capacity = fragment
+            .provenance
+            .capacity()
+            .saturating_mul(size_of::<DecodedProvenanceEntry>());
+        for (index, entry) in std::mem::take(&mut fragment.provenance)
+            .into_iter()
+            .enumerate()
+        {
+            if index % 256 == 0 {
+                poll("permanent-program-provenance-entry")
+                    .map_err(PermanentProgramError::Control)?;
+            }
+            if usize::try_from(entry.provenance_id).ok() != Some(index)
+                || entry.source_sha256.is_empty()
+                || entry
+                    .source_sha256
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+            {
+                return Err(PermanentProgramError::Encoded(
+                    EncodedValidationError::invariant("fragment provenance is not canonical"),
+                ));
+            }
+            pending.push(PendingProvenance {
+                value: entry,
+                fragment: fragment_index,
+                local_id: index,
+            });
+            budget
+                .claim_work(1)
+                .map_err(PermanentProgramError::Encoded)?;
+        }
+        budget
+            .release(source_capacity)
+            .map_err(PermanentProgramError::Encoded)?;
+    }
+    Budget::count(
+        total,
+        budget.limits.max_provenance,
+        "source provenance count",
+    )
+    .map_err(PermanentProgramError::Encoded)?;
+    pending.sort_by(|left, right| {
+        (left.value.source_sha256.as_slice(), left.value.generated)
+            .cmp(&(right.value.source_sha256.as_slice(), right.value.generated))
+    });
+    let mut provenance = Vec::<DecodedProvenanceEntry>::new();
+    provenance.try_reserve_exact(pending.len()).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program provenance allocation failed",
+        ))
+    })?;
+    budget
+        .claim_owned(
+            provenance
+                .capacity()
+                .saturating_mul(size_of::<DecodedProvenanceEntry>()),
+        )
+        .map_err(PermanentProgramError::Encoded)?;
+    let pending_capacity = pending
+        .capacity()
+        .saturating_mul(size_of::<PendingProvenance>());
+    for candidate in pending {
+        let known = provenance.last().is_some_and(|entry| {
+            entry.source_sha256 == candidate.value.source_sha256
+                && entry.generated == candidate.value.generated
+        });
+        let identifier = if known {
+            u32::try_from(provenance.len() - 1).map_err(|_| {
+                PermanentProgramError::Encoded(EncodedValidationError::resource(
+                    "permanent-program provenance ID exceeds u32",
+                ))
+            })?
+        } else {
+            u32::try_from(provenance.len()).map_err(|_| {
+                PermanentProgramError::Encoded(EncodedValidationError::resource(
+                    "permanent-program provenance ID exceeds u32",
+                ))
+            })?
+        };
+        maps[candidate.fragment][candidate.local_id] = identifier;
+        if known {
+            budget
+                .release(provenance_nested_owned_bytes(&candidate.value))
+                .map_err(PermanentProgramError::Encoded)?;
+        } else {
+            let mut value = candidate.value;
+            value.provenance_id = identifier;
+            provenance.push(value);
+        }
+    }
+    budget
+        .release_temporary(pending_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    Budget::count(
+        provenance.len(),
+        budget.limits.max_provenance,
+        "provenance count",
+    )
+    .map_err(PermanentProgramError::Encoded)?;
+    Ok((provenance, maps))
+}
+
+fn freeze_clauses<E>(
+    fragments: &mut [Fragment],
+    predicate_maps: &[Vec<u32>],
+    provenance_maps: &[Vec<u32>],
+    predicates: &[DecodedPredicate],
+    provenance: &[DecodedProvenanceEntry],
+    budget: &mut Budget,
+    poll: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(Vec<DecodedClause>, Vec<DecodedGroundAtom>), E> {
+    let total = fragments
+        .iter()
+        .try_fold(0_usize, |count, fragment| {
+            count.checked_add(fragment.clauses.len())
+        })
+        .ok_or_else(|| {
+            PermanentProgramError::Encoded(EncodedValidationError::resource(
+                "permanent-program clause count overflowed",
+            ))
+        })?;
+    Budget::count(total, budget.limits.max_clauses, "source clause count")
+        .map_err(PermanentProgramError::Encoded)?;
+    let mut pending = Vec::<PendingClause>::new();
+    pending.try_reserve_exact(total).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program clause staging allocation failed",
+        ))
+    })?;
+    budget
+        .claim_temporary(
+            pending
+                .capacity()
+                .saturating_mul(size_of::<PendingClause>()),
+        )
+        .map_err(PermanentProgramError::Encoded)?;
+    let mut promoted_facts = Vec::<DecodedGroundAtom>::new();
+    promoted_facts.try_reserve_exact(total).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program promoted-fact allocation failed",
+        ))
+    })?;
+    budget
+        .claim_temporary(
+            promoted_facts
+                .capacity()
+                .saturating_mul(size_of::<DecodedGroundAtom>()),
+        )
+        .map_err(PermanentProgramError::Encoded)?;
+    for (fragment_index, fragment) in fragments.iter_mut().enumerate() {
+        let source_capacity = fragment
+            .clauses
+            .capacity()
+            .saturating_mul(size_of::<DecodedClause>());
+        for (index, mut clause) in std::mem::take(&mut fragment.clauses)
+            .into_iter()
+            .enumerate()
+        {
+            if index % 64 == 0 {
+                poll("permanent-program-clause").map_err(PermanentProgramError::Control)?;
+            }
+            if usize::try_from(clause.clause_id).ok() != Some(index) {
+                return Err(PermanentProgramError::Encoded(
+                    EncodedValidationError::invariant("fragment clause IDs are not dense"),
+                ));
+            }
+            remap_atoms_in_place(&mut clause.body, &predicate_maps[fragment_index])
+                .map_err(PermanentProgramError::Encoded)?;
+            remap_atoms_in_place(&mut clause.head, &predicate_maps[fragment_index])
+                .map_err(PermanentProgramError::Encoded)?;
+            canonicalize_clause(&mut clause.body, &mut clause.head, predicates, budget)
+                .map_err(PermanentProgramError::Encoded)?;
+            if clause.body.iter().any(|atom| clause.head.contains(atom)) {
+                budget
+                    .release(clause_nested_owned_bytes(&clause))
+                    .map_err(PermanentProgramError::Encoded)?;
+                continue;
+            }
+            remap_ids_in_place(
+                &mut clause.provenance_ids,
+                &provenance_maps[fragment_index],
+                "clause provenance",
+            )
+            .map_err(PermanentProgramError::Encoded)?;
+            let obsolete_join = std::mem::take(&mut clause.join_order);
+            budget
+                .release(obsolete_join.capacity().saturating_mul(size_of::<u32>()))
+                .map_err(PermanentProgramError::Encoded)?;
+            if clause.body.is_empty()
+                && !clause.head.is_empty()
+                && clause.head.iter().all(|atom| {
+                    atom.arguments
+                        .iter()
+                        .all(|term| !matches!(term, DecodedTerm::Variable { .. }))
+                })
+            {
+                if clause.head.len() > 1 {
+                    return Err(PermanentProgramError::Encoded(
+                        EncodedValidationError::protocol(
+                            "permanent-program ground disjunctions require an encoded disjunction phase",
+                        ),
+                    ));
+                }
+                let atom = clause.head.pop().ok_or_else(|| {
+                    PermanentProgramError::Encoded(EncodedValidationError::invariant(
+                        "permanent-program promoted ground fact disappeared",
+                    ))
+                })?;
+                promoted_facts.push(DecodedGroundAtom {
+                    predicate_id: atom.predicate_id,
+                    arguments: atom.arguments,
+                    provenance_ids: clause.provenance_ids,
+                });
+                budget
+                    .release(
+                        clause
+                            .body
+                            .capacity()
+                            .saturating_mul(size_of::<DecodedAtom>())
+                            .saturating_add(
+                                clause
+                                    .head
+                                    .capacity()
+                                    .saturating_mul(size_of::<DecodedAtom>()),
+                            ),
+                    )
+                    .map_err(PermanentProgramError::Encoded)?;
+                continue;
+            }
+            let key =
+                rule_key(&clause.body, &clause.head).map_err(PermanentProgramError::Encoded)?;
+            budget
+                .claim_temporary(key.capacity())
+                .map_err(PermanentProgramError::Encoded)?;
+            pending.push(PendingClause { key, value: clause });
+            budget
+                .claim_work(1)
+                .map_err(PermanentProgramError::Encoded)?;
+        }
+        budget
+            .release(source_capacity)
+            .map_err(PermanentProgramError::Encoded)?;
+    }
+    retain_complement_exclusions(&mut pending, predicates, provenance, budget)
+        .map_err(PermanentProgramError::Encoded)?;
+    pending.sort_by(|left, right| left.key.cmp(&right.key));
+    let mut selected = Vec::<PendingClause>::new();
+    selected.try_reserve_exact(pending.len()).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program clause selection allocation failed",
+        ))
+    })?;
+    let selected_capacity = selected
+        .capacity()
+        .saturating_mul(size_of::<PendingClause>());
+    budget
+        .claim_temporary(selected_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    let pending_capacity = pending
+        .capacity()
+        .saturating_mul(size_of::<PendingClause>());
+    for candidate in pending {
+        if let Some(known) = selected
+            .last_mut()
+            .filter(|known| known.key == candidate.key)
+        {
+            if known.value.body != candidate.value.body || known.value.head != candidate.value.head
+            {
+                return Err(PermanentProgramError::Encoded(
+                    EncodedValidationError::invariant(
+                        "equal permanent-program rule keys have conflicting clauses",
+                    ),
+                ));
+            }
+            let discarded_bytes = clause_nested_owned_bytes(&candidate.value);
+            merge_sorted_ids(
+                &mut known.value.provenance_ids,
+                candidate.value.provenance_ids,
+                budget,
+            )
+            .map_err(PermanentProgramError::Encoded)?;
+            budget
+                .release_temporary(candidate.key.capacity())
+                .map_err(PermanentProgramError::Encoded)?;
+            budget
+                .release(discarded_bytes)
+                .map_err(PermanentProgramError::Encoded)?;
+        } else {
+            selected.push(candidate);
+        }
+    }
+    budget
+        .release_temporary(pending_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    Budget::count(selected.len(), budget.limits.max_clauses, "clause count")
+        .map_err(PermanentProgramError::Encoded)?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(selected.len()).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program clause output allocation failed",
+        ))
+    })?;
+    budget
+        .claim_owned(output.capacity().saturating_mul(size_of::<DecodedClause>()))
+        .map_err(PermanentProgramError::Encoded)?;
+    for (identifier, candidate) in selected.into_iter().enumerate() {
+        let mut clause = candidate.value;
+        clause.clause_id = u32::try_from(identifier).map_err(|_| {
+            PermanentProgramError::Encoded(EncodedValidationError::resource(
+                "permanent-program clause ID exceeds u32",
+            ))
+        })?;
+        clause.join_order = plan_join_order(&clause.body, predicates, budget)
+            .map_err(PermanentProgramError::Encoded)?;
+        budget
+            .release_temporary(candidate.key.capacity())
+            .map_err(PermanentProgramError::Encoded)?;
+        output.push(clause);
+    }
+    budget
+        .release_temporary(selected_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    Ok((output, promoted_facts))
+}
+
+fn retain_complement_exclusions(
+    pending: &mut Vec<PendingClause>,
+    predicates: &[DecodedPredicate],
+    provenance: &[DecodedProvenanceEntry],
+    budget: &mut Budget,
+) -> EncodedResult<()> {
+    let builtin_digest: [u8; 32] = Sha256::digest(BUILTIN_PROVENANCE_INPUT).into();
+    let builtin_provenance = provenance
+        .iter()
+        .find(|entry| entry.generated && entry.source_sha256.as_slice() == [builtin_digest])
+        .map(|entry| entry.provenance_id)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("permanent-program provenance has no built-in entry")
+        })?;
+    for negative in predicates {
+        let positive_kind = match negative.kind {
+            PredicateKind::NegatedConcept => PredicateKind::Concept,
+            PredicateKind::NegatedNominal => PredicateKind::Nominal,
+            PredicateKind::NegatedObjectRole => PredicateKind::ObjectRole,
+            PredicateKind::NegatedDataRole => PredicateKind::DataRole,
+            PredicateKind::NegatedDataRange => PredicateKind::DataRange,
+            _ => continue,
+        };
+        let positive = predicates
+            .iter()
+            .find(|candidate| {
+                candidate.kind == positive_kind
+                    && candidate.argument_sorts == negative.argument_sorts
+                    && candidate.symbol_id == negative.symbol_id
+                    && candidate.role_id == negative.role_id
+                    && candidate.annotation == negative.annotation
+                    && candidate.internal_key == negative.internal_key
+            })
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "permanent-program negative predicate has no positive complement",
+                )
+            })?;
+        let mut body = Vec::<DecodedAtom>::new();
+        body.try_reserve_exact(2).map_err(|_| {
+            EncodedValidationError::resource(
+                "permanent-program complement-clause allocation failed",
+            )
+        })?;
+        budget.claim_owned(body.capacity().saturating_mul(size_of::<DecodedAtom>()))?;
+        for predicate in [positive, negative] {
+            let mut arguments = Vec::new();
+            arguments
+                .try_reserve_exact(predicate.argument_sorts.len())
+                .map_err(|_| {
+                    EncodedValidationError::resource(
+                        "permanent-program complement-atom allocation failed",
+                    )
+                })?;
+            budget.claim_owned(
+                arguments
+                    .capacity()
+                    .saturating_mul(size_of::<DecodedTerm>()),
+            )?;
+            for (index, sort) in predicate.argument_sorts.iter().enumerate() {
+                arguments.push(DecodedTerm::Variable {
+                    index: u32::try_from(index).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "permanent-program complement variable exceeds u32",
+                        )
+                    })?,
+                    sort: *sort,
+                });
+            }
+            body.push(DecodedAtom {
+                predicate_id: predicate.predicate_id,
+                arguments,
+            });
+        }
+        let mut provenance_ids = Vec::new();
+        provenance_ids.try_reserve_exact(1).map_err(|_| {
+            EncodedValidationError::resource(
+                "permanent-program complement provenance allocation failed",
+            )
+        })?;
+        budget.claim_owned(provenance_ids.capacity().saturating_mul(size_of::<u32>()))?;
+        provenance_ids.push(builtin_provenance);
+        let mut clause = DecodedClause {
+            clause_id: 0,
+            body,
+            head: Vec::new(),
+            provenance_ids,
+            join_order: Vec::new(),
+        };
+        canonicalize_clause(&mut clause.body, &mut clause.head, predicates, budget)?;
+        let key = rule_key(&clause.body, &clause.head)?;
+        budget.claim_temporary(key.capacity())?;
+        push_counted(pending, PendingClause { key, value: clause }, budget)?;
+    }
+    Ok(())
+}
+
+fn freeze_facts<E>(
+    fragments: &mut [Fragment],
+    mut promoted_facts: Vec<DecodedGroundAtom>,
+    predicate_maps: &[Vec<u32>],
+    provenance_maps: &[Vec<u32>],
+    predicates: &[DecodedPredicate],
+    budget: &mut Budget,
+    poll: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(Vec<DecodedGroundAtom>, Vec<DecodedGroundAtom>), E> {
+    let total = fragments
+        .iter()
+        .try_fold(0_usize, |count, fragment| {
+            count
+                .checked_add(fragment.positive_facts.len())
+                .and_then(|value| value.checked_add(fragment.negative_facts.len()))
+        })
+        .ok_or_else(|| {
+            PermanentProgramError::Encoded(EncodedValidationError::resource(
+                "permanent-program fact count overflowed",
+            ))
+        })?;
+    Budget::count(total, budget.limits.max_facts, "source fact count")
+        .map_err(PermanentProgramError::Encoded)?;
+    let pending_count = total.checked_add(promoted_facts.len()).ok_or_else(|| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program promoted fact count overflowed",
+        ))
+    })?;
+    let mut pending = Vec::<DecodedGroundAtom>::new();
+    pending.try_reserve_exact(pending_count).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program fact staging allocation failed",
+        ))
+    })?;
+    let pending_capacity = pending
+        .capacity()
+        .saturating_mul(size_of::<DecodedGroundAtom>());
+    budget
+        .claim_temporary(pending_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    let promoted_capacity = promoted_facts
+        .capacity()
+        .saturating_mul(size_of::<DecodedGroundAtom>());
+    pending.append(&mut promoted_facts);
+    budget
+        .release_temporary(promoted_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    for (fragment_index, fragment) in fragments.iter_mut().enumerate() {
+        let positive_capacity = fragment
+            .positive_facts
+            .capacity()
+            .saturating_mul(size_of::<DecodedGroundAtom>());
+        let negative_capacity = fragment
+            .negative_facts
+            .capacity()
+            .saturating_mul(size_of::<DecodedGroundAtom>());
+        for (expected_negative, (values, source_capacity)) in [
+            (
+                false,
+                (
+                    std::mem::take(&mut fragment.positive_facts),
+                    positive_capacity,
+                ),
+            ),
+            (
+                true,
+                (
+                    std::mem::take(&mut fragment.negative_facts),
+                    negative_capacity,
+                ),
+            ),
+        ] {
+            for (index, mut fact) in values.into_iter().enumerate() {
+                if index % 256 == 0 {
+                    poll("permanent-program-fact").map_err(PermanentProgramError::Control)?;
+                }
+                fact.predicate_id = map_id(
+                    fact.predicate_id,
+                    &predicate_maps[fragment_index],
+                    "fact predicate",
+                )
+                .map_err(PermanentProgramError::Encoded)?;
+                remap_ids_in_place(
+                    &mut fact.provenance_ids,
+                    &provenance_maps[fragment_index],
+                    "fact provenance",
+                )
+                .map_err(PermanentProgramError::Encoded)?;
+                let predicate = predicate_for(fact.predicate_id, predicates)?;
+                if is_negative_kind(predicate.kind) != expected_negative {
+                    return Err(PermanentProgramError::Encoded(
+                        EncodedValidationError::invariant(
+                            "fragment fact is stored in the wrong polarity partition",
+                        ),
+                    ));
+                }
+                pending.push(fact);
+                budget
+                    .claim_work(1)
+                    .map_err(PermanentProgramError::Encoded)?;
+            }
+            budget
+                .release(source_capacity)
+                .map_err(PermanentProgramError::Encoded)?;
+        }
+    }
+    pending.sort_by(compare_ground_identity);
+    let mut merged = Vec::<DecodedGroundAtom>::new();
+    merged.try_reserve_exact(pending.len()).map_err(|_| {
+        PermanentProgramError::Encoded(EncodedValidationError::resource(
+            "permanent-program fact merge allocation failed",
+        ))
+    })?;
+    let merged_capacity = merged
+        .capacity()
+        .saturating_mul(size_of::<DecodedGroundAtom>());
+    budget
+        .claim_temporary(merged_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    for fact in pending {
+        if let Some(known) = merged.last_mut().filter(|known| {
+            known.predicate_id == fact.predicate_id && known.arguments == fact.arguments
+        }) {
+            let discarded_bytes = ground_atom_nested_owned_bytes(&fact);
+            merge_sorted_ids(&mut known.provenance_ids, fact.provenance_ids, budget)
+                .map_err(PermanentProgramError::Encoded)?;
+            budget
+                .release(discarded_bytes)
+                .map_err(PermanentProgramError::Encoded)?;
+        } else {
+            merged.push(fact);
+        }
+    }
+    budget
+        .release_temporary(pending_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    Budget::count(merged.len(), budget.limits.max_facts, "fact count")
+        .map_err(PermanentProgramError::Encoded)?;
+    let mut positive = Vec::new();
+    let mut negative = Vec::new();
+    for value in merged {
+        let predicate = predicate_for(value.predicate_id, predicates)?;
+        if is_negative_kind(predicate.kind) {
+            push_counted(&mut negative, value, budget).map_err(PermanentProgramError::Encoded)?;
+        } else {
+            push_counted(&mut positive, value, budget).map_err(PermanentProgramError::Encoded)?;
+        }
+    }
+    budget
+        .release_temporary(merged_capacity)
+        .map_err(PermanentProgramError::Encoded)?;
+    sort_ground_atoms(&mut positive, budget).map_err(PermanentProgramError::Encoded)?;
+    sort_ground_atoms(&mut negative, budget).map_err(PermanentProgramError::Encoded)?;
+    Ok((positive, negative))
+}
+
+fn derive_representable_expressivity(
+    predicates: &[DecodedPredicate],
+    clauses: &[DecodedClause],
+    positive_facts: &[DecodedGroundAtom],
+    negative_facts: &[DecodedGroundAtom],
+    provenance: &[DecodedProvenanceEntry],
+    roles: &crate::input_wire::DecodedRoleModel,
+    source: ProgramSemanticEvidence,
+) -> EncodedResult<DecodedExpressivity> {
+    let nominals = predicates.iter().any(|predicate| {
+        matches!(
+            predicate.kind,
+            PredicateKind::Nominal | PredicateKind::NegatedNominal
+        )
+    });
+    let number_restrictions = predicates.iter().any(|predicate| {
+        matches!(
+            predicate.kind,
+            PredicateKind::AtLeastObject
+                | PredicateKind::AtLeastData
+                | PredicateKind::AnnotatedEquality
+        )
+    });
+    let mut keys = false;
+    for clause in clauses {
+        let mut named_individual = false;
+        let mut ordering_guard = false;
+        for atom in &clause.body {
+            match predicate_for(atom.predicate_id, predicates)?.kind {
+                PredicateKind::NamedIndividual => named_individual = true,
+                PredicateKind::OrderingGuard => ordering_guard = true,
+                _ => {}
+            }
+        }
+        let mut equality = false;
+        for atom in &clause.head {
+            if predicate_for(atom.predicate_id, predicates)?.kind == PredicateKind::Equality {
+                equality = true;
+                break;
+            }
+        }
+        if named_individual && ordering_guard && equality {
+            keys = true;
+            break;
+        }
+    }
+    let non_horn = clauses.iter().any(|clause| clause.head.len() > 1);
+    let abox = positive_facts
+        .iter()
+        .chain(negative_facts)
+        .any(|fact| has_source_provenance(&fact.provenance_ids, provenance));
+    let mut bottom_properties = false;
+    for clause in clauses {
+        if !has_source_provenance(&clause.provenance_ids, provenance) {
+            continue;
+        }
+        for atom in clause.body.iter().chain(&clause.head) {
+            let predicate = predicate_for(atom.predicate_id, predicates)?;
+            if (matches!(
+                predicate.kind,
+                PredicateKind::ObjectRole | PredicateKind::NegatedObjectRole
+            ) && predicate.role_id == Some(roles.bottom_object_role_id))
+                || (matches!(
+                    predicate.kind,
+                    PredicateKind::DataRole | PredicateKind::NegatedDataRole
+                ) && predicate.role_id == Some(roles.bottom_data_property_id))
+            {
+                bottom_properties = true;
+                break;
+            }
+        }
+        if bottom_properties {
+            break;
+        }
+    }
+    Ok(DecodedExpressivity {
+        inverse_roles: source.inverse_roles,
+        nominals: source.nominals || nominals,
+        datatypes: false,
+        unknown_datatypes: false,
+        complex_roles: !roles.complex_inclusions.is_empty() || !roles.automata.is_empty(),
+        number_restrictions: source.number_restrictions || number_restrictions,
+        keys: source.keys || keys,
+        non_horn,
+        bottom_properties: source.bottom_properties || bottom_properties,
+        abox: source.abox || abox,
+    })
+}
+
+fn has_source_provenance(ids: &[u32], provenance: &[DecodedProvenanceEntry]) -> bool {
+    ids.iter().any(|identifier| {
+        provenance
+            .get(usize::try_from(*identifier).unwrap_or(usize::MAX))
+            .is_some_and(|entry| !entry.generated)
+    })
+}
+
+fn remap_atoms_in_place(atoms: &mut [DecodedAtom], mapping: &[u32]) -> EncodedResult<()> {
+    for atom in atoms {
+        atom.predicate_id = map_id(atom.predicate_id, mapping, "atom predicate")?;
+    }
+    Ok(())
+}
+
+fn remap_ids_in_place(
+    values: &mut Vec<u32>,
+    mapping: &[u32],
+    name: &'static str,
+) -> EncodedResult<()> {
+    for value in values.iter_mut() {
+        *value = map_id(*value, mapping, name)?;
+    }
+    values.sort_unstable();
+    values.dedup();
+    if values.is_empty() {
+        return Err(EncodedValidationError::invariant(format!(
+            "permanent-program {name} is empty"
+        )));
+    }
+    Ok(())
+}
+
+fn map_id(value: u32, mapping: &[u32], name: &'static str) -> EncodedResult<u32> {
+    mapping
+        .get(
+            usize::try_from(value).map_err(|_| {
+                EncodedValidationError::invariant(format!("{name} ID exceeds usize"))
+            })?,
+        )
+        .copied()
+        .ok_or_else(|| EncodedValidationError::invariant(format!("{name} ID is dangling")))
+}
+
+fn release_remap_storage(maps: Vec<Vec<u32>>, budget: &mut Budget) -> EncodedResult<()> {
+    let bytes = maps
+        .capacity()
+        .saturating_mul(size_of::<Vec<u32>>())
+        .saturating_add(
+            maps.iter()
+                .map(|values| values.capacity().saturating_mul(size_of::<u32>()))
+                .sum::<usize>(),
+        );
+    drop(maps);
+    budget.release_temporary(bytes)
+}
+
+fn predicate_for(
+    identifier: u32,
+    predicates: &[DecodedPredicate],
+) -> EncodedResult<&DecodedPredicate> {
+    predicates
+        .get(
+            usize::try_from(identifier)
+                .map_err(|_| EncodedValidationError::invariant("predicate ID exceeds usize"))?,
+        )
+        .ok_or_else(|| EncodedValidationError::invariant("predicate ID is dangling"))
+}
+
+fn merge_sorted_ids(
+    destination: &mut Vec<u32>,
+    mut source: Vec<u32>,
+    budget: &mut Budget,
+) -> EncodedResult<()> {
+    let before = destination.capacity().saturating_mul(size_of::<u32>());
+    destination.append(&mut source);
+    destination.sort_unstable();
+    destination.dedup();
+    let after = destination.capacity().saturating_mul(size_of::<u32>());
+    budget.resize_allocation(before, after)
+}
+
+fn push_counted<T>(values: &mut Vec<T>, value: T, budget: &mut Budget) -> EncodedResult<()> {
+    let before = values.capacity().saturating_mul(size_of::<T>());
+    values.try_reserve(1).map_err(|_| {
+        EncodedValidationError::resource("permanent-program vector allocation failed")
+    })?;
+    let after = values.capacity().saturating_mul(size_of::<T>());
+    budget.resize_allocation(before, after)?;
+    values.push(value);
+    Ok(())
+}
+
+fn canonicalize_clause(
+    body: &mut Vec<DecodedAtom>,
+    head: &mut Vec<DecodedAtom>,
+    predicates: &[DecodedPredicate],
+    budget: &mut Budget,
+) -> EncodedResult<()> {
+    for atom in body.iter_mut().chain(head.iter_mut()) {
+        canonicalize_symmetric_atom(atom, predicates)?;
+    }
+    sort_atoms_alpha(body, budget)?;
+    sort_atoms_alpha(head, budget)?;
+    let mut variables = Vec::<(u32, TermSort)>::new();
+    for atom in body.iter().chain(head.iter()) {
+        for term in &atom.arguments {
+            if let DecodedTerm::Variable { index, sort } = term {
+                if !variables.contains(&(*index, *sort)) {
+                    push_counted(&mut variables, (*index, *sort), budget)?;
+                }
+            }
+        }
+    }
+    let maximum_passes = variables.len().checked_add(2).ok_or_else(|| {
+        EncodedValidationError::resource(
+            "permanent-program alpha-canonicalization bound overflowed",
+        )
+    })?;
+    let variable_storage = variables
+        .capacity()
+        .saturating_mul(size_of::<(u32, TermSort)>());
+    let variable_count = variables.len();
+    let mut seen = Vec::<[u8; 32]>::new();
+    for _ in 0..maximum_passes.max(2) {
+        let state = rule_key(body, head)?;
+        budget.claim_temporary(state.capacity())?;
+        let digest: [u8; 32] = Sha256::digest(&state).into();
+        if seen.contains(&digest) {
+            budget.release_temporary(state.capacity())?;
+            budget.release_temporary(variable_storage)?;
+            let seen_storage = seen.capacity().saturating_mul(size_of::<[u8; 32]>());
+            budget.release_temporary(seen_storage)?;
+            return Err(EncodedValidationError::invariant(
+                "permanent-program alpha-canonicalization entered a cycle",
+            ));
+        }
+        push_counted(&mut seen, digest, budget)?;
+        let mut mapping = Vec::<((u32, TermSort), u32)>::new();
+        for atom in body.iter().chain(head.iter()) {
+            for term in &atom.arguments {
+                let DecodedTerm::Variable { index, sort } = term else {
+                    continue;
+                };
+                if mapping.iter().all(|(known, _)| known != &(*index, *sort)) {
+                    let target = u32::try_from(mapping.len()).map_err(|_| {
+                        EncodedValidationError::resource(
+                            "permanent-program variable ID exceeds u32",
+                        )
+                    })?;
+                    push_counted(&mut mapping, ((*index, *sort), target), budget)?;
+                }
+            }
+        }
+        for atom in body.iter_mut().chain(head.iter_mut()) {
+            for term in &mut atom.arguments {
+                if let DecodedTerm::Variable { index, sort } = term {
+                    *index = mapping
+                        .iter()
+                        .find_map(|(source, target)| {
+                            (*source == (*index, *sort)).then_some(*target)
+                        })
+                        .ok_or_else(|| {
+                            EncodedValidationError::invariant(
+                                "permanent-program variable mapping is incomplete",
+                            )
+                        })?;
+                }
+            }
+            canonicalize_symmetric_atom(atom, predicates)?;
+        }
+        let mapping_storage = mapping
+            .capacity()
+            .saturating_mul(size_of::<((u32, TermSort), u32)>());
+        drop(mapping);
+        budget.release_temporary(mapping_storage)?;
+        sort_atoms_canonical(body, budget)?;
+        sort_atoms_canonical(head, budget)?;
+        let next = rule_key(body, head)?;
+        budget.claim_temporary(next.capacity())?;
+        let first_occurrence_dense = first_occurrence_dense(body, head, variable_count, budget)?;
+        let stable = state == next && first_occurrence_dense;
+        budget.release_temporary(state.capacity())?;
+        budget.release_temporary(next.capacity())?;
+        if stable {
+            drop(variables);
+            budget.release_temporary(variable_storage)?;
+            let seen_storage = seen.capacity().saturating_mul(size_of::<[u8; 32]>());
+            drop(seen);
+            budget.release_temporary(seen_storage)?;
+            return Ok(());
+        }
+        budget.claim_work(1)?;
+    }
+    drop(variables);
+    budget.release_temporary(variable_storage)?;
+    let seen_storage = seen.capacity().saturating_mul(size_of::<[u8; 32]>());
+    drop(seen);
+    budget.release_temporary(seen_storage)?;
+    Err(EncodedValidationError::invariant(
+        "permanent-program alpha-canonicalization exceeded its bounded passes",
+    ))
+}
+
+fn first_occurrence_dense(
+    body: &[DecodedAtom],
+    head: &[DecodedAtom],
+    variable_count: usize,
+    budget: &mut Budget,
+) -> EncodedResult<bool> {
+    let mut order = Vec::<u32>::new();
+    for atom in body.iter().chain(head) {
+        for term in &atom.arguments {
+            if let DecodedTerm::Variable { index, .. } = term {
+                if !order.contains(index) {
+                    push_counted(&mut order, *index, budget)?;
+                }
+            }
+        }
+    }
+    let dense = order.len() == variable_count
+        && order
+            .iter()
+            .enumerate()
+            .all(|(index, value)| usize::try_from(*value).ok() == Some(index));
+    let storage = order.capacity().saturating_mul(size_of::<u32>());
+    drop(order);
+    budget.release_temporary(storage)?;
+    Ok(dense)
+}
+
+fn canonicalize_symmetric_atom(
+    atom: &mut DecodedAtom,
+    predicates: &[DecodedPredicate],
+) -> EncodedResult<()> {
+    let predicate = predicate_for(atom.predicate_id, predicates)?;
+    let pair = match predicate.kind {
+        PredicateKind::AnnotatedEquality => Some((0, 1)),
+        PredicateKind::Equality | PredicateKind::Inequality | PredicateKind::OrderingGuard => {
+            Some((0, 1))
+        }
+        _ => None,
+    };
+    if let Some((left, right)) = pair {
+        if atom.arguments.len() <= right {
+            return Err(EncodedValidationError::invariant(
+                "permanent-program symmetric atom has the wrong arity",
+            ));
+        }
+        if compare_terms(&atom.arguments[right], &atom.arguments[left]) == Ordering::Less {
+            atom.arguments.swap(left, right);
+        }
+    }
+    Ok(())
+}
+
+fn sort_atoms_alpha(atoms: &mut Vec<DecodedAtom>, budget: &mut Budget) -> EncodedResult<()> {
+    atoms.sort_by(|left, right| {
+        left.predicate_id
+            .cmp(&right.predicate_id)
+            .then_with(|| compare_term_slices(&left.arguments, &right.arguments))
+    });
+    dedup_atoms(atoms, budget)
+}
+
+fn sort_atoms_canonical(atoms: &mut Vec<DecodedAtom>, budget: &mut Budget) -> EncodedResult<()> {
+    let mut keyed = Vec::<(Vec<u8>, DecodedAtom)>::new();
+    keyed.try_reserve_exact(atoms.len()).map_err(|_| {
+        EncodedValidationError::resource("permanent-program atom-key allocation failed")
+    })?;
+    let keyed_storage = keyed
+        .capacity()
+        .saturating_mul(size_of::<(Vec<u8>, DecodedAtom)>());
+    budget.claim_temporary(keyed_storage)?;
+    for atom in atoms.drain(..) {
+        let key = atom_key(&atom)?;
+        budget.claim_temporary(key.capacity())?;
+        keyed.push((key, atom));
+    }
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut previous = None::<Vec<u8>>;
+    for (key, atom) in keyed {
+        if previous.as_ref().is_some_and(|known| known == &key) {
+            budget.release(atom_nested_owned_bytes(&atom))?;
+            budget.release_temporary(key.capacity())?;
+        } else {
+            if let Some(known) = previous.replace(key) {
+                budget.release_temporary(known.capacity())?;
+            }
+            atoms.push(atom);
+        }
+    }
+    if let Some(known) = previous {
+        budget.release_temporary(known.capacity())?;
+    }
+    budget.release_temporary(keyed_storage)
+}
+
+fn dedup_atoms(atoms: &mut Vec<DecodedAtom>, budget: &mut Budget) -> EncodedResult<()> {
+    let mut index = 1;
+    while index < atoms.len() {
+        if atoms[index - 1] == atoms[index] {
+            let duplicate = atoms.remove(index);
+            budget.release(atom_nested_owned_bytes(&duplicate))?;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
+fn compare_ground_identity(left: &DecodedGroundAtom, right: &DecodedGroundAtom) -> Ordering {
+    left.predicate_id
+        .cmp(&right.predicate_id)
+        .then_with(|| compare_term_slices(&left.arguments, &right.arguments))
+}
+
+fn compare_term_slices(left: &[DecodedTerm], right: &[DecodedTerm]) -> Ordering {
+    for (left, right) in left.iter().zip(right) {
+        let order = compare_terms(left, right);
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn compare_terms(left: &DecodedTerm, right: &DecodedTerm) -> Ordering {
+    const fn key(value: &DecodedTerm) -> (u8, u8, u32, u32) {
+        match value {
+            DecodedTerm::Variable {
+                index,
+                sort: TermSort::Data,
+            } => (0, 0, *index, 0),
+            DecodedTerm::Variable {
+                index,
+                sort: TermSort::Object,
+            } => (0, 1, *index, 0),
+            DecodedTerm::Individual { individual_id } => (1, 0, *individual_id, 0),
+            DecodedTerm::Data {
+                source_literal_id,
+                data_identity_id,
+            } => (2, 0, *data_identity_id, *source_literal_id),
+        }
+    }
+    key(left).cmp(&key(right))
+}
+
+fn sort_ground_atoms(facts: &mut Vec<DecodedGroundAtom>, budget: &mut Budget) -> EncodedResult<()> {
+    let mut keyed = Vec::<(Vec<u8>, DecodedGroundAtom)>::new();
+    keyed.try_reserve_exact(facts.len()).map_err(|_| {
+        EncodedValidationError::resource("permanent-program fact-key allocation failed")
+    })?;
+    let keyed_storage = keyed
+        .capacity()
+        .saturating_mul(size_of::<(Vec<u8>, DecodedGroundAtom)>());
+    budget.claim_temporary(keyed_storage)?;
+    for fact in facts.drain(..) {
+        let key = ground_atom_key(&fact)?;
+        budget.claim_temporary(key.capacity())?;
+        keyed.push((key, fact));
+    }
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    for (key, value) in keyed {
+        budget.release_temporary(key.capacity())?;
+        facts.push(value);
+    }
+    budget.release_temporary(keyed_storage)
+}
+
+fn plan_join_order(
+    body: &[DecodedAtom],
+    predicates: &[DecodedPredicate],
+    budget: &mut Budget,
+) -> EncodedResult<Vec<u32>> {
+    let mut remaining = vec![true; body.len()];
+    budget.claim_temporary(remaining.capacity().saturating_mul(size_of::<bool>()))?;
+    let mut bound = Vec::<(u32, TermSort)>::new();
+    let atom_keys = body
+        .iter()
+        .map(atom_key)
+        .collect::<EncodedResult<Vec<_>>>()?;
+    budget.claim_temporary(atom_keys.capacity().saturating_mul(size_of::<Vec<u8>>()))?;
+    for key in &atom_keys {
+        budget.claim_temporary(key.capacity())?;
+    }
+    let mut result = Vec::new();
+    result.try_reserve_exact(body.len()).map_err(|_| {
+        EncodedValidationError::resource("permanent-program join-order allocation failed")
+    })?;
+    budget.claim_owned(result.capacity().saturating_mul(size_of::<u32>()))?;
+    while result.len() < body.len() {
+        let mut selected = None::<(usize, (u8, u8, usize, usize, &[u8]))>;
+        for (index, atom) in body.iter().enumerate() {
+            if !remaining[index] {
+                continue;
+            }
+            budget.claim_work(1)?;
+            let predicate = predicates
+                .get(usize::try_from(atom.predicate_id).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "permanent-program join predicate is dangling",
+                    )
+                })?;
+            let mut shared = 0_usize;
+            let mut new = 0_usize;
+            for (term_index, term) in atom.arguments.iter().enumerate() {
+                let DecodedTerm::Variable { index, sort } = term else {
+                    continue;
+                };
+                if atom.arguments[..term_index].iter().any(|known| {
+                    matches!(
+                        known,
+                        DecodedTerm::Variable {
+                            index: known_index,
+                            sort: known_sort
+                        } if known_index == index && known_sort == sort
+                    )
+                }) {
+                    continue;
+                }
+                if bound.contains(&(*index, *sort)) {
+                    shared += 1;
+                } else {
+                    new += 1;
+                }
+            }
+            let filter = matches!(
+                predicate.kind,
+                PredicateKind::Equality | PredicateKind::Inequality | PredicateKind::OrderingGuard
+            );
+            let rank = (
+                u8::from(filter && new > 0),
+                u8::from(shared == 0),
+                new,
+                atom.arguments.len(),
+                atom_keys[index].as_slice(),
+            );
+            if selected.as_ref().is_none_or(|(_, known)| rank < *known) {
+                selected = Some((index, rank));
+            }
+        }
+        let index = selected.map(|(index, _)| index).ok_or_else(|| {
+            EncodedValidationError::invariant("permanent-program join planning lost an atom")
+        })?;
+        remaining[index] = false;
+        result.push(u32::try_from(index).map_err(|_| {
+            EncodedValidationError::resource("permanent-program join index exceeds u32")
+        })?);
+        for term in &body[index].arguments {
+            if let DecodedTerm::Variable { index, sort } = term {
+                if !bound.contains(&(*index, *sort)) {
+                    push_counted(&mut bound, (*index, *sort), budget)?;
+                }
+            }
+        }
+    }
+    budget.release_temporary(remaining.capacity().saturating_mul(size_of::<bool>()))?;
+    budget.release_temporary(
+        bound
+            .capacity()
+            .saturating_mul(size_of::<(u32, TermSort)>()),
+    )?;
+    for key in &atom_keys {
+        budget.release_temporary(key.capacity())?;
+    }
+    budget.release_temporary(atom_keys.capacity().saturating_mul(size_of::<Vec<u8>>()))?;
+    Ok(result)
+}
+
+const fn predicate_kind_name(kind: PredicateKind) -> &'static str {
+    match kind {
+        PredicateKind::Concept => "concept",
+        PredicateKind::NegatedConcept => "negated_concept",
+        PredicateKind::Nominal => "nominal",
+        PredicateKind::NegatedNominal => "negated_nominal",
+        PredicateKind::ObjectRole => "object_role",
+        PredicateKind::NegatedObjectRole => "negated_object_role",
+        PredicateKind::DataRole => "data_role",
+        PredicateKind::NegatedDataRole => "negated_data_role",
+        PredicateKind::DataRange => "data_range",
+        PredicateKind::NegatedDataRange => "negated_data_range",
+        PredicateKind::Equality => "equality",
+        PredicateKind::Inequality => "inequality",
+        PredicateKind::AtLeastObject => "at_least_object",
+        PredicateKind::AtLeastData => "at_least_data",
+        PredicateKind::AnnotatedEquality => "annotated_equality",
+        PredicateKind::AutomatonState => "automaton_state",
+        PredicateKind::DisjointGuard => "disjoint_guard",
+        PredicateKind::OrderingGuard => "ordering_guard",
+        PredicateKind::NamedIndividual => "named_individual",
+    }
+}
+
+const fn term_sort_name(sort: TermSort) -> &'static str {
+    match sort {
+        TermSort::Object => "object",
+        TermSort::Data => "data",
+    }
+}
+
+fn write_option_u32(output: &mut Vec<u8>, value: Option<u32>) -> EncodedResult<()> {
+    if let Some(value) = value {
+        write!(output, "{value}").map_err(|_| {
+            EncodedValidationError::invariant("permanent-program integer write failed")
+        })?;
+    } else {
+        output.extend_from_slice(b"null");
+    }
+    Ok(())
+}
+
+fn write_u32_values(output: &mut Vec<u8>, values: &[u32]) -> EncodedResult<()> {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            output.push(b',');
+        }
+        write!(output, "{value}").map_err(|_| {
+            EncodedValidationError::invariant("permanent-program integer write failed")
+        })?;
+    }
+    Ok(())
+}
+
+fn write_hex(output: &mut Vec<u8>, value: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in value {
+        output.push(HEX[usize::from(byte >> 4)]);
+        output.push(HEX[usize::from(byte & 0x0F)]);
+    }
+}
+
+fn atom_key(atom: &DecodedAtom) -> EncodedResult<Vec<u8>> {
+    let mut output = Vec::new();
+    write_atom_json(&mut output, atom)?;
+    Ok(output)
+}
+
+fn ground_atom_key(atom: &DecodedGroundAtom) -> EncodedResult<Vec<u8>> {
+    let mut output = Vec::new();
+    output.extend_from_slice(b"{\"arguments\":[");
+    write_terms_json(&mut output, &atom.arguments)?;
+    write!(
+        &mut output,
+        "],\"predicate_id\":{},\"provenance_ids\":[",
+        atom.predicate_id
+    )
+    .map_err(|_| {
+        EncodedValidationError::invariant("permanent-program ground-atom key write failed")
+    })?;
+    write_u32_values(&mut output, &atom.provenance_ids)?;
+    output.extend_from_slice(b"],\"schema_version\":1,\"type\":\"GroundAtom\"}");
+    Ok(output)
+}
+
+fn write_atom_json(output: &mut Vec<u8>, atom: &DecodedAtom) -> EncodedResult<()> {
+    output.extend_from_slice(b"{\"arguments\":[");
+    write_terms_json(output, &atom.arguments)?;
+    write!(
+        output,
+        "],\"predicate_id\":{},\"schema_version\":1,\"type\":\"Atom\"}}",
+        atom.predicate_id
+    )
+    .map_err(|_| EncodedValidationError::invariant("permanent-program atom key write failed"))?;
+    Ok(())
+}
+
+fn write_terms_json(output: &mut Vec<u8>, terms: &[DecodedTerm]) -> EncodedResult<()> {
+    for (index, term) in terms.iter().enumerate() {
+        if index > 0 {
+            output.push(b',');
+        }
+        write_term_json(output, term)?;
+    }
+    Ok(())
+}
+
+fn write_term_json(output: &mut Vec<u8>, term: &DecodedTerm) -> EncodedResult<()> {
+    match term {
+        DecodedTerm::Variable { index, sort } => write!(
+            output,
+            "{{\"index\":{index},\"schema_version\":1,\"sort\":\"{}\",\"type\":\"Variable\"}}",
+            term_sort_name(*sort)
+        ),
+        DecodedTerm::Individual { individual_id } => write!(
+            output,
+            "{{\"individual_id\":{individual_id},\"schema_version\":1,\"type\":\"IndividualTerm\"}}"
+        ),
+        DecodedTerm::Data {
+            source_literal_id,
+            data_identity_id,
+        } => write!(
+            output,
+            "{{\"data_identity_id\":{data_identity_id},\"schema_version\":1,\"source_literal_id\":{source_literal_id},\"type\":\"DataConstant\"}}"
+        ),
+    }
+    .map_err(|_| {
+        EncodedValidationError::invariant("permanent-program term key write failed")
+    })
+}
+
+fn rule_key(body: &[DecodedAtom], head: &[DecodedAtom]) -> EncodedResult<Vec<u8>> {
+    let mut output = Vec::new();
+    output.extend_from_slice(b"{\"body\":[");
+    for (index, atom) in body.iter().enumerate() {
+        if index > 0 {
+            output.push(b',');
+        }
+        write_atom_json(&mut output, atom)?;
+    }
+    output.extend_from_slice(b"],\"head\":[");
+    for (index, atom) in head.iter().enumerate() {
+        if index > 0 {
+            output.push(b',');
+        }
+        write_atom_json(&mut output, atom)?;
+    }
+    output.extend_from_slice(b"]}");
+    Ok(output)
+}
+
+const fn is_negative_kind(kind: PredicateKind) -> bool {
+    matches!(
+        kind,
+        PredicateKind::NegatedConcept
+            | PredicateKind::NegatedNominal
+            | PredicateKind::NegatedObjectRole
+            | PredicateKind::NegatedDataRole
+            | PredicateKind::NegatedDataRange
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_datatype_payload_is_canonical_json() {
+        let value: serde_json::Value = serde_json::from_str(DEFAULT_DATATYPE_SEMANTICS).unwrap();
+        assert_eq!(
+            serde_json::to_string(&value).unwrap(),
+            DEFAULT_DATATYPE_SEMANTICS
+        );
+    }
+
+    #[test]
+    fn predicate_key_uses_recursive_filler_digest() -> EncodedResult<()> {
+        let predicates = vec![
+            DecodedPredicate {
+                predicate_id: 0,
+                kind: PredicateKind::Concept,
+                argument_sorts: vec![TermSort::Object],
+                symbol_id: Some(0),
+                role_id: None,
+                cardinality: None,
+                filler_predicate_id: None,
+                annotation: Vec::new(),
+                internal_key: None,
+            },
+            DecodedPredicate {
+                predicate_id: 1,
+                kind: PredicateKind::AtLeastObject,
+                argument_sorts: vec![TermSort::Object],
+                symbol_id: None,
+                role_id: Some(0),
+                cardinality: Some(1),
+                filler_predicate_id: Some(0),
+                annotation: Vec::new(),
+                internal_key: None,
+            },
+        ];
+        let mut budget = Budget::new(PermanentProgramLimits::default(), 0)?;
+        let keys = predicate_keys(&predicates, &mut budget)?;
+        let digest: [u8; 32] = Sha256::digest(&keys[0]).into();
+        assert!(String::from_utf8(keys[1].clone())
+            .unwrap()
+            .contains(&crate::model::hex(&digest)));
+        Ok(())
+    }
+
+    #[test]
+    fn cyclic_filler_graph_fails_closed() {
+        let predicates = vec![DecodedPredicate {
+            predicate_id: 0,
+            kind: PredicateKind::AtLeastObject,
+            argument_sorts: vec![TermSort::Object],
+            symbol_id: None,
+            role_id: Some(0),
+            cardinality: Some(1),
+            filler_predicate_id: Some(0),
+            annotation: Vec::new(),
+            internal_key: None,
+        }];
+        let mut budget = Budget::new(PermanentProgramLimits::default(), 0).unwrap();
+        assert!(predicate_keys(&predicates, &mut budget)
+            .unwrap_err()
+            .message
+            .contains("self-referential"));
+    }
+}

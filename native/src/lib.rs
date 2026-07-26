@@ -573,6 +573,17 @@ fn encoded_profile_error(error: encoded::profile::ProfilePhaseError<NativeError>
     }
 }
 
+fn encoded_permanent_error(
+    error: encoded::permanent_program::PermanentProgramError<NativeError>,
+) -> NativeError {
+    match error {
+        encoded::permanent_program::PermanentProgramError::Encoded(error) => {
+            encoded_validation_error(error)
+        }
+        encoded::permanent_program::PermanentProgramError::Control(error) => error,
+    }
+}
+
 fn encoded_profile_unsupported_datatype_policy(
     value: &str,
 ) -> NativeResult<encoded::profile::ProfileUnsupportedDatatypePolicy> {
@@ -1525,22 +1536,6 @@ fn decode_encoded_scope_maps(
     Ok((decoded, owned_bytes))
 }
 
-struct EncodedSliceProgram {
-    named_classes: encoded::named_classes::NamedClassPhase,
-    object_roles: encoded::object_roles::ObjectRolePhase,
-    data_roles: encoded::data_roles::DataRolePhase,
-    data_inclusions: encoded::data_inclusions::DataInclusionPhase,
-    data_role_hierarchy: encoded::data_role_hierarchy::DataRoleHierarchyPhase,
-    simple_roles: encoded::simple_roles::SimpleRolePhase,
-    complex_roles: encoded::complex_roles::ComplexRolePhase,
-    role_characteristics: encoded::role_characteristics::RoleCharacteristicPhase,
-    object_role_hierarchy: encoded::object_role_hierarchy::ObjectRoleHierarchyPhase,
-    role_semantics: encoded::role_semantics::RoleSemanticsPhase,
-    role_automata: encoded::role_automata::RoleAutomataPhase,
-    role_model: encoded::role_model::RoleModelPhase,
-    role_clauses: encoded::role_clauses::RoleClausePhase,
-}
-
 fn compile_encoded_slice_symbol_phases(
     slices: &Bound<'_, PyTuple>,
     limits: encoded::named_classes::NamedClassPhaseLimits,
@@ -1682,14 +1677,16 @@ fn compile_encoded_slice_symbol_phases(
     Ok(phases)
 }
 
-fn compile_encoded_slice_program(slices: &Bound<'_, PyAny>) -> NativeResult<EncodedSliceProgram> {
+fn compile_encoded_slice_program(
+    slices: &Bound<'_, PyAny>,
+) -> NativeResult<encoded::permanent_program::EncodedSliceProgram> {
     compile_encoded_slice_program_with_namespace(slices, None)
 }
 
 fn compile_encoded_slice_program_with_namespace(
     slices: &Bound<'_, PyAny>,
     definition_namespace: Option<[u8; 32]>,
-) -> NativeResult<EncodedSliceProgram> {
+) -> NativeResult<encoded::permanent_program::EncodedSliceProgram> {
     let mut poll = |_phase| Ok(());
     compile_encoded_slice_program_controlled(slices, definition_namespace, &mut poll)
 }
@@ -1698,7 +1695,7 @@ fn compile_encoded_slice_program_controlled(
     slices: &Bound<'_, PyAny>,
     definition_namespace: Option<[u8; 32]>,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
-) -> NativeResult<EncodedSliceProgram> {
+) -> NativeResult<encoded::permanent_program::EncodedSliceProgram> {
     if !slices.is_exact_instance_of::<PyTuple>() {
         return Err(encoded_slice_invalid(
             "encoded slice program is not an exact tuple",
@@ -2716,7 +2713,7 @@ fn compile_encoded_slice_program_controlled(
     .map_err(encoded_validation_error)?;
     // Nothing escapes the coarse call before this final publication checkpoint.
     poll("merged-role-clause-publication")?;
-    Ok(EncodedSliceProgram {
+    Ok(encoded::permanent_program::EncodedSliceProgram {
         named_classes,
         object_roles,
         data_roles,
@@ -2785,6 +2782,133 @@ fn debug_validate_encoded_slices_cancel_v1(
         };
         compile_encoded_slice_program_controlled(slices, None, &mut poll).map(drop)
     })
+}
+
+/// Private exact-parity probe for the encoded permanent-program prerequisite.
+///
+/// This publishes no session and is deliberately absent from `FEATURES`.
+#[pyfunction(name = "_encoded_permanent_program_parity_v1")]
+#[pyo3(signature = (
+    *,
+    slices,
+    reference_ir,
+    logical_fingerprint=None,
+    max_owned_bytes=None,
+    cancel_at_checkpoint=None
+))]
+fn encoded_permanent_program_parity_v1(
+    py: Python<'_>,
+    slices: &Bound<'_, PyAny>,
+    reference_ir: &Bound<'_, PyBytes>,
+    logical_fingerprint: Option<&Bound<'_, PyAny>>,
+    max_owned_bytes: Option<usize>,
+    cancel_at_checkpoint: Option<u64>,
+) -> PyResult<Vec<u8>> {
+    contain_encoded_selection(py, || {
+        if cancel_at_checkpoint == Some(0) {
+            return Err(encoded_slice_invalid(
+                "permanent-program cancellation checkpoint must be positive",
+            ));
+        }
+        let namespace = logical_fingerprint
+            .map(encoded_logical_fingerprint)
+            .transpose()?;
+        let limits = DecodeLimits::default();
+        let reference = decode_ontology(
+            copy_capped_bytes(
+                reference_ir,
+                limits.max_wire_bytes,
+                "permanent-program reference wire",
+            )?,
+            &limits,
+        )
+        .map_err(map_input_wire_error)?;
+        let mut checkpoint = 0_u64;
+        let mut poll = |phase: &'static str| {
+            checkpoint = checkpoint.checked_add(1).ok_or_else(|| {
+                NativeError::invariant("permanent-program checkpoint count overflowed")
+            })?;
+            if cancel_at_checkpoint == Some(checkpoint) {
+                return Err(NativeError::new(
+                    ErrorKind::Cancelled,
+                    "REASONER_INTERRUPTED",
+                    "native permanent-program assembly was interrupted at a test checkpoint",
+                )
+                .with_context("checkpoint", checkpoint.to_string())
+                .with_context("phase", phase));
+            }
+            Ok(())
+        };
+        let phases = compile_encoded_slice_program_controlled(slices, namespace, &mut poll)?;
+        let mut assembly_limits = encoded::permanent_program::PermanentProgramLimits::default();
+        if let Some(maximum) = max_owned_bytes {
+            assembly_limits.max_owned_bytes = maximum;
+        }
+        let assembled = encoded::permanent_program::assemble_encoded_permanent_program(
+            phases,
+            assembly_limits,
+            &mut poll,
+        )
+        .map_err(encoded_permanent_error)?;
+        let mismatch = permanent_program_mismatch(&assembled.program, &reference.program);
+        if let Some(section) = mismatch {
+            let semantic_fence = matches!(
+                section,
+                "ground_disjunctions" | "datatype_model" | "expressivity"
+            );
+            return Err(NativeError::new(
+                ErrorKind::Wire,
+                "NATIVE_ENCODED_PARITY_MISMATCH",
+                if semantic_fence {
+                    "encoded permanent phases cannot exactly represent the reference semantics"
+                } else {
+                    "encoded permanent-program assembly differs from the scalar reference"
+                },
+            )
+            .with_context("section", section));
+        }
+        assembled
+            .parity_manifest_json()
+            .map_err(encoded_validation_error)
+    })
+}
+
+fn permanent_program_mismatch(
+    assembled: &input_wire::DecodedProgram,
+    reference: &input_wire::DecodedProgram,
+) -> Option<&'static str> {
+    [
+        (
+            assembled.symbol_domains != reference.symbol_domains,
+            "symbol_domains",
+        ),
+        (assembled.predicates != reference.predicates, "predicates"),
+        (assembled.clauses != reference.clauses, "clauses"),
+        (
+            assembled.positive_facts != reference.positive_facts,
+            "positive_facts",
+        ),
+        (
+            assembled.negative_facts != reference.negative_facts,
+            "negative_facts",
+        ),
+        (
+            assembled.ground_disjunctions != reference.ground_disjunctions,
+            "ground_disjunctions",
+        ),
+        (assembled.role_model != reference.role_model, "role_model"),
+        (
+            assembled.datatype_model != reference.datatype_model,
+            "datatype_model",
+        ),
+        (
+            assembled.expressivity != reference.expressivity,
+            "expressivity",
+        ),
+        (assembled.provenance != reference.provenance, "provenance"),
+    ]
+    .into_iter()
+    .find_map(|(different, section)| different.then_some(section))
 }
 
 fn compile_encoded_profile_slices_controlled(
@@ -4669,6 +4793,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(validate_encoded_slices_v1, module)?)?;
     module.add_function(wrap_pyfunction!(
         debug_validate_encoded_slices_cancel_v1,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        encoded_permanent_program_parity_v1,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(debug_encoded_selection_panic_v1, module)?)?;

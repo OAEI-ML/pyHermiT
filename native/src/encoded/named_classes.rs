@@ -218,6 +218,36 @@ pub struct IndividualSignatureBinding {
     pub declared: bool,
 }
 
+/// Source-derived semantics that cannot be reconstructed from optimized rule
+/// output after normalization has removed tautologies or minimum-zero forms.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ProgramSemanticEvidence {
+    pub inverse_roles: bool,
+    pub nominals: bool,
+    pub datatypes: bool,
+    pub number_restrictions: bool,
+    pub keys: bool,
+    pub abox: bool,
+    pub bottom_properties: bool,
+    pub ground_disjunctions: bool,
+    pub unsupported_extension: bool,
+}
+
+impl ProgramSemanticEvidence {
+    const fn include(&mut self, other: Self) {
+        self.inverse_roles |= other.inverse_roles;
+        self.nominals |= other.nominals;
+        self.datatypes |= other.datatypes;
+        self.number_restrictions |= other.number_restrictions;
+        self.keys |= other.keys;
+        self.abox |= other.abox;
+        self.bottom_properties |= other.bottom_properties;
+        self.ground_disjunctions |= other.ground_disjunctions;
+        self.unsupported_extension |= other.unsupported_extension;
+    }
+}
+
 /// Owned output of the named-class compiler transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamedClassPhase {
@@ -240,6 +270,7 @@ pub struct NamedClassPhase {
     pub deferred_roots: usize,
     pub work: u64,
     pub owned_bytes: usize,
+    pub(crate) semantic_evidence: ProgramSemanticEvidence,
     compiled_root_digests: Vec<[u8; 32]>,
     nominal_bindings: Vec<NominalBinding>,
     normalized_edges: Vec<NormalizedEdge>,
@@ -265,7 +296,40 @@ pub struct NamedClassPhase {
     manifest_limit: usize,
 }
 
+pub(crate) struct NamedProgramParts {
+    pub entity_domain: DecodedSymbolDomain,
+    pub class_domain: DecodedSymbolDomain,
+    pub data_range_domain: DecodedSymbolDomain,
+    pub individual_domain: DecodedSymbolDomain,
+    pub source_literal_domain: DecodedSymbolDomain,
+    pub data_value_domain: DecodedSymbolDomain,
+    pub predicates: Vec<DecodedPredicate>,
+    pub clauses: Vec<DecodedClause>,
+    pub positive_facts: Vec<DecodedGroundAtom>,
+    pub negative_facts: Vec<DecodedGroundAtom>,
+    pub provenance: Vec<DecodedProvenanceEntry>,
+    pub semantic_evidence: ProgramSemanticEvidence,
+}
+
 impl NamedClassPhase {
+    /// Consume the compiler transaction at the sole permanent-program boundary.
+    pub(crate) fn into_program_parts(self) -> NamedProgramParts {
+        NamedProgramParts {
+            entity_domain: self.entity_domain,
+            class_domain: self.class_domain,
+            data_range_domain: self.data_range_domain,
+            individual_domain: self.individual_domain,
+            source_literal_domain: self.source_literal_domain,
+            data_value_domain: self.data_value_domain,
+            predicates: self.predicates,
+            clauses: self.clauses,
+            positive_facts: self.positive_facts,
+            negative_facts: self.negative_facts,
+            provenance: self.provenance,
+            semantic_evidence: self.semantic_evidence,
+        }
+    }
+
     /// Canonical private handoff for the session-owned entity and individual sets.
     pub fn canonical_session_domain_manifest_json(&self) -> EncodedResult<Vec<u8>> {
         self.canonical_session_domain_manifest_json_with_limit(self.manifest_limit)
@@ -1677,6 +1741,200 @@ pub fn compile_named_class_phase_with_role_domains_scoped_and_namespace<B: ByteS
     )
 }
 
+fn source_semantic_evidence<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<ProgramSemanticEvidence> {
+    let mut evidence = ProgramSemanticEvidence::default();
+    let node_count = model.summary().node_count;
+    let mut state = Vec::new();
+    state.try_reserve_exact(node_count).map_err(|_| {
+        EncodedValidationError::resource("semantic-evidence bitmap allocation failed")
+    })?;
+    // Bits 0/1 record traversal outside/inside a class-assertion context. Bit
+    // 2 marks logical roots, whose final field is the non-semantic annotation
+    // collection. Seeding every root before traversal makes shared DAG nodes
+    // deterministic and bounds the scan to two visits per node.
+    state.resize(node_count, 0_u8);
+    budget.claim_owned(state.capacity())?;
+    let mut stack = Vec::<(NodeId, bool)>::new();
+    let maximum_visits = node_count.checked_mul(2).ok_or_else(|| {
+        EncodedValidationError::resource("semantic-evidence visit bound overflowed")
+    })?;
+    stack.try_reserve_exact(maximum_visits).map_err(|_| {
+        EncodedValidationError::resource("semantic-evidence stack allocation failed")
+    })?;
+    budget.claim_owned(stack.capacity().saturating_mul(size_of::<(NodeId, bool)>()))?;
+    for root in &symbols.roots {
+        budget.claim_work(1)?;
+        match root.handler {
+            RootHandler::Declaration
+            | RootHandler::OntologyAnnotation
+            | RootHandler::AnnotationAssertion
+            | RootHandler::SubAnnotationPropertyOf
+            | RootHandler::AnnotationPropertyDomain
+            | RootHandler::AnnotationPropertyRange => continue,
+            RootHandler::SubDataPropertyOf
+            | RootHandler::EquivalentDataProperties
+            | RootHandler::DisjointDataProperties
+            | RootHandler::DataPropertyDomain
+            | RootHandler::DataPropertyRange
+            | RootHandler::FunctionalDataProperty
+            | RootHandler::DatatypeDefinition
+            | RootHandler::DataPropertyAssertion
+            | RootHandler::NegativeDataPropertyAssertion => evidence.datatypes = true,
+            RootHandler::HasKey => evidence.keys = true,
+            RootHandler::SameIndividual
+            | RootHandler::DifferentIndividuals
+            | RootHandler::ClassAssertion
+            | RootHandler::ObjectPropertyAssertion
+            | RootHandler::NegativeObjectPropertyAssertion => evidence.abox = true,
+            RootHandler::SwrlRule => evidence.unsupported_extension = true,
+            _ => {}
+        }
+        if matches!(
+            root.handler,
+            RootHandler::DataPropertyAssertion | RootHandler::NegativeDataPropertyAssertion
+        ) {
+            evidence.abox = true;
+        }
+        let index = usize::try_from(root.node.get() - 1).map_err(|_| {
+            EncodedValidationError::invariant("semantic-evidence root ID exceeds usize")
+        })?;
+        let root_state = state.get_mut(index).ok_or_else(|| {
+            EncodedValidationError::invariant("semantic-evidence root ID is dangling")
+        })?;
+        *root_state |= 0b100;
+        let assertion_context = root.handler == RootHandler::ClassAssertion;
+        let visit_bit = if assertion_context { 0b010 } else { 0b001 };
+        if *root_state & visit_bit == 0 {
+            *root_state |= visit_bit;
+            stack.push((root.node, assertion_context));
+        }
+    }
+    while let Some((identifier, assertion_context)) = stack.pop() {
+        budget.claim_work(1)?;
+        let index = usize::try_from(identifier.get() - 1).map_err(|_| {
+            EncodedValidationError::invariant("semantic-evidence node ID exceeds usize")
+        })?;
+        let visit_bit = if assertion_context { 0b010 } else { 0b001 };
+        let node_state = state.get_mut(index).ok_or_else(|| {
+            EncodedValidationError::invariant("semantic-evidence node ID is dangling")
+        })?;
+        debug_assert_ne!(*node_state & visit_bit, 0);
+        let logical_root = *node_state & 0b100 != 0;
+        let node = model.node(identifier)?;
+        match node.tag() {
+            OBJECT_INVERSE_OF_TAG => evidence.inverse_roles = true,
+            OBJECT_ONE_OF_TAG => evidence.nominals = true,
+            OBJECT_MIN_CARDINALITY_TAG
+            | OBJECT_MAX_CARDINALITY_TAG
+            | OBJECT_EXACT_CARDINALITY_TAG
+            | DATA_MIN_CARDINALITY_TAG
+            | DATA_MAX_CARDINALITY_TAG
+            | DATA_EXACT_CARDINALITY_TAG => evidence.number_restrictions = true,
+            LITERAL_TAG
+            | DATA_INTERSECTION_OF_TAG
+            | DATA_UNION_OF_TAG
+            | DATA_COMPLEMENT_OF_TAG
+            | DATA_ONE_OF_TAG
+            | DATATYPE_RESTRICTION_TAG
+            | DATA_SOME_VALUES_FROM_TAG
+            | DATA_ALL_VALUES_FROM_TAG
+            | DATA_HAS_VALUE_TAG => evidence.datatypes = true,
+            OBJECT_UNION_OF_TAG if assertion_context => evidence.ground_disjunctions = true,
+            ENTITY_TAG => {
+                let entity_id = symbols.entity_symbol_for_node(identifier).ok_or_else(|| {
+                    EncodedValidationError::invariant(
+                        "semantic-evidence entity has no symbol identity",
+                    )
+                })?;
+                let entity = symbols
+                    .entity_domain
+                    .values
+                    .get(usize::try_from(entity_id).unwrap_or(usize::MAX))
+                    .ok_or_else(|| {
+                        EncodedValidationError::invariant("semantic-evidence entity ID is dangling")
+                    })?;
+                if entity.display.starts_with("datatype:")
+                    || entity.display.starts_with(DATA_PROPERTY_PREFIX)
+                {
+                    evidence.datatypes = true;
+                }
+                if entity.display == BOTTOM_OBJECT_DISPLAY || entity.display == BOTTOM_DATA_DISPLAY
+                {
+                    evidence.bottom_properties = true;
+                }
+            }
+            _ => {}
+        }
+        let fields = node.fields();
+        let semantic_end = if logical_root {
+            fields.end.checked_sub(1).ok_or_else(|| {
+                EncodedValidationError::invariant("semantic root lost its annotation field")
+            })?
+        } else {
+            fields.end
+        };
+        for field_index in fields.start..semantic_end {
+            let field = model.field(field_index)?.ok_or_else(|| {
+                EncodedValidationError::invariant("semantic-evidence field disappeared")
+            })?;
+            match model.resolve(field)? {
+                ComponentValue::Node(child) => {
+                    schedule_semantic_node(child, assertion_context, &mut state, &mut stack)?;
+                }
+                ComponentValue::Collection(collection) => {
+                    for item_index in collection.items() {
+                        budget.claim_work(1)?;
+                        let item = model.item(item_index)?.ok_or_else(|| {
+                            EncodedValidationError::invariant(
+                                "semantic-evidence collection item disappeared",
+                            )
+                        })?;
+                        if let ComponentValue::Node(child) = model.resolve(item)? {
+                            schedule_semantic_node(
+                                child,
+                                assertion_context,
+                                &mut state,
+                                &mut stack,
+                            )?;
+                        }
+                    }
+                }
+                ComponentValue::None | ComponentValue::Scalar(_) => {}
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+fn schedule_semantic_node(
+    identifier: NodeId,
+    assertion_context: bool,
+    state: &mut [u8],
+    stack: &mut Vec<(NodeId, bool)>,
+) -> EncodedResult<()> {
+    let index = usize::try_from(identifier.get() - 1).map_err(|_| {
+        EncodedValidationError::invariant("semantic-evidence child ID exceeds usize")
+    })?;
+    let node_state = state.get_mut(index).ok_or_else(|| {
+        EncodedValidationError::invariant("semantic-evidence child ID is dangling")
+    })?;
+    let visit_bit = if assertion_context { 0b010 } else { 0b001 };
+    if *node_state & visit_bit == 0 {
+        *node_state |= visit_bit;
+        if stack.len() == stack.capacity() {
+            return Err(EncodedValidationError::invariant(
+                "semantic-evidence bounded stack overflowed",
+            ));
+        }
+        stack.push((identifier, assertion_context));
+    }
+    Ok(())
+}
+
 fn compile_named_class_phase_impl<B: ByteSource>(
     model: &ValidatedModel<B>,
     symbols: &SymbolPhase,
@@ -1688,6 +1946,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
 ) -> EncodedResult<NamedClassPhase> {
     let mut budget = PhaseBudget::new(limits);
     canonical::validate_scope_maps(scope_maps, &mut budget)?;
+    let semantic_evidence = source_semantic_evidence(model, symbols, &mut budget)?;
     let (definitions, class_data_definitions) = class_boolean_definitions(
         model,
         symbols,
@@ -2858,6 +3117,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         deferred_roots,
         work: budget.work,
         owned_bytes: budget.owned_bytes,
+        semantic_evidence,
         compiled_root_digests,
         nominal_bindings,
         normalized_edges: edges,
@@ -23699,6 +23959,10 @@ fn merge_named_class_phases_impl(
         limits.max_compiled_roots,
         "compiled root count",
     )?;
+    let mut semantic_evidence = ProgramSemanticEvidence::default();
+    for (_, phase) in phases {
+        semantic_evidence.include(phase.semantic_evidence);
+    }
     Ok(NamedClassPhase {
         entity_domain,
         declared_entities,
@@ -23719,6 +23983,7 @@ fn merge_named_class_phases_impl(
         deferred_roots,
         work: budget.work,
         owned_bytes: budget.owned_bytes,
+        semantic_evidence,
         compiled_root_digests,
         nominal_bindings,
         normalized_edges: edges,

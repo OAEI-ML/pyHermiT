@@ -386,6 +386,14 @@ def _encoded_session_domain_slices_manifest_v1(
     slices: tuple[tuple[object, ...], ...],
     logical_fingerprint: memoryview | None = None,
 ) -> bytes: ...
+def _encoded_permanent_program_parity_v1(
+    *,
+    slices: tuple[tuple[object, ...], ...],
+    reference_ir: bytes,
+    logical_fingerprint: memoryview | None = None,
+    max_owned_bytes: int | None = None,
+    cancel_at_checkpoint: int | None = None,
+) -> bytes: ...
 def self_test() -> None: ...
 def create_session(
     ir: bytes,

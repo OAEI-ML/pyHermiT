@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 pub const INPUT_SCHEMA_VERSION: u16 = 1;
@@ -446,7 +447,7 @@ impl Document {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[repr(u8)]
 pub enum SymbolKind {
     Entity = 0,
@@ -479,7 +480,7 @@ impl SymbolKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[repr(u8)]
 pub enum TermSort {
     Object = 0,
@@ -496,7 +497,7 @@ impl TermSort {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[repr(u16)]
 pub enum PredicateKind {
     Concept = 0,
@@ -569,7 +570,7 @@ pub struct OntologyMetadata {
     pub core_adapter_protocol_version: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedSymbolValue {
     pub identifier: u32,
     pub key: Vec<u8>,
@@ -578,13 +579,13 @@ pub struct DecodedSymbolValue {
     pub query_local: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedSymbolDomain {
     pub kind: SymbolKind,
     pub values: Vec<DecodedSymbolValue>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedPredicate {
     pub predicate_id: u32,
     pub kind: PredicateKind,
@@ -597,7 +598,7 @@ pub struct DecodedPredicate {
     pub internal_key: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum DecodedTerm {
     Variable {
         index: u32,
@@ -622,20 +623,20 @@ impl DecodedTerm {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedAtom {
     pub predicate_id: u32,
     pub arguments: Vec<DecodedTerm>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedGroundAtom {
     pub predicate_id: u32,
     pub arguments: Vec<DecodedTerm>,
     pub provenance_ids: Vec<u32>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedClause {
     pub clause_id: u32,
     pub body: Vec<DecodedAtom>,
@@ -644,21 +645,21 @@ pub struct DecodedClause {
     pub join_order: Vec<u32>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedGroundDisjunction {
     pub disjunction_id: u32,
     pub disjuncts: Vec<DecodedGroundAtom>,
     pub provenance_ids: Vec<u32>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedProvenanceEntry {
     pub provenance_id: u32,
     pub source_sha256: Vec<[u8; 32]>,
     pub generated: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedRoleAutomaton {
     pub component_id: u32,
     pub state_count: u32,
@@ -667,14 +668,14 @@ pub struct DecodedRoleAutomaton {
     pub transitions: Vec<DecodedRoleTransition>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedRoleTransition {
     pub source_state: u32,
     pub target_state: u32,
     pub role_id: Option<u32>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedRoleModel {
     pub object_role_count: u32,
     pub data_property_count: u32,
@@ -690,7 +691,7 @@ pub struct DecodedRoleModel {
     pub bottom_data_property_id: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedLiteralIdentity {
     pub source_literal_id: u32,
     pub data_identity_id: u32,
@@ -698,7 +699,7 @@ pub struct DecodedLiteralIdentity {
     pub semantic_payload_json: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedDatatypeModel {
     pub literal_identities: Vec<DecodedLiteralIdentity>,
     pub datatype_definitions: Vec<(u32, u32)>,
@@ -706,7 +707,7 @@ pub struct DecodedDatatypeModel {
     pub semantic_payload_json: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedExpressivity {
     pub inverse_roles: bool,
     pub nominals: bool,
@@ -720,7 +721,7 @@ pub struct DecodedExpressivity {
     pub abox: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecodedProgram {
     pub symbol_domains: Vec<DecodedSymbolDomain>,
     pub predicates: Vec<DecodedPredicate>,
@@ -741,6 +742,193 @@ impl DecodedProgram {
             .iter()
             .find(|domain| domain.kind == kind)
     }
+}
+
+/// Validate an already-owned decoded program with the same cross-reference
+/// contract used by the binary decoder.
+///
+/// Direct structural compilation never passes through the private input wire,
+/// so all producers converge here before a program may become session-owned.
+pub(crate) fn validate_decoded_program(program: &DecodedProgram) -> InputResult<()> {
+    let expected_domains = [
+        SymbolKind::ClassExpression,
+        SymbolKind::DataProperty,
+        SymbolKind::DataRange,
+        SymbolKind::DataValue,
+        SymbolKind::Entity,
+        SymbolKind::Individual,
+        SymbolKind::ObjectRole,
+        SymbolKind::SourceLiteral,
+    ];
+    if program
+        .symbol_domains
+        .iter()
+        .map(|domain| domain.kind)
+        .ne(expected_domains)
+    {
+        return Err(InputWireError::wire(
+            "program symbol domains are not complete and canonical",
+        ));
+    }
+    let mut domain_counts = [0_u32; 8];
+    for domain in &program.symbol_domains {
+        domain_counts[domain.kind.index()] = u32::try_from(domain.values.len())
+            .map_err(|_| InputWireError::resource("symbol domain exceeds u32"))?;
+        for (identifier, value) in domain.values.iter().enumerate() {
+            if usize::try_from(value.identifier).ok() != Some(identifier)
+                || value.key.is_empty()
+                || value.display.is_empty()
+            {
+                return Err(InputWireError::wire(
+                    "program symbol values are not dense or contain empty identities",
+                ));
+            }
+        }
+    }
+    for (identifier, predicate) in program.predicates.iter().enumerate() {
+        if usize::try_from(predicate.predicate_id).ok() != Some(identifier) {
+            return Err(InputWireError::wire("predicate IDs are not dense"));
+        }
+        validate_predicate_arity(predicate.kind, &predicate.argument_sorts)?;
+        validate_predicate_shape(predicate, &domain_counts)?;
+        if let Some(filler) = predicate.filler_predicate_id {
+            if filler == predicate.predicate_id
+                || usize_from_u32(filler, "filler predicate")? >= program.predicates.len()
+            {
+                return Err(InputWireError::wire(
+                    "cardinality filler predicate ID is dangling or self-referential",
+                ));
+            }
+        }
+    }
+    validate_role_model_value(&program.role_model, &domain_counts)?;
+    validate_datatype_model_value(&program.datatype_model, &domain_counts)?;
+    validate_predicate_cross_references(
+        &program.predicates,
+        &program.role_model,
+        &program.datatype_model,
+        &domain_counts,
+    )?;
+    for (identifier, entry) in program.provenance.iter().enumerate() {
+        if usize::try_from(entry.provenance_id).ok() != Some(identifier)
+            || entry.source_sha256.is_empty()
+        {
+            return Err(InputWireError::wire(
+                "program provenance IDs or digest ranges are invalid",
+            ));
+        }
+        validate_sorted_unique(&entry.source_sha256, "provenance digests")?;
+        if identifier > 0 {
+            let previous = &program.provenance[identifier - 1];
+            if (previous.source_sha256.as_slice(), previous.generated)
+                >= (entry.source_sha256.as_slice(), entry.generated)
+            {
+                return Err(InputWireError::wire(
+                    "program provenance entries are not canonical",
+                ));
+            }
+        }
+    }
+    let individual_count = domain_counts[SymbolKind::Individual.index()];
+    let literal_count = domain_counts[SymbolKind::SourceLiteral.index()];
+    let data_value_count = domain_counts[SymbolKind::DataValue.index()];
+    let provenance_count = u32::try_from(program.provenance.len())
+        .map_err(|_| InputWireError::resource("provenance count exceeds u32"))?;
+    for (identifier, clause) in program.clauses.iter().enumerate() {
+        if usize::try_from(clause.clause_id).ok() != Some(identifier)
+            || (clause.body.is_empty() && clause.head.is_empty())
+        {
+            return Err(InputWireError::wire(
+                "clause IDs are not dense or contain an empty rule",
+            ));
+        }
+        validate_owned_provenance(&clause.provenance_ids, provenance_count, "clause")?;
+        for atom in clause.body.iter().chain(&clause.head) {
+            validate_owned_atom(
+                atom,
+                &program.predicates,
+                individual_count,
+                literal_count,
+                data_value_count,
+                false,
+            )?;
+        }
+        if clause.body.iter().any(|atom| clause.head.contains(atom)) {
+            return Err(InputWireError::wire(
+                "program contains a tautological clause",
+            ));
+        }
+        if clause.join_order.len() != clause.body.len() {
+            return Err(InputWireError::wire(
+                "clause join order length does not match its body",
+            ));
+        }
+        for (position, value) in clause.join_order.iter().enumerate() {
+            if usize::try_from(*value)
+                .ok()
+                .is_none_or(|index| index >= clause.body.len())
+                || clause.join_order[..position].contains(value)
+            {
+                return Err(InputWireError::wire(
+                    "clause join order is not a body permutation",
+                ));
+            }
+        }
+    }
+    for (facts, negative) in [
+        (&program.positive_facts, false),
+        (&program.negative_facts, true),
+    ] {
+        for fact in facts {
+            validate_owned_ground_atom(
+                fact,
+                &program.predicates,
+                individual_count,
+                literal_count,
+                data_value_count,
+                provenance_count,
+            )?;
+            let kind = program.predicates
+                [usize_from_u32(fact.predicate_id, "ground fact predicate")?]
+            .kind;
+            if is_negative_fact_kind(kind) != negative {
+                return Err(InputWireError::wire(
+                    "ground fact is stored in the wrong polarity partition",
+                ));
+            }
+        }
+    }
+    for (identifier, disjunction) in program.ground_disjunctions.iter().enumerate() {
+        if usize::try_from(disjunction.disjunction_id).ok() != Some(identifier)
+            || disjunction.disjuncts.len() < 2
+        {
+            return Err(InputWireError::wire(
+                "ground disjunction IDs or arity are invalid",
+            ));
+        }
+        validate_owned_provenance(
+            &disjunction.provenance_ids,
+            provenance_count,
+            "ground disjunction",
+        )?;
+        for disjunct in &disjunction.disjuncts {
+            validate_owned_ground_atom(
+                disjunct,
+                &program.predicates,
+                individual_count,
+                literal_count,
+                data_value_count,
+                provenance_count,
+            )?;
+            if disjunct.provenance_ids != disjunction.provenance_ids {
+                return Err(InputWireError::wire(
+                    "ground disjunct provenance differs from its disjunction",
+                ));
+            }
+        }
+    }
+    validate_expressivity_value(program)?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1461,8 +1649,7 @@ fn decode_program(document: &Document) -> InputResult<DecodedProgram> {
         domain_counts[SymbolKind::DataRange.index()],
     )?;
     let expressivity = decode_expressivity(document.require(SectionKind::Expressivity)?)?;
-    validate_predicate_cross_references(&predicates, &role_model, &datatype_model, &domain_counts)?;
-    Ok(DecodedProgram {
+    let program = DecodedProgram {
         symbol_domains,
         predicates,
         clauses,
@@ -1473,7 +1660,9 @@ fn decode_program(document: &Document) -> InputResult<DecodedProgram> {
         datatype_model,
         expressivity,
         provenance,
-    })
+    };
+    validate_decoded_program(&program)?;
+    Ok(program)
 }
 
 fn decode_symbol_domains(
@@ -2589,6 +2778,331 @@ fn validate_predicate_cross_references(
         ));
     }
     Ok(())
+}
+
+#[allow(clippy::suspicious_operation_groupings)]
+fn validate_role_model_value(
+    roles: &DecodedRoleModel,
+    _domain_counts: &[u32; 8],
+) -> InputResult<()> {
+    // Role IDs include the built-ins and may therefore outnumber the named-role
+    // symbol domains. Predicate references below are checked against these
+    // authoritative role-model counts instead of assuming the two namespaces
+    // have equal cardinality.
+    if roles.object_role_count == 0 || roles.data_property_count == 0 {
+        return Err(InputWireError::wire(
+            "role-model counts omit required built-ins",
+        ));
+    }
+    if roles.inverse_role_ids.len() != usize_from_u32(roles.object_role_count, "object role count")?
+        || roles
+            .inverse_role_ids
+            .iter()
+            .any(|value| *value >= roles.object_role_count)
+    {
+        return Err(InputWireError::wire(
+            "inverse role map is incomplete or dangling",
+        ));
+    }
+    for (identifier, inverse) in roles.inverse_role_ids.iter().enumerate() {
+        let inverse_index = usize_from_u32(*inverse, "inverse role ID")?;
+        if roles.inverse_role_ids.get(inverse_index).copied()
+            != Some(u32::try_from(identifier).unwrap_or(u32::MAX))
+        {
+            return Err(InputWireError::wire(
+                "inverse role map is not an involution",
+            ));
+        }
+    }
+    validate_sorted_unique(&roles.simple_inclusions, "object role inclusions")?;
+    validate_sorted_unique(&roles.data_inclusions, "data role inclusions")?;
+    validate_sorted_unique(&roles.complex_inclusions, "complex role inclusions")?;
+    validate_sorted_unique(&roles.non_simple_components, "non-simple role components")?;
+    if roles
+        .simple_inclusions
+        .iter()
+        .any(|(left, right)| *left >= roles.object_role_count || *right >= roles.object_role_count)
+        || roles.data_inclusions.iter().any(|(left, right)| {
+            *left >= roles.data_property_count || *right >= roles.data_property_count
+        })
+        || roles.complex_inclusions.iter().any(|(chain, target)| {
+            chain.len() < 2
+                || *target >= roles.object_role_count
+                || chain
+                    .iter()
+                    .any(|identifier| *identifier >= roles.object_role_count)
+        })
+        || roles
+            .non_simple_components
+            .iter()
+            .any(|identifier| *identifier >= roles.object_role_count)
+    {
+        return Err(InputWireError::wire(
+            "role-model inclusion or component reference is dangling",
+        ));
+    }
+    if roles.top_object_role_id >= roles.object_role_count
+        || roles.bottom_object_role_id >= roles.object_role_count
+        || roles.top_data_property_id >= roles.data_property_count
+        || roles.bottom_data_property_id >= roles.data_property_count
+    {
+        return Err(InputWireError::wire("role-model built-in ID is dangling"));
+    }
+    for (index, automaton) in roles.automata.iter().enumerate() {
+        if (automaton.component_id >= roles.object_role_count)
+            || (automaton.state_count == 0)
+            || (automaton.initial_state >= automaton.state_count)
+            || automaton.final_states.is_empty()
+            || automaton
+                .final_states
+                .iter()
+                .any(|state| *state >= automaton.state_count)
+        {
+            return Err(InputWireError::wire("role automaton header is invalid"));
+        }
+        validate_sorted_unique(&automaton.final_states, "role automaton final states")?;
+        if index > 0 && roles.automata[index - 1].component_id >= automaton.component_id {
+            return Err(InputWireError::wire(
+                "role automata are not canonically ordered",
+            ));
+        }
+        if automaton
+            .transitions
+            .windows(2)
+            .any(|pair| transition_key(&pair[0]) >= transition_key(&pair[1]))
+            || automaton.transitions.iter().any(|transition| {
+                transition.source_state >= automaton.state_count
+                    || transition.target_state >= automaton.state_count
+                    || transition
+                        .role_id
+                        .is_some_and(|role| role >= roles.object_role_count)
+            })
+        {
+            return Err(InputWireError::wire(
+                "role automaton transitions are dangling or noncanonical",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_datatype_model_value(
+    datatypes: &DecodedDatatypeModel,
+    domain_counts: &[u32; 8],
+) -> InputResult<()> {
+    let literal_count = domain_counts[SymbolKind::SourceLiteral.index()];
+    let data_value_count = domain_counts[SymbolKind::DataValue.index()];
+    let data_range_count = domain_counts[SymbolKind::DataRange.index()];
+    if datatypes.literal_identities.len() != usize_from_u32(literal_count, "literal count")? {
+        return Err(InputWireError::wire(
+            "datatype identities do not cover source literals densely",
+        ));
+    }
+    for (identifier, literal) in datatypes.literal_identities.iter().enumerate() {
+        if usize::try_from(literal.source_literal_id).ok() != Some(identifier)
+            || literal.data_identity_id >= data_value_count
+            || literal.comparison_key.is_empty()
+        {
+            return Err(InputWireError::wire(
+                "literal identity source/data ID is not dense or is dangling",
+            ));
+        }
+        validate_canonical_json_text(&literal.semantic_payload_json, "literal semantic payload")?;
+    }
+    validate_sorted_unique(&datatypes.datatype_definitions, "datatype definitions")?;
+    if datatypes
+        .datatype_definitions
+        .iter()
+        .any(|(left, right)| *left >= data_range_count || *right >= data_range_count)
+    {
+        return Err(InputWireError::wire("datatype definition ID is dangling"));
+    }
+    validate_sorted_unique(&datatypes.unknown_datatype_ids, "unknown datatype IDs")?;
+    if datatypes
+        .unknown_datatype_ids
+        .iter()
+        .any(|value| *value >= data_range_count)
+    {
+        return Err(InputWireError::wire("unknown datatype ID is dangling"));
+    }
+    let semantic = validate_canonical_json_text(
+        &datatypes.semantic_payload_json,
+        "datatype semantic payload",
+    )?;
+    let semantic_count = semantic
+        .as_object()
+        .and_then(|value| value.get("data_ranges"))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| {
+            InputWireError::wire("datatype semantic payload has no data_ranges collection")
+        })?;
+    if semantic_count != usize_from_u32(data_range_count, "data range count")? {
+        return Err(InputWireError::wire(
+            "datatype semantic payload does not cover the data-range domain",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_canonical_json_text(value: &str, name: &str) -> InputResult<serde_json::Value> {
+    let parsed: serde_json::Value = serde_json::from_str(value)
+        .map_err(|_| InputWireError::wire(format!("{name} is not valid JSON")))?;
+    let canonical = serde_json::to_string(&parsed)
+        .map_err(|_| InputWireError::wire(format!("{name} cannot be canonicalized")))?;
+    if canonical != value {
+        return Err(InputWireError::wire(format!(
+            "{name} is not canonical JSON"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn validate_owned_atom(
+    atom: &DecodedAtom,
+    predicates: &[DecodedPredicate],
+    individual_count: u32,
+    literal_count: u32,
+    data_value_count: u32,
+    ground: bool,
+) -> InputResult<()> {
+    let predicate = predicates
+        .get(usize_from_u32(atom.predicate_id, "atom predicate ID")?)
+        .ok_or_else(|| InputWireError::wire("atom predicate ID is dangling"))?;
+    validate_argument_list(
+        &atom.arguments,
+        predicate,
+        individual_count,
+        literal_count,
+        data_value_count,
+        ground,
+    )
+}
+
+fn validate_owned_ground_atom(
+    atom: &DecodedGroundAtom,
+    predicates: &[DecodedPredicate],
+    individual_count: u32,
+    literal_count: u32,
+    data_value_count: u32,
+    provenance_count: u32,
+) -> InputResult<()> {
+    let predicate = predicates
+        .get(usize_from_u32(
+            atom.predicate_id,
+            "ground atom predicate ID",
+        )?)
+        .ok_or_else(|| InputWireError::wire("ground atom predicate ID is dangling"))?;
+    validate_argument_list(
+        &atom.arguments,
+        predicate,
+        individual_count,
+        literal_count,
+        data_value_count,
+        true,
+    )?;
+    validate_owned_provenance(&atom.provenance_ids, provenance_count, "ground atom")
+}
+
+fn validate_owned_provenance(values: &[u32], count: u32, name: &str) -> InputResult<()> {
+    if values.is_empty() || values.iter().any(|value| *value >= count) {
+        return Err(InputWireError::wire(format!(
+            "{name} provenance is empty or dangling"
+        )));
+    }
+    validate_sorted_unique(values, &format!("{name} provenance"))
+}
+
+fn validate_expressivity_value(program: &DecodedProgram) -> InputResult<()> {
+    let observed_non_horn = !program.ground_disjunctions.is_empty()
+        || program.clauses.iter().any(|clause| clause.head.len() > 1);
+    let observed_nominals = program.predicates.iter().any(|predicate| {
+        matches!(
+            predicate.kind,
+            PredicateKind::Nominal | PredicateKind::NegatedNominal
+        )
+    });
+    let observed_datatypes = !program.datatype_model.literal_identities.is_empty()
+        || !program.datatype_model.datatype_definitions.is_empty()
+        || !program.datatype_model.unknown_datatype_ids.is_empty()
+        || program.predicates.iter().any(|predicate| {
+            matches!(
+                predicate.kind,
+                PredicateKind::DataRange
+                    | PredicateKind::NegatedDataRange
+                    | PredicateKind::AtLeastData
+            ) || (matches!(
+                predicate.kind,
+                PredicateKind::DataRole | PredicateKind::NegatedDataRole
+            ) && predicate.role_id != Some(program.role_model.bottom_data_property_id))
+        });
+    let observed_complex_roles = !program.role_model.complex_inclusions.is_empty()
+        || !program.role_model.automata.is_empty();
+    let observed_cardinality = program.predicates.iter().any(|predicate| {
+        matches!(
+            predicate.kind,
+            PredicateKind::AtLeastObject
+                | PredicateKind::AtLeastData
+                | PredicateKind::AnnotatedEquality
+        )
+    });
+    let observed_keys = program.clauses.iter().any(|clause| {
+        clause.body.iter().any(|atom| {
+            program.predicates[usize::try_from(atom.predicate_id).unwrap_or(usize::MAX)].kind
+                == PredicateKind::NamedIndividual
+        }) && clause.body.iter().any(|atom| {
+            program.predicates[usize::try_from(atom.predicate_id).unwrap_or(usize::MAX)].kind
+                == PredicateKind::OrderingGuard
+        }) && clause.head.iter().any(|atom| {
+            program.predicates[usize::try_from(atom.predicate_id).unwrap_or(usize::MAX)].kind
+                == PredicateKind::Equality
+        })
+    });
+    if observed_non_horn && !program.expressivity.non_horn {
+        return Err(InputWireError::wire(
+            "expressivity incorrectly marks a non-Horn program as Horn",
+        ));
+    }
+    if observed_nominals && !program.expressivity.nominals {
+        return Err(InputWireError::wire("expressivity omits compiled nominals"));
+    }
+    if observed_datatypes && !program.expressivity.datatypes {
+        return Err(InputWireError::wire(
+            "expressivity omits compiled datatype constraints",
+        ));
+    }
+    if !program.datatype_model.unknown_datatype_ids.is_empty()
+        && !program.expressivity.unknown_datatypes
+    {
+        return Err(InputWireError::wire(
+            "expressivity omits unknown datatype restrictions",
+        ));
+    }
+    if observed_complex_roles && !program.expressivity.complex_roles {
+        return Err(InputWireError::wire(
+            "expressivity omits complex role clauses or automata",
+        ));
+    }
+    if observed_cardinality && !program.expressivity.number_restrictions {
+        return Err(InputWireError::wire(
+            "expressivity omits compiled number restrictions",
+        ));
+    }
+    if observed_keys && !program.expressivity.keys {
+        return Err(InputWireError::wire("expressivity omits compiled keys"));
+    }
+    Ok(())
+}
+
+const fn is_negative_fact_kind(kind: PredicateKind) -> bool {
+    matches!(
+        kind,
+        PredicateKind::NegatedConcept
+            | PredicateKind::NegatedNominal
+            | PredicateKind::NegatedObjectRole
+            | PredicateKind::NegatedDataRole
+            | PredicateKind::NegatedDataRange
+    )
 }
 
 fn validate_argument_list(
