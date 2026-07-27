@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import stat
@@ -60,6 +61,15 @@ class ArchiveContent:
     files: Mapping[str, bytes]
 
 
+_FileIdentity = tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _ArtifactSnapshot:
+    payload: bytes
+    identity: _FileIdentity
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactReport:
     artifact: str
@@ -75,6 +85,83 @@ class ArtifactReport:
     archive_sha256: str
     java_free: bool = True
     probe_excluded: bool = True
+
+
+def _stat_identity(value: os.stat_result) -> _FileIdentity:
+    return (
+        value.st_mode,
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _absolute_path(path: Path) -> Path:
+    """Make a path absolute without following a possibly hostile leaf symlink."""
+
+    return Path(os.path.abspath(path))
+
+
+def _regular_lstat(path: Path) -> os.stat_result:
+    try:
+        result = path.lstat()
+    except OSError as error:
+        raise ArtifactError(f"artifact does not exist or cannot be inspected: {path}") from error
+    if not stat.S_ISREG(result.st_mode):
+        raise ArtifactError(f"artifact is not a regular file: {path}")
+    return result
+
+
+def _regular_identity(path: Path) -> _FileIdentity:
+    return _stat_identity(_regular_lstat(path))
+
+
+def _confirm_regular_path(
+    path: Path,
+    opened: os.stat_result,
+    completed: os.stat_result,
+) -> None:
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise ArtifactError(f"artifact pathname changed while reading: {path}") from error
+    identities = {
+        _stat_identity(opened),
+        _stat_identity(completed),
+        _stat_identity(current),
+    }
+    if not stat.S_ISREG(current.st_mode) or len(identities) != 1:
+        raise ArtifactError(f"artifact pathname changed while reading: {path}")
+
+
+def _read_regular(path: Path) -> _ArtifactSnapshot:
+    expected = _regular_lstat(path)
+    if expected.st_size > _MAX_ARCHIVE_SIZE:
+        raise ArtifactError("artifact exceeds the audit size limit")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ArtifactError(f"artifact cannot be opened safely: {path}") from error
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _stat_identity(expected) != _stat_identity(opened):
+            raise ArtifactError(f"artifact changed while opening: {path}")
+        chunks: list[bytes] = []
+        total = 0
+        while chunk := os.read(descriptor, 1024 * 1024):
+            total += len(chunk)
+            if total > _MAX_ARCHIVE_SIZE:
+                raise ArtifactError("artifact exceeds the audit size limit")
+            chunks.append(chunk)
+        completed = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    _confirm_regular_path(path, opened, completed)
+    return _ArtifactSnapshot(b"".join(chunks), _stat_identity(completed))
 
 
 def _contains_absolute_path(data: bytes, marker: bytes) -> bool:
@@ -97,11 +184,9 @@ def _safe_name(raw: str) -> str:
     return path.as_posix()
 
 
-def _read_wheel(path: Path) -> ArchiveContent:
-    if path.stat().st_size > _MAX_ARCHIVE_SIZE:
-        raise ArtifactError("wheel exceeds the audit size limit")
+def _read_wheel(path: Path, payload: bytes) -> ArchiveContent:
     try:
-        with zipfile.ZipFile(path) as archive:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             files: dict[str, bytes] = {}
             total = 0
             for info in archive.infolist():
@@ -124,11 +209,9 @@ def _read_wheel(path: Path) -> ArchiveContent:
     return ArchiveContent(files)
 
 
-def _read_sdist(path: Path) -> ArchiveContent:
-    if path.stat().st_size > _MAX_ARCHIVE_SIZE:
-        raise ArtifactError("sdist exceeds the audit size limit")
+def _read_sdist(path: Path, payload: bytes) -> ArchiveContent:
     try:
-        with tarfile.open(path, mode="r:*") as archive:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as archive:
             files: dict[str, bytes] = {}
             total = 0
             for member in archive.getmembers():
@@ -374,7 +457,13 @@ def _wheel_tags(
     return tuple(sorted(metadata_tags))
 
 
-def _inspect_wheel(path: Path, content: ArchiveContent, expected: str) -> ArtifactReport:
+def _inspect_wheel(
+    path: Path,
+    content: ArchiveContent,
+    expected: str,
+    *,
+    archive_sha256: str,
+) -> ArtifactReport:
     metadata, metadata_raw = _metadata(content, wheel=True)
     name, version, requires_python = _check_metadata(metadata)
     tags = _wheel_tags(path, content, metadata_name=name, metadata_version=version)
@@ -429,11 +518,17 @@ def _inspect_wheel(path: Path, content: ArchiveContent, expected: str) -> Artifa
         python_hashes=_python_hashes(content, sdist=False),
         license_hashes=license_hashes,
         metadata_sha256=hashlib.sha256(metadata_raw).hexdigest(),
-        archive_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        archive_sha256=archive_sha256,
     )
 
 
-def _inspect_sdist(path: Path, content: ArchiveContent, expected: str) -> ArtifactReport:
+def _inspect_sdist(
+    path: Path,
+    content: ArchiveContent,
+    expected: str,
+    *,
+    archive_sha256: str,
+) -> ArtifactReport:
     if expected not in {"auto", "sdist"}:
         raise ArtifactError(f"expected {expected}, found sdist")
     metadata, metadata_raw = _metadata(content, wheel=False)
@@ -503,27 +598,46 @@ def _inspect_sdist(path: Path, content: ArchiveContent, expected: str) -> Artifa
         python_hashes=_python_hashes(content, sdist=True),
         license_hashes=license_hashes,
         metadata_sha256=hashlib.sha256(metadata_raw).hexdigest(),
-        archive_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        archive_sha256=archive_sha256,
     )
 
 
-def inspect_artifact(path: Path, *, pure: bool = False, expected: str = "auto") -> ArtifactReport:
-    """Inspect one artifact and return a deterministic report."""
-
-    path = path.resolve()
-    if not path.is_file():
-        raise ArtifactError(f"artifact does not exist: {path}")
+def _inspect_snapshot(
+    path: Path,
+    snapshot: _ArtifactSnapshot,
+    *,
+    pure: bool = False,
+    expected: str = "auto",
+) -> ArtifactReport:
     if pure:
         expected = "pure-wheel"
+    archive_sha256 = hashlib.sha256(snapshot.payload).hexdigest()
     if path.name.endswith(".whl"):
-        content = _read_wheel(path)
+        content = _read_wheel(path, snapshot.payload)
         _check_names_and_payloads(content)
-        return _inspect_wheel(path, content, expected)
+        return _inspect_wheel(
+            path,
+            content,
+            expected,
+            archive_sha256=archive_sha256,
+        )
     if path.name.endswith((".tar.gz", ".tar.bz2", ".tar.xz")):
-        content = _read_sdist(path)
+        content = _read_sdist(path, snapshot.payload)
         _check_names_and_payloads(content)
-        return _inspect_sdist(path, content, expected)
+        return _inspect_sdist(
+            path,
+            content,
+            expected,
+            archive_sha256=archive_sha256,
+        )
     raise ArtifactError(f"unsupported artifact suffix: {path}")
+
+
+def inspect_artifact(path: Path, *, pure: bool = False, expected: str = "auto") -> ArtifactReport:
+    """Inspect and hash one stable regular-file snapshot."""
+
+    path = _absolute_path(path)
+    return _inspect_snapshot(path, _read_regular(path), pure=pure, expected=expected)
 
 
 def compare_wheels(pure: Path, native: Path) -> tuple[ArtifactReport, ArtifactReport]:
@@ -546,10 +660,18 @@ def compare_wheels(pure: Path, native: Path) -> tuple[ArtifactReport, ArtifactRe
     return pure_report, native_report
 
 
-def external_audit(path: Path) -> tuple[str, ...]:
-    """Run ABI3 and host-platform shared-library auditors."""
+def external_audit(
+    path: Path,
+    *,
+    expected_archive_sha256: str | None = None,
+) -> tuple[str, ...]:
+    """Run ABI3 and host auditors against the inspected artifact identity."""
 
-    report = inspect_artifact(path, expected="native-wheel")
+    path = _absolute_path(path)
+    snapshot = _read_regular(path)
+    report = _inspect_snapshot(path, snapshot, expected="native-wheel")
+    if expected_archive_sha256 is not None and report.archive_sha256 != expected_archive_sha256:
+        raise ArtifactError("artifact changed between internal and external audit")
     commands: list[list[str]] = [["abi3audit", "--strict", "--report", str(path)]]
     platform = report.tags[0].split("-", 2)[-1]
     if "manylinux" in platform or "musllinux" in platform:
@@ -562,6 +684,8 @@ def external_audit(path: Path) -> tuple[str, ...]:
         raise ArtifactError(f"no dependency auditor for platform tag: {platform}")
     rendered: list[str] = []
     for command in commands:
+        if _regular_identity(path) != snapshot.identity:
+            raise ArtifactError("artifact changed before external audit")
         if shutil.which(command[0]) is None:
             raise ArtifactError(f"required audit command is unavailable: {command[0]}")
         completed = subprocess.run(
@@ -580,6 +704,12 @@ def external_audit(path: Path) -> tuple[str, ...]:
         lowered = completed.stdout.casefold()
         if any(part in lowered for part in _FORBIDDEN_DEPENDENCY_PARTS):
             raise ArtifactError(f"external audit reports a Java/JVM library: {command[0]}")
+        completed_snapshot = _read_regular(path)
+        if (
+            completed_snapshot.identity != snapshot.identity
+            or hashlib.sha256(completed_snapshot.payload).hexdigest() != report.archive_sha256
+        ):
+            raise ArtifactError("artifact changed during external audit")
         rendered.append(" ".join(command))
     return tuple(rendered)
 
@@ -605,8 +735,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 inspect_artifact(path, pure=args.pure, expected=expected) for path in args.artifacts
             ]
             if args.external:
-                for path in args.artifacts:
-                    external_audit(path)
+                for path, report in zip(args.artifacts, reports, strict=True):
+                    external_audit(
+                        path,
+                        expected_archive_sha256=report.archive_sha256,
+                    )
     except (OSError, subprocess.CalledProcessError, ArtifactError) as error:
         print(f"artifact invalid: {error}")
         return 1
