@@ -12,6 +12,13 @@ from pyowl_core import (
     compose_views,
 )
 
+from pyhermit.encoded_input import (
+    ENCODED_BUFFER_WIDTHS,
+    ENCODED_DESCRIPTOR_SHA256,
+    ENCODED_SCHEMA_NAME,
+    ENCODED_SCHEMA_VERSION,
+    negotiate_encoded_input,
+)
 from pyhermit.inputs import capture_ontology
 
 OPTIONS = LoadOptions(imports=ImportPolicy.IGNORE, backend=BackendPreference.PYTHON)
@@ -60,6 +67,53 @@ def test_all_shared_view_shapes_remain_zero_copy_and_semantically_equal() -> Non
     assert overlay.base is source
     assert composite.members[0].view is overlay
     assert composite.members[1].view is target
+
+
+def test_current_core_public_encoded_producer_crosses_the_exact_handoff() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "encoded-public",
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "SubClassOf(:A :B)",
+        ),
+        options=OPTIONS,
+    )
+
+    assert snapshot.capabilities.encoded_view_schemas == {
+        ENCODED_SCHEMA_NAME: ENCODED_SCHEMA_VERSION
+    }
+    negotiated = negotiate_encoded_input(
+        snapshot,
+        {ENCODED_SCHEMA_NAME: ENCODED_SCHEMA_VERSION},
+    )
+    assert negotiated.available
+    assert negotiated.core_schema_version == ENCODED_SCHEMA_VERSION
+    assert negotiated.native_schema_version == ENCODED_SCHEMA_VERSION
+    assert negotiated.reason is None
+
+    lease = negotiated.lease
+    assert lease is not None
+    assert lease.owner is snapshot
+    assert isinstance(lease.encoded_view, pyowl_core.EncodedStructuralView)
+    assert lease.encoded_view.owner is snapshot
+    assert lease.descriptor_digest == ENCODED_DESCRIPTOR_SHA256
+    assert lease.structural_fingerprint is lease.encoded_view.structural_fingerprint
+    assert tuple(lease.buffers) == tuple(ENCODED_BUFFER_WIDTHS)
+    assert all(
+        lease.buffers[name].obj is lease.encoded_view.buffers[name].obj
+        for name in ENCODED_BUFFER_WIDTHS
+    )
+
+    assert len(lease.segments) == 1
+    segment = lease.segments[0]
+    assert segment.role == 1
+    assert segment.owner is snapshot
+    assert segment.source is None
+    assert segment.posting_mode == 0
+    assert segment.root_ids.nbytes == 0
+    assert segment.anonymous_scope_map.nbytes == 0
+    assert segment.member_token is None
 
 
 def test_path_bytes_stream_document_and_snapshot_share_logical_identity(tmp_path) -> None:  # type: ignore[no-untyped-def]
