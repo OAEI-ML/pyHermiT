@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::convert::Infallible;
 use std::mem::size_of;
 
 use serde::Serialize;
@@ -25,6 +26,7 @@ const DECLARATION_TAG: u16 = 60;
 const POSTINGS_ALL: u8 = 0;
 const POSTINGS_INCLUDE: u8 = 1;
 const POSTINGS_EXCLUDE: u8 = 2;
+const SOURCE_POLL_STRIDE: usize = 1_024;
 
 const BUILTIN_ENTITIES: &[(EntityKind, &str)] = &[
     (EntityKind::Class, "http://www.w3.org/2002/07/owl#Thing"),
@@ -53,6 +55,21 @@ impl Default for SymbolPhaseLimits {
         }
     }
 }
+
+/// Separates encoded operational failures from caller-owned cancellation.
+#[derive(Debug, Eq, PartialEq)]
+pub enum SymbolPhaseError<E> {
+    Encoded(EncodedValidationError),
+    Control(E),
+}
+
+impl<E> From<EncodedValidationError> for SymbolPhaseError<E> {
+    fn from(error: EncodedValidationError) -> Self {
+        Self::Encoded(error)
+    }
+}
+
+type ControlledResult<T, E> = Result<T, SymbolPhaseError<E>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntityKind {
@@ -470,6 +487,38 @@ impl PhaseBudget {
     }
 }
 
+#[derive(Default)]
+struct PhasePoll {
+    work_since_poll: usize,
+}
+
+impl PhasePoll {
+    fn observe<E>(
+        &mut self,
+        amount: usize,
+        phase: &'static str,
+        control: &mut impl FnMut(&'static str) -> Result<(), E>,
+    ) -> ControlledResult<(), E> {
+        self.work_since_poll = self.work_since_poll.saturating_add(amount);
+        if self.work_since_poll < SOURCE_POLL_STRIDE {
+            return Ok(());
+        }
+        self.work_since_poll %= SOURCE_POLL_STRIDE;
+        control(phase).map_err(SymbolPhaseError::Control)
+    }
+}
+
+fn claim_work_controlled<E>(
+    budget: &mut PhaseBudget,
+    polling: &mut PhasePoll,
+    amount: usize,
+    phase: &'static str,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
+    budget.claim_work(amount)?;
+    polling.observe(amount, phase, control)
+}
+
 #[derive(Clone, Copy)]
 struct RootPostings<S: ByteSource> {
     postings: S,
@@ -571,9 +620,25 @@ pub fn compile_symbol_phase<B: ByteSource>(
     model: &ValidatedModel<B>,
     limits: SymbolPhaseLimits,
 ) -> EncodedResult<SymbolPhase> {
-    let (phase, catalog) =
-        compile_symbol_phase_with_selection(model, limits, RootSelection::<&[u8]>::All)?;
-    finish_single_symbol_phase(phase, catalog, limits)
+    let mut control = |_phase| Ok::<(), Infallible>(());
+    into_encoded(compile_symbol_phase_controlled(model, limits, &mut control))
+}
+
+/// Validate and own the symbol seed while polling within long source traversals.
+pub fn compile_symbol_phase_controlled<B: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    limits: SymbolPhaseLimits,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<SymbolPhase, E> {
+    let mut polling = PhasePoll::default();
+    let (phase, catalog) = compile_symbol_phase_with_selection_controlled(
+        model,
+        limits,
+        RootSelection::<&[u8]>::All,
+        &mut polling,
+        control,
+    )?;
+    finish_single_symbol_phase_controlled(phase, catalog, limits, &mut polling, control)
 }
 
 /// Compile only roots selected by source-local ALL, INCLUDE, or EXCLUDE postings.
@@ -583,23 +648,73 @@ pub fn compile_symbol_phase_selected<B: ByteSource, S: ByteSource>(
     posting_mode: u8,
     postings: S,
 ) -> EncodedResult<SymbolPhase> {
-    let (phase, catalog) =
-        compile_symbol_phase_selected_with_catalog(model, limits, posting_mode, postings)?;
-    finish_single_symbol_phase(phase, catalog, limits)
+    let mut control = |_phase| Ok::<(), Infallible>(());
+    into_encoded(compile_symbol_phase_selected_controlled(
+        model,
+        limits,
+        posting_mode,
+        postings,
+        &mut control,
+    ))
 }
 
-pub(crate) fn compile_symbol_phase_selected_with_catalog<B: ByteSource, S: ByteSource>(
+/// Compile one selected source while polling within long source traversals.
+pub fn compile_symbol_phase_selected_controlled<B: ByteSource, S: ByteSource, E>(
     model: &ValidatedModel<B>,
     limits: SymbolPhaseLimits,
     posting_mode: u8,
     postings: S,
-) -> EncodedResult<(SymbolPhase, SourceDeclarationCatalog)> {
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<SymbolPhase, E> {
+    let mut polling = PhasePoll::default();
+    let (phase, catalog) = compile_symbol_phase_selected_with_catalog_and_polling(
+        model,
+        limits,
+        posting_mode,
+        postings,
+        &mut polling,
+        control,
+    )?;
+    finish_single_symbol_phase_controlled(phase, catalog, limits, &mut polling, control)
+}
+
+pub(crate) fn compile_symbol_phase_selected_with_catalog_controlled<
+    B: ByteSource,
+    S: ByteSource,
+    E,
+>(
+    model: &ValidatedModel<B>,
+    limits: SymbolPhaseLimits,
+    posting_mode: u8,
+    postings: S,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(SymbolPhase, SourceDeclarationCatalog), E> {
+    let mut polling = PhasePoll::default();
+    compile_symbol_phase_selected_with_catalog_and_polling(
+        model,
+        limits,
+        posting_mode,
+        postings,
+        &mut polling,
+        control,
+    )
+}
+
+fn compile_symbol_phase_selected_with_catalog_and_polling<B: ByteSource, S: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    limits: SymbolPhaseLimits,
+    posting_mode: u8,
+    postings: S,
+    polling: &mut PhasePoll,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(SymbolPhase, SourceDeclarationCatalog), E> {
     let selection = match posting_mode {
         POSTINGS_ALL if postings.is_empty() => RootSelection::All,
         POSTINGS_ALL => {
             return Err(EncodedValidationError::protocol(
                 "ALL encoded root selection carries exclusions",
-            ));
+            )
+            .into());
         }
         POSTINGS_INCLUDE => RootSelection::Include(RootPostings::new(
             postings,
@@ -614,17 +729,20 @@ pub(crate) fn compile_symbol_phase_selected_with_catalog<B: ByteSource, S: ByteS
         _ => {
             return Err(EncodedValidationError::protocol(
                 "encoded root selection mode is unsupported",
-            ));
+            )
+            .into());
         }
     };
-    compile_symbol_phase_with_selection(model, limits, selection)
+    compile_symbol_phase_with_selection_controlled(model, limits, selection, polling, control)
 }
 
-fn finish_single_symbol_phase(
+fn finish_single_symbol_phase_controlled<E>(
     phase: SymbolPhase,
     catalog: SourceDeclarationCatalog,
     limits: SymbolPhaseLimits,
-) -> EncodedResult<SymbolPhase> {
+    polling: &mut PhasePoll,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<SymbolPhase, E> {
     let remaining = SymbolPhaseLimits {
         max_owned_bytes: limits
             .max_owned_bytes
@@ -643,19 +761,50 @@ fn finish_single_symbol_phase(
     };
     let mut phases = [phase];
     let mut catalogs = [catalog];
-    install_source_declaration_proof(&mut phases, &mut catalogs, remaining)?;
+    install_source_declaration_proof_with_polling(
+        &mut phases,
+        &mut catalogs,
+        remaining,
+        polling,
+        control,
+    )?;
     let [phase] = phases;
     Ok(phase)
 }
 
+#[cfg(test)]
 fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
     model: &ValidatedModel<B>,
     limits: SymbolPhaseLimits,
-    mut selection: RootSelection<S>,
+    selection: RootSelection<S>,
 ) -> EncodedResult<(SymbolPhase, SourceDeclarationCatalog)> {
+    let mut control = |_phase| Ok::<(), Infallible>(());
+    let mut polling = PhasePoll::default();
+    into_encoded(compile_symbol_phase_with_selection_controlled(
+        model,
+        limits,
+        selection,
+        &mut polling,
+        &mut control,
+    ))
+}
+
+fn compile_symbol_phase_with_selection_controlled<B: ByteSource, S: ByteSource, E>(
+    model: &ValidatedModel<B>,
+    limits: SymbolPhaseLimits,
+    mut selection: RootSelection<S>,
+    polling: &mut PhasePoll,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(SymbolPhase, SourceDeclarationCatalog), E> {
     let summary = model.summary();
     let mut budget = PhaseBudget::new(limits);
-    budget.claim_work(selection.validation_work())?;
+    claim_work_controlled(
+        &mut budget,
+        polling,
+        selection.validation_work(),
+        "source-symbol-posting",
+        control,
+    )?;
     let selected_root_count = selection.selected_count(summary.root_count);
     let mut roots = Vec::new();
     budget.claim_owned(
@@ -671,14 +820,20 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
     let mut declarations = Vec::<DeclaredIdentity>::new();
     let mut source_declaration_keys = Vec::<Vec<u8>>::new();
     for root_index in 0..summary.root_count {
-        budget.claim_work(1)?;
+        claim_work_controlled(&mut budget, polling, 1, "source-symbol-root", control)?;
         let excluded = selection.excludes(root_index)?;
         let root = model
             .root(root_index)?
             .ok_or_else(|| EncodedValidationError::invariant("validated root row disappeared"))?;
         let node = model.node(root.node())?;
         if node.tag() == DECLARATION_TAG {
+            let work_before = budget.work;
             let identity = declaration_identity(model, root.node(), &mut budget)?;
+            polling.observe(
+                usize::try_from(budget.work.saturating_sub(work_before)).unwrap_or(usize::MAX),
+                "source-symbol-scalar",
+                control,
+            )?;
             budget.claim_owned(size_of::<Vec<u8>>())?;
             source_declaration_keys.try_reserve(1).map_err(|_| {
                 EncodedValidationError::resource("source declaration catalog allocation failed")
@@ -709,15 +864,27 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
             handler,
         });
     }
-    budget.claim_work(sort_work(source_declaration_keys.len()))?;
+    claim_work_controlled(
+        &mut budget,
+        polling,
+        sort_work(source_declaration_keys.len()),
+        "source-symbol-declaration-sort",
+        control,
+    )?;
     source_declaration_keys.sort();
     source_declaration_keys.dedup();
 
-    let semantic_nodes = semantic_reachability(model, &roots, &mut budget)?;
+    let semantic_nodes = semantic_reachability(model, &roots, &mut budget, polling, control)?;
     let mut entities = Vec::<ExtractedEntity>::new();
     let mut source_entity_nodes = Vec::<(NodeId, Vec<u8>)>::new();
     for (node_index, reachable) in semantic_nodes.iter().copied().enumerate() {
-        budget.claim_work(1)?;
+        claim_work_controlled(
+            &mut budget,
+            polling,
+            1,
+            "source-symbol-entity-scan",
+            control,
+        )?;
         let node = model
             .node_at(node_index)?
             .ok_or_else(|| EncodedValidationError::invariant("validated node row disappeared"))?;
@@ -726,7 +893,13 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
         }
         // Every encoded entity must still satisfy the frozen core model even
         // when scalar normalization ignores its annotation-only occurrence.
+        let work_before = budget.work;
         let entity = extract_entity(model, node.id(), &mut budget)?;
+        polling.observe(
+            usize::try_from(budget.work.saturating_sub(work_before)).unwrap_or(usize::MAX),
+            "source-symbol-scalar",
+            control,
+        )?;
         if reachable == 0 {
             continue;
         }
@@ -739,7 +912,8 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
         {
             return Err(EncodedValidationError::invariant(
                 "validated source entities are not in canonical key order",
-            ));
+            )
+            .into());
         }
         budget.claim_owned(size_of::<ExtractedEntity>())?;
         budget.claim_owned(size_of::<(NodeId, Vec<u8>)>())?;
@@ -761,7 +935,13 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
                 budget.entity(entities.len().checked_add(1).ok_or_else(|| {
                     EncodedValidationError::resource("encoded source entity count overflowed")
                 })?)?;
-                budget.claim_work(entities.len().saturating_sub(position))?;
+                claim_work_controlled(
+                    &mut budget,
+                    polling,
+                    entities.len().saturating_sub(position),
+                    "source-symbol-builtin",
+                    control,
+                )?;
                 budget.claim_owned(size_of::<ExtractedEntity>())?;
                 entities.try_reserve(1).map_err(|_| {
                     EncodedValidationError::resource("encoded built-in entity allocation failed")
@@ -771,7 +951,13 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
         }
     }
 
-    budget.claim_work(sort_work(declarations.len()))?;
+    claim_work_controlled(
+        &mut budget,
+        polling,
+        sort_work(declarations.len()),
+        "source-symbol-declaration-sort",
+        control,
+    )?;
     declarations.sort_by(|left, right| {
         (left.kind.as_str(), left.iri.as_str()).cmp(&(right.kind.as_str(), right.iri.as_str()))
     });
@@ -792,7 +978,13 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
             EncodedValidationError::resource("encoded declaration output allocation failed")
         })?;
     for declaration in declarations {
-        budget.claim_work(binary_search_work(entities.len()))?;
+        claim_work_controlled(
+            &mut budget,
+            polling,
+            binary_search_work(entities.len()),
+            "source-symbol-declaration",
+            control,
+        )?;
         let entity_id = entities
             .binary_search_by(|entity| entity.key.cmp(&declaration.key))
             .map_err(|_| {
@@ -826,7 +1018,13 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
             EncodedValidationError::resource("encoded entity-node output allocation failed")
         })?;
     for (node, key) in source_entity_nodes {
-        budget.claim_work(binary_search_work(entities.len()))?;
+        claim_work_controlled(
+            &mut budget,
+            polling,
+            binary_search_work(entities.len()),
+            "source-symbol-entity-map",
+            control,
+        )?;
         let identifier = entities
             .binary_search_by(|entity| entity.key.cmp(&key))
             .map_err(|_| {
@@ -890,15 +1088,43 @@ fn compile_symbol_phase_with_selection<B: ByteSource, S: ByteSource>(
 ///
 /// The canonical key proof is temporary. Public declaration metadata remains
 /// filtered independently in every source phase.
+#[cfg(test)]
 pub(crate) fn install_source_declaration_proof(
     phases: &mut [SymbolPhase],
     catalogs: &mut [SourceDeclarationCatalog],
     limits: SymbolPhaseLimits,
 ) -> EncodedResult<()> {
+    let mut control = |_phase| Ok::<(), Infallible>(());
+    into_encoded(install_source_declaration_proof_controlled(
+        phases,
+        catalogs,
+        limits,
+        &mut control,
+    ))
+}
+
+pub(crate) fn install_source_declaration_proof_controlled<E>(
+    phases: &mut [SymbolPhase],
+    catalogs: &mut [SourceDeclarationCatalog],
+    limits: SymbolPhaseLimits,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
+    let mut polling = PhasePoll::default();
+    install_source_declaration_proof_with_polling(phases, catalogs, limits, &mut polling, control)
+}
+
+fn install_source_declaration_proof_with_polling<E>(
+    phases: &mut [SymbolPhase],
+    catalogs: &mut [SourceDeclarationCatalog],
+    limits: SymbolPhaseLimits,
+    polling: &mut PhasePoll,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
     if phases.is_empty() || phases.len() != catalogs.len() {
         return Err(EncodedValidationError::invariant(
             "source declaration catalogs do not align with symbol phases",
-        ));
+        )
+        .into());
     }
     let mut budget = PhaseBudget::new(limits);
     let source_key_count = catalogs.iter().try_fold(0_usize, |total, catalog| {
@@ -921,10 +1147,22 @@ pub(crate) fn install_source_declaration_proof(
             EncodedValidationError::resource("source declaration key merge allocation failed")
         })?;
     for catalog in catalogs {
-        budget.claim_work(catalog.keys.len())?;
+        claim_work_controlled(
+            &mut budget,
+            polling,
+            catalog.keys.len(),
+            "source-declaration-proof-catalog",
+            control,
+        )?;
         source_keys.append(&mut catalog.keys);
     }
-    budget.claim_work(sort_work(source_keys.len()))?;
+    claim_work_controlled(
+        &mut budget,
+        polling,
+        sort_work(source_keys.len()),
+        "source-declaration-proof-sort",
+        control,
+    )?;
     source_keys.sort();
     source_keys.dedup();
 
@@ -947,7 +1185,13 @@ pub(crate) fn install_source_declaration_proof(
         .map_err(|_| EncodedValidationError::resource("reachable entity key allocation failed"))?;
     for phase in phases.iter() {
         for (_, entity_id) in &phase.entity_node_symbols {
-            budget.claim_work(1)?;
+            claim_work_controlled(
+                &mut budget,
+                polling,
+                1,
+                "source-declaration-proof-reachable",
+                control,
+            )?;
             let entity = phase
                 .entity_domain
                 .values
@@ -964,7 +1208,13 @@ pub(crate) fn install_source_declaration_proof(
             )?);
         }
     }
-    budget.claim_work(sort_work(reachable_keys.len()))?;
+    claim_work_controlled(
+        &mut budget,
+        polling,
+        sort_work(reachable_keys.len()),
+        "source-declaration-proof-sort",
+        control,
+    )?;
     reachable_keys.sort();
     reachable_keys.dedup();
 
@@ -981,7 +1231,13 @@ pub(crate) fn install_source_declaration_proof(
         EncodedValidationError::resource("source declaration proof allocation failed")
     })?;
     for key in source_keys {
-        budget.claim_work(binary_search_work(reachable_keys.len()))?;
+        claim_work_controlled(
+            &mut budget,
+            polling,
+            binary_search_work(reachable_keys.len()),
+            "source-declaration-proof-intersection",
+            control,
+        )?;
         if reachable_keys.binary_search(&key).is_ok() {
             proof.push(key);
         }
@@ -1007,7 +1263,13 @@ pub(crate) fn install_source_declaration_proof(
                 )
             })?;
         for (_, entity_id) in &phase.entity_node_symbols {
-            budget.claim_work(1)?;
+            claim_work_controlled(
+                &mut budget,
+                polling,
+                1,
+                "source-declaration-proof-identifier",
+                control,
+            )?;
             let entity = phase
                 .entity_domain
                 .values
@@ -1017,12 +1279,24 @@ pub(crate) fn install_source_declaration_proof(
                         "source declaration proof contains a dangling entity ID",
                     )
                 })?;
-            budget.claim_work(binary_search_work(proof.len()))?;
+            claim_work_controlled(
+                &mut budget,
+                polling,
+                binary_search_work(proof.len()),
+                "source-declaration-proof-identifier",
+                control,
+            )?;
             if proof.binary_search(&entity.key).is_ok() {
                 identifiers.push(*entity_id);
             }
         }
-        budget.claim_work(sort_work(identifiers.len()))?;
+        claim_work_controlled(
+            &mut budget,
+            polling,
+            sort_work(identifiers.len()),
+            "source-declaration-proof-sort",
+            control,
+        )?;
         identifiers.sort_unstable();
         identifiers.dedup();
         phase.source_declared_entity_ids = identifiers;
@@ -1043,11 +1317,13 @@ pub(crate) fn install_source_declaration_proof(
     Ok(())
 }
 
-fn semantic_reachability<B: ByteSource>(
+fn semantic_reachability<B: ByteSource, E>(
     model: &ValidatedModel<B>,
     roots: &[DispatchedRoot],
     budget: &mut PhaseBudget,
-) -> EncodedResult<Vec<u8>> {
+    polling: &mut PhasePoll,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<Vec<u8>, E> {
     let node_count = model.summary().node_count;
     let stack_bytes = node_count.checked_mul(size_of::<NodeId>()).ok_or_else(|| {
         EncodedValidationError::resource("encoded semantic traversal stack size overflowed")
@@ -1074,35 +1350,56 @@ fn semantic_reachability<B: ByteSource>(
             EncodedValidationError::invariant("encoded semantic root has no annotation field")
         })?;
         for field_index in fields.start..semantic_end {
-            budget.claim_work(1)?;
+            claim_work_controlled(budget, polling, 1, "source-symbol-reachability", control)?;
             let component = required_component(model.field(field_index)?, "semantic root field")?;
-            enqueue_component(model, component, &mut reached, &mut stack, budget)?;
+            enqueue_component(
+                model,
+                component,
+                &mut reached,
+                &mut stack,
+                budget,
+                polling,
+                control,
+            )?;
         }
     }
     while let Some(identifier) = stack.pop() {
-        budget.claim_work(1)?;
+        claim_work_controlled(budget, polling, 1, "source-symbol-reachability", control)?;
         let node = model.node(identifier)?;
         for field_index in node.fields() {
-            budget.claim_work(1)?;
+            claim_work_controlled(budget, polling, 1, "source-symbol-reachability", control)?;
             let component = required_component(model.field(field_index)?, "semantic node field")?;
-            enqueue_component(model, component, &mut reached, &mut stack, budget)?;
+            enqueue_component(
+                model,
+                component,
+                &mut reached,
+                &mut stack,
+                budget,
+                polling,
+                control,
+            )?;
         }
     }
     Ok(reached)
 }
 
-fn enqueue_component<B: ByteSource>(
+fn enqueue_component<B: ByteSource, E>(
     model: &ValidatedModel<B>,
     component: ComponentRef,
     reached: &mut [u8],
     stack: &mut Vec<NodeId>,
     budget: &mut PhaseBudget,
-) -> EncodedResult<()> {
+    polling: &mut PhasePoll,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<(), E> {
     match model.resolve(component)? {
-        ComponentValue::Node(identifier) => enqueue_node(identifier, reached, stack),
+        ComponentValue::Node(identifier) => {
+            enqueue_node(identifier, reached, stack)?;
+            Ok(())
+        }
         ComponentValue::Collection(collection) => {
             for item_index in collection.items() {
-                budget.claim_work(1)?;
+                claim_work_controlled(budget, polling, 1, "source-symbol-reachability", control)?;
                 let item = required_component(model.item(item_index)?, "semantic collection item")?;
                 if let ComponentValue::Node(identifier) = model.resolve(item)? {
                     enqueue_node(identifier, reached, stack)?;
@@ -1398,6 +1695,14 @@ fn required_component(
     })
 }
 
+fn into_encoded<T>(result: ControlledResult<T, Infallible>) -> EncodedResult<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(SymbolPhaseError::Encoded(error)) => Err(error),
+        Err(SymbolPhaseError::Control(never)) => match never {},
+    }
+}
+
 const fn root_kind_name(kind: RootKind) -> &'static str {
     match kind {
         RootKind::OntologyAnnotation => "ontology_annotation",
@@ -1603,6 +1908,37 @@ mod tests {
         assert_eq!(manifest["schema_version"], 1);
         assert_eq!(manifest["root_dispatch"][0]["handler"], "Declaration");
         assert_eq!(manifest["declared_entities"][0]["iri"], "urn:C");
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_source_scan_cancels_and_retries_without_semantic_drift() -> EncodedResult<()> {
+        let iri = format!("urn:{}", "a".repeat(SOURCE_POLL_STRIDE + 64));
+        let owned = declaration(&iri);
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let baseline = compile_symbol_phase(&model, SymbolPhaseLimits::default())?;
+
+        let cancelled =
+            compile_symbol_phase_controlled(&model, SymbolPhaseLimits::default(), &mut |phase| {
+                Err(phase)
+            });
+        assert_eq!(
+            cancelled,
+            Err(SymbolPhaseError::Control("source-symbol-scalar"))
+        );
+
+        let mut checkpoints = Vec::new();
+        let retry =
+            compile_symbol_phase_controlled(&model, SymbolPhaseLimits::default(), &mut |phase| {
+                checkpoints.push(phase);
+                Ok::<(), Infallible>(())
+            })
+            .map_err(|error| match error {
+                SymbolPhaseError::Encoded(error) => error,
+                SymbolPhaseError::Control(never) => match never {},
+            })?;
+        assert_eq!(retry, baseline);
+        assert!(checkpoints.contains(&"source-symbol-scalar"));
         Ok(())
     }
 

@@ -58,6 +58,20 @@ def _direct_columns() -> tuple[object, dict[str, memoryview]]:
     return encoded, dict(encoded.buffers)
 
 
+def _wide_declaration_columns(
+    count: int = 5_000,
+) -> tuple[object, dict[str, memoryview]]:
+    declarations = b" ".join(
+        f"Declaration(Class(<urn:lifecycle:poll#{index:05d}>))".encode() for index in range(count)
+    )
+    snapshot = pyowl_core.load_snapshot(
+        b"Ontology(<urn:lifecycle:poll> " + declarations + b")",
+        options=_OPTIONS,
+    )
+    encoded = produce_encoded_structural_view_v1(snapshot)
+    return encoded, dict(encoded.buffers)
+
+
 def _validate(
     columns: dict[str, memoryview],
     *,
@@ -255,6 +269,54 @@ def test_detached_scope_map_compilation_observes_cross_thread_interrupt_and_retr
     del record, scope_bytes, captured, columns, encoded
     gc.collect()
     try:
+        assert decode_check(retry.check(None)).satisfiable
+    finally:
+        retry.close()
+
+
+def test_detached_source_traversal_observes_cross_thread_interrupt_and_retries() -> None:
+    encoded, columns = _wide_declaration_columns()
+    source = encoded.owner
+    config = ReasonerConfig()
+    captured = capture_compatible_view(source)
+    record = _slice_record(columns)
+    cancellation = native.CancellationHandle()
+
+    def interrupt_inside_source_scan() -> bool:
+        deadline = time.monotonic() + 10.0
+        # Program preflight is checkpoint one. Reaching three proves that
+        # detached source traversal crossed multiple bounded inner strides.
+        while cancellation._debug_poll_count < 3:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.000_1)
+        return cancellation.interrupt("cancel detached encoded source traversal")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        interrupted = executor.submit(interrupt_inside_source_scan)
+        with pytest.raises(
+            ReasonerInterruptedError,
+            match="cancel detached encoded source traversal",
+        ):
+            native._create_encoded_session_v1(
+                slices=(record,),
+                metadata=encode_encoded_session_metadata(captured, config),
+                config=encode_config(config),
+                cancellation=cancellation,
+                validate_profile=False,
+            )
+        assert interrupted.result(timeout=10.0)
+
+    cancellation.reset()
+    retry = native._create_encoded_session_v1(
+        slices=(record,),
+        metadata=encode_encoded_session_metadata(captured, config),
+        config=encode_config(config),
+        cancellation=cancellation,
+        validate_profile=False,
+    )
+    try:
+        assert retry.encoded_compiler_gil_released is True
         assert decode_check(retry.check(None)).satisfiable
     finally:
         retry.close()

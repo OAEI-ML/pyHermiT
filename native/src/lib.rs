@@ -1087,6 +1087,13 @@ fn encoded_profile_error(error: encoded::profile::ProfilePhaseError<NativeError>
     }
 }
 
+fn encoded_symbol_error(error: encoded::symbols::SymbolPhaseError<NativeError>) -> NativeError {
+    match error {
+        encoded::symbols::SymbolPhaseError::Encoded(error) => encoded_validation_error(error),
+        encoded::symbols::SymbolPhaseError::Control(error) => error,
+    }
+}
+
 fn encoded_permanent_error(
     error: encoded::permanent_program::PermanentProgramError<NativeError>,
 ) -> NativeError {
@@ -2148,13 +2155,15 @@ fn compile_encoded_slice_symbol_phases<B: encoded::ByteSource>(
             })?,
             ..encoded::symbols::SymbolPhaseLimits::default()
         };
-        let (phase, catalog) = encoded::symbols::compile_symbol_phase_selected_with_catalog(
-            &model,
-            symbol_limits,
-            slice.posting_mode,
-            slice.postings,
-        )
-        .map_err(encoded_validation_error)?;
+        let (phase, catalog) =
+            encoded::symbols::compile_symbol_phase_selected_with_catalog_controlled(
+                &model,
+                symbol_limits,
+                slice.posting_mode,
+                slice.postings,
+                poll,
+            )
+            .map_err(encoded_symbol_error)?;
         source_work = source_work.checked_add(phase.work).ok_or_else(|| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "encoded slice symbol work overflowed",
@@ -2185,8 +2194,13 @@ fn compile_encoded_slice_symbol_phases<B: encoded::ByteSource>(
         })?,
         ..encoded::symbols::SymbolPhaseLimits::default()
     };
-    encoded::symbols::install_source_declaration_proof(&mut phases, &mut catalogs, proof_limits)
-        .map_err(encoded_validation_error)?;
+    encoded::symbols::install_source_declaration_proof_controlled(
+        &mut phases,
+        &mut catalogs,
+        proof_limits,
+        poll,
+    )
+    .map_err(encoded_symbol_error)?;
     poll("source-declaration-proof")?;
     Ok(phases)
 }
