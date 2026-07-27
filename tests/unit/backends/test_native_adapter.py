@@ -741,6 +741,70 @@ def test_profile_handoff_supplies_full_context_and_matches_scalar_report(
     )
 
 
+@pytest.mark.parametrize("compiler_fails", (False, True), ids=("success", "failure"))
+def test_profile_handoff_binds_and_detaches_operation_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    compiler_fails: bool,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    snapshot, report = _profile_fixture()
+    handles: list[_Handle] = []
+    received: dict[str, object] = {}
+    failure = RuntimeError("profile compiler failed")
+
+    class TrackingHandle(_Handle):
+        def __init__(
+            self,
+            timeout: float | None = None,
+            max_memory_bytes: int | None = None,
+        ) -> None:
+            super().__init__(timeout, max_memory_bytes)
+            handles.append(self)
+
+    def compile_profile(**values: object) -> bytes:
+        received.update(values)
+        if compiler_fails:
+            raise failure
+        return _profile_result(report)
+
+    extension.CancellationHandle = TrackingHandle
+    extension._encoded_profile_slices_manifest_v1 = compile_profile
+    monkeypatch.setattr(
+        "pyhermit.backends.native.negotiate_encoded_input",
+        lambda _view, _schemas: SimpleNamespace(lease=_profile_lease(snapshot)),
+    )
+    source = CancellationSource()
+    source.begin_operation(timeout=60.0, max_memory_bytes=4_096)
+    factory = NativeBackendFactory(extension)
+
+    if compiler_fails:
+        with pytest.raises(RuntimeError) as caught:
+            factory._validate_encoded_profile_handoff(
+                snapshot,
+                report,
+                UnsupportedDatatypePolicy.ERROR,
+                source.token,
+                max_memory_bytes=4_096,
+            )
+        assert caught.value is failure
+    else:
+        factory._validate_encoded_profile_handoff(
+            snapshot,
+            report,
+            UnsupportedDatatypePolicy.ERROR,
+            source.token,
+            max_memory_bytes=4_096,
+        )
+
+    assert len(handles) == 1
+    assert received["cancellation"] is handles[0]
+    timeout, memory_limit = handles[0].resets[0]
+    assert timeout is not None and 0 < timeout <= 60.0
+    assert memory_limit == 4_096
+    assert source.interrupt("after-profile") is True
+    assert handles[0].interruptions == []
+
+
 def test_profile_handoff_rejects_native_scalar_manifest_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -856,6 +920,47 @@ def test_profile_handoff_rejects_json_scalar_type_coercion(
         )
 
     assert caught.value.context["reason"] == "encoded_profile_manifest_mismatch"
+
+
+def test_facade_binds_profile_validation_to_the_active_operation() -> None:
+    snapshot, report = _profile_fixture()
+    reasoner = object.__new__(Reasoner)
+    reasoner._config = ReasonerConfig(max_memory_bytes=8_192)
+    reasoner._cancellation = CancellationSource()
+    reasoner._cancellation.begin_operation(timeout=60.0, max_memory_bytes=8_192)
+    received: dict[str, object] = {}
+
+    def validate(
+        view: object,
+        profile: object,
+        unsupported_datatypes: object,
+        cancellation: object,
+        *,
+        max_memory_bytes: object,
+    ) -> None:
+        received.update(
+            {
+                "view": view,
+                "profile": profile,
+                "unsupported_datatypes": unsupported_datatypes,
+                "cancellation": cancellation,
+                "max_memory_bytes": max_memory_bytes,
+            }
+        )
+
+    reasoner._factory = SimpleNamespace(_validate_encoded_profile_handoff=validate)
+    validator = reasoner._encoded_profile_validator()
+    assert validator is not None
+
+    validator(snapshot, report, UnsupportedDatatypePolicy.ERROR)
+
+    assert received == {
+        "view": snapshot,
+        "profile": report,
+        "unsupported_datatypes": UnsupportedDatatypePolicy.ERROR,
+        "cancellation": reasoner._cancellation.token,
+        "max_memory_bytes": 8_192,
+    }
 
 
 def test_facade_runs_the_encoded_gate_before_scalar_compilation(

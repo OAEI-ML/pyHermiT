@@ -408,6 +408,9 @@ class NativeBackendFactory:
         view: OntologyView,
         profile: OWL2DLReport,
         unsupported_datatypes: UnsupportedDatatypePolicy,
+        cancellation: CancellationToken | None = None,
+        *,
+        max_memory_bytes: int | None = None,
     ) -> None:
         """Compare the full origin-bearing native and scalar profile manifests."""
 
@@ -418,6 +421,13 @@ class NativeBackendFactory:
             raise TypeError("profile must be OWL2DLReport")
         if not isinstance(unsupported_datatypes, UnsupportedDatatypePolicy):
             raise TypeError("unsupported_datatypes must be UnsupportedDatatypePolicy")
+        if cancellation is not None and not isinstance(cancellation, CancellationToken):
+            raise TypeError("cancellation must be CancellationToken or None")
+        if max_memory_bytes is not None:
+            if isinstance(max_memory_bytes, bool) or not isinstance(max_memory_bytes, int):
+                raise TypeError("max_memory_bytes must be a positive integer or None")
+            if max_memory_bytes <= 0:
+                raise ValueError("max_memory_bytes must be a positive integer or None")
         negotiation = negotiate_encoded_input(
             view,
             {ENCODED_SCHEMA_NAME: ENCODED_SCHEMA_VERSION},
@@ -433,12 +443,31 @@ class NativeBackendFactory:
                 context={"reason": "encoded_profile_slices_missing"},
             )
         contexts = _encoded_profile_contexts(view)
-        result = profile_compiler(
-            slices=_encoded_slice_records(root_slices),
-            unsupported_datatypes=unsupported_datatypes.value,
-            ontology_identity_context=contexts.ontology_identity_context,
-            origin_context=contexts.origin_context,
-        )
+        handle_value: object | None = None
+        observer_id: int | None = None
+        if cancellation is not None:
+            cancellation.check()
+            remaining = cancellation.remaining_seconds
+            if remaining is not None and remaining <= 0:
+                cancellation.check()
+            handle_value = self._handle_type(
+                timeout=remaining,
+                max_memory_bytes=max_memory_bytes,
+            )
+            observer_id = cancellation._attach(cast(_CancellationHandle, handle_value))
+        try:
+            result = profile_compiler(
+                slices=_encoded_slice_records(root_slices),
+                unsupported_datatypes=unsupported_datatypes.value,
+                ontology_identity_context=contexts.ontology_identity_context,
+                origin_context=contexts.origin_context,
+                cancellation=handle_value,
+            )
+            if cancellation is not None:
+                cancellation.check()
+        finally:
+            if cancellation is not None and observer_id is not None:
+                cancellation._detach(observer_id)
         if type(result) is not bytes:
             raise BackendMismatchError(
                 "native encoded profile compiler returned an incompatible result",

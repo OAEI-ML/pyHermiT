@@ -103,10 +103,19 @@ class VerifyBackendFactory:
         view: object,
         profile: object,
         unsupported_datatypes: object,
+        cancellation: CancellationToken | None = None,
+        *,
+        max_memory_bytes: int | None = None,
     ) -> None:
         hook = getattr(self._native, "_validate_encoded_profile_handoff", None)
         if callable(hook):
-            hook(view, profile, unsupported_datatypes)
+            hook(
+                view,
+                profile,
+                unsupported_datatypes,
+                cancellation,
+                max_memory_bytes=max_memory_bytes,
+            )
 
     def _create_encoded_lifecycle_handoff(
         self,

@@ -6,7 +6,7 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from enum import Enum
@@ -43,7 +43,7 @@ from pyhermit.clauses import (
     compile_captured_bundle,
     compile_delta_plan,
 )
-from pyhermit.config import ReasonerConfig
+from pyhermit.config import ReasonerConfig, UnsupportedDatatypePolicy
 from pyhermit.core import (
     COMPILER_CACHE_SCHEMA_VERSION,
     CapturedOntology,
@@ -57,6 +57,7 @@ from pyhermit.exceptions import (
 )
 from pyhermit.inputs import ValidatedOntology, capture_ontology
 from pyhermit.normalize import NormalizedOntology
+from pyhermit.profile import OWL2DLReport
 from pyhermit.services import (
     ClassificationService,
     CompiledQueryExecutor,
@@ -160,11 +161,7 @@ class Reasoner:
             max_memory_bytes=selected_config.max_memory_bytes,
         )
         self._factory = select_backend_factory(selected_config)
-        profile_validator = getattr(
-            self._factory,
-            "_validate_encoded_profile_handoff",
-            None,
-        )
+        profile_validator = self._encoded_profile_validator()
         validated = capture_ontology(
             ontology,
             config=selected_config,
@@ -613,6 +610,38 @@ class Reasoner:
                 session.close()
             raise
 
+    def _encoded_profile_validator(
+        self,
+    ) -> (
+        None
+        | Callable[
+            [OntologyView, OWL2DLReport, UnsupportedDatatypePolicy],
+            None,
+        ]
+    ):
+        hook = getattr(
+            self._factory,
+            "_validate_encoded_profile_handoff",
+            None,
+        )
+        if not callable(hook):
+            return None
+
+        def validate(
+            view: OntologyView,
+            profile: OWL2DLReport,
+            unsupported_datatypes: UnsupportedDatatypePolicy,
+        ) -> None:
+            hook(
+                view,
+                profile,
+                unsupported_datatypes,
+                self._cancellation.token,
+                max_memory_bytes=self._config.max_memory_bytes,
+            )
+
+        return validate
+
     def _create_encoded_lifecycle_session(
         self,
         captured: CapturedOntology,
@@ -884,11 +913,7 @@ class Reasoner:
                 remove_axioms=owl.CanonicalSet(removals),
             ),
         )
-        profile_validator = getattr(
-            self._factory,
-            "_validate_encoded_profile_handoff",
-            None,
-        )
+        profile_validator = self._encoded_profile_validator()
         validated = capture_ontology(
             proposed,
             config=self._config,

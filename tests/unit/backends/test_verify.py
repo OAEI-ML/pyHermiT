@@ -251,7 +251,9 @@ def test_verify_factory_forwards_the_private_encoded_gate(
         def __init__(self) -> None:
             super().__init__("native", _Session())
             self.validated: list[object] = []
-            self.profile_validated: list[tuple[object, object, object]] = []
+            self.profile_validated: list[
+                tuple[object, object, object, object, object]
+            ] = []
 
         def _validate_encoded_handoff(self, view: object) -> None:
             self.validated.append(view)
@@ -261,8 +263,19 @@ def test_verify_factory_forwards_the_private_encoded_gate(
             view: object,
             profile: object,
             unsupported_datatypes: object,
+            cancellation: object,
+            *,
+            max_memory_bytes: object,
         ) -> None:
-            self.profile_validated.append((view, profile, unsupported_datatypes))
+            self.profile_validated.append(
+                (
+                    view,
+                    profile,
+                    unsupported_datatypes,
+                    cancellation,
+                    max_memory_bytes,
+                )
+            )
 
     native = NativeFactory()
     python = _Factory("python", _Session())
@@ -271,12 +284,21 @@ def test_verify_factory_forwards_the_private_encoded_gate(
     view = object()
     profile = object()
     policy = object()
+    cancellation = CancellationToken()
 
     factory._validate_encoded_handoff(view)
-    factory._validate_encoded_profile_handoff(view, profile, policy)
+    factory._validate_encoded_profile_handoff(
+        view,
+        profile,
+        policy,
+        cancellation,
+        max_memory_bytes=4_096,
+    )
 
     assert native.validated == [view]
-    assert native.profile_validated == [(view, profile, policy)]
+    assert native.profile_validated == [
+        (view, profile, policy, cancellation, 4_096)
+    ]
 
 
 def test_verify_factory_pairs_direct_native_compilation_with_scalar_shadow(
