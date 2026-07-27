@@ -43,6 +43,11 @@ _MUSLLINUX_SMOKE_IMAGE = (
     "3.12.13-alpine3.24",
     "sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df",
 )
+_INSTALLED_WP18_CONTRACT = (
+    "python -m pytest -q -p no:cacheprovider "
+    "{project}/tests/differential/encoded_compiler/test_permanent_program_assembly.py"
+    "::test_facade_constructs_encoded_services_without_scalar_service_context"
+)
 _MATERIAL_FILES = (
     ".github/workflows/release.yml",
     ".github/workflows/wheels.yml",
@@ -59,6 +64,7 @@ _MATERIAL_FILES = (
     "setup.cfg",
     "setup.py",
     "src/pyhermit/_version.py",
+    "tests/differential/encoded_compiler/test_permanent_program_assembly.py",
     "tools/packaging_probe/README.md",
     "tools/packaging_probe/check_artifact.py",
     "tools/packaging_probe/create_sbom.py",
@@ -458,6 +464,17 @@ def _build_provenance(
     ):
         raise ReleaseManifestError("pyproject points to an unexpected release verifier lock")
     cibuildwheel = require_mapping(tool.get("cibuildwheel"), "tool.cibuildwheel")
+    test_commands = [
+        require_str(command, "tool.cibuildwheel.test-command entry")
+        for command in require_list(
+            cibuildwheel.get("test-command"),
+            "tool.cibuildwheel.test-command",
+        )
+    ]
+    if test_commands.count(_INSTALLED_WP18_CONTRACT) != 1:
+        raise ReleaseManifestError(
+            "native wheels must run the bounded WP18 encoded public-dispatch contract exactly once"
+        )
     linux = require_mapping(cibuildwheel.get("linux"), "tool.cibuildwheel.linux")
     before_all = require_str(linux.get("before-all"), "tool.cibuildwheel.linux.before-all")
     rustup_version = _shell_assignment(before_all, "rustup_version")
@@ -563,6 +580,14 @@ def _build_provenance(
     return {
         "build_backend": backend,
         "build_requirements": build_requirements,
+        "installed_native_contracts": [
+            {
+                "capability_state": "unadvertised",
+                "command": _INSTALLED_WP18_CONTRACT,
+                "id": "wp18-encoded-public-dispatch-short",
+                "scope": "bounded-correctness-only",
+            }
+        ],
         "minimum_rust": minimum_rust,
         "musllinux_smoke_image": musllinux_smoke_image,
         "release_rust": rust_toolchain,

@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 from tools.packaging_probe.check_artifact import ArtifactReport
 from tools.packaging_probe.release_manifest import (
+    _INSTALLED_WP18_CONTRACT,
+    _MATERIAL_FILES,
     ReleaseManifestError,
     _build_provenance,
     _checkout_provenance,
@@ -283,6 +285,21 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertEqual(provenance["release_rust"], "1.97.1")
         self.assertEqual(provenance["rustup"], "1.28.2")
         self.assertEqual(
+            provenance["installed_native_contracts"],
+            [
+                {
+                    "capability_state": "unadvertised",
+                    "command": _INSTALLED_WP18_CONTRACT,
+                    "id": "wp18-encoded-public-dispatch-short",
+                    "scope": "bounded-correctness-only",
+                }
+            ],
+        )
+        self.assertIn(
+            "tests/differential/encoded_compiler/test_permanent_program_assembly.py",
+            _MATERIAL_FILES,
+        )
+        self.assertEqual(
             provenance["musllinux_smoke_image"],
             {
                 "digest": (
@@ -315,6 +332,35 @@ class ReleaseManifestTests(unittest.TestCase):
                 for action in actions
             )
         )
+
+    def test_missing_installed_wp18_contract_is_rejected(self) -> None:
+        pyproject = (self.root / "pyproject.toml").read_bytes()
+        mutated = pyproject.replace(
+            _INSTALLED_WP18_CONTRACT.encode(),
+            b"python -m pytest tests/unit",
+        )
+        self.assertNotEqual(mutated, pyproject)
+
+        def material_payload(
+            root: Path,
+            _snapshots: object,
+            relative: str,
+        ) -> bytes:
+            if relative == "pyproject.toml":
+                return mutated
+            return (root / relative).read_bytes()
+
+        with (
+            patch(
+                "tools.packaging_probe.release_manifest._material_payload",
+                side_effect=material_payload,
+            ),
+            self.assertRaisesRegex(
+                ReleaseManifestError,
+                "bounded WP18 encoded public-dispatch contract",
+            ),
+        ):
+            _build_provenance(self.root)
 
     def test_mutable_musllinux_smoke_image_is_rejected(self) -> None:
         workflow = (self.root / ".github/workflows/wheels.yml").read_bytes()

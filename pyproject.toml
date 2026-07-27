@@ -88,6 +88,7 @@ test-requires = [
 test-command = [
   "python {project}/tests/packaging/installed_smoke.py --expected-backend native",
   "python {project}/tests/packaging/run_installed_suite.py --backend native",
+  "python -m pytest -q -p no:cacheprovider {project}/tests/differential/encoded_compiler/test_permanent_program_assembly.py::test_facade_constructs_encoded_services_without_scalar_service_context",
   "python {project}/tests/packaging/installed_smoke.py --expected-backend python",
 ]
 
