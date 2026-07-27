@@ -961,6 +961,14 @@ fn validate_complete_root_coverage(
     named_classes: &NamedClassPhase,
     role_characteristics: &RoleCharacteristicPhase,
 ) -> EncodedResult<()> {
+    if let Some(observed) = named_classes.cardinality_overflow.as_ref() {
+        return Err(EncodedValidationError::resource(
+            "cardinality exceeds the unsigned 32-bit IR limit",
+        )
+        .with_context("limit", "u32")
+        .with_context("observed_hex", observed.hexadecimal()?)
+        .with_context("allowed", u32::MAX.to_string()));
+    }
     let deferred_roots = named_classes
         .deferred_roots
         .checked_add(role_characteristics.deferred_roots)

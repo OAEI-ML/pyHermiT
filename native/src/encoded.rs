@@ -30,6 +30,7 @@ pub mod symbols;
 pub(crate) mod xml_literal;
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -55,6 +56,7 @@ const COMPONENT_SEQUENCE: u8 = 7;
 pub struct EncodedValidationError {
     pub code: &'static str,
     pub message: String,
+    pub context: BTreeMap<String, String>,
 }
 
 impl EncodedValidationError {
@@ -62,6 +64,7 @@ impl EncodedValidationError {
         Self {
             code: "NATIVE_ENCODED_VIEW_INVALID",
             message: message.into(),
+            context: BTreeMap::new(),
         }
     }
 
@@ -69,6 +72,7 @@ impl EncodedValidationError {
         Self {
             code: "NATIVE_ENCODED_RESOURCE_LIMIT",
             message: message.into(),
+            context: BTreeMap::new(),
         }
     }
 
@@ -76,7 +80,13 @@ impl EncodedValidationError {
         Self {
             code: "NATIVE_ENCODED_INVARIANT",
             message: message.into(),
+            context: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.context.insert(key.into(), value.into());
+        self
     }
 }
 

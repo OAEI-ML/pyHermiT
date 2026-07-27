@@ -1932,18 +1932,428 @@ def test_direct_lifecycle_profile_gate_rejects_before_publication_and_allows_ret
         "class-assertion",
     ],
 )
-def test_direct_lifecycle_rejects_every_uncompiled_logical_root(
+def test_direct_lifecycle_matches_scalar_u32_limit_for_every_cardinality_root(
     body: tuple[str, ...],
 ) -> None:
     snapshot = pyowl_core.load_snapshot(functional(*body), options=OPTIONS)
 
-    with pytest.raises(
-        BackendMismatchError,
-        match=r"source semantics contain uncompiled logical roots \(count=1\)",
-    ) as rejected:
+    with pytest.raises(ResourceLimitError) as scalar:
+        _compiled(snapshot)
+    with pytest.raises(ResourceLimitError) as encoded:
         _direct_lifecycle_session(snapshot)
 
-    assert rejected.value.code == "NATIVE_ENCODED_VIEW_INVALID"
+    assert encoded.value.as_dict() == scalar.value.as_dict()
+    assert encoded.value.context == {
+        "allowed": 4_294_967_295,
+        "limit": "u32",
+        "observed": 4_294_967_296,
+    }
+
+
+@pytest.mark.parametrize(
+    ("constructor", "property", "filler", "side", "observed"),
+    [
+        pytest.param(
+            "ObjectMinCardinality", ":p", ":B", side, 4_294_967_296, id=f"object-min-{side}"
+        )
+        for side in ("antecedent", "consequent")
+    ]
+    + [
+        pytest.param(
+            "ObjectMaxCardinality",
+            ":p",
+            ":B",
+            "antecedent",
+            4_294_967_297,
+            id="object-max-antecedent",
+        ),
+        pytest.param(
+            "ObjectMaxCardinality",
+            ":p",
+            ":B",
+            "consequent",
+            4_294_967_296,
+            id="object-max-consequent",
+        ),
+    ]
+    + [
+        pytest.param(
+            "ObjectExactCardinality",
+            ":p",
+            ":B",
+            side,
+            4_294_967_296,
+            id=f"object-exact-{side}",
+        )
+        for side in ("antecedent", "consequent")
+    ]
+    + [
+        pytest.param(
+            "DataMinCardinality",
+            ":d",
+            "xsd:string",
+            side,
+            4_294_967_296,
+            id=f"data-min-{side}",
+        )
+        for side in ("antecedent", "consequent")
+    ]
+    + [
+        pytest.param(
+            "DataMaxCardinality",
+            ":d",
+            "xsd:string",
+            side,
+            4_294_967_297,
+            id=f"data-max-{side}",
+        )
+        for side in ("antecedent", "consequent")
+    ]
+    + [
+        pytest.param(
+            "DataExactCardinality",
+            ":d",
+            "xsd:string",
+            side,
+            4_294_967_296,
+            id=f"data-exact-{side}",
+        )
+        for side in ("antecedent", "consequent")
+    ],
+)
+def test_direct_lifecycle_matches_scalar_constructor_cardinality_transform(
+    constructor: str,
+    property: str,
+    filler: str,
+    side: str,
+    observed: int,
+) -> None:
+    restriction = f"{constructor}(4294967296 {property} {filler})"
+    statement = (
+        f"SubClassOf({restriction} :A)"
+        if side == "antecedent"
+        else f"SubClassOf(:A {restriction})"
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            statement,
+        ),
+        options=OPTIONS,
+    )
+
+    with pytest.raises(ResourceLimitError) as scalar:
+        _compiled(snapshot)
+    with pytest.raises(ResourceLimitError) as encoded:
+        _direct_lifecycle_session(snapshot)
+
+    assert scalar.value.context["observed"] == observed
+    assert encoded.value.as_dict() == scalar.value.as_dict()
+
+
+@pytest.mark.parametrize(
+    ("constructor", "property", "filler", "side", "observed"),
+    [
+        pytest.param(
+            "ObjectMinCardinality",
+            ":p",
+            ":B",
+            "antecedent",
+            10_000_000_000,
+            id="object-min-negated-antecedent",
+        ),
+        pytest.param(
+            "ObjectMinCardinality",
+            ":p",
+            ":B",
+            "consequent",
+            9_999_999_999,
+            id="object-min-negated-consequent",
+        ),
+        *[
+            pytest.param(
+                "ObjectMaxCardinality",
+                ":p",
+                ":B",
+                side,
+                10_000_000_001,
+                id=f"object-max-negated-{side}",
+            )
+            for side in ("antecedent", "consequent")
+        ],
+        pytest.param(
+            "ObjectExactCardinality",
+            ":p",
+            ":B",
+            "antecedent",
+            10_000_000_000,
+            id="object-exact-negated-antecedent",
+        ),
+        pytest.param(
+            "ObjectExactCardinality",
+            ":p",
+            ":B",
+            "consequent",
+            9_999_999_999,
+            id="object-exact-negated-consequent",
+        ),
+        *[
+            pytest.param(
+                "DataMinCardinality",
+                ":d",
+                "xsd:string",
+                side,
+                10_000_000_000,
+                id=f"data-min-negated-{side}",
+            )
+            for side in ("antecedent", "consequent")
+        ],
+        *[
+            pytest.param(
+                "DataMaxCardinality",
+                ":d",
+                "xsd:string",
+                side,
+                10_000_000_001,
+                id=f"data-max-negated-{side}",
+            )
+            for side in ("antecedent", "consequent")
+        ],
+        *[
+            pytest.param(
+                "DataExactCardinality",
+                ":d",
+                "xsd:string",
+                side,
+                10_000_000_000,
+                id=f"data-exact-negated-{side}",
+            )
+            for side in ("antecedent", "consequent")
+        ],
+    ],
+)
+def test_direct_lifecycle_matches_scalar_negated_cardinality_transform(
+    constructor: str,
+    property: str,
+    filler: str,
+    side: str,
+    observed: int,
+) -> None:
+    restriction = (
+        f"ObjectComplementOf({constructor}(10000000000 {property} {filler}))"
+    )
+    statement = (
+        f"SubClassOf({restriction} :A)"
+        if side == "antecedent"
+        else f"SubClassOf(:A {restriction})"
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            statement,
+        ),
+        options=OPTIONS,
+    )
+
+    with pytest.raises(ResourceLimitError) as scalar:
+        _compiled(snapshot)
+    with pytest.raises(ResourceLimitError) as encoded:
+        _direct_lifecycle_session(snapshot)
+
+    assert scalar.value.context["observed"] == observed
+    assert encoded.value.as_dict() == scalar.value.as_dict()
+
+
+@pytest.mark.parametrize(
+    ("constructor", "side"),
+    [
+        pytest.param(constructor, side, id=f"{kind}-{side}")
+        for kind, constructor in (
+            ("object-min", "ObjectMinCardinality"),
+            ("object-exact", "ObjectExactCardinality"),
+        )
+        for side in ("antecedent", "consequent")
+    ],
+)
+def test_negated_object_decrement_at_u32_successor_keeps_overflowing_target(
+    constructor: str,
+    side: str,
+) -> None:
+    restriction = (
+        f"ObjectComplementOf({constructor}(4294967296 :p :B))"
+    )
+    statement = (
+        f"SubClassOf({restriction} :A)"
+        if side == "antecedent"
+        else f"SubClassOf(:A {restriction})"
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            statement,
+        ),
+        options=OPTIONS,
+    )
+
+    with pytest.raises(ResourceLimitError) as scalar:
+        _compiled(snapshot)
+    with pytest.raises(ResourceLimitError) as encoded:
+        _direct_lifecycle_session(snapshot)
+
+    assert scalar.value.context["observed"] == 4_294_967_296
+    assert encoded.value.as_dict() == scalar.value.as_dict()
+
+
+@pytest.mark.parametrize(
+    ("constructor", "property", "filler", "side"),
+    [
+        pytest.param(constructor, property, filler, side, id=f"{domain}-{kind}-{side}")
+        for domain, constructor, property, filler in (
+            ("object", "ObjectMaxCardinality", ":p", ":B"),
+            ("object", "ObjectExactCardinality", ":p", ":B"),
+            ("data", "DataMaxCardinality", ":d", "xsd:string"),
+            ("data", "DataExactCardinality", ":d", "xsd:string"),
+        )
+        for kind in (constructor.removeprefix("Object").removeprefix("Data"),)
+        for side in ("antecedent", "consequent")
+    ],
+)
+def test_direct_lifecycle_matches_scalar_u32_boundary_successor(
+    constructor: str,
+    property: str,
+    filler: str,
+    side: str,
+) -> None:
+    restriction = f"{constructor}(4294967295 {property} {filler})"
+    statement = (
+        f"SubClassOf({restriction} :A)"
+        if side == "antecedent"
+        else f"SubClassOf(:A {restriction})"
+    )
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            statement,
+        ),
+        options=OPTIONS,
+    )
+
+    with pytest.raises(ResourceLimitError) as scalar:
+        _compiled(snapshot)
+    with pytest.raises(ResourceLimitError) as encoded:
+        _direct_lifecycle_session(snapshot)
+
+    assert scalar.value.context["observed"] == 4_294_967_296
+    assert encoded.value.as_dict() == scalar.value.as_dict()
+
+
+@pytest.mark.parametrize(
+    "restriction",
+    [
+        "ObjectMinCardinality(4294967296 :p owl:Nothing)",
+        "ObjectMaxCardinality(4294967296 :p owl:Nothing)",
+        "ObjectExactCardinality(4294967296 :p owl:Nothing)",
+        "DataMinCardinality(4294967296 owl:bottomDataProperty xsd:string)",
+        "DataMaxCardinality(4294967296 owl:bottomDataProperty xsd:string)",
+        "DataExactCardinality(4294967296 owl:bottomDataProperty xsd:string)",
+    ],
+)
+def test_reducible_oversized_cardinality_does_not_raise_resource_limit(
+    restriction: str,
+) -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(ObjectProperty(:p))",
+            f"SubClassOf(:A {restriction})",
+        ),
+        options=OPTIONS,
+    )
+
+    _compiled(snapshot)
+    session = _direct_lifecycle_session(snapshot)
+    session.close()
+
+
+def test_direct_lifecycle_preserves_arbitrary_precision_cardinality_error_context() -> None:
+    observed = 1_208_925_819_614_629_174_706_299
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(ObjectProperty(:p))",
+            f"SubClassOf(:A ObjectMinCardinality({observed} :p :B))",
+        ),
+        options=OPTIONS,
+    )
+
+    with pytest.raises(ResourceLimitError) as scalar:
+        _compiled(snapshot)
+    with pytest.raises(ResourceLimitError) as encoded:
+        _direct_lifecycle_session(snapshot)
+
+    assert encoded.value.as_dict() == scalar.value.as_dict()
+    assert encoded.value.context["observed"] == observed
+
+
+@pytest.mark.parametrize(
+    "restrictions",
+    [
+        (
+            "SubClassOf(:A ObjectMinCardinality(4294967296 :p :C))",
+            "SubClassOf(:B ObjectMinCardinality(10000000000 :p :C))",
+        ),
+        (
+            "SubClassOf(:A ObjectMinCardinality(4294967296 :p :C))",
+            "SubClassOf(:B DataMinCardinality(10000000000 :d xsd:string))",
+        ),
+        (
+            "SubClassOf(:A DataMinCardinality(4294967296 :d xsd:string))",
+            "SubClassOf(:B DataMinCardinality(10000000000 :e xsd:integer))",
+        ),
+    ],
+    ids=["object-fillers", "object-data", "data-roles-fillers"],
+)
+def test_direct_lifecycle_selects_resource_safe_minimum_cardinality_error(
+    restrictions: tuple[str, str],
+) -> None:
+    numeric_minimum = 4_294_967_296
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(Class(:A))",
+            "Declaration(Class(:B))",
+            "Declaration(Class(:C))",
+            "Declaration(ObjectProperty(:p))",
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            *restrictions,
+        ),
+        options=OPTIONS,
+    )
+
+    with pytest.raises(ResourceLimitError) as scalar:
+        _compiled(snapshot)
+    with pytest.raises(ResourceLimitError) as encoded:
+        _direct_lifecycle_session(snapshot)
+
+    assert scalar.value.context["observed"] == numeric_minimum
+    assert encoded.value.as_dict() == scalar.value.as_dict()
+    assert encoded.value.context == {
+        "allowed": 4_294_967_295,
+        "limit": "u32",
+        "observed": numeric_minimum,
+    }
 
 
 @pytest.mark.parametrize(
@@ -2313,7 +2723,7 @@ def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(
         session.close()
 
 
-def test_advertised_lifecycle_is_ineligible_for_deferred_roots_without_fallback(
+def test_advertised_lifecycle_preserves_cardinality_limit_without_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     unsupported = pyowl_core.load_snapshot(
@@ -2356,11 +2766,11 @@ def test_advertised_lifecycle_is_ineligible_for_deferred_roots_without_fallback(
     )
     monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
 
-    with pytest.raises(
-        BackendMismatchError,
-        match=r"source semantics contain uncompiled logical roots \(count=1\)",
-    ):
+    with pytest.raises(ResourceLimitError) as scalar:
+        _compiled(unsupported)
+    with pytest.raises(ResourceLimitError) as encoded:
         Reasoner(unsupported)
+    assert encoded.value.as_dict() == scalar.value.as_dict()
     assert direct_calls == 1
     assert scalar_calls == 0
 

@@ -249,6 +249,64 @@ impl ProgramSemanticEvidence {
 
 /// Owned output of the named-class compiler transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CardinalityMagnitude {
+    bytes_le: Vec<u8>,
+}
+
+impl CardinalityMagnitude {
+    pub(crate) fn hexadecimal(&self) -> EncodedResult<String> {
+        let capacity = self.bytes_le.len().checked_mul(2).ok_or_else(|| {
+            EncodedValidationError::resource("cardinality hexadecimal length overflowed")
+        })?;
+        let mut output = String::new();
+        output.try_reserve_exact(capacity).map_err(|_| {
+            EncodedValidationError::resource("cardinality hexadecimal allocation failed")
+        })?;
+        let digits = b"0123456789abcdef";
+        let mut bytes = self.bytes_le.iter().rev();
+        let first = *bytes.next().ok_or_else(|| {
+            EncodedValidationError::invariant("cardinality magnitude became empty")
+        })?;
+        if first >> 4 != 0 {
+            output.push(char::from(digits[usize::from(first >> 4)]));
+        }
+        output.push(char::from(digits[usize::from(first & 0x0f)]));
+        for byte in bytes {
+            output.push(char::from(digits[usize::from(byte >> 4)]));
+            output.push(char::from(digits[usize::from(byte & 0x0f)]));
+        }
+        Ok(output)
+    }
+
+    fn try_clone_accounted(&self, budget: &mut PhaseBudget) -> EncodedResult<Self> {
+        budget.claim_owned(self.bytes_le.len())?;
+        let mut bytes_le = Vec::new();
+        bytes_le
+            .try_reserve_exact(self.bytes_le.len())
+            .map_err(|_| {
+                EncodedValidationError::resource("merged cardinality magnitude allocation failed")
+            })?;
+        bytes_le.extend_from_slice(&self.bytes_le);
+        Ok(Self { bytes_le })
+    }
+}
+
+impl Ord for CardinalityMagnitude {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.bytes_le
+            .len()
+            .cmp(&other.bytes_le.len())
+            .then_with(|| self.bytes_le.iter().rev().cmp(other.bytes_le.iter().rev()))
+    }
+}
+
+impl PartialOrd for CardinalityMagnitude {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamedClassPhase {
     entity_domain: DecodedSymbolDomain,
     pub declared_entities: Vec<DecodedEntity>,
@@ -270,6 +328,7 @@ pub struct NamedClassPhase {
     pub work: u64,
     pub owned_bytes: usize,
     pub(crate) semantic_evidence: ProgramSemanticEvidence,
+    pub(crate) cardinality_overflow: Option<CardinalityMagnitude>,
     compiled_root_digests: Vec<[u8; 32]>,
     nominal_bindings: Vec<NominalBinding>,
     normalized_edges: Vec<NormalizedEdge>,
@@ -956,6 +1015,47 @@ impl DefinitionPolarity {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CardinalityPolarities(u8);
+
+impl CardinalityPolarities {
+    const POSITIVE: u8 = 1;
+    const NEGATIVE: u8 = 2;
+
+    const BOTH: Self = Self(Self::POSITIVE | Self::NEGATIVE);
+
+    const fn contains(self, polarity: DefinitionPolarity) -> bool {
+        let bit = match polarity {
+            DefinitionPolarity::Positive => Self::POSITIVE,
+            DefinitionPolarity::Negative => Self::NEGATIVE,
+        };
+        self.0 & bit != 0
+    }
+
+    const fn flipped(self) -> Self {
+        Self(
+            (if self.0 & Self::POSITIVE != 0 {
+                Self::NEGATIVE
+            } else {
+                0
+            }) | (if self.0 & Self::NEGATIVE != 0 {
+                Self::POSITIVE
+            } else {
+                0
+            }),
+        )
+    }
+}
+
+impl From<DefinitionPolarity> for CardinalityPolarities {
+    fn from(value: DefinitionPolarity) -> Self {
+        match value {
+            DefinitionPolarity::Positive => Self(Self::POSITIVE),
+            DefinitionPolarity::Negative => Self(Self::NEGATIVE),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ClassBooleanDefinition {
     expressions: Vec<NodeId>,
@@ -1596,6 +1696,8 @@ pub(super) struct PhaseBudget {
     limits: NamedClassPhaseLimits,
     work: u64,
     owned_bytes: usize,
+    cardinality_overflow: Option<CardinalityMagnitude>,
+    cardinality_overflow_events: usize,
 }
 
 impl PhaseBudget {
@@ -1604,6 +1706,8 @@ impl PhaseBudget {
             limits,
             work: 0,
             owned_bytes: 0,
+            cardinality_overflow: None,
+            cardinality_overflow_events: 0,
         }
     }
 
@@ -3164,6 +3268,7 @@ fn compile_named_class_phase_impl<B: ByteSource>(
         work: budget.work,
         owned_bytes: budget.owned_bytes,
         semantic_evidence,
+        cardinality_overflow: budget.cardinality_overflow,
         compiled_root_digests,
         nominal_bindings,
         normalized_edges: edges,
@@ -5007,6 +5112,7 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
             data_roles,
             identifier,
             false,
+            CardinalityPolarities::BOTH,
             member_depth,
             scope_maps,
             budget,
@@ -5131,7 +5237,7 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
         if atomic_class_selection(model, symbols, identifier, budget)?.is_some() {
             continue;
         }
-        let Some(negative) = class_boolean_definition_candidates(
+        let negative = class_boolean_definition_candidates(
             model,
             symbols,
             object_roles,
@@ -5141,11 +5247,8 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
             namespace,
             scope_maps,
             budget,
-        )?
-        else {
-            return Ok(());
-        };
-        let Some(positive) = class_boolean_definition_candidates(
+        )?;
+        let positive = class_boolean_definition_candidates(
             model,
             symbols,
             object_roles,
@@ -5155,8 +5258,8 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
             namespace,
             scope_maps,
             budget,
-        )?
-        else {
+        )?;
+        let (Some(negative), Some(positive)) = (negative, positive) else {
             return Ok(());
         };
         let count = negative.len().checked_add(positive.len()).ok_or_else(|| {
@@ -5206,6 +5309,7 @@ fn class_boolean_definition_candidates<B: ByteSource>(
         data_roles,
         expression,
         false,
+        polarity.into(),
         0,
         scope_maps,
         budget,
@@ -5239,6 +5343,7 @@ fn normalized_class_term<B: ByteSource>(
     data_roles: Option<&DataRolePhase>,
     identifier: NodeId,
     inherited_complement: bool,
+    cardinality_polarities: CardinalityPolarities,
     initial_depth: usize,
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
@@ -5499,6 +5604,7 @@ fn normalized_class_term<B: ByteSource>(
                 data_roles,
                 filler,
                 complemented,
+                cardinality_polarities,
                 filler_depth,
                 scope_maps,
                 budget,
@@ -5629,15 +5735,31 @@ fn normalized_class_term<B: ByteSource>(
             let Some(data_roles) = data_roles else {
                 return Ok(None);
             };
-            let Some((cardinality, cardinality_bytes)) = integer_field_u32_bytes(
+            if !reduction_inputs_are_retained(model, symbols, base, depth, budget)? {
+                return Ok(None);
+            }
+            let cardinality_field = integer_field_u32_bytes(
                 model,
                 node,
                 0,
                 "data-exact-cardinality definition cardinality",
                 budget,
-            )?
-            else {
-                return Ok(None);
+            )?;
+            let (cardinality, cardinality_bytes) = match cardinality_field {
+                CardinalityField::Fits(cardinality, cardinality_bytes) => {
+                    (cardinality, cardinality_bytes)
+                }
+                CardinalityField::Overflow(observed) => {
+                    record_constructor_cardinality_overflow(
+                        budget,
+                        observed,
+                        CardinalityProjectionDomain::Data,
+                        node.tag(),
+                        complemented,
+                        cardinality_polarities,
+                    )?;
+                    return Ok(None);
+                }
             };
             let property = node_field(model, node, 1, "data-exact-cardinality definition role")?;
             if !reduction_inputs_are_retained(model, symbols, property, depth, budget)? {
@@ -5680,6 +5802,7 @@ fn normalized_class_term<B: ByteSource>(
 
             let (intersection, first, second) = if complemented {
                 let Some(upper_cardinality) = cardinality.checked_add(1) else {
+                    record_incremented_cardinality_overflow(budget)?;
                     return Ok(None);
                 };
                 let lower = if cardinality == 1 {
@@ -5707,6 +5830,7 @@ fn normalized_class_term<B: ByteSource>(
                 (false, lower, upper)
             } else {
                 if cardinality == u32::MAX {
+                    record_incremented_cardinality_overflow(budget)?;
                     return Ok(None);
                 }
                 let minimum = if cardinality == 1 {
@@ -5775,15 +5899,31 @@ fn normalized_class_term<B: ByteSource>(
             let Some(data_roles) = data_roles else {
                 return Ok(None);
             };
-            let Some((cardinality, cardinality_bytes)) = integer_field_u32_bytes(
+            if !reduction_inputs_are_retained(model, symbols, base, depth, budget)? {
+                return Ok(None);
+            }
+            let cardinality_field = integer_field_u32_bytes(
                 model,
                 node,
                 0,
                 "data-cardinality definition cardinality",
                 budget,
-            )?
-            else {
-                return Ok(None);
+            )?;
+            let (cardinality, cardinality_bytes) = match cardinality_field {
+                CardinalityField::Fits(cardinality, cardinality_bytes) => {
+                    (cardinality, cardinality_bytes)
+                }
+                CardinalityField::Overflow(observed) => {
+                    record_constructor_cardinality_overflow(
+                        budget,
+                        observed,
+                        CardinalityProjectionDomain::Data,
+                        node.tag(),
+                        complemented,
+                        cardinality_polarities,
+                    )?;
+                    return Ok(None);
+                }
             };
             let normalized = match (node.tag(), complemented, cardinality) {
                 (DATA_MIN_CARDINALITY_TAG, false, 0) => return Ok(None),
@@ -5824,7 +5964,10 @@ fn normalized_class_term<B: ByteSource>(
                         )?,
                     }
                 }
-                (DATA_MAX_CARDINALITY_TAG, false, u32::MAX) => return Ok(None),
+                (DATA_MAX_CARDINALITY_TAG, false, u32::MAX) => {
+                    record_incremented_cardinality_overflow(budget)?;
+                    return Ok(None);
+                }
                 (DATA_MAX_CARDINALITY_TAG, false, _) => DataCardinalityNormalization::Cardinality {
                     kind: DataCardinalityKind::Maximum,
                     cardinality,
@@ -5832,6 +5975,7 @@ fn normalized_class_term<B: ByteSource>(
                 },
                 (DATA_MAX_CARDINALITY_TAG, true, _) => {
                     let Some(normalized_cardinality) = cardinality.checked_add(1) else {
+                        record_incremented_cardinality_overflow(budget)?;
                         return Ok(None);
                     };
                     if normalized_cardinality == 1 {
@@ -5965,15 +6109,28 @@ fn normalized_class_term<B: ByteSource>(
             if !reduction_inputs_are_retained(model, symbols, base, depth, budget)? {
                 return Ok(None);
             }
-            let Some((cardinality, cardinality_bytes)) = integer_field_u32_bytes(
+            let cardinality_field = integer_field_u32_bytes(
                 model,
                 node,
                 0,
                 "object-exact-cardinality definition cardinality",
                 budget,
-            )?
-            else {
-                return Ok(None);
+            )?;
+            let (cardinality, cardinality_bytes) = match cardinality_field {
+                CardinalityField::Fits(cardinality, cardinality_bytes) => {
+                    (cardinality, cardinality_bytes)
+                }
+                CardinalityField::Overflow(observed) => {
+                    record_constructor_cardinality_overflow(
+                        budget,
+                        observed,
+                        CardinalityProjectionDomain::Object,
+                        node.tag(),
+                        complemented,
+                        cardinality_polarities,
+                    )?;
+                    return Ok(None);
+                }
             };
             let property = node_field(model, node, 1, "object-exact-cardinality definition role")?;
             let role_id = named_object_role_id(model, symbols, object_roles, property, budget)?;
@@ -6008,6 +6165,7 @@ fn normalized_class_term<B: ByteSource>(
                     filler,
                     filler_depth,
                     normalization,
+                    cardinality_polarities,
                     scope_maps,
                     budget,
                 );
@@ -6015,6 +6173,7 @@ fn normalized_class_term<B: ByteSource>(
 
             let (intersection, first, second) = if complemented {
                 let Some(upper_cardinality) = cardinality.checked_add(1) else {
+                    record_incremented_cardinality_overflow(budget)?;
                     return Ok(None);
                 };
                 let lower = if cardinality == 1 {
@@ -6042,6 +6201,7 @@ fn normalized_class_term<B: ByteSource>(
                 (false, lower, upper)
             } else {
                 if cardinality == u32::MAX {
+                    record_incremented_cardinality_overflow(budget)?;
                     return Ok(None);
                 }
                 let minimum = if cardinality == 1 {
@@ -6073,6 +6233,7 @@ fn normalized_class_term<B: ByteSource>(
                 filler,
                 filler_depth,
                 first,
+                cardinality_polarities,
                 scope_maps,
                 budget,
             )?
@@ -6089,6 +6250,7 @@ fn normalized_class_term<B: ByteSource>(
                 filler,
                 filler_depth,
                 second,
+                cardinality_polarities,
                 scope_maps,
                 budget,
             )?
@@ -6117,15 +6279,28 @@ fn normalized_class_term<B: ByteSource>(
             if !reduction_inputs_are_retained(model, symbols, base, depth, budget)? {
                 return Ok(None);
             }
-            let Some((cardinality, cardinality_bytes)) = integer_field_u32_bytes(
+            let cardinality_field = integer_field_u32_bytes(
                 model,
                 node,
                 0,
                 "object-cardinality definition cardinality",
                 budget,
-            )?
-            else {
-                return Ok(None);
+            )?;
+            let (cardinality, cardinality_bytes) = match cardinality_field {
+                CardinalityField::Fits(cardinality, cardinality_bytes) => {
+                    (cardinality, cardinality_bytes)
+                }
+                CardinalityField::Overflow(observed) => {
+                    record_constructor_cardinality_overflow(
+                        budget,
+                        observed,
+                        CardinalityProjectionDomain::Object,
+                        node.tag(),
+                        complemented,
+                        cardinality_polarities,
+                    )?;
+                    return Ok(None);
+                }
             };
             let normalized = match (node.tag(), complemented, cardinality) {
                 (OBJECT_MIN_CARDINALITY_TAG, false, 0) => return Ok(None),
@@ -6164,7 +6339,10 @@ fn normalized_class_term<B: ByteSource>(
                         )?,
                     }
                 }
-                (OBJECT_MAX_CARDINALITY_TAG, false, u32::MAX) => return Ok(None),
+                (OBJECT_MAX_CARDINALITY_TAG, false, u32::MAX) => {
+                    record_incremented_cardinality_overflow(budget)?;
+                    return Ok(None);
+                }
                 (OBJECT_MAX_CARDINALITY_TAG, false, _) => CardinalityNormalization::Cardinality {
                     kind: ObjectCardinalityKind::Maximum,
                     cardinality,
@@ -6172,6 +6350,7 @@ fn normalized_class_term<B: ByteSource>(
                 },
                 (OBJECT_MAX_CARDINALITY_TAG, true, _) => {
                     let Some(normalized_cardinality) = cardinality.checked_add(1) else {
+                        record_incremented_cardinality_overflow(budget)?;
                         return Ok(None);
                     };
                     if normalized_cardinality == 1 {
@@ -6213,6 +6392,13 @@ fn normalized_class_term<B: ByteSource>(
                     ..
                 }
             );
+            let filler_polarities = match &normalized {
+                CardinalityNormalization::Cardinality {
+                    kind: ObjectCardinalityKind::Maximum,
+                    ..
+                } => cardinality_polarities.flipped(),
+                _ => cardinality_polarities,
+            };
             let Some(filler) = normalized_class_term(
                 model,
                 symbols,
@@ -6220,6 +6406,7 @@ fn normalized_class_term<B: ByteSource>(
                 data_roles,
                 filler,
                 complement_filler,
+                filler_polarities,
                 filler_depth,
                 scope_maps,
                 budget,
@@ -6407,6 +6594,7 @@ fn normalized_class_term<B: ByteSource>(
             data_roles,
             operand,
             complemented,
+            cardinality_polarities,
             operand_depth,
             scope_maps,
             budget,
@@ -6495,6 +6683,7 @@ fn normalized_object_restriction_term<B: ByteSource>(
     filler: NodeId,
     filler_depth: usize,
     normalization: CardinalityNormalization,
+    cardinality_polarities: CardinalityPolarities,
     scope_maps: &[AnonymousScopeMap],
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<NormalizedClassTerm>> {
@@ -6505,6 +6694,13 @@ fn normalized_object_restriction_term<B: ByteSource>(
             ..
         }
     );
+    let filler_polarities = match &normalization {
+        CardinalityNormalization::Cardinality {
+            kind: ObjectCardinalityKind::Maximum,
+            ..
+        } => cardinality_polarities.flipped(),
+        _ => cardinality_polarities,
+    };
     let Some(filler) = normalized_class_term(
         model,
         symbols,
@@ -6512,6 +6708,7 @@ fn normalized_object_restriction_term<B: ByteSource>(
         data_roles,
         filler,
         complement_filler,
+        filler_polarities,
         filler_depth,
         scope_maps,
         budget,
@@ -9879,12 +10076,8 @@ fn reducible_cardinality_projection<B: ByteSource>(
     if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
         return Ok(None);
     }
-    let Some((cardinality, _cardinality_bytes)) =
-        integer_field_u32_bytes(model, node, 0, "cardinality value", budget)?
-    else {
-        return Ok(None);
-    };
-    let zero = cardinality == 0;
+    let cardinality = integer_field_u32_bytes(model, node, 0, "cardinality value", budget)?;
+    let zero = matches!(cardinality, CardinalityField::Fits(0, _));
     if zero {
         if let Some(display) = rule.zero_reduction {
             return builtin_atomic_class_selection(symbols, node.id(), display)
@@ -10295,13 +10488,25 @@ fn data_property_collection_has_iri<B: ByteSource>(
     Ok(false)
 }
 
+enum CardinalityField<B: ByteSource> {
+    Fits(u32, Vec<u8>),
+    Overflow(ScalarRef<B>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CardinalityAdjustment {
+    Decrement,
+    Exact,
+    Increment,
+}
+
 fn integer_field_u32_bytes<B: ByteSource>(
     model: &ValidatedModel<B>,
     node: NodeRef,
     offset: usize,
     name: &'static str,
     budget: &mut PhaseBudget,
-) -> EncodedResult<Option<(u32, Vec<u8>)>> {
+) -> EncodedResult<CardinalityField<B>> {
     let field_index = node
         .fields()
         .start
@@ -10325,7 +10530,7 @@ fn integer_field_u32_bytes<B: ByteSource>(
         ));
     }
     if value.len() > size_of::<u32>() {
-        return Ok(None);
+        return Ok(CardinalityField::Overflow(value));
     }
     let mut cardinality = 0_u32;
     for index in 0..value.len() {
@@ -10338,10 +10543,287 @@ fn integer_field_u32_bytes<B: ByteSource>(
             .ok_or_else(|| EncodedValidationError::resource("cardinality shift overflowed"))?;
         cardinality |= u32::from(byte) << shift;
     }
-    Ok(Some((
+    Ok(CardinalityField::Fits(
         cardinality,
         canonical_u32_integer_bytes(cardinality, budget)?,
-    )))
+    ))
+}
+
+fn scalar_exceeds_u32_successor<B: ByteSource>(value: ScalarRef<B>) -> EncodedResult<bool> {
+    const U32_SUCCESSOR_LE: [u8; 5] = [0, 0, 0, 0, 1];
+    if value.len() != U32_SUCCESSOR_LE.len() {
+        return Ok(value.len() > U32_SUCCESSOR_LE.len());
+    }
+    for index in (0..value.len()).rev() {
+        let observed = value.byte(index).ok_or_else(|| {
+            EncodedValidationError::invariant("cardinality scalar became truncated")
+        })?;
+        match observed.cmp(&U32_SUCCESSOR_LE[index]) {
+            Ordering::Equal => {}
+            ordering => return Ok(ordering == Ordering::Greater),
+        }
+    }
+    Ok(false)
+}
+
+fn overflow_adjustment<B: ByteSource>(
+    domain: CardinalityProjectionDomain,
+    tag: u16,
+    complemented: bool,
+    polarities: CardinalityPolarities,
+    observed: ScalarRef<B>,
+) -> EncodedResult<CardinalityAdjustment> {
+    let positive = polarities.contains(DefinitionPolarity::Positive);
+    let adjustment = match (domain, tag) {
+        (
+            CardinalityProjectionDomain::Object,
+            OBJECT_MIN_CARDINALITY_TAG | OBJECT_EXACT_CARDINALITY_TAG,
+        ) if complemented && positive && scalar_exceeds_u32_successor(observed)? => {
+            CardinalityAdjustment::Decrement
+        }
+        (CardinalityProjectionDomain::Object, OBJECT_MAX_CARDINALITY_TAG)
+            if complemented || !positive =>
+        {
+            CardinalityAdjustment::Increment
+        }
+        (CardinalityProjectionDomain::Data, DATA_MAX_CARDINALITY_TAG) => {
+            CardinalityAdjustment::Increment
+        }
+        (
+            CardinalityProjectionDomain::Object,
+            OBJECT_MIN_CARDINALITY_TAG | OBJECT_MAX_CARDINALITY_TAG | OBJECT_EXACT_CARDINALITY_TAG,
+        )
+        | (
+            CardinalityProjectionDomain::Data,
+            DATA_MIN_CARDINALITY_TAG | DATA_EXACT_CARDINALITY_TAG,
+        ) => CardinalityAdjustment::Exact,
+        _ => {
+            return Err(EncodedValidationError::invariant(
+                "cardinality overflow changed constructor domain",
+            ));
+        }
+    };
+    Ok(adjustment)
+}
+
+struct AdjustedCardinality<B: ByteSource> {
+    observed: ScalarRef<B>,
+    adjustment: CardinalityAdjustment,
+    pivot: usize,
+    len: usize,
+}
+
+impl<B: ByteSource> AdjustedCardinality<B> {
+    fn new(
+        observed: ScalarRef<B>,
+        adjustment: CardinalityAdjustment,
+        budget: &mut PhaseBudget,
+    ) -> EncodedResult<Self> {
+        budget.claim_work(observed.len())?;
+        let pivot = match adjustment {
+            CardinalityAdjustment::Exact => 0,
+            CardinalityAdjustment::Decrement => {
+                let mut pivot = None;
+                for index in 0..observed.len() {
+                    if observed.byte(index).ok_or_else(|| {
+                        EncodedValidationError::invariant("cardinality scalar became truncated")
+                    })? != 0
+                    {
+                        pivot = Some(index);
+                        break;
+                    }
+                }
+                pivot.ok_or_else(|| {
+                    EncodedValidationError::invariant("positive cardinality decrement underflowed")
+                })?
+            }
+            CardinalityAdjustment::Increment => {
+                let mut pivot = observed.len();
+                for index in 0..observed.len() {
+                    if observed.byte(index).ok_or_else(|| {
+                        EncodedValidationError::invariant("cardinality scalar became truncated")
+                    })? != u8::MAX
+                    {
+                        pivot = index;
+                        break;
+                    }
+                }
+                pivot
+            }
+        };
+        let mut len = if adjustment == CardinalityAdjustment::Increment && pivot == observed.len() {
+            observed.len().checked_add(1).ok_or_else(|| {
+                EncodedValidationError::resource("incremented cardinality length overflowed")
+            })?
+        } else {
+            observed.len()
+        };
+        while len != 0
+            && (Self {
+                observed,
+                adjustment,
+                pivot,
+                len,
+            })
+            .byte(len - 1)?
+                == 0
+        {
+            len -= 1;
+        }
+        if len == 0 {
+            return Err(EncodedValidationError::invariant(
+                "cardinality overflow magnitude became empty",
+            ));
+        }
+        Ok(Self {
+            observed,
+            adjustment,
+            pivot,
+            len,
+        })
+    }
+
+    fn byte(&self, index: usize) -> EncodedResult<u8> {
+        if index >= self.len {
+            return Err(EncodedValidationError::invariant(
+                "adjusted cardinality byte index is out of range",
+            ));
+        }
+        if self.adjustment == CardinalityAdjustment::Increment
+            && self.pivot == self.observed.len()
+            && index == self.observed.len()
+        {
+            return Ok(1);
+        }
+        let raw = self.observed.byte(index).ok_or_else(|| {
+            EncodedValidationError::invariant("cardinality scalar became truncated")
+        })?;
+        Ok(match self.adjustment {
+            CardinalityAdjustment::Decrement if index < self.pivot => u8::MAX,
+            CardinalityAdjustment::Decrement if index == self.pivot => raw - 1,
+            CardinalityAdjustment::Increment if index < self.pivot => 0,
+            CardinalityAdjustment::Increment if index == self.pivot => raw + 1,
+            _ => raw,
+        })
+    }
+
+    fn cmp(&self, current: &CardinalityMagnitude) -> EncodedResult<Ordering> {
+        match self.len.cmp(&current.bytes_le.len()) {
+            Ordering::Equal => {}
+            ordering => return Ok(ordering),
+        }
+        for index in (0..self.len).rev() {
+            match self.byte(index)?.cmp(&current.bytes_le[index]) {
+                Ordering::Equal => {}
+                ordering => return Ok(ordering),
+            }
+        }
+        Ok(Ordering::Equal)
+    }
+}
+
+fn record_cardinality_overflow<B: ByteSource>(
+    budget: &mut PhaseBudget,
+    observed: ScalarRef<B>,
+    adjustment: CardinalityAdjustment,
+) -> EncodedResult<()> {
+    budget.cardinality_overflow_events = budget
+        .cardinality_overflow_events
+        .checked_add(1)
+        .ok_or_else(|| {
+            EncodedValidationError::resource("cardinality overflow event count overflowed")
+        })?;
+    let preclaimed = if budget.cardinality_overflow.is_none() {
+        let lower_bound = match adjustment {
+            CardinalityAdjustment::Exact | CardinalityAdjustment::Increment => observed.len(),
+            CardinalityAdjustment::Decrement => observed.len().saturating_sub(1).max(5),
+        };
+        budget.claim_owned(lower_bound)?;
+        Some(lower_bound)
+    } else {
+        None
+    };
+    let adjusted = AdjustedCardinality::new(observed, adjustment, budget)?;
+    if let Some(preclaimed) = preclaimed {
+        if adjusted.len > preclaimed {
+            budget.claim_owned(adjusted.len - preclaimed)?;
+        }
+    }
+    if let Some(current) = budget.cardinality_overflow.as_ref() {
+        if adjusted.cmp(current)? != Ordering::Less {
+            return Ok(());
+        }
+    }
+    if let Some(current) = budget.cardinality_overflow.as_mut() {
+        if adjusted.len > current.bytes_le.len() {
+            return Err(EncodedValidationError::invariant(
+                "smaller cardinality magnitude grew beyond retained storage",
+            ));
+        }
+        for index in 0..adjusted.len {
+            current.bytes_le[index] = adjusted.byte(index)?;
+        }
+        current.bytes_le.truncate(adjusted.len);
+        return Ok(());
+    }
+    let mut bytes_le = Vec::new();
+    bytes_le.try_reserve_exact(adjusted.len).map_err(|_| {
+        EncodedValidationError::resource("cardinality overflow copy allocation failed")
+    })?;
+    for index in 0..adjusted.len {
+        bytes_le.push(adjusted.byte(index)?);
+    }
+    budget.cardinality_overflow = Some(CardinalityMagnitude { bytes_le });
+    Ok(())
+}
+
+fn record_constructor_cardinality_overflow<B: ByteSource>(
+    budget: &mut PhaseBudget,
+    observed: ScalarRef<B>,
+    domain: CardinalityProjectionDomain,
+    tag: u16,
+    complemented: bool,
+    polarities: CardinalityPolarities,
+) -> EncodedResult<()> {
+    let adjustment = overflow_adjustment(domain, tag, complemented, polarities, observed)?;
+    record_cardinality_overflow(budget, observed, adjustment)
+}
+
+fn record_incremented_cardinality_overflow(budget: &mut PhaseBudget) -> EncodedResult<()> {
+    const U32_SUCCESSOR_LE: [u8; 5] = [0, 0, 0, 0, 1];
+    budget.cardinality_overflow_events = budget
+        .cardinality_overflow_events
+        .checked_add(1)
+        .ok_or_else(|| {
+            EncodedValidationError::resource("cardinality overflow event count overflowed")
+        })?;
+    if let Some(current) = budget.cardinality_overflow.as_mut() {
+        let ordering = U32_SUCCESSOR_LE
+            .len()
+            .cmp(&current.bytes_le.len())
+            .then_with(|| {
+                U32_SUCCESSOR_LE
+                    .iter()
+                    .rev()
+                    .cmp(current.bytes_le.iter().rev())
+            });
+        if ordering != Ordering::Less {
+            return Ok(());
+        }
+        current.bytes_le[..U32_SUCCESSOR_LE.len()].copy_from_slice(&U32_SUCCESSOR_LE);
+        current.bytes_le.truncate(U32_SUCCESSOR_LE.len());
+        return Ok(());
+    }
+    budget.claim_owned(U32_SUCCESSOR_LE.len())?;
+    let mut bytes_le = Vec::new();
+    bytes_le
+        .try_reserve_exact(U32_SUCCESSOR_LE.len())
+        .map_err(|_| {
+            EncodedValidationError::resource("incremented cardinality overflow allocation failed")
+        })?;
+    bytes_le.extend_from_slice(&U32_SUCCESSOR_LE);
+    budget.cardinality_overflow = Some(CardinalityMagnitude { bytes_le });
+    Ok(())
 }
 
 fn canonical_u32_integer_bytes(
@@ -24171,6 +24653,12 @@ fn merge_named_class_phases_impl(
     for (_, phase) in phases {
         semantic_evidence.include(phase.semantic_evidence);
     }
+    let cardinality_overflow = phases
+        .iter()
+        .filter_map(|(_, phase)| phase.cardinality_overflow.as_ref())
+        .min()
+        .map(|observed| observed.try_clone_accounted(&mut budget))
+        .transpose()?;
     Ok(NamedClassPhase {
         entity_domain,
         declared_entities,
@@ -24192,6 +24680,7 @@ fn merge_named_class_phases_impl(
         work: budget.work,
         owned_bytes: budget.owned_bytes,
         semantic_evidence,
+        cardinality_overflow,
         compiled_root_digests,
         nominal_bindings,
         normalized_edges: edges,
@@ -25867,10 +26356,29 @@ fn sort_work(count: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
     use crate::encoded::model::ValidatedModel;
     use crate::encoded::symbols::{compile_symbol_phase, SymbolPhaseLimits};
     use crate::encoded::{EncodedColumns, EncodedLimits};
+
+    #[derive(Clone, Copy)]
+    struct ReadCountingBytes<'a> {
+        bytes: &'a [u8],
+        reads: &'a Cell<usize>,
+    }
+
+    impl ByteSource for ReadCountingBytes<'_> {
+        fn len(self) -> usize {
+            self.bytes.len()
+        }
+
+        fn byte(self, index: usize) -> Option<u8> {
+            self.reads.set(self.reads.get().saturating_add(1));
+            self.bytes.get(index).copied()
+        }
+    }
 
     #[derive(Clone, Debug)]
     struct OwnedColumns {
@@ -25901,6 +26409,33 @@ mod tests {
                 item_values: &self.item_values,
                 item_lengths: &self.item_lengths,
                 scalar_bytes: &self.scalar_bytes,
+            }
+        }
+
+        fn read_counted<'a>(
+            &'a self,
+            column_reads: &'a Cell<usize>,
+            scalar_reads: &'a Cell<usize>,
+        ) -> EncodedColumns<ReadCountingBytes<'a>> {
+            let column = |bytes: &'a [u8]| ReadCountingBytes {
+                bytes,
+                reads: column_reads,
+            };
+            EncodedColumns {
+                root_kinds: column(&self.root_kinds),
+                root_ids: column(&self.root_ids),
+                node_tags: column(&self.node_tags),
+                node_field_offsets: column(&self.node_field_offsets),
+                field_kinds: column(&self.field_kinds),
+                field_values: column(&self.field_values),
+                field_lengths: column(&self.field_lengths),
+                item_kinds: column(&self.item_kinds),
+                item_values: column(&self.item_values),
+                item_lengths: column(&self.item_lengths),
+                scalar_bytes: ReadCountingBytes {
+                    bytes: &self.scalar_bytes,
+                    reads: scalar_reads,
+                },
             }
         }
     }
@@ -26161,6 +26696,39 @@ mod tests {
         }
     }
 
+    fn oversized_cardinality_pair() -> OwnedColumns {
+        let mut scalar_bytes = b"urn:Curn:pclassobject_property".to_vec();
+        scalar_bytes.extend([0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01]);
+        OwnedColumns {
+            root_kinds: vec![super::super::ROOT_AXIOM],
+            root_ids: le32(&[7]),
+            node_tags: le16(&[1, 1, 2, 2, OBJECT_MIN_CARDINALITY_TAG, 38, 62]),
+            node_field_offsets: le64(&[0, 1, 2, 4, 6, 9, 12, 14]),
+            field_kinds: vec![
+                super::super::COMPONENT_TEXT,
+                super::super::COMPONENT_TEXT,
+                super::super::COMPONENT_ENUM,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_ENUM,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_INTEGER,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_INTEGER,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_NODE,
+                super::super::COMPONENT_SET,
+                super::super::COMPONENT_SET,
+            ],
+            field_values: le64(&[0, 5, 10, 1, 15, 2, 30, 4, 3, 35, 4, 3, 0, 2]),
+            field_lengths: le64(&[5, 5, 5, 0, 15, 0, 5, 0, 0, 5, 0, 0, 2, 0]),
+            item_kinds: vec![super::super::COMPONENT_NODE, super::super::COMPONENT_NODE],
+            item_values: le64(&[5, 6]),
+            item_lengths: le64(&[0, 0]),
+            scalar_bytes,
+        }
+    }
+
     fn disjoint_classes() -> OwnedColumns {
         let mut owned = equivalent_classes();
         owned.node_tags = le16(&[1, 1, 2, 2, 63]);
@@ -26264,6 +26832,137 @@ mod tests {
         let mut owned = same_individual();
         owned.node_tags = le16(&[1, 1, 2, 2, DIFFERENT_INDIVIDUALS_TAG]);
         owned
+    }
+
+    #[test]
+    fn oversized_cardinality_rejects_before_copying_under_owned_byte_limit() -> EncodedResult<()> {
+        let owned = oversized_cardinality_pair();
+        let column_reads = Cell::new(0);
+        let scalar_reads = Cell::new(0);
+        let model = ValidatedModel::new(
+            owned.read_counted(&column_reads, &scalar_reads),
+            EncodedLimits::default(),
+        )?;
+        let reads_after_validation = scalar_reads.get();
+        let node =
+            model
+                .node(NodeId::new(5).ok_or_else(|| {
+                    EncodedValidationError::invariant("test node ID disappeared")
+                })?)?;
+        let limits = NamedClassPhaseLimits {
+            max_owned_bytes: 4,
+            ..NamedClassPhaseLimits::default()
+        };
+        let mut budget = PhaseBudget::new(limits);
+
+        let CardinalityField::Overflow(observed) =
+            integer_field_u32_bytes(&model, node, 0, "test cardinality value", &mut budget)?
+        else {
+            return Err(EncodedValidationError::invariant(
+                "five-byte test cardinality unexpectedly fit u32",
+            ));
+        };
+        let error =
+            record_cardinality_overflow(&mut budget, observed, CardinalityAdjustment::Exact)
+                .expect_err("five-byte cardinality must exceed the four-byte owned limit");
+
+        assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
+        assert!(error.message.contains("owned-byte limit"));
+        assert_eq!(budget.usage(), (5, 0));
+        assert!(budget.cardinality_overflow.is_none());
+        assert_eq!(scalar_reads.get(), reads_after_validation);
+        Ok(())
+    }
+
+    #[test]
+    fn cardinality_overflow_selection_uses_resource_safe_numeric_minimum() -> EncodedResult<()> {
+        let lower = CardinalityMagnitude {
+            bytes_le: vec![0, 0, 0, 0, 1],
+        };
+        let higher = CardinalityMagnitude {
+            bytes_le: vec![0, 228, 11, 84, 2],
+        };
+
+        let selected = [&higher, &lower]
+            .into_iter()
+            .min()
+            .expect("overflow selection disappeared");
+        assert_eq!(selected.hexadecimal()?, "100000000");
+        Ok(())
+    }
+
+    #[test]
+    fn retained_cardinality_minimum_reuses_its_single_owned_allocation() -> EncodedResult<()> {
+        let owned = oversized_cardinality_pair();
+        let model = ValidatedModel::new(owned.borrowed(), EncodedLimits::default())?;
+        let first = model.node(NodeId::new(5).ok_or_else(|| {
+            EncodedValidationError::invariant("first test cardinality node disappeared")
+        })?)?;
+        let second = model.node(NodeId::new(6).ok_or_else(|| {
+            EncodedValidationError::invariant("second test cardinality node disappeared")
+        })?)?;
+        let limits = NamedClassPhaseLimits {
+            max_owned_bytes: 5,
+            ..NamedClassPhaseLimits::default()
+        };
+        let mut budget = PhaseBudget::new(limits);
+        let CardinalityField::Overflow(first) =
+            integer_field_u32_bytes(&model, first, 0, "first test cardinality", &mut budget)?
+        else {
+            return Err(EncodedValidationError::invariant(
+                "first test cardinality unexpectedly fit u32",
+            ));
+        };
+        let CardinalityField::Overflow(second) =
+            integer_field_u32_bytes(&model, second, 0, "second test cardinality", &mut budget)?
+        else {
+            return Err(EncodedValidationError::invariant(
+                "second test cardinality unexpectedly fit u32",
+            ));
+        };
+
+        record_cardinality_overflow(&mut budget, first, CardinalityAdjustment::Exact)?;
+        record_cardinality_overflow(&mut budget, second, CardinalityAdjustment::Exact)?;
+
+        assert_eq!(budget.usage().1, 5);
+        assert_eq!(budget.cardinality_overflow_events, 2);
+        assert_eq!(
+            budget
+                .cardinality_overflow
+                .as_ref()
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant("retained cardinality minimum disappeared")
+                })?
+                .hexadecimal()?,
+            "100000000",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_u32_successor_overflow_is_charged_once() -> EncodedResult<()> {
+        let limits = NamedClassPhaseLimits {
+            max_owned_bytes: 5,
+            ..NamedClassPhaseLimits::default()
+        };
+        let mut budget = PhaseBudget::new(limits);
+
+        record_incremented_cardinality_overflow(&mut budget)?;
+        record_incremented_cardinality_overflow(&mut budget)?;
+
+        assert_eq!(budget.usage().1, 5);
+        assert_eq!(budget.cardinality_overflow_events, 2);
+        assert_eq!(
+            budget
+                .cardinality_overflow
+                .as_ref()
+                .ok_or_else(|| {
+                    EncodedValidationError::invariant("retained u32 successor overflow disappeared")
+                })?
+                .hexadecimal()?,
+            "100000000",
+        );
+        Ok(())
     }
 
     #[test]

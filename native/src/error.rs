@@ -140,7 +140,21 @@ impl NativeError {
                     kwargs.set_item("limit", limit)?;
                 }
                 for field in ["observed", "allowed"] {
-                    if let Some(value) = self.context.get(field) {
+                    let hexadecimal = (field == "observed")
+                        .then(|| self.context.get("observed_hex"))
+                        .flatten();
+                    if let Some(value) = hexadecimal {
+                        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                            return Err(PyValueError::new_err(
+                                "native resource error has a nonhexadecimal observed_hex value",
+                            ));
+                        }
+                        let integer = py
+                            .import("builtins")?
+                            .getattr("int")?
+                            .call1((value, 16_u8))?;
+                        kwargs.set_item(field, integer)?;
+                    } else if let Some(value) = self.context.get(field) {
                         let integer = value.parse::<u64>().map_err(|_| {
                             PyValueError::new_err(format!(
                                 "native resource error has a noninteger {field} value"

@@ -600,12 +600,14 @@ fn encoded_validation_error(error: encoded::EncodedValidationError) -> NativeErr
         "NATIVE_ENCODED_RESOURCE_LIMIT" => ErrorKind::Resource,
         _ => ErrorKind::Invariant,
     };
-    let mapped = NativeError::new(kind, error.code, error.message);
-    if kind == ErrorKind::Resource {
-        mapped.with_context("limit", "encoded-structural-validation")
-    } else {
-        mapped
+    let mut mapped = NativeError::new(kind, error.code, error.message);
+    for (key, value) in error.context {
+        mapped = mapped.with_context(key, value);
     }
+    if kind == ErrorKind::Resource && !mapped.context.contains_key("limit") {
+        mapped = mapped.with_context("limit", "encoded-structural-validation");
+    }
+    mapped
 }
 
 fn encoded_profile_error(error: encoded::profile::ProfilePhaseError<NativeError>) -> NativeError {

@@ -26,6 +26,7 @@ import pyowl_core.model as owl
 
 from pyhermit.backends.protocol import (
     COMPILED_IR_SCHEMA_VERSION,
+    U32_MAX,
     CompiledOntology,
     EntityRef,
     FingerprintLike,
@@ -331,12 +332,32 @@ class _CompilationState:
         self.clauses: list[_ClauseSpec] = []
         self.facts: list[_FactSpec] = []
         self.atom_count = 0
+        self.invalid_cardinality: int | None = None
         self._nominal_semantics: set[_PredicateSpec] = set()
         self._automaton_semantics: set[tuple[int, _PredicateSpec, tuple[int, ...]]] = set()
 
     def checkpoint(self) -> None:
         if self.cancelled is not None and self.cancelled():
             raise ReasonerInterruptedError("ontology clausification cancelled")
+
+    def retain_invalid_cardinality(self, candidate: int) -> bool:
+        if candidate <= U32_MAX:
+            return False
+        self.invalid_cardinality = (
+            candidate
+            if self.invalid_cardinality is None
+            else min(self.invalid_cardinality, candidate)
+        )
+        return True
+
+    def raise_invalid_cardinality(self) -> None:
+        if self.invalid_cardinality is not None:
+            raise ResourceLimitError(
+                "cardinality exceeds the unsigned 32-bit IR limit",
+                limit="u32",
+                observed=self.invalid_cardinality,
+                allowed=U32_MAX,
+            )
 
     def provenance_for(self, record: NormalizedRecord) -> tuple[int, ...]:
         key = (record.provenance_sha256, record.generated)
@@ -382,6 +403,16 @@ class _CompilationState:
                 allowed=self.limits.max_atoms,
             )
         return _AtomSpec(predicate, tuple(arguments))
+
+    def preflight_atoms(self, amount: int) -> None:
+        self.checkpoint()
+        if amount > self.limits.max_atoms - self.atom_count:
+            raise ResourceLimitError(
+                "compiled atom limit exceeded",
+                limit="max_atoms",
+                observed=self.limits.max_atoms + 1,
+                allowed=self.limits.max_atoms,
+            )
 
     def add_clause(
         self,
@@ -454,6 +485,7 @@ def compile_normalized(
     for record in normalized.records:
         state.checkpoint()
         _compile_record(state, record)
+    state.raise_invalid_cardinality()
     _emit_builtin_facts_and_clashes(state)
     _emit_complement_clashes(state)
     _emit_pending_nominal_semantics(state)
@@ -2116,6 +2148,8 @@ def _compile_class_antecedent(
             (),
         )
     if isinstance(expression, owl.ObjectMinCardinality):
+        if state.retain_invalid_cardinality(expression.cardinality):
+            return (), ()
         if expression.cardinality == 0:
             return ((state.atom(_class_predicate(state, owl.OWL_THING), root),), ())
         return (
@@ -2133,13 +2167,16 @@ def _compile_class_antecedent(
             (),
         )
     if isinstance(expression, owl.ObjectMaxCardinality):
+        target_count = expression.cardinality + 1
+        if state.retain_invalid_cardinality(target_count):
+            return (), ()
         return (
             (),
             (
                 state.atom(
                     _at_least_object(
                         state,
-                        expression.cardinality + 1,
+                        target_count,
                         expression.property,
                         expression.filler,
                     ),
@@ -2185,6 +2222,8 @@ def _compile_class_antecedent(
             ),
         )
     if isinstance(expression, owl.DataMinCardinality):
+        if state.retain_invalid_cardinality(expression.cardinality):
+            return (), ()
         if expression.cardinality == 0:
             return ((state.atom(_class_predicate(state, owl.OWL_THING), root),), ())
         return (
@@ -2202,13 +2241,16 @@ def _compile_class_antecedent(
             (),
         )
     if isinstance(expression, owl.DataMaxCardinality):
+        target_count = expression.cardinality + 1
+        if state.retain_invalid_cardinality(target_count):
+            return (), ()
         return (
             (),
             (
                 state.atom(
                     _at_least_data(
                         state,
-                        expression.cardinality + 1,
+                        target_count,
                         (expression.property,),
                         expression.filler,
                     ),
@@ -2284,6 +2326,8 @@ def _compile_class_consequent(
         )
         return
     if isinstance(expression, owl.ObjectMinCardinality):
+        if state.retain_invalid_cardinality(expression.cardinality):
+            return
         if expression.cardinality == 0:
             return
         state.add_clause(
@@ -2356,6 +2400,8 @@ def _compile_class_consequent(
         )
         return
     if isinstance(expression, owl.DataMinCardinality):
+        if state.retain_invalid_cardinality(expression.cardinality):
+            return
         if expression.cardinality == 0:
             return
         state.add_clause(
@@ -2416,9 +2462,21 @@ def _compile_object_at_most(
     filler: owl.ClassExpression,
     provenance: tuple[int, ...],
 ) -> None:
+    target_count = cardinality + 1
+    invalid = state.retain_invalid_cardinality(cardinality)
+    invalid = state.retain_invalid_cardinality(target_count) or invalid
+    if invalid:
+        return
+    pair_count = target_count * (target_count - 1) // 2
+    generated_atoms = 2 * target_count
+    if target_count > 2:
+        generated_atoms += target_count - 1
+    if cardinality != 0:
+        generated_atoms += pair_count
+    state.preflight_atoms(generated_atoms)
     first_fresh = _fresh_variable_index(body, head, root)
     targets = tuple(
-        Variable(first_fresh + index, TermSort.OBJECT) for index in range(cardinality + 1)
+        Variable(first_fresh + index, TermSort.OBJECT) for index in range(target_count)
     )
     role_predicate = _object_role_predicate(state, role)
     filler_predicate = _class_predicate(state, filler)
@@ -2456,9 +2514,14 @@ def _compile_data_at_most(
     filler: owl.DataRange,
     provenance: tuple[int, ...],
 ) -> None:
+    target_count = cardinality + 1
+    if state.retain_invalid_cardinality(target_count):
+        return
+    pair_count = target_count * (target_count - 1) // 2
+    state.preflight_atoms(2 * target_count + pair_count)
     first_fresh = _fresh_variable_index(body, head, root)
     targets = tuple(
-        Variable(first_fresh + index, TermSort.DATA) for index in range(cardinality + 1)
+        Variable(first_fresh + index, TermSort.DATA) for index in range(target_count)
     )
     role_predicate = _data_role_predicate(state, property)
     filler_predicate = _data_predicate(state, filler)
@@ -2996,6 +3059,24 @@ def _predicate_spec_key(predicate: _PredicateSpec) -> bytes:
     return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
+def _raise_invalid_predicate_cardinality(predicates: Iterable[_PredicateSpec]) -> None:
+    observed = min(
+        (
+            predicate.cardinality
+            for predicate in predicates
+            if predicate.cardinality is not None and predicate.cardinality > U32_MAX
+        ),
+        default=None,
+    )
+    if observed is not None:
+        raise ResourceLimitError(
+            "cardinality exceeds the unsigned 32-bit IR limit",
+            limit="u32",
+            observed=observed,
+            allowed=U32_MAX,
+        )
+
+
 def _freeze_predicates(
     predicates: set[_PredicateSpec],
     base_registry: PredicateRegistry | None = None,
@@ -3005,6 +3086,7 @@ def _freeze_predicates(
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[PredicateRegistry, dict[_PredicateSpec, int]]:
     _raise_if_cancelled(cancelled)
+    _raise_invalid_predicate_cardinality(predicates)
     if base_registry is None:
         if base_specs is not None or base_set is not None:
             raise ValueError("base_specs and base_set require base_registry")

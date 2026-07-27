@@ -622,6 +622,48 @@ def test_limits_and_cancellation_use_public_taxonomy() -> None:
         compile_normalized(normalized, cancelled=lambda: True)
 
 
+@pytest.mark.parametrize("domain", ["object", "data"])
+def test_at_most_atom_preflight_precedes_cardinality_sized_allocation(
+    domain: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = owl.Class(owl.IRI("urn:test:clauses:bounded-at-most-source"))
+    filler = owl.Class(owl.IRI("urn:test:clauses:bounded-at-most-filler"))
+    if domain == "object":
+        restriction: owl.ClassExpression = owl.ObjectMaxCardinality(
+            100_000,
+            owl.ObjectProperty(owl.IRI("urn:test:clauses:bounded-at-most-role")),
+            filler,
+        )
+    else:
+        restriction = owl.DataMaxCardinality(
+            100_000,
+            owl.DataProperty(owl.IRI("urn:test:clauses:bounded-at-most-data")),
+            INTEGER,
+        )
+    normalized = normalize_axioms(
+        (owl.SubClassOf(source, restriction),),
+        logical_fingerprint=FINGERPRINT,
+    )
+
+    def unexpected_target_allocation(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("at-most target allocation ran before the atom-limit preflight")
+
+    monkeypatch.setattr(
+        clause_compiler,
+        "_fresh_variable_index",
+        unexpected_target_allocation,
+    )
+    with pytest.raises(ResourceLimitError) as caught:
+        compile_normalized(normalized, limits=CompilationLimits(max_atoms=1_000))
+
+    assert caught.value.context == {
+        "allowed": 1_000,
+        "limit": "max_atoms",
+        "observed": 1_001,
+    }
+
+
 def test_compilation_digest_does_not_depend_on_python_hash_order() -> None:
     axioms = _logical_axioms()
     digests = {
