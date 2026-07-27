@@ -395,8 +395,9 @@ jobs:
       - name: Exercise musllinux wheel on native hardware
         env:
           ARCH: ${{ matrix.arch }}
+          MUSLLINUX_SMOKE_IMAGE: "docker.io/library/python:3.12.13-alpine3.24@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
         run: |
-          docker run --rm -v "$PWD:/project" -w /tmp python:3.12-alpine sh -ec '
+          docker run --rm -v "$PWD:/project" -w /tmp "$MUSLLINUX_SMOKE_IMAGE" sh -ec '
             python -m venv /tmp/venv
             /tmp/venv/bin/python -m pip install --no-index --find-links /project/wheelhouse /project/native/*musllinux*'"$ARCH"'.whl
             /tmp/venv/bin/python /project/tests/packaging/installed_smoke.py --expected-backend native --expected-core-backend python

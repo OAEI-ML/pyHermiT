@@ -283,6 +283,16 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertEqual(provenance["release_rust"], "1.97.1")
         self.assertEqual(provenance["rustup"], "1.28.2")
         self.assertEqual(
+            provenance["musllinux_smoke_image"],
+            {
+                "digest": (
+                    "sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
+                ),
+                "repository": "docker.io/library/python",
+                "tag": "3.12.13-alpine3.24",
+            },
+        )
+        self.assertEqual(
             provenance["release_verifier_requirements"],
             [
                 {
@@ -305,6 +315,34 @@ class ReleaseManifestTests(unittest.TestCase):
                 for action in actions
             )
         )
+
+    def test_mutable_musllinux_smoke_image_is_rejected(self) -> None:
+        workflow = (self.root / ".github/workflows/wheels.yml").read_bytes()
+        mutated = workflow.replace(
+            (
+                b"docker.io/library/python:3.12.13-alpine3.24"
+                b"@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
+            ),
+            b"python:3.12-alpine",
+        )
+
+        def material_payload(
+            root: Path,
+            _snapshots: object,
+            relative: str,
+        ) -> bytes:
+            if relative == ".github/workflows/wheels.yml":
+                return mutated
+            return (root / relative).read_bytes()
+
+        with (
+            patch(
+                "tools.packaging_probe.release_manifest._material_payload",
+                side_effect=material_payload,
+            ),
+            self.assertRaisesRegex(ReleaseManifestError, "audited version and index digest"),
+        ):
+            _build_provenance(self.root)
 
     def test_attestation_job_reverifies_the_hash_locked_bundle(self) -> None:
         release_workflow = (self.root / ".github/workflows/release.yml").read_text(encoding="utf-8")

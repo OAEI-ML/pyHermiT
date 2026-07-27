@@ -38,6 +38,11 @@ _PACKAGING_VERIFIER = (
     "26.2",
     "5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e",
 )
+_MUSLLINUX_SMOKE_IMAGE = (
+    "docker.io/library/python",
+    "3.12.13-alpine3.24",
+    "sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df",
+)
 _MATERIAL_FILES = (
     ".github/workflows/release.yml",
     ".github/workflows/wheels.yml",
@@ -525,6 +530,32 @@ def _build_provenance(
             "attestation job must semantically verify the bundle before attesting"
         )
 
+    smoke_image_matches = re.findall(
+        r'(?m)^\s+MUSLLINUX_SMOKE_IMAGE: "([^"]+)"$',
+        workflow_text,
+    )
+    if len(smoke_image_matches) != 1:
+        raise ReleaseManifestError(
+            "musllinux smoke environment must declare exactly one container image"
+        )
+    smoke_image_match = re.fullmatch(
+        r"([^:@]+(?:/[^:@]+)*):([^@]+)@(sha256:[0-9a-f]{64})",
+        smoke_image_matches[0],
+    )
+    if smoke_image_match is None or smoke_image_match.groups() != _MUSLLINUX_SMOKE_IMAGE:
+        raise ReleaseManifestError(
+            "musllinux smoke container must use the audited version and index digest"
+        )
+    if workflow_text.count('"$MUSLLINUX_SMOKE_IMAGE"') != 1:
+        raise ReleaseManifestError(
+            "musllinux smoke job must run the provenance-bound container image"
+        )
+    musllinux_smoke_image = {
+        "digest": smoke_image_match.group(3),
+        "repository": smoke_image_match.group(1),
+        "tag": smoke_image_match.group(2),
+    }
+
     cargo = parse_toml(_material_payload(root, snapshots, "Cargo.toml"))
     workspace = require_mapping(cargo.get("workspace"), "Cargo workspace")
     workspace_package = require_mapping(workspace.get("package"), "Cargo workspace package")
@@ -533,6 +564,7 @@ def _build_provenance(
         "build_backend": backend,
         "build_requirements": build_requirements,
         "minimum_rust": minimum_rust,
+        "musllinux_smoke_image": musllinux_smoke_image,
         "release_rust": rust_toolchain,
         "release_verifier_requirements": verifier_requirements,
         "rustup": rustup_version,
