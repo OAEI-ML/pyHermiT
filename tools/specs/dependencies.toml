@@ -89,6 +89,17 @@ linkage = "development-only"
 audit_owner = "WP00,WPP0"
 
 [[dependency]]
+name = "packaging"
+requirement = "packaging==26.2"
+scope = "release-verifier"
+license = "Apache-2.0 OR BSD-2-Clause"
+source = "https://pypi.org/project/packaging/26.2/"
+purpose = "hash-locked release artifact, manifest, SBOM, and attestation verification"
+shipped = false
+linkage = "workflow-only"
+audit_owner = "WPP0"
+
+[[dependency]]
 name = "pytest"
 requirement = "pytest>=8.2,<10"
 scope = "development"

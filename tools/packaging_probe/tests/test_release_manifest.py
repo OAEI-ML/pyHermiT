@@ -283,6 +283,16 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertEqual(provenance["release_rust"], "1.97.1")
         self.assertEqual(provenance["rustup"], "1.28.2")
         self.assertEqual(
+            provenance["release_verifier_requirements"],
+            [
+                {
+                    "name": "packaging",
+                    "sha256": ("5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e"),
+                    "version": "26.2",
+                }
+            ],
+        )
+        self.assertEqual(
             len(cast(list[str], provenance["rustup_installer_sha256"])),
             4,
         )
@@ -294,6 +304,17 @@ class ReleaseManifestTests(unittest.TestCase):
                 and len(str(action.get("revision"))) == 40
                 for action in actions
             )
+        )
+
+    def test_attestation_job_reverifies_the_hash_locked_bundle(self) -> None:
+        release_workflow = (self.root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        attestation_job = release_workflow.split("  attest-candidate:\n", 1)[1]
+
+        self.assertIn("--require-hashes", attestation_job)
+        self.assertIn("release-verifier-requirements.txt", attestation_job)
+        self.assertLess(
+            attestation_job.index("python -m tools.packaging_probe.release_manifest"),
+            attestation_job.index("uses: actions/attest-build-provenance@"),
         )
 
     def test_workflow_action_tags_are_rejected_as_mutable(self) -> None:

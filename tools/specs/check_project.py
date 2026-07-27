@@ -126,6 +126,19 @@ def _requirements_by_scope(pyproject: dict[str, Any], root: Path) -> dict[tuple[
 
     tool = require_mapping(pyproject.get("tool"), "tool")
     pyhermit = require_mapping(tool.get("pyhermit"), "tool.pyhermit")
+    verifier_path = _table_path(pyhermit, "release_verifier_requirements", root)
+    verifier_requirement = verifier_path.read_text(encoding="utf-8")
+    verifier_match = re.fullmatch(
+        r"([A-Za-z0-9_.-]+)==([A-Za-z0-9_.+-]+) "
+        r"--hash=sha256:([0-9a-f]{64})\n",
+        verifier_requirement,
+    )
+    if verifier_match is None:
+        raise ProjectCheckError("release verifier requirement must have one exact SHA-256 pin")
+    verifier_name, verifier_version, _verifier_hash = verifier_match.groups()
+    result[("release-verifier", _normalized_name(verifier_name))] = (
+        f"{verifier_name}=={verifier_version}"
+    )
     probe_path = _table_path(pyhermit, "packaging_probe_native_manifest", root)
     probe = load_toml(probe_path)
     probe_package = require_mapping(probe.get("package"), "packaging probe package")
@@ -367,6 +380,15 @@ def validate_project(root: Path) -> dict[str, int]:
     if not rust_license_inventory.is_file():
         raise ProjectCheckError(
             f"Rust production license inventory is missing: {rust_license_inventory}"
+        )
+    release_verifier_requirements = _table_path(
+        pyhermit,
+        "release_verifier_requirements",
+        root,
+    )
+    if not release_verifier_requirements.is_file():
+        raise ProjectCheckError(
+            f"release verifier requirements are missing: {release_verifier_requirements}"
         )
     cargo = load_toml(root / "Cargo.toml")
     workspace_package = require_mapping(

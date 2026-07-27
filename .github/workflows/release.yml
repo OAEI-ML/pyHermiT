@@ -21,6 +21,10 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
+      - name: Install checksum-pinned release verifier dependency
+        run: >-
+          python -m pip install --force-reinstall --no-deps --only-binary=:all:
+          --require-hashes -r tools/specs/release-verifier-requirements.txt
       - name: Require completed licensing and provenance review
         run: python -m tools.specs.check_release_gate --require-publishable
 
@@ -47,10 +51,29 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install checksum-pinned release verifier dependency
+        run: >-
+          python -m pip install --force-reinstall --no-deps --only-binary=:all:
+          --require-hashes -r tools/specs/release-verifier-requirements.txt
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-bundle
           path: artifacts
+
+      - name: Reverify the exact candidate immediately before attestation
+        run: >-
+          python -m tools.packaging_probe.release_manifest
+          --bundle artifacts --source-revision "${GITHUB_SHA}"
+          --source-date-epoch 946684800 --verify
 
       - name: Attest every staged artifact, manifest, checksum file, and SBOM
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1

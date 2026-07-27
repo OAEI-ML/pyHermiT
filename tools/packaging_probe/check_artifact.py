@@ -472,6 +472,7 @@ def _inspect_sdist(path: Path, content: ArchiveContent, expected: str) -> Artifa
         "src/pyhermit/_version.py",
         "src/pyhermit/py.typed",
         "tools/specs/licensing.toml",
+        "tools/specs/release-verifier-requirements.txt",
         "tools/specs/rust-production-licenses.toml",
     }
     missing = required - logical

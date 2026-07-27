@@ -18,7 +18,7 @@ recursive-include specs *.md *.toml
 recursive-include docs *.md
 recursive-include reports *.json *.md *.toml
 recursive-include benchmarks *.py *.json *.md *.toml
-recursive-include tools/specs *.py *.toml *.md
+recursive-include tools/specs *.py *.toml *.md *.txt
 prune tests
 prune tools/packaging_probe
 prune .github

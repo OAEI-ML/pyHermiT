@@ -33,6 +33,11 @@ _MANIFEST_NAME = "release-manifest.json"
 _CHECKSUM_NAME = "SHA256SUMS"
 _SBOM_NAME = "release-sbom.spdx.json"
 _MAX_METADATA_SIZE = 16 * 1024 * 1024
+_PACKAGING_VERIFIER = (
+    "packaging",
+    "26.2",
+    "5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e",
+)
 _MATERIAL_FILES = (
     ".github/workflows/release.yml",
     ".github/workflows/wheels.yml",
@@ -57,6 +62,7 @@ _MATERIAL_FILES = (
     "tools/specs/dependencies.toml",
     "tools/specs/licensing.toml",
     "tools/specs/native-wheel-targets.toml",
+    "tools/specs/release-verifier-requirements.txt",
     "tools/specs/rust-production-licenses.toml",
 )
 _SBOM_SOURCE_FILES = frozenset(
@@ -415,6 +421,11 @@ def _build_provenance(
         snapshots,
         ".github/workflows/wheels.yml",
     ).decode("utf-8")
+    release_workflow_text = _material_payload(
+        root,
+        snapshots,
+        ".github/workflows/release.yml",
+    ).decode("utf-8")
     workflow_tools = sorted(
         {
             f"{name}=={version}"
@@ -432,6 +443,15 @@ def _build_provenance(
         )
 
     tool = require_mapping(pyproject.get("tool"), "pyproject tool")
+    pyhermit = require_mapping(tool.get("pyhermit"), "tool.pyhermit")
+    if (
+        require_str(
+            pyhermit.get("release_verifier_requirements"),
+            "tool.pyhermit.release_verifier_requirements",
+        )
+        != "tools/specs/release-verifier-requirements.txt"
+    ):
+        raise ReleaseManifestError("pyproject points to an unexpected release verifier lock")
     cibuildwheel = require_mapping(tool.get("cibuildwheel"), "tool.cibuildwheel")
     linux = require_mapping(cibuildwheel.get("linux"), "tool.cibuildwheel.linux")
     before_all = require_str(linux.get("before-all"), "tool.cibuildwheel.linux.before-all")
@@ -450,6 +470,61 @@ def _build_provenance(
     ):
         raise ReleaseManifestError("Linux Rust bootstrap is not archive- and checksum-bound")
 
+    verifier_requirement = _material_payload(
+        root,
+        snapshots,
+        "tools/specs/release-verifier-requirements.txt",
+    ).decode("utf-8")
+    requirement_match = re.fullmatch(
+        r"([A-Za-z0-9_.-]+)==([A-Za-z0-9_.+-]+) "
+        r"--hash=sha256:([0-9a-f]{64})\n",
+        verifier_requirement,
+    )
+    if requirement_match is None:
+        raise ReleaseManifestError("release verifier requirement must have one exact SHA-256 pin")
+    if requirement_match.groups() != _PACKAGING_VERIFIER:
+        raise ReleaseManifestError("release verifier dependency differs from its audited wheel")
+    verifier_requirements = [
+        {
+            "name": requirement_match.group(1),
+            "sha256": requirement_match.group(3),
+            "version": requirement_match.group(2),
+        }
+    ]
+    requirement_path = "tools/specs/release-verifier-requirements.txt"
+    if (
+        workflow_text.count(requirement_path) != 1
+        or release_workflow_text.count(requirement_path) != 2
+    ):
+        raise ReleaseManifestError(
+            "producer, licensing, and attestation jobs must install the verifier lock"
+        )
+    required_pip_flags = (
+        "--force-reinstall",
+        "--no-deps",
+        "--only-binary=:all:",
+        "--require-hashes",
+    )
+    if any(
+        flag not in workflow_text or release_workflow_text.count(flag) != 2
+        for flag in required_pip_flags
+    ):
+        raise ReleaseManifestError("release verifier installs are not fail-closed and hash-bound")
+    try:
+        attestation_job = release_workflow_text.split("  attest-candidate:\n", 1)[1]
+    except IndexError as error:
+        raise ReleaseManifestError("release workflow omits the attestation job") from error
+    verification_marker = "python -m tools.packaging_probe.release_manifest"
+    attestation_marker = "uses: actions/attest-build-provenance@"
+    if (
+        verification_marker not in attestation_job
+        or attestation_marker not in attestation_job
+        or attestation_job.index(verification_marker) > attestation_job.index(attestation_marker)
+    ):
+        raise ReleaseManifestError(
+            "attestation job must semantically verify the bundle before attesting"
+        )
+
     cargo = parse_toml(_material_payload(root, snapshots, "Cargo.toml"))
     workspace = require_mapping(cargo.get("workspace"), "Cargo workspace")
     workspace_package = require_mapping(workspace.get("package"), "Cargo workspace package")
@@ -459,17 +534,14 @@ def _build_provenance(
         "build_requirements": build_requirements,
         "minimum_rust": minimum_rust,
         "release_rust": rust_toolchain,
+        "release_verifier_requirements": verifier_requirements,
         "rustup": rustup_version,
         "rustup_hosts": rustup_hosts,
         "rustup_installer_sha256": installer_checksums,
         "workflow_actions": _workflow_actions_from_texts(
             [
                 workflow_text,
-                _material_payload(
-                    root,
-                    snapshots,
-                    ".github/workflows/release.yml",
-                ).decode("utf-8"),
+                release_workflow_text,
             ]
         ),
         "workflow_python_tools": workflow_tools,
