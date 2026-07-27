@@ -2219,35 +2219,58 @@ def test_reducible_class_booleans_collapse_to_atomic_literals_exactly() -> None:
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
-def test_absorbing_booleans_validate_every_operand_before_publication() -> None:
+def test_absorbing_booleans_discard_supported_nested_operands_exactly() -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(Datatype(:T))",
             "SubClassOf(ObjectUnionOf(owl:Thing "
             "ObjectSomeValuesFrom(:p :A)) :B)",
             "DataPropertyRange(:d DataUnionOf(rdfs:Literal "
             "DataIntersectionOf(xsd:string xsd:integer)))",
+            "DataPropertyRange(:e DataIntersectionOf("
+            "DataComplementOf(rdfs:Literal) "
+            "DataUnionOf(xsd:boolean xsd:decimal)))",
+            "DatatypeDefinition(:T DataComplementOf(DataIntersectionOf("
+            "DataComplementOf(rdfs:Literal) "
+            "DataUnionOf(xsd:boolean xsd:decimal))))",
         ),
         options=OPTIONS,
     )
 
     manifest = _native_manifest(snapshot)
 
-    assert manifest["compiled_roots"] == 1
-    assert manifest["deferred_roots"] == 1
+    assert manifest == _expected_manifest(
+        snapshot,
+        compiled_roots=4,
+        include_data_ranges=True,
+        include_datatype_definitions=True,
+    )
     assert not any(
         value["generated"]
         for value in cast(
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     )
-    assert all(
-        predicate["kind"] != PredicateKind.DATA_ROLE.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.DATA_ROLE.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 2
     )
+    assert not any(
+        value["generated"]
+        or str(value["display"]).startswith(
+            ("DataIntersectionOf:", "DataUnionOf:")
+        )
+        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+    )
+    assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 

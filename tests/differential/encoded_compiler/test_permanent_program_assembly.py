@@ -1835,6 +1835,42 @@ def test_no_reference_lifecycle_matches_scalar_consistency_and_classification() 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 
 
+def test_direct_lifecycle_discards_nested_data_boolean_beside_absorber() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            "Declaration(DataProperty(:d))",
+            "Declaration(DataProperty(:e))",
+            "Declaration(Datatype(:T))",
+            "DataPropertyRange(:d DataUnionOf(rdfs:Literal "
+            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "DataPropertyRange(:e DataIntersectionOf("
+            "DataComplementOf(rdfs:Literal) "
+            "DataUnionOf(xsd:boolean xsd:decimal)))",
+            "DatatypeDefinition(:T DataComplementOf(DataIntersectionOf("
+            "DataComplementOf(rdfs:Literal) "
+            "DataUnionOf(xsd:boolean xsd:decimal))))",
+        ),
+        options=OPTIONS,
+    )
+
+    encoded = _direct_lifecycle_session(snapshot)
+    compiled = _compiled(snapshot)
+    scalar = native.create_session(
+        encode_ontology(compiled),
+        encode_config(ReasonerConfig()),
+        native.CancellationHandle(),
+    )
+    try:
+        assert encoded.permanent_program_sha256 == scalar.permanent_program_sha256
+        assert encoded.compiler_digest == facade_module._canonical_compiler_digest(compiled)
+        assert _check_signature(encoded.check(None)) == _check_signature(scalar.check(None))
+        assert encoded.classify_data_properties() == scalar.classify_data_properties()
+    finally:
+        encoded.close()
+        scalar.close()
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
 def test_direct_lifecycle_profile_gate_rejects_before_publication_and_allows_retry() -> None:
     invalid = pyowl_core.load_snapshot(
         functional(

@@ -873,6 +873,32 @@ enum DataRangeBoundary {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DataBooleanReductionMode {
+    Intersection,
+    Union,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DataBooleanReductionRule {
+    mode: DataBooleanReductionMode,
+    identity: DataRangeBoundary,
+    absorbing: DataRangeBoundary,
+}
+
+const DATA_BOOLEAN_REDUCTION_RULES: [DataBooleanReductionRule; 2] = [
+    DataBooleanReductionRule {
+        mode: DataBooleanReductionMode::Intersection,
+        identity: DataRangeBoundary::Top,
+        absorbing: DataRangeBoundary::Bottom,
+    },
+    DataBooleanReductionRule {
+        mode: DataBooleanReductionMode::Union,
+        identity: DataRangeBoundary::Bottom,
+        absorbing: DataRangeBoundary::Top,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DataQuantifierProjectionRule {
     tag: u16,
     bottom_reduction: &'static str,
@@ -1367,6 +1393,12 @@ struct AtomicDataRangeSelection {
     expression: NodeId,
     negative: bool,
     depth: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AtomicDataRangeProjection {
+    Selected(AtomicDataRangeSelection),
+    Discardable,
 }
 
 impl PartialEq for AtomicDataRangeSelection {
@@ -11383,6 +11415,27 @@ fn atomic_data_range_selection_at_depth<B: ByteSource>(
     initial_depth: usize,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<AtomicDataRangeSelection>> {
+    Ok(
+        match atomic_data_range_projection_at_depth(
+            model,
+            symbols,
+            identifier,
+            initial_depth,
+            budget,
+        )? {
+            Some(AtomicDataRangeProjection::Selected(selection)) => Some(selection),
+            Some(AtomicDataRangeProjection::Discardable) | None => None,
+        },
+    )
+}
+
+fn atomic_data_range_projection_at_depth<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    initial_depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicDataRangeProjection>> {
     let mut base = identifier;
     let mut negative = false;
     let mut normalized_complement = None;
@@ -11407,18 +11460,23 @@ fn atomic_data_range_selection_at_depth<B: ByteSource>(
         base = node_field(model, node, 0, "data-complement operand")?;
         negative = !negative;
     }
-    let Some(selection) =
-        positive_atomic_data_range_selection(model, symbols, base, depth, budget)?
+    let Some(projection) =
+        positive_atomic_data_range_projection(model, symbols, base, depth, budget)?
     else {
         return Ok(None);
     };
     if !negative {
-        return Ok(Some(selection));
+        return Ok(Some(projection));
     }
-    Ok(Some(complement_atomic_data_range_selection(
-        selection,
-        normalized_complement.unwrap_or(identifier),
-    )))
+    Ok(Some(match projection {
+        AtomicDataRangeProjection::Selected(selection) => {
+            AtomicDataRangeProjection::Selected(complement_atomic_data_range_selection(
+                selection,
+                normalized_complement.unwrap_or(identifier),
+            ))
+        }
+        AtomicDataRangeProjection::Discardable => AtomicDataRangeProjection::Discardable,
+    }))
 }
 
 fn positive_atomic_data_range_selection<B: ByteSource>(
@@ -11428,6 +11486,21 @@ fn positive_atomic_data_range_selection<B: ByteSource>(
     depth: usize,
     budget: &mut PhaseBudget,
 ) -> EncodedResult<Option<AtomicDataRangeSelection>> {
+    Ok(
+        match positive_atomic_data_range_projection(model, symbols, identifier, depth, budget)? {
+            Some(AtomicDataRangeProjection::Selected(selection)) => Some(selection),
+            Some(AtomicDataRangeProjection::Discardable) | None => None,
+        },
+    )
+}
+
+fn positive_atomic_data_range_projection<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    identifier: NodeId,
+    depth: usize,
+    budget: &mut PhaseBudget,
+) -> EncodedResult<Option<AtomicDataRangeProjection>> {
     let node = model.node(identifier)?;
     let supported = match node.tag() {
         ENTITY_TAG => {
@@ -11455,16 +11528,26 @@ fn positive_atomic_data_range_selection<B: ByteSource>(
         _ => false,
     };
     if supported {
-        return Ok(Some(AtomicDataRangeSelection {
-            base: identifier,
-            expression: identifier,
-            negative: false,
-            depth,
-        }));
+        return Ok(Some(AtomicDataRangeProjection::Selected(
+            AtomicDataRangeSelection {
+                base: identifier,
+                expression: identifier,
+                negative: false,
+                depth,
+            },
+        )));
     }
-    if !matches!(node.tag(), DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG) {
-        return Ok(None);
-    }
+    let mode = match node.tag() {
+        DATA_INTERSECTION_OF_TAG => DataBooleanReductionMode::Intersection,
+        DATA_UNION_OF_TAG => DataBooleanReductionMode::Union,
+        _ => return Ok(None),
+    };
+    let rule = DATA_BOOLEAN_REDUCTION_RULES
+        .iter()
+        .find(|rule| rule.mode == mode)
+        .ok_or_else(|| {
+            EncodedValidationError::invariant("data Boolean reduction mode lost its rule")
+        })?;
     if node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
             "data Boolean expression no longer has schema-1 shape",
@@ -11476,18 +11559,22 @@ fn positive_atomic_data_range_selection<B: ByteSource>(
             "data Boolean operands did not resolve to a collection",
         ));
     };
-    let operand_depth = depth
-        .checked_add(1)
-        .ok_or_else(|| EncodedValidationError::resource("data-range depth overflowed"))?;
+    if operands.len() < 2 {
+        return Err(EncodedValidationError::invariant(
+            "data Boolean expression has fewer than two operands",
+        ));
+    }
+    let operand_depth = child_expression_depth(depth, "data-range depth overflowed")?;
     PhaseBudget::count(
         operand_depth,
         budget.limits.max_canonical_depth,
         "data-range depth",
     )?;
-    let intersection = node.tag() == DATA_INTERSECTION_OF_TAG;
     let mut absorbing = None;
     let mut retained = None;
     let mut identity = None;
+    let mut discardable = false;
+    let mut multiple_retained = false;
     for item_index in operands.items() {
         budget.claim_work(1)?;
         let item = required_component(model.item(item_index)?, "data Boolean operand")?;
@@ -11496,21 +11583,23 @@ fn positive_atomic_data_range_selection<B: ByteSource>(
                 "data Boolean operand did not resolve to a node",
             ));
         };
-        let Some(selection) =
-            atomic_data_range_selection_at_depth(model, symbols, operand, operand_depth, budget)?
+        let Some(projection) =
+            atomic_data_range_projection_at_depth(model, symbols, operand, operand_depth, budget)?
         else {
             return Ok(None);
         };
-        let is_top = atomic_data_range_selection_is_top(model, symbols, selection)?;
-        let is_bottom = atomic_data_range_selection_is_bottom(model, symbols, selection)?;
-        if (intersection && is_bottom) || (!intersection && is_top) {
+        let AtomicDataRangeProjection::Selected(selection) = projection else {
+            discardable = true;
+            continue;
+        };
+        if atomic_data_range_selection_has_boundary(model, symbols, selection, rule.absorbing)? {
             absorbing.get_or_insert(selection);
             continue;
         }
         if absorbing.is_some() {
             continue;
         }
-        if (intersection && is_top) || (!intersection && is_bottom) {
+        if atomic_data_range_selection_has_boundary(model, symbols, selection, rule.identity)? {
             identity.get_or_insert(selection);
             continue;
         }
@@ -11518,11 +11607,34 @@ fn positive_atomic_data_range_selection<B: ByteSource>(
             continue;
         }
         if retained.is_some() {
-            return Ok(None);
+            multiple_retained = true;
+            continue;
         }
         retained = Some(selection);
     }
-    Ok(absorbing.or(retained).or(identity))
+    if let Some(selection) = absorbing {
+        return Ok(Some(AtomicDataRangeProjection::Selected(selection)));
+    }
+    if discardable || multiple_retained {
+        return Ok(Some(AtomicDataRangeProjection::Discardable));
+    }
+    Ok(retained
+        .or(identity)
+        .map(AtomicDataRangeProjection::Selected))
+}
+
+fn atomic_data_range_selection_has_boundary<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    symbols: &SymbolPhase,
+    selection: AtomicDataRangeSelection,
+    boundary: DataRangeBoundary,
+) -> EncodedResult<bool> {
+    match boundary {
+        DataRangeBoundary::Bottom => {
+            atomic_data_range_selection_is_bottom(model, symbols, selection)
+        }
+        DataRangeBoundary::Top => atomic_data_range_selection_is_top(model, symbols, selection),
+    }
 }
 
 fn atomic_data_range_selection_is_top<B: ByteSource>(
