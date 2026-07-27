@@ -1013,7 +1013,7 @@ def test_named_class_signature_predicates_clauses_and_provenance_match_scalar() 
     )
 
     assert _native_manifest(snapshot) == _expected_manifest(snapshot, compiled_roots=3)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_atomic_complement_subclass_literals_match_scalar_exactly() -> None:
@@ -1051,7 +1051,7 @@ def test_atomic_complement_subclass_literals_match_scalar_exactly() -> None:
         predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 3
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -1079,7 +1079,7 @@ def test_trivial_atomic_complement_subclasses_normalize_without_symbol_leaks(
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_atomic_complement_equivalent_classes_match_scalar_exactly() -> None:
@@ -1110,7 +1110,7 @@ def test_atomic_complement_equivalent_classes_match_scalar_exactly() -> None:
         predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 3
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_atomic_complement_disjoint_classes_match_scalar_exactly() -> None:
@@ -1143,7 +1143,7 @@ def test_atomic_complement_disjoint_classes_match_scalar_exactly() -> None:
         predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 3
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_trivial_complement_disjoint_with_bottom_drops_without_symbol_leaks() -> None:
@@ -1164,7 +1164,7 @@ def test_trivial_complement_disjoint_with_bottom_drops_without_symbol_leaks() ->
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_atomic_complement_property_constraints_and_keys_match_scalar_exactly() -> None:
@@ -1206,7 +1206,7 @@ def test_atomic_complement_property_constraints_and_keys_match_scalar_exactly() 
         predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 3
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_builtin_complements_normalize_without_expression_symbol_leaks() -> None:
@@ -1247,7 +1247,7 @@ def test_builtin_complements_normalize_without_expression_symbol_leaks() -> None
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_semantic_source_literal_symbols_match_scalar_exactly() -> None:
@@ -1276,7 +1276,7 @@ def test_semantic_source_literal_symbols_match_scalar_exactly() -> None:
     )
     assert actual["compiled_roots"] == 7
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_source_literal_symbols_merge_by_canonical_key() -> None:
@@ -1304,7 +1304,7 @@ def test_composite_source_literal_symbols_merge_by_canonical_key() -> None:
 
     assert actual["source_literal_symbols"] == _expected_source_literal_symbols(composite)
     assert len(cast(list[object], actual["source_literal_symbols"])) == 3
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_source_literal_symbols_follow_source_local_root_selection() -> None:
@@ -1341,7 +1341,7 @@ def test_source_literal_symbols_follow_source_local_root_selection() -> None:
     assert selected_keys == {
         cast(str, value["key_hex"]) for value in _expected_source_literal_symbols(snapshot)
     }
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_string_data_value_symbols_match_scalar_and_collapse_aliases() -> None:
@@ -1373,7 +1373,7 @@ def test_string_data_value_symbols_match_scalar_and_collapse_aliases() -> None:
     assert data_symbols == _expected_data_value_symbols(snapshot)
     assert len(data_symbols) < len(source_symbols)
     assert all(cast(str, value["display"]).startswith("data-value:") for value in data_symbols)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_string_aliases_share_one_global_data_identity() -> None:
@@ -1400,7 +1400,7 @@ def test_composite_string_aliases_share_one_global_data_identity() -> None:
     assert actual["data_value_symbols"] == _expected_data_value_symbols(composite)
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_contextual_multi_slice_program_matches_scalar_composite_exactly() -> None:
@@ -1442,7 +1442,7 @@ def test_contextual_multi_slice_program_matches_scalar_composite_exactly() -> No
     )
 
     assert actual == _expected_manifest(composite, compiled_roots=4)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_atomic_complement_subclasses_remap_exactly() -> None:
@@ -1468,7 +1468,7 @@ def test_composite_atomic_complement_subclasses_remap_exactly() -> None:
 
     assert actual == _expected_manifest(composite, compiled_roots=2)
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_atomic_complement_equivalences_remap_exactly() -> None:
@@ -1494,7 +1494,7 @@ def test_composite_atomic_complement_equivalences_remap_exactly() -> None:
 
     assert actual == _expected_manifest(composite, compiled_roots=2)
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_atomic_complement_disjoints_remap_exactly() -> None:
@@ -1520,7 +1520,7 @@ def test_composite_atomic_complement_disjoints_remap_exactly() -> None:
 
     assert actual == _expected_manifest(composite, compiled_roots=2)
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_atomic_complement_constraints_and_keys_remap_exactly() -> None:
@@ -1556,7 +1556,7 @@ def test_composite_atomic_complement_constraints_and_keys_remap_exactly() -> Non
         include_keys=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_multi_slice_merge_deduplicates_the_same_semantic_root_across_members() -> None:
@@ -1679,7 +1679,7 @@ def test_source_local_selection_retains_generated_restriction_dependencies(
         if value["generated"]
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_source_local_selection_excludes_unsupported_restriction_without_leaks() -> None:
@@ -1750,7 +1750,7 @@ def test_source_local_selection_excludes_unsupported_restriction_without_leaks()
             list[dict[str, object]], included["class_expression_symbols"]
         )
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("reverse_slices", [False, True])
@@ -1821,7 +1821,7 @@ def test_composite_selection_retains_cross_slice_restriction_declarations(
         binding["declared"] = False
     assert actual == expected
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("reverse_slices", [False, True])
@@ -1914,7 +1914,7 @@ def test_composite_selection_excludes_unreachable_declaration_proof_without_leak
             list[dict[str, object]], include_manifest["class_expression_symbols"]
         )
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_double_digit_fragment_ids_preserve_scalar_predicate_and_clause_order() -> None:
@@ -2001,7 +2001,7 @@ def test_atomic_complement_class_assertions_match_scalar_exactly() -> None:
     assert predicates[cast(int, negative_facts[0]["predicate_id"])]["kind"] == (
         PredicateKind.NEGATED_CONCEPT.value
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_named_nominal_class_assertions_match_scalar_semantics_exactly() -> None:
@@ -2043,7 +2043,7 @@ def test_named_nominal_class_assertions_match_scalar_semantics_exactly() -> None
         predicate["kind"] == PredicateKind.EQUALITY.value
         for predicate in predicates
     ) == 1
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_named_nominal_class_axioms_constraints_and_keys_match_scalar_exactly() -> None:
@@ -2101,7 +2101,7 @@ def test_named_nominal_class_axioms_constraints_and_keys_match_scalar_exactly() 
         predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value
         for predicate in predicates
     ) == 3
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_nested_atomic_class_complements_reduce_by_parity_exactly() -> None:
@@ -2161,7 +2161,7 @@ def test_nested_atomic_class_complements_reduce_by_parity_exactly() -> None:
         predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value
         for predicate in predicates
     ) == 1
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_reducible_class_booleans_collapse_to_atomic_literals_exactly() -> None:
@@ -2216,7 +2216,7 @@ def test_reducible_class_booleans_collapse_to_atomic_literals_exactly() -> None:
         for value in class_symbols
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_absorbing_booleans_discard_supported_nested_operands_exactly() -> None:
@@ -2271,7 +2271,7 @@ def test_absorbing_booleans_discard_supported_nested_operands_exactly() -> None:
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_flat_boolean_subclass_definitions_match_scalar_exactly() -> None:
@@ -2307,7 +2307,7 @@ def test_flat_boolean_subclass_definitions_match_scalar_exactly() -> None:
     assert len(generated) == 6
     namespace = f":class:{snapshot.logical_fingerprint.hex}:"
     assert all(namespace in str(value["display"]) for value in generated)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_class_boolean_definitions_match_scalar_exactly() -> None:
@@ -2366,7 +2366,7 @@ def test_recursive_class_boolean_definitions_match_scalar_exactly() -> None:
         str(value["display"]).split(":")[-2] for value in generated
     } == {"negative", "positive"}
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_horn_object_quantifier_definitions_match_scalar_exactly() -> None:
@@ -2412,7 +2412,7 @@ def test_horn_object_quantifier_definitions_match_scalar_exactly() -> None:
     assert len(generated) == 5
     assert {str(value["display"]).split(":")[-2] for value in generated} == {"negative", "positive"}
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_horn_object_quantifiers_match_scalar_exactly() -> None:
@@ -2449,7 +2449,7 @@ def test_recursive_horn_object_quantifiers_match_scalar_exactly() -> None:
         == 8
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_object_quantifier_fillers_match_scalar_exactly() -> None:
@@ -2497,7 +2497,7 @@ def test_recursive_object_quantifier_fillers_match_scalar_exactly() -> None:
         == 17
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_recursive_object_quantifier_fillers_reuse_global_identity() -> None:
@@ -2546,7 +2546,7 @@ def test_composite_recursive_object_quantifier_fillers_reuse_global_identity() -
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_recursive_quantifier_cardinality_fillers_defer_without_symbol_leaks() -> None:
@@ -2585,7 +2585,7 @@ def test_unsupported_recursive_quantifier_cardinality_fillers_defer_without_symb
         predicate["kind"] != PredicateKind.OBJECT_ROLE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_horn_object_quantifiers_reuse_global_identity() -> None:
@@ -2633,7 +2633,7 @@ def test_composite_horn_object_quantifiers_reuse_global_identity() -> None:
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_at_least_object_quantifier_polarities_match_scalar_exactly() -> None:
@@ -2675,7 +2675,7 @@ def test_at_least_object_quantifier_polarities_match_scalar_exactly() -> None:
         if predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_at_least_object_definitions_cover_duality_and_recursive_fillers() -> None:
@@ -2728,7 +2728,7 @@ def test_at_least_object_definitions_cover_duality_and_recursive_fillers() -> No
         == 9
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_at_least_object_definitions_reuse_global_identity() -> None:
@@ -2787,7 +2787,7 @@ def test_composite_at_least_object_definitions_reuse_global_identity() -> None:
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_self_definitions_match_scalar_exactly() -> None:
@@ -2838,7 +2838,7 @@ def test_object_self_definitions_match_scalar_exactly() -> None:
         str(value["display"]).split(":")[-2] for value in generated
     } == {"negative", "positive"}
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_object_self_definitions_use_global_namespace() -> None:
@@ -2886,7 +2886,7 @@ def test_composite_object_self_definitions_use_global_namespace() -> None:
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_object_self_definitions_match_scalar_exactly() -> None:
@@ -2936,7 +2936,7 @@ def test_recursive_object_self_definitions_match_scalar_exactly() -> None:
         )
     ) == 16
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_recursive_object_self_definitions_reuse_global_identity() -> None:
@@ -2987,7 +2987,7 @@ def test_composite_recursive_object_self_definitions_reuse_global_identity() -> 
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_minimum_definitions_match_scalar_at_least_predicates() -> None:
@@ -3031,7 +3031,7 @@ def test_object_minimum_definitions_match_scalar_at_least_predicates() -> None:
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_minimum_cardinality_above_u32_defers_without_symbol_leaks() -> None:
@@ -3063,7 +3063,7 @@ def test_object_minimum_cardinality_above_u32_defers_without_symbol_leaks() -> N
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_minimum_definitions_cover_recursive_and_nominal_fillers() -> None:
@@ -3110,7 +3110,7 @@ def test_object_minimum_definitions_cover_recursive_and_nominal_fillers() -> Non
     ]
     assert {predicate["cardinality"] for predicate in at_least} == {1, 2, 3, 4}
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_object_minimum_definitions_reuse_global_identity() -> None:
@@ -3162,7 +3162,7 @@ def test_composite_object_minimum_definitions_reuse_global_identity() -> None:
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert generated and all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_minimum_one_normalizes_to_scalar_existential_identity() -> None:
@@ -3208,7 +3208,7 @@ def test_object_minimum_one_normalizes_to_scalar_existential_identity() -> None:
         if predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
     } == {1}
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_minimum_one_covers_generated_class_contexts() -> None:
@@ -3258,7 +3258,7 @@ def test_object_minimum_one_covers_generated_class_contexts() -> None:
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_object_minimum_one_reuses_explicit_existential_identity() -> None:
@@ -3319,7 +3319,7 @@ def test_composite_object_minimum_one_reuses_explicit_existential_identity() -> 
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_maximum_definitions_match_scalar_annotated_equalities() -> None:
@@ -3377,7 +3377,7 @@ def test_object_maximum_definitions_match_scalar_annotated_equalities() -> None:
         for predicate in predicates
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_maximum_cardinality_overflow_defers_without_symbol_leaks() -> None:
@@ -3411,7 +3411,7 @@ def test_object_maximum_cardinality_overflow_defers_without_symbol_leaks() -> No
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_maximum_definitions_cover_recursive_and_nominal_fillers() -> None:
@@ -3461,7 +3461,7 @@ def test_object_maximum_definitions_cover_recursive_and_nominal_fillers() -> Non
     assert {predicate["cardinality"] for predicate in annotated} == {2}
     assert all(predicate["filler_predicate_id"] is not None for predicate in annotated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_object_maximum_definitions_reuse_global_identity() -> None:
@@ -3515,7 +3515,7 @@ def test_composite_object_maximum_definitions_reuse_global_identity() -> None:
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert generated and all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_exact_definitions_match_scalar_minimum_maximum_expansion() -> None:
@@ -3571,7 +3571,7 @@ def test_object_exact_definitions_match_scalar_minimum_maximum_expansion() -> No
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_exact_cardinality_overflow_defers_without_symbol_leaks() -> None:
@@ -3618,7 +3618,7 @@ def test_object_exact_cardinality_overflow_defers_without_symbol_leaks() -> None
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_exact_definitions_cover_recursive_and_nominal_fillers() -> None:
@@ -3667,7 +3667,7 @@ def test_object_exact_definitions_cover_recursive_and_nominal_fillers() -> None:
     ]
     assert {predicate["cardinality"] for predicate in annotated} == {2, 3}
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_object_exact_definitions_reuse_global_identity() -> None:
@@ -3723,7 +3723,7 @@ def test_composite_object_exact_definitions_reuse_global_identity() -> None:
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert generated and all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_has_value_definitions_match_scalar_singleton_nominals() -> None:
@@ -3780,7 +3780,7 @@ def test_object_has_value_definitions_match_scalar_singleton_nominals() -> None:
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_has_value_definitions_cover_generated_class_contexts() -> None:
@@ -3812,7 +3812,7 @@ def test_object_has_value_definitions_cover_generated_class_contexts() -> None:
         include_keys=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_undeclared_named_object_has_value_matches_scalar_exactly() -> None:
@@ -3850,7 +3850,7 @@ def test_undeclared_named_object_has_value_matches_scalar_exactly() -> None:
     ]
     assert len(singleton_nominals) == 1
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_object_has_value_reuses_explicit_quantifier_identity() -> None:
@@ -3910,7 +3910,7 @@ def test_composite_object_has_value_reuses_explicit_quantifier_identity() -> Non
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert generated and all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_undeclared_named_object_has_value_remaps_exactly() -> None:
@@ -3952,7 +3952,7 @@ def test_composite_undeclared_named_object_has_value_remaps_exactly() -> None:
         "declared"
     ] is False
     assert forward["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_object_has_value_partially_unsupported_inputs_defer_without_symbol_leaks() -> None:
@@ -4007,7 +4007,7 @@ def test_object_has_value_partially_unsupported_inputs_defer_without_symbol_leak
         predicate["kind"] == PredicateKind.OBJECT_ROLE.value
         for predicate in predicates
     ) == 1
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_atomic_data_quantifier_definitions_match_scalar_exactly() -> None:
@@ -4056,7 +4056,7 @@ def test_atomic_data_quantifier_definitions_match_scalar_exactly() -> None:
         for predicate in at_least
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_atomic_data_quantifiers_cover_generated_class_contexts() -> None:
@@ -4092,7 +4092,7 @@ def test_atomic_data_quantifiers_cover_generated_class_contexts() -> None:
         include_keys=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_atomic_data_quantifiers_reuse_global_identity() -> None:
@@ -4144,7 +4144,7 @@ def test_composite_atomic_data_quantifiers_reuse_global_identity() -> None:
     assert len(generated) == 2
     assert all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_data_quantifier_fillers_match_scalar_exactly() -> None:
@@ -4192,7 +4192,7 @@ def test_recursive_data_quantifier_fillers_match_scalar_exactly() -> None:
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_data_quantifier_fillers_cover_generated_class_contexts() -> None:
@@ -4233,7 +4233,7 @@ def test_recursive_data_quantifier_fillers_cover_generated_class_contexts() -> N
         include_keys=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_recursive_data_quantifier_fillers_reuse_global_identity() -> None:
@@ -4293,7 +4293,7 @@ def test_composite_recursive_data_quantifier_fillers_reuse_global_identity() -> 
         if value["generated"]
     ) == 4
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_data_quantifier_inputs_defer_without_symbol_leaks() -> None:
@@ -4342,7 +4342,7 @@ def test_unsupported_data_quantifier_inputs_defer_without_symbol_leaks() -> None
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_minimum_definitions_match_scalar_at_least_predicates() -> None:
@@ -4395,7 +4395,7 @@ def test_data_minimum_definitions_match_scalar_at_least_predicates() -> None:
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_minimum_definitions_cover_generated_class_contexts() -> None:
@@ -4430,7 +4430,7 @@ def test_data_minimum_definitions_cover_generated_class_contexts() -> None:
         include_keys=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_data_minimum_definitions_reuse_global_identity() -> None:
@@ -4483,7 +4483,7 @@ def test_composite_data_minimum_definitions_reuse_global_identity() -> None:
     assert len(generated) == 2
     assert all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_data_minimum_fillers_match_scalar_exactly() -> None:
@@ -4525,7 +4525,7 @@ def test_recursive_data_minimum_fillers_match_scalar_exactly() -> None:
         include_generated_data_definitions=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_data_minimum_fillers_cover_generated_class_contexts() -> None:
@@ -4566,7 +4566,7 @@ def test_recursive_data_minimum_fillers_cover_generated_class_contexts() -> None
         include_keys=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_recursive_data_minimum_fillers_reuse_global_identity() -> None:
@@ -4626,7 +4626,7 @@ def test_composite_recursive_data_minimum_fillers_reuse_global_identity() -> Non
         if value["generated"]
     ) == 4
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_data_minimum_inputs_defer_without_symbol_leaks() -> None:
@@ -4673,7 +4673,7 @@ def test_unsupported_data_minimum_inputs_defer_without_symbol_leaks() -> None:
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_maximum_definitions_match_scalar_at_most_clauses() -> None:
@@ -4718,7 +4718,7 @@ def test_data_maximum_definitions_match_scalar_at_most_clauses() -> None:
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_cardinality_boundaries_and_complement_duals_match_scalar() -> None:
@@ -4755,7 +4755,7 @@ def test_data_cardinality_boundaries_and_complement_duals_match_scalar() -> None
         if predicate["kind"] == PredicateKind.AT_LEAST_DATA.value
     } == {1, 3}
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_maximum_definitions_cover_generated_class_contexts() -> None:
@@ -4790,7 +4790,7 @@ def test_data_maximum_definitions_cover_generated_class_contexts() -> None:
         include_keys=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_data_maximum_definitions_reuse_global_identity() -> None:
@@ -4843,7 +4843,7 @@ def test_composite_data_maximum_definitions_reuse_global_identity() -> None:
     assert len(generated) == 2
     assert all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_data_maximum_fillers_match_scalar_exactly() -> None:
@@ -4884,7 +4884,7 @@ def test_recursive_data_maximum_fillers_match_scalar_exactly() -> None:
         include_generated_data_definitions=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_data_maximum_fillers_cover_generated_class_contexts() -> None:
@@ -4925,7 +4925,7 @@ def test_recursive_data_maximum_fillers_cover_generated_class_contexts() -> None
         include_keys=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_recursive_data_maximum_fillers_reuse_global_identity() -> None:
@@ -4985,7 +4985,7 @@ def test_composite_recursive_data_maximum_fillers_reuse_global_identity() -> Non
         if value["generated"]
     ) == 4
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
@@ -5036,7 +5036,7 @@ def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_exact_cardinality_definitions_match_scalar_normalization() -> None:
@@ -5082,7 +5082,7 @@ def test_data_exact_cardinality_definitions_match_scalar_normalization() -> None
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_exact_cardinality_boundaries_and_complements_match_scalar() -> None:
@@ -5114,7 +5114,7 @@ def test_data_exact_cardinality_boundaries_and_complements_match_scalar() -> Non
         include_at_least_data_predicates=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_exact_cardinality_definitions_cover_generated_class_contexts() -> None:
@@ -5150,7 +5150,7 @@ def test_data_exact_cardinality_definitions_cover_generated_class_contexts() -> 
         include_keys=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_data_exact_cardinality_definitions_reuse_global_identity() -> None:
@@ -5204,7 +5204,7 @@ def test_composite_data_exact_cardinality_definitions_reuse_global_identity() ->
     assert generated
     assert all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_data_exact_cardinality_fillers_match_scalar_exactly() -> None:
@@ -5251,7 +5251,7 @@ def test_recursive_data_exact_cardinality_fillers_match_scalar_exactly() -> None
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_data_exact_cardinality_fillers_cover_generated_contexts() -> None:
@@ -5299,7 +5299,7 @@ def test_recursive_data_exact_cardinality_fillers_cover_generated_contexts() -> 
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_recursive_data_exact_fillers_reuse_global_identity() -> None:
@@ -5365,7 +5365,7 @@ def test_composite_recursive_data_exact_fillers_reuse_global_identity() -> None:
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() -> None:
@@ -5415,7 +5415,7 @@ def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() 
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_has_value_definitions_match_scalar_singleton_quantifiers() -> None:
@@ -5457,7 +5457,7 @@ def test_data_has_value_definitions_match_scalar_singleton_quantifiers() -> None
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_has_value_definitions_cover_complements_and_generated_contexts() -> None:
@@ -5492,7 +5492,7 @@ def test_data_has_value_definitions_cover_complements_and_generated_contexts() -
         include_keys=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_data_has_value_definitions_reuse_global_identity() -> None:
@@ -5545,7 +5545,7 @@ def test_composite_data_has_value_definitions_reuse_global_identity() -> None:
     assert len(generated) == 2
     assert all(namespace in str(value["display"]) for value in generated)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partially_unsupported_data_has_value_inputs_defer_without_symbol_leaks() -> None:
@@ -5593,7 +5593,7 @@ def test_partially_unsupported_data_has_value_inputs_defer_without_symbol_leaks(
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partial_object_self_equivalence_defers_without_symbol_leaks() -> None:
@@ -5620,7 +5620,7 @@ def test_partial_object_self_equivalence_defers_without_symbol_leaks() -> None:
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partial_nested_object_self_root_defers_without_symbol_leaks() -> None:
@@ -5647,7 +5647,7 @@ def test_partial_nested_object_self_root_defers_without_symbol_leaks() -> None:
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_flat_boolean_equivalent_class_definitions_match_scalar_exactly() -> None:
@@ -5684,7 +5684,7 @@ def test_flat_boolean_equivalent_class_definitions_match_scalar_exactly() -> Non
     assert {
         str(value["display"]).split(":")[-2] for value in generated
     } == {"negative", "positive"}
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partial_boolean_equivalence_defers_without_generated_symbol_leaks() -> None:
@@ -5716,7 +5716,7 @@ def test_partial_boolean_equivalence_defers_without_generated_symbol_leaks() -> 
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_flat_boolean_class_assertion_definitions_match_scalar_exactly() -> None:
@@ -5746,7 +5746,7 @@ def test_flat_boolean_class_assertion_definitions_match_scalar_exactly() -> None
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     ) == 2
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_flat_boolean_property_constraint_definitions_match_scalar_exactly() -> None:
@@ -5787,7 +5787,7 @@ def test_flat_boolean_property_constraint_definitions_match_scalar_exactly() -> 
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     ) == 3
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_flat_boolean_key_definitions_match_scalar_exactly() -> None:
@@ -5824,7 +5824,7 @@ def test_flat_boolean_key_definitions_match_scalar_exactly() -> None:
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     ) == 2
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_flat_boolean_disjoint_definitions_match_scalar_exactly() -> None:
@@ -5857,7 +5857,7 @@ def test_flat_boolean_disjoint_definitions_match_scalar_exactly() -> None:
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     ) == 5
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partial_boolean_disjoint_defers_without_generated_symbol_leaks() -> None:
@@ -5883,7 +5883,7 @@ def test_partial_boolean_disjoint_defers_without_generated_symbol_leaks() -> Non
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_generated_class_entity_remapping_matches_scalar_exactly() -> None:
@@ -5909,7 +5909,7 @@ def test_generated_class_entity_remapping_matches_scalar_exactly() -> None:
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_boolean_definitions_use_the_global_logical_namespace() -> None:
@@ -5951,7 +5951,7 @@ def test_composite_boolean_definitions_use_the_global_logical_namespace() -> Non
         )
         if value["generated"]
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_recursive_class_booleans_reuse_normalized_definitions() -> None:
@@ -5996,7 +5996,7 @@ def test_composite_recursive_class_booleans_reuse_normalized_definitions() -> No
     assert len(generated) == 2
     namespace = f":class:{composite.logical_fingerprint.hex}:positive:"
     assert all(namespace in str(value["display"]) for value in generated)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
@@ -6047,7 +6047,7 @@ def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
         )
         if value["generated"]
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_builtin_restrictions_and_cardinalities_reduce_exactly() -> None:
@@ -6104,7 +6104,7 @@ def test_builtin_restrictions_and_cardinalities_reduce_exactly() -> None:
         for value in class_symbols
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("datatype_iri", sorted(SUPPORTED_DATATYPES))
@@ -6130,7 +6130,7 @@ def test_implicit_builtin_datatype_minimum_zero_reduces_exactly(
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_implicit_builtin_datatype_restriction_reductions_match_scalar() -> None:
@@ -6183,7 +6183,7 @@ def test_implicit_builtin_datatype_restriction_reductions_match_scalar() -> None
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_discarded_data_range_values_reduce_without_symbols() -> None:
@@ -6236,7 +6236,7 @@ def test_discarded_data_range_values_reduce_without_symbols() -> None:
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_discarded_data_range_value_keeps_shared_live_literal() -> None:
@@ -6277,7 +6277,7 @@ def test_composite_discarded_data_range_value_keeps_shared_live_literal() -> Non
     assert len(cast(list[object], forward["source_literal_symbols"])) == 1
     assert len(cast(list[object], forward["data_value_symbols"])) == 1
     assert forward["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_discarded_data_boolean_operands_prune_normalized_symbols() -> None:
@@ -6325,7 +6325,7 @@ def test_discarded_data_boolean_operands_prune_normalized_symbols() -> None:
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_discarded_data_boolean_keeps_shared_live_literal() -> None:
@@ -6367,7 +6367,7 @@ def test_composite_discarded_data_boolean_keeps_shared_live_literal() -> None:
     assert len(cast(list[object], forward["source_literal_symbols"])) == 1
     assert len(cast(list[object], forward["data_value_symbols"])) == 1
     assert forward["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_complemented_reduced_data_booleans_match_scalar_roots() -> None:
@@ -6419,7 +6419,7 @@ def test_complemented_reduced_data_booleans_match_scalar_roots() -> None:
         for value in cast(list[dict[str, object]], manifest["source_literal_symbols"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_complemented_reduced_atomic_class_booleans_match_scalar_contexts() -> None:
@@ -6473,7 +6473,7 @@ def test_complemented_reduced_atomic_class_booleans_match_scalar_contexts() -> N
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -6557,7 +6557,7 @@ def test_absorbing_class_booleans_discard_object_self_in_scalar_contexts(
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -6652,7 +6652,7 @@ def test_absorbing_class_booleans_discard_object_values_in_scalar_contexts(
         for value in cast(list[dict[str, object]], manifest["individual_symbols"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -6733,7 +6733,7 @@ def test_absorbing_class_booleans_discard_object_quantifiers_in_scalar_contexts(
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -6826,7 +6826,7 @@ def test_absorbing_class_booleans_discard_object_cardinalities_in_scalar_context
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -6911,7 +6911,7 @@ def test_absorbing_class_booleans_discard_data_quantifiers_in_scalar_contexts(
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_absorbing_class_booleans_discard_data_values_in_scalar_contexts() -> None:
@@ -6984,7 +6984,7 @@ def test_absorbing_class_booleans_discard_data_values_in_scalar_contexts() -> No
     assert manifest["source_literal_symbols"] == []
     assert manifest["data_value_symbols"] == []
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -7076,7 +7076,7 @@ def test_absorbing_class_booleans_discard_data_cardinalities_in_scalar_contexts(
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
@@ -7113,7 +7113,7 @@ def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=10)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_implicit_builtin_property_restrictions_reduce_exactly() -> None:
@@ -7143,7 +7143,7 @@ def test_implicit_builtin_property_restrictions_reduce_exactly() -> None:
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=13)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_nonreduced_implicit_builtin_properties_remain_retained() -> None:
@@ -7171,7 +7171,7 @@ def test_nonreduced_implicit_builtin_properties_remain_retained() -> None:
         include_data_assertions=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_implicit_builtin_property_reductions_remap_composite_slices_exactly() -> None:
@@ -7212,7 +7212,7 @@ def test_implicit_builtin_property_reductions_remap_composite_slices_exactly() -
         include_at_least_object_predicates=True,
     )
     assert forward["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_bottom_data_has_value_reduces_without_literal_symbols() -> None:
@@ -7235,7 +7235,7 @@ def test_bottom_data_has_value_reduces_without_literal_symbols() -> None:
     assert manifest["source_literal_symbols"] == []
     assert manifest["data_value_symbols"] == []
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_bottom_data_has_value_keeps_a_shared_live_literal() -> None:
@@ -7261,7 +7261,7 @@ def test_bottom_data_has_value_keeps_a_shared_live_literal() -> None:
     assert len(cast(list[object], manifest["source_literal_symbols"])) == 1
     assert len(cast(list[object], manifest["data_value_symbols"])) == 1
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_bottom_data_has_value_reduction_remaps_composite_literals_exactly() -> None:
@@ -7303,7 +7303,7 @@ def test_bottom_data_has_value_reduction_remaps_composite_literals_exactly() -> 
     assert len(cast(list[object], forward["source_literal_symbols"])) == 1
     assert len(cast(list[object], forward["data_value_symbols"])) == 1
     assert forward["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_bottom_object_has_value_drops_implicit_individual_exactly() -> None:
@@ -7326,7 +7326,7 @@ def test_bottom_object_has_value_drops_implicit_individual_exactly() -> None:
     assert manifest["individual_signature"] == []
     assert manifest["named_individuals"] == []
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_bottom_object_has_value_keeps_shared_live_individual() -> None:
@@ -7369,7 +7369,7 @@ def test_composite_bottom_object_has_value_keeps_shared_live_individual() -> Non
         "declared"
     ] is False
     assert forward["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_reduced_restriction_disjoint_duplicates_force_empty_exactly() -> None:
@@ -7387,7 +7387,7 @@ def test_reduced_restriction_disjoint_duplicates_force_empty_exactly() -> None:
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=1)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_reducible_restrictions_require_retained_nonbuiltin_inputs() -> None:
@@ -7420,7 +7420,7 @@ def test_reducible_restrictions_require_retained_nonbuiltin_inputs() -> None:
         )
         for value in class_symbols
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_reducible_restrictions_remap_composite_slices_exactly() -> None:
@@ -7449,7 +7449,7 @@ def test_reducible_restrictions_remap_composite_slices_exactly() -> None:
 
     assert manifest == _expected_manifest(composite, compiled_roots=4)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_reducible_disjoint_unions_match_scalar_exactly() -> None:
@@ -7481,7 +7481,7 @@ def test_reducible_disjoint_unions_match_scalar_exactly() -> None:
         )
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_generated_disjoint_unions_match_scalar_exactly() -> None:
@@ -7513,7 +7513,7 @@ def test_generated_disjoint_unions_match_scalar_exactly() -> None:
         )
     ) == 2
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_generated_disjoint_unions_match_scalar_exactly() -> None:
@@ -7546,7 +7546,7 @@ def test_recursive_generated_disjoint_unions_match_scalar_exactly() -> None:
         )
     ) == 7
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_disjoint_unions_remap_composite_slices_exactly() -> None:
@@ -7593,7 +7593,7 @@ def test_recursive_disjoint_unions_remap_composite_slices_exactly() -> None:
     assert len(generated) == 6
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(namespace in str(value["display"]) for value in generated)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_restriction_bearing_disjoint_unions_match_scalar_exactly() -> None:
@@ -7656,7 +7656,7 @@ def test_restriction_bearing_disjoint_unions_match_scalar_exactly() -> None:
         include_generated_data_definitions=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_complemented_restriction_disjoint_union_members_match_scalar() -> None:
@@ -7702,7 +7702,7 @@ def test_complemented_restriction_disjoint_union_members_match_scalar() -> None:
         include_generated_data_definitions=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_restriction_disjoint_unions_reuse_global_identity() -> None:
@@ -7771,7 +7771,7 @@ def test_composite_restriction_disjoint_unions_reuse_global_identity() -> None:
         if value["generated"]
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
@@ -7804,7 +7804,7 @@ def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_reducible_disjoint_unions_remap_composite_slices_exactly() -> None:
@@ -7832,7 +7832,7 @@ def test_reducible_disjoint_unions_remap_composite_slices_exactly() -> None:
 
     assert manifest == _expected_manifest(composite, compiled_roots=2)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -7866,7 +7866,7 @@ def test_trivial_nominal_axioms_normalize_without_symbol_leaks(axiom: str) -> No
         not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_atomic_complements_remap_local_class_domains_exactly() -> None:
@@ -7898,7 +7898,7 @@ def test_composite_atomic_complements_remap_local_class_domains_exactly() -> Non
             list[dict[str, object]], manifest["class_expression_symbols"]
         )
     ) == 2
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_named_nominal_assertions_remap_exactly() -> None:
@@ -7925,7 +7925,7 @@ def test_composite_named_nominal_assertions_remap_exactly() -> None:
 
     assert manifest == _expected_manifest(composite, compiled_roots=2)
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_named_nominal_class_axioms_and_constraints_remap_exactly() -> None:
@@ -7964,7 +7964,7 @@ def test_composite_named_nominal_class_axioms_and_constraints_remap_exactly() ->
         include_data_domains=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_nested_complements_remap_normalized_literals_exactly() -> None:
@@ -8008,7 +8008,7 @@ def test_composite_nested_complements_remap_normalized_literals_exactly() -> Non
         include_datatype_definitions=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_reducible_booleans_remap_atomic_literals_exactly() -> None:
@@ -8052,7 +8052,7 @@ def test_composite_reducible_booleans_remap_atomic_literals_exactly() -> None:
         include_datatype_definitions=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_named_same_individual_facts_and_overlapping_provenance_match_scalar() -> None:
@@ -8134,7 +8134,7 @@ def test_annotated_named_axiom_family_preserves_exact_nested_provenance() -> Non
     assert manifest["compiled_roots"] == 6
     assert manifest["deferred_roots"] == 0
     assert manifest["named_individuals"] == [0, 1]
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_named_object_domain_and_range_clauses_match_scalar_exactly() -> None:
@@ -8161,7 +8161,7 @@ def test_annotated_named_object_domain_and_range_clauses_match_scalar_exactly() 
         include_object_constraints=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_restriction_bearing_object_property_ranges_match_scalar_exactly() -> None:
@@ -8205,7 +8205,7 @@ def test_restriction_bearing_object_property_ranges_match_scalar_exactly() -> No
         include_generated_data_definitions=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_complemented_restriction_object_property_ranges_match_scalar() -> None:
@@ -8251,7 +8251,7 @@ def test_complemented_restriction_object_property_ranges_match_scalar() -> None:
         include_generated_data_definitions=True,
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_restriction_object_ranges_reuse_global_identity() -> None:
@@ -8321,7 +8321,7 @@ def test_composite_restriction_object_ranges_reuse_global_identity() -> None:
         if value["generated"]
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partial_restriction_object_range_defers_without_symbol_leaks() -> None:
@@ -8363,7 +8363,7 @@ def test_partial_restriction_object_range_defers_without_symbol_leaks() -> None:
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_object_functionality_and_reflexivity_match_scalar_exactly() -> None:
@@ -8395,7 +8395,7 @@ def test_annotated_object_functionality_and_reflexivity_match_scalar_exactly() -
         include_object_characteristics=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_named_data_property_domains_match_scalar_exactly() -> None:
@@ -8428,7 +8428,7 @@ def test_annotated_named_data_property_domains_match_scalar_exactly() -> None:
         include_data_domains=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_named_data_property_ranges_match_scalar_exactly() -> None:
@@ -8456,7 +8456,7 @@ def test_annotated_named_data_property_ranges_match_scalar_exactly() -> None:
         include_data_ranges=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_atomic_data_complement_ranges_and_definitions_match_scalar_exactly() -> None:
@@ -8493,7 +8493,7 @@ def test_atomic_data_complement_ranges_and_definitions_match_scalar_exactly() ->
         predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 2
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_enumerated_and_restricted_data_literals_match_scalar_exactly() -> None:
@@ -8537,7 +8537,7 @@ def test_enumerated_and_restricted_data_literals_match_scalar_exactly() -> None:
         str(value["display"]).startswith("DatatypeRestriction:")
         for value in data_range_symbols
     ) == 1
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_complemented_enumerated_restricted_and_bottom_ranges_match_scalar() -> None:
@@ -8579,7 +8579,7 @@ def test_complemented_enumerated_restricted_and_bottom_ranges_match_scalar() -> 
         predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 3
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_nested_atomic_data_complements_reduce_by_parity_exactly() -> None:
@@ -8628,7 +8628,7 @@ def test_nested_atomic_data_complements_reduce_by_parity_exactly() -> None:
         predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 2
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_reducible_data_booleans_collapse_to_atomic_ranges_exactly() -> None:
@@ -8675,7 +8675,7 @@ def test_reducible_data_booleans_collapse_to_atomic_ranges_exactly() -> None:
         for value in data_symbols
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_named_datatype_definitions_match_scalar_exactly() -> None:
@@ -8704,7 +8704,7 @@ def test_annotated_named_datatype_definitions_match_scalar_exactly() -> None:
         include_datatype_definitions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_named_keys_match_scalar_exactly() -> None:
@@ -8737,7 +8737,7 @@ def test_annotated_named_keys_match_scalar_exactly() -> None:
         include_keys=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_functional_data_properties_match_scalar_exactly() -> None:
@@ -8765,7 +8765,7 @@ def test_annotated_functional_data_properties_match_scalar_exactly() -> None:
         include_data_functionalities=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_string_data_property_assertions_match_scalar_exactly() -> None:
@@ -8797,7 +8797,7 @@ def test_annotated_string_data_property_assertions_match_scalar_exactly() -> Non
         include_data_assertions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_string_data_assertions_remap_roles_terms_and_aliases_exactly() -> None:
@@ -8829,7 +8829,7 @@ def test_composite_string_data_assertions_remap_roles_terms_and_aliases_exactly(
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_negative_string_data_assertions_match_scalar_exactly() -> None:
@@ -8863,7 +8863,7 @@ def test_annotated_negative_string_data_assertions_match_scalar_exactly() -> Non
         include_negative_data_assertions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_negative_string_data_assertions_remap_aliases_exactly() -> None:
@@ -8895,7 +8895,7 @@ def test_composite_negative_string_data_assertions_remap_aliases_exactly() -> No
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_boolean_data_assertions_collapse_aliases_and_match_scalar_exactly() -> None:
@@ -8924,7 +8924,7 @@ def test_boolean_data_assertions_collapse_aliases_and_match_scalar_exactly() -> 
     assert len(cast(list[object], actual["source_literal_symbols"])) == 4
     assert len(cast(list[object], actual["data_value_symbols"])) == 2
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_boolean_data_assertions_remap_one_shared_identity_exactly() -> None:
@@ -8957,7 +8957,7 @@ def test_composite_boolean_data_assertions_remap_one_shared_identity_exactly() -
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_integer_family_data_assertions_match_scalar_boundaries_exactly() -> None:
@@ -8998,7 +8998,7 @@ def test_integer_family_data_assertions_match_scalar_boundaries_exactly() -> Non
     )
     assert actual["data_value_symbols"] == _expected_data_value_symbols(snapshot)
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_integer_aliases_remap_one_shared_identity_exactly() -> None:
@@ -9031,7 +9031,7 @@ def test_composite_integer_aliases_remap_one_shared_identity_exactly() -> None:
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_decimal_data_assertions_reduce_aliases_and_match_scalar_exactly() -> None:
@@ -9066,7 +9066,7 @@ def test_decimal_data_assertions_reduce_aliases_and_match_scalar_exactly() -> No
     assert len(cast(list[object], actual["source_literal_symbols"])) == 7
     assert len(cast(list[object], actual["data_value_symbols"])) == 5
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_decimal_and_integer_aliases_share_one_identity_exactly() -> None:
@@ -9099,7 +9099,7 @@ def test_composite_decimal_and_integer_aliases_share_one_identity_exactly() -> N
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_rational_data_assertions_reduce_aliases_and_match_scalar_exactly() -> None:
@@ -9132,7 +9132,7 @@ def test_rational_data_assertions_reduce_aliases_and_match_scalar_exactly() -> N
     assert len(cast(list[object], actual["source_literal_symbols"])) == 5
     assert len(cast(list[object], actual["data_value_symbols"])) == 4
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_rational_and_decimal_aliases_share_one_identity_exactly() -> None:
@@ -9165,7 +9165,7 @@ def test_composite_rational_and_decimal_aliases_share_one_identity_exactly() -> 
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_ieee_data_assertions_match_scalar_bits_and_signed_zero_exactly() -> None:
@@ -9203,7 +9203,7 @@ def test_ieee_data_assertions_match_scalar_bits_and_signed_zero_exactly() -> Non
     assert len(cast(list[object], actual["source_literal_symbols"])) == 10
     assert len(cast(list[object], actual["data_value_symbols"])) == 9
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -9241,7 +9241,7 @@ def test_ieee_normal_subnormal_and_tie_boundaries_match_scalar_exactly(
     )
     assert actual["data_value_symbols"] == _expected_data_value_symbols(snapshot)
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_generated_ieee_rounding_matrix_matches_scalar_exactly() -> None:
@@ -9279,7 +9279,7 @@ def test_generated_ieee_rounding_matrix_matches_scalar_exactly() -> None:
     )
     assert actual["data_value_symbols"] == _expected_data_value_symbols(snapshot)
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_ieee_lexical_aliases_share_one_identity_exactly() -> None:
@@ -9312,7 +9312,7 @@ def test_composite_ieee_lexical_aliases_share_one_identity_exactly() -> None:
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_binary_data_assertions_decode_aliases_and_match_scalar_exactly() -> None:
@@ -9343,7 +9343,7 @@ def test_binary_data_assertions_decode_aliases_and_match_scalar_exactly() -> Non
     assert len(cast(list[object], actual["source_literal_symbols"])) == 6
     assert len(cast(list[object], actual["data_value_symbols"])) == 4
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_base64_whitespace_aliases_share_one_identity_exactly() -> None:
@@ -9376,7 +9376,7 @@ def test_composite_base64_whitespace_aliases_share_one_identity_exactly() -> Non
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_uri_data_assertions_preserve_spelling_and_match_scalar_exactly() -> None:
@@ -9405,7 +9405,7 @@ def test_uri_data_assertions_preserve_spelling_and_match_scalar_exactly() -> Non
     assert len(cast(list[object], actual["source_literal_symbols"])) == 4
     assert len(cast(list[object], actual["data_value_symbols"])) == 4
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_uri_spelling_remaps_one_shared_identity_exactly() -> None:
@@ -9438,7 +9438,7 @@ def test_composite_uri_spelling_remaps_one_shared_identity_exactly() -> None:
     assert len(cast(list[object], actual["source_literal_symbols"])) == 1
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_date_time_data_assertions_normalize_aliases_and_match_scalar_exactly() -> None:
@@ -9486,7 +9486,7 @@ def test_date_time_data_assertions_normalize_aliases_and_match_scalar_exactly() 
     assert len(cast(list[object], actual["source_literal_symbols"])) == 8
     assert len(cast(list[object], actual["data_value_symbols"])) == 5
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_date_time_zone_aliases_share_one_identity_exactly() -> None:
@@ -9522,7 +9522,7 @@ def test_composite_date_time_zone_aliases_share_one_identity_exactly() -> None:
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_xml_data_assertions_canonicalize_and_match_scalar_exactly() -> None:
@@ -9563,7 +9563,7 @@ def test_xml_data_assertions_canonicalize_and_match_scalar_exactly() -> None:
     assert len(cast(list[object], actual["source_literal_symbols"])) == 4
     assert len(cast(list[object], actual["data_value_symbols"])) == 3
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_xml_spelling_remaps_one_canonical_identity_exactly() -> None:
@@ -9602,7 +9602,7 @@ def test_composite_xml_spelling_remaps_one_canonical_identity_exactly() -> None:
     assert len(cast(list[object], actual["source_literal_symbols"])) == 2
     assert len(cast(list[object], actual["data_value_symbols"])) == 1
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_named_object_assertions_and_inverse_roles_match_scalar_exactly() -> None:
@@ -9629,7 +9629,7 @@ def test_annotated_named_object_assertions_and_inverse_roles_match_scalar_exactl
         include_object_assertions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_negative_object_assertions_and_inverse_roles_match_scalar_exactly() -> None:
@@ -9664,7 +9664,7 @@ def test_annotated_negative_object_assertions_and_inverse_roles_match_scalar_exa
         include_negative_object_assertions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_anonymous_object_assertions_group_sources_exactly() -> None:
@@ -9689,7 +9689,7 @@ def test_composite_anonymous_object_assertions_group_sources_exactly() -> None:
         include_object_assertions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_negative_object_assertion_annotations_group_sources_exactly() -> None:
@@ -9719,7 +9719,7 @@ def test_composite_negative_object_assertion_annotations_group_sources_exactly()
         include_negative_object_assertions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_object_assertions_remap_local_roles_and_individuals_exactly() -> None:
@@ -9751,7 +9751,7 @@ def test_composite_object_assertions_remap_local_roles_and_individuals_exactly()
         include_object_assertions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_negative_object_assertions_remap_local_roles_and_individuals_exactly() -> None:
@@ -9783,7 +9783,7 @@ def test_composite_negative_object_assertions_remap_local_roles_and_individuals_
         include_negative_object_assertions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_anonymous_object_assertion_operands_match_scalar_exactly() -> None:
@@ -9807,7 +9807,7 @@ def test_anonymous_object_assertion_operands_match_scalar_exactly() -> None:
     assert manifest["named_individuals"] == [0]
     assert len(cast(list[object], manifest["individual_symbols"])) == 2
     assert len(cast(list[object], manifest["individual_signature"])) == 1
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_anonymous_class_and_data_assertions_match_scalar_exactly() -> None:
@@ -9835,7 +9835,7 @@ def test_anonymous_class_and_data_assertions_match_scalar_exactly() -> None:
     assert manifest["deferred_roots"] == 0
     assert manifest["named_individuals"] == [0]
     assert len(cast(list[object], manifest["individual_signature"])) == 1
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_anonymous_assertion_operands_remap_scopes_exactly() -> None:
@@ -9857,7 +9857,7 @@ def test_composite_anonymous_assertion_operands_remap_scopes_exactly() -> None:
     assert manifest["deferred_roots"] == 0
     assert manifest["named_individuals"] == []
     assert len(cast(list[object], manifest["individual_symbols"])) == 4
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -9886,7 +9886,7 @@ def test_forbidden_anonymous_negative_assertions_defer_atomically(axiom: str) ->
     assert len(cast(list[object], manifest["individual_symbols"])) == 1
     assert len(cast(list[dict[str, object]], manifest["positive_facts"])) == 2
     assert manifest["negative_facts"] == []
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_anonymous_object_constraints_remap_and_group_sources_exactly() -> None:
@@ -9911,7 +9911,7 @@ def test_composite_anonymous_object_constraints_remap_and_group_sources_exactly(
         include_object_constraints=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_object_constraints_remap_distinct_local_role_domains() -> None:
@@ -9943,7 +9943,7 @@ def test_composite_object_constraints_remap_distinct_local_role_domains() -> Non
         include_object_constraints=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_anonymous_object_characteristics_group_sources_exactly() -> None:
@@ -9967,7 +9967,7 @@ def test_composite_anonymous_object_characteristics_group_sources_exactly() -> N
         include_object_characteristics=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_object_characteristics_remap_distinct_local_role_domains() -> None:
@@ -9996,7 +9996,7 @@ def test_composite_object_characteristics_remap_distinct_local_role_domains() ->
         include_object_characteristics=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_anonymous_data_domains_group_sources_exactly() -> None:
@@ -10021,7 +10021,7 @@ def test_composite_anonymous_data_domains_group_sources_exactly() -> None:
         include_data_domains=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_data_domains_remap_distinct_local_role_and_class_domains() -> None:
@@ -10051,7 +10051,7 @@ def test_composite_data_domains_remap_distinct_local_role_and_class_domains() ->
         include_data_domains=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_anonymous_data_ranges_group_sources_exactly() -> None:
@@ -10074,7 +10074,7 @@ def test_composite_anonymous_data_ranges_group_sources_exactly() -> None:
         include_data_ranges=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_data_ranges_remap_distinct_local_role_and_datatype_domains() -> None:
@@ -10102,7 +10102,7 @@ def test_composite_data_ranges_remap_distinct_local_role_and_datatype_domains() 
         include_data_ranges=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_generated_data_range_definitions_use_global_namespace() -> None:
@@ -10143,7 +10143,7 @@ def test_composite_generated_data_range_definitions_use_global_namespace() -> No
         if value["generated"]
     ) == 2
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_atomic_data_complements_remap_exactly() -> None:
@@ -10176,7 +10176,7 @@ def test_composite_atomic_data_complements_remap_exactly() -> None:
         include_datatype_definitions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_enumerated_and_restricted_data_literals_remap_exactly() -> None:
@@ -10212,7 +10212,7 @@ def test_composite_enumerated_and_restricted_data_literals_remap_exactly() -> No
         include_datatype_definitions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_datatype_definitions_remap_distinct_local_domains_exactly() -> None:
@@ -10242,7 +10242,7 @@ def test_composite_datatype_definitions_remap_distinct_local_domains_exactly() -
         include_datatype_definitions=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_boolean_datatype_definitions_remap_exactly() -> None:
@@ -10274,7 +10274,7 @@ def test_composite_boolean_datatype_definitions_remap_exactly() -> None:
         for value in cast(list[dict[str, object]], actual["data_range_symbols"])
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_anonymous_named_keys_group_sources_exactly() -> None:
@@ -10297,7 +10297,7 @@ def test_composite_anonymous_named_keys_group_sources_exactly() -> None:
         include_keys=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_named_keys_remap_distinct_local_domains_exactly() -> None:
@@ -10329,7 +10329,7 @@ def test_composite_named_keys_remap_distinct_local_domains_exactly() -> None:
         include_keys=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_anonymous_functional_data_properties_group_sources_exactly() -> None:
@@ -10352,7 +10352,7 @@ def test_composite_anonymous_functional_data_properties_group_sources_exactly() 
         include_data_functionalities=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_functional_data_properties_remap_distinct_local_role_domains() -> None:
@@ -10380,7 +10380,7 @@ def test_composite_functional_data_properties_remap_distinct_local_role_domains(
         include_data_functionalities=True,
     )
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_object_cardinality_domain_defers_the_whole_root() -> None:
@@ -10404,7 +10404,7 @@ def test_unsupported_object_cardinality_domain_defers_the_whole_root() -> None:
         predicate["kind"] != "object_role"
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_object_cardinality_data_domain_defers_the_whole_root() -> None:
@@ -10426,7 +10426,7 @@ def test_unsupported_object_cardinality_data_domain_defers_the_whole_root() -> N
         predicate["kind"] != PredicateKind.DATA_ROLE.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_generated_data_property_range_definitions_match_scalar_exactly() -> None:
@@ -10461,7 +10461,7 @@ def test_generated_data_property_range_definitions_match_scalar_exactly() -> Non
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ) == 3
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_generated_data_range_definitions_match_scalar_exactly() -> None:
@@ -10496,7 +10496,7 @@ def test_recursive_generated_data_range_definitions_match_scalar_exactly() -> No
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ) == 5
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_nested_homogeneous_data_booleans_flatten_exactly() -> None:
@@ -10533,7 +10533,7 @@ def test_nested_homogeneous_data_booleans_flatten_exactly() -> None:
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ) == 2
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_data_boolean_complements_normalize_exactly() -> None:
@@ -10571,7 +10571,7 @@ def test_data_boolean_complements_normalize_exactly() -> None:
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     ) == 2
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_mixed_nested_datatype_definition_matches_scalar_exactly() -> None:
@@ -10597,7 +10597,7 @@ def test_mixed_nested_datatype_definition_matches_scalar_exactly() -> None:
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ) == 2
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_deep_mixed_nested_datatype_definition_matches_scalar_exactly() -> None:
@@ -10624,7 +10624,7 @@ def test_deep_mixed_nested_datatype_definition_matches_scalar_exactly() -> None:
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ) == 4
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_boolean_datatype_definitions_match_scalar_exactly() -> None:
@@ -10655,7 +10655,7 @@ def test_boolean_datatype_definitions_match_scalar_exactly() -> None:
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_recursive_boolean_datatype_definition_matches_scalar_exactly() -> None:
@@ -10681,7 +10681,7 @@ def test_recursive_boolean_datatype_definition_matches_scalar_exactly() -> None:
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ) == 2
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_mixed_nested_datatype_definitions_reuse_polarized_dependencies() -> None:
@@ -10719,7 +10719,7 @@ def test_mixed_nested_datatype_definitions_reuse_polarized_dependencies() -> Non
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ) == 2
     assert manifest["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_mixed_nested_datatype_definitions_compose_canonically() -> None:
@@ -10765,7 +10765,7 @@ def test_mixed_nested_datatype_definitions_compose_canonically() -> None:
         for value in cast(list[dict[str, object]], forward["data_range_symbols"])
     ) == 2
     assert forward["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partially_unsupported_has_key_defers_without_generated_symbols() -> None:
@@ -10801,7 +10801,7 @@ def test_partially_unsupported_has_key_defers_without_generated_symbols() -> Non
         }
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_anonymous_annotations_group_normalized_sources_exactly() -> None:
@@ -10829,7 +10829,7 @@ def test_composite_anonymous_annotations_group_normalized_sources_exactly() -> N
 
     assert actual == _expected_manifest(composite, compiled_roots=10)
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_identity_annotation_variants_group_sources_exactly() -> None:
@@ -10850,7 +10850,7 @@ def test_composite_identity_annotation_variants_group_sources_exactly() -> None:
 
     assert actual == _expected_manifest(composite, compiled_roots=4)
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_annotated_object_cardinality_assertion_defers() -> None:
@@ -10870,7 +10870,7 @@ def test_unsupported_annotated_object_cardinality_assertion_defers() -> None:
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 1
     assert manifest["named_individuals"] == [0]
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_object_cardinality_assertion_defers_without_partial_symbols() -> None:
@@ -10899,7 +10899,7 @@ def test_unsupported_object_cardinality_assertion_defers_without_partial_symbols
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert manifest["negative_facts"] == []
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_nominal_assertions_defer_without_partial_symbols() -> None:
@@ -10933,7 +10933,7 @@ def test_unsupported_nominal_assertions_defer_without_partial_symbols() -> None:
         not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
@@ -10975,7 +10975,7 @@ def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
         not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -11014,7 +11014,7 @@ def test_partial_atomic_complement_subclass_defers_without_leaking_symbols(
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partial_atomic_complement_equivalence_defers_without_leaking_symbols() -> None:
@@ -11043,7 +11043,7 @@ def test_partial_atomic_complement_equivalence_defers_without_leaking_symbols() 
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_partial_atomic_complement_disjoint_defers_without_leaking_symbols() -> None:
@@ -11072,7 +11072,7 @@ def test_partial_atomic_complement_disjoint_defers_without_leaking_symbols() -> 
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_unsupported_object_cardinality_constraints_defer_without_leaks() -> None:
@@ -11105,7 +11105,7 @@ def test_unsupported_object_cardinality_constraints_defer_without_leaks() -> Non
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -11135,7 +11135,7 @@ def test_anonymous_identity_axiom_defers_the_whole_root_without_partial_fact(
     assert all(value["kind"] != predicate_kind.value for value in predicates)
     positive_facts = cast(list[dict[str, object]], manifest["positive_facts"])
     assert len(positive_facts) == 2
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_hostile_class_kind_rolls_back_and_valid_retry_is_byte_exact() -> None:

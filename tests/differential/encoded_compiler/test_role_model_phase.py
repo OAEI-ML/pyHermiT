@@ -106,7 +106,7 @@ def test_complete_object_and_data_role_model_is_scalar_canonical_bytes() -> None
     assert payload["complex_inclusions"]
     assert payload["data_inclusions"]
     assert payload["automata"]
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_empty_role_model_retains_builtins_in_exact_scalar_order() -> None:
@@ -118,7 +118,7 @@ def test_empty_role_model_retains_builtins_in_exact_scalar_order() -> None:
     payload = cast(dict[str, object], json.loads(actual))
     assert payload["object_role_count"] == 2
     assert payload["data_property_count"] == 2
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_freezes_cross_slice_inclusions_and_automata_after_union() -> None:
@@ -155,7 +155,7 @@ def test_composite_freezes_cross_slice_inclusions_and_automata_after_union() -> 
     payload = cast(dict[str, object], json.loads(actual))
     assert payload["complex_inclusions"]
     assert payload["automata"]
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("posting_mode", [1, 2])
@@ -234,7 +234,7 @@ def test_unrelated_axioms_do_not_change_the_frozen_role_model() -> None:
 
     assert _native_manifest_bytes(enriched) == _native_manifest_bytes(baseline)
     assert _native_manifest_bytes(enriched) == _expected_manifest_bytes(enriched)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_hostile_symbol_kind_rolls_back_and_valid_retry_is_byte_exact() -> None:
@@ -258,7 +258,7 @@ def test_hostile_symbol_kind_rolls_back_and_valid_retry_is_byte_exact() -> None:
     assert caught.value.code == "NATIVE_ENCODED_VIEW_INVALID"
     assert native._encoded_role_model_manifest_v1(**buffers) == baseline
     assert baseline == _expected_manifest_bytes(snapshot)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_generated_regular_role_models_match_scalar_canonical_bytes() -> None:
@@ -287,4 +287,4 @@ def test_generated_regular_role_models_match_scalar_canonical_bytes() -> None:
 
         assert _native_manifest_bytes(snapshot) == _expected_manifest_bytes(snapshot)
 
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES

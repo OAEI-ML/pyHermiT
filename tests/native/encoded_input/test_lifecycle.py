@@ -422,7 +422,7 @@ def test_contextual_multi_slice_cancellation_is_transactional_and_reusable() -> 
         is None
     )
     assert native._encoded_role_clause_slices_manifest_v1(slices=slices) == baseline
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
     assert encoded.owner is not None
 
 
@@ -485,5 +485,5 @@ def test_encoded_selection_panic_is_redacted_and_does_not_poison_later_calls(
     assert str(captured.value) == "native encoded-selection validation panic was contained"
     assert "content must not escape" not in diagnostics.err
     _validate(columns)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
     assert encoded.owner is not None

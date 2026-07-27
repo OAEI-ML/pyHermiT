@@ -154,7 +154,7 @@ def test_simple_role_expansion_and_normalized_provenance_match_scalar_exactly() 
     )
 
     assert _native_manifest(snapshot) == _expected_manifest(snapshot)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_only_role_axiom_uses_annotation_stripped_statement_digest() -> None:
@@ -209,7 +209,7 @@ def test_composite_simple_graph_remaps_ids_and_deduplicates_normalized_edges() -
 
     assert actual == _expected_manifest(composite)
     assert actual["compiled_roots"] == 3
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("posting_mode", [1, 2])
@@ -273,7 +273,7 @@ def test_chain_and_other_role_axioms_remain_explicitly_outside_the_simple_graph(
     assert actual["compiled_roots"] == 0
     assert actual["simple_inclusions"] == []
     assert actual == _expected_manifest(snapshot)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_generated_role_expression_permutations_match_scalar_exactly() -> None:

@@ -471,7 +471,7 @@ def test_valid_unary_data_restrictions_match_scalar_projection() -> None:
     assert actual == _expected_manifest(snapshot)
     assert actual["conforms"] is True
     assert actual["issues"] == []
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_multi_property_diagnostics_order_and_provenance_match_scalar_exactly() -> None:

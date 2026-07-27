@@ -272,10 +272,21 @@ def capture_compatible_view_deferred(view: OntologyView) -> DeferredCapturedOnto
 
 
 def _deferred_capture_eligible(view: OntologyView) -> bool:
-    """Keep nested lazy sources on the eager semantic-attestation path."""
+    """Defer only bounded lazy shapes rooted directly in snapshots."""
 
     if isinstance(view, OntologyOverlay):
-        return isinstance(view.base, OntologySnapshot)
+        maximum_depth = view.depth
+        if type(maximum_depth) is not int or maximum_depth <= 0:
+            return False
+        seen: set[int] = set()
+        base: OntologyView = view
+        while isinstance(base, OntologyOverlay):
+            identity = id(base)
+            if identity in seen or len(seen) >= maximum_depth:
+                return False
+            seen.add(identity)
+            base = base.base
+        return isinstance(base, OntologySnapshot)
     if isinstance(view, OntologyComposite):
         return all(
             isinstance(member.view, OntologySnapshot)

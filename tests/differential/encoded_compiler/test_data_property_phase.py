@@ -135,14 +135,14 @@ def test_data_property_symbols_and_builtins_match_scalar_exactly() -> None:
     assert "data_property:urn:test:data-roles#p" in displays
     assert "data_property:http://www.w3.org/2002/07/owl#topDataProperty" in displays
     assert "data_property:http://www.w3.org/2002/07/owl#bottomDataProperty" in displays
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_empty_ontology_still_matches_scalar_builtin_data_property_domain() -> None:
     snapshot = pyowl_core.load_snapshot(functional(), options=OPTIONS)
 
     assert _native_manifest(snapshot) == _expected_manifest(snapshot)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_data_property_domain_remaps_and_deduplicates_keys() -> None:
@@ -174,7 +174,7 @@ def test_composite_data_property_domain_remaps_and_deduplicates_keys() -> None:
         value["display"] for value in cast(list[dict[str, object]], actual["data_property_symbols"])
     ]
     assert displays.count("data_property:urn:test:data-roles#shared") == 1
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("posting_mode", [1, 2])
@@ -215,7 +215,7 @@ def test_source_local_include_and_exclude_rebuild_exact_data_property_domain(
     )
 
     assert actual == _expected_manifest(expected)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_hostile_data_property_kind_rolls_back_to_byte_exact_retry() -> None:

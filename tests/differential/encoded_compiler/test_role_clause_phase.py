@@ -219,7 +219,7 @@ def test_mixed_role_graph_predicates_clauses_and_provenance_match_scalar() -> No
     clauses = cast(list[dict[str, object]], payload["clauses"])
     assert any(len(cast(list[object], clause["body"])) > 1 for clause in clauses)
     assert any(not clause["head"] for clause in clauses)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_empty_graph_retains_inverse_and_bottom_builtin_clauses_exactly() -> None:
@@ -278,7 +278,7 @@ def test_composite_clausifies_the_merged_role_graph_once() -> None:
     )
 
     assert actual == _expected_manifest(composite)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_anonymous_annotation_scope_maps_clause_provenance_exactly() -> None:
@@ -301,7 +301,7 @@ def test_composite_anonymous_annotation_scope_maps_clause_provenance_exactly() -
     )
 
     assert actual == _expected_manifest(composite)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("posting_mode", [1, 2])
@@ -387,7 +387,7 @@ def test_unowned_class_and_property_semantics_remain_deferred() -> None:
 
     assert _native_manifest_bytes(enriched) == _native_manifest_bytes(baseline)
     _assert_exact(baseline)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_hostile_input_rolls_back_before_a_valid_byte_exact_retry() -> None:
@@ -412,7 +412,7 @@ def test_hostile_input_rolls_back_before_a_valid_byte_exact_retry() -> None:
     assert caught.value.code == "NATIVE_ENCODED_VIEW_INVALID"
     assert native._encoded_role_clause_manifest_v1(**buffers) == baseline
     assert cast(dict[str, object], json.loads(baseline)) == _expected_manifest(snapshot)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_generated_regular_role_clauses_match_scalar_exactly() -> None:
@@ -442,7 +442,7 @@ def test_generated_regular_role_clauses_match_scalar_exactly() -> None:
 
         _assert_exact(snapshot)
 
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_generated_role_characteristic_clauses_match_scalar_exactly() -> None:
@@ -474,7 +474,7 @@ def test_generated_role_characteristic_clauses_match_scalar_exactly() -> None:
 
         _assert_exact(snapshot)
 
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_public_compiler_digest_and_role_results_remain_backend_exact() -> None:
@@ -512,7 +512,7 @@ def test_public_compiler_digest_and_role_results_remain_backend_exact() -> None:
     assert len({value["compiler_digest"] for value in diagnostics}) == 1
     assert len(set(results)) == 1
     assert {value["ingestion_path"] for value in diagnostics} == {
+        "encoded-native",
         "scalar-python",
-        "scalar-wire",
     }
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES

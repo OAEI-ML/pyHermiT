@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 
 import pytest
@@ -201,3 +202,48 @@ def test_backend_diagnostic_json_is_exact_and_sorted() -> None:
         False,
     )
     assert '"complete_features":["owl2-dl"]' in canonical_backend_json(info)
+
+
+def test_backend_info_recursively_freezes_compiler_handoff_and_serializes_it() -> None:
+    widths = {"root_ids": 4, "scalar_bytes": 1}
+    handoff: dict[str, object] = {
+        "buffer_widths": widths,
+        "descriptor_sha256": "ab" * 32,
+        "model_schema": 1,
+        "schema_name": "pyowl-core/structural-columns",
+        "schema_version": 1,
+    }
+    info = BackendInfo(
+        "native",
+        "0.1.0",
+        1,
+        "native-1",
+        "0.1.0",
+        (0, 1),
+        1,
+        (1, 0),
+        1,
+        frozenset({"encoded-structural-compiler-v1"}),
+        True,
+        handoff,
+    )
+    handoff["schema_name"] = "mutated"
+    widths["root_ids"] = 8
+
+    assert info.compiler_handoff is not None
+    assert info.compiler_handoff["schema_name"] == "pyowl-core/structural-columns"
+    assert info.compiler_handoff["buffer_widths"] == {
+        "root_ids": 4,
+        "scalar_bytes": 1,
+    }
+    with pytest.raises(TypeError):
+        info.compiler_handoff["schema_name"] = "mutated"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        info.compiler_handoff["buffer_widths"]["root_ids"] = 8  # type: ignore[index]
+    assert json.loads(canonical_backend_json(info))["compiler_handoff"] == {
+        "buffer_widths": {"root_ids": 4, "scalar_bytes": 1},
+        "descriptor_sha256": "ab" * 32,
+        "model_schema": 1,
+        "schema_name": "pyowl-core/structural-columns",
+        "schema_version": 1,
+    }

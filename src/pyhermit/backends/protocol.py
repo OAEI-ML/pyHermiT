@@ -17,6 +17,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from pyhermit.config import ReasonerConfig
@@ -26,6 +27,15 @@ from pyhermit.exceptions import ResourceLimitError
 U32_MAX = (1 << 32) - 1
 COMPILED_IR_SCHEMA_VERSION = 1
 _HEX_256 = re.compile(r"^[0-9a-f]{64}$")
+_COMPILER_HANDOFF_FIELDS = frozenset(
+    {
+        "buffer_widths",
+        "descriptor_sha256",
+        "model_schema",
+        "schema_name",
+        "schema_version",
+    }
+)
 
 
 class _StringEnum(str, Enum):
@@ -568,6 +578,11 @@ class BackendInfo:
     core_adapter_protocol_version: int
     complete_features: frozenset[str]
     accelerated: bool
+    _compiler_handoff: Mapping[str, object] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if self.name not in ("python", "native", "verify"):
@@ -584,7 +599,69 @@ class BackendInfo:
             raise TypeError("complete_features must contain nonempty strings")
         if not isinstance(self.accelerated, bool):
             raise TypeError("accelerated must be bool")
+        compiler_handoff = _freeze_compiler_handoff(self._compiler_handoff)
+        if (
+            compiler_handoff is not None
+            and compiler_handoff["model_schema"] != self.core_model_schema_version
+        ):
+            raise ValueError("compiler_handoff model schema does not match the core contract")
         object.__setattr__(self, "complete_features", features)
+        object.__setattr__(self, "_compiler_handoff", compiler_handoff)
+
+    @property
+    def compiler_handoff(self) -> Mapping[str, object]:
+        """Return the encoded schema attestation when this backend can publish it."""
+
+        value = self._compiler_handoff
+        if value is None:
+            raise AttributeError("scalar backend has no compiler_handoff")
+        return value
+
+
+def _freeze_compiler_handoff(
+    value: Mapping[str, object] | None,
+) -> Mapping[str, object] | None:
+    """Validate and recursively freeze one public encoded compiler attestation."""
+
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("compiler_handoff must be a mapping or None")
+    if set(value) != _COMPILER_HANDOFF_FIELDS or not all(
+        isinstance(name, str) for name in value
+    ):
+        raise ValueError("compiler_handoff fields are incompatible")
+    schema_name = value["schema_name"]
+    if type(schema_name) is not str or not schema_name:
+        raise TypeError("compiler_handoff schema_name must be nonempty text")
+    for name in ("schema_version", "model_schema"):
+        scalar = value[name]
+        if type(scalar) is not int or scalar < 1:
+            raise TypeError(f"compiler_handoff {name} must be a positive integer")
+    descriptor = value["descriptor_sha256"]
+    if type(descriptor) is not str or _HEX_256.fullmatch(descriptor) is None:
+        raise TypeError("compiler_handoff descriptor_sha256 must be lowercase SHA-256")
+    raw_widths = value["buffer_widths"]
+    if not isinstance(raw_widths, Mapping):
+        raise TypeError("compiler_handoff buffer_widths must be a mapping")
+    widths: dict[str, int] = {}
+    for name, width in raw_widths.items():
+        if type(name) is not str or not name:
+            raise TypeError("compiler_handoff buffer names must be nonempty text")
+        if type(width) is not int or width < 1:
+            raise TypeError("compiler_handoff buffer widths must be positive integers")
+        widths[name] = width
+    if not widths:
+        raise ValueError("compiler_handoff buffer_widths must not be empty")
+    return MappingProxyType(
+        {
+            "buffer_widths": MappingProxyType(dict(sorted(widths.items()))),
+            "descriptor_sha256": descriptor,
+            "model_schema": value["model_schema"],
+            "schema_name": schema_name,
+            "schema_version": value["schema_version"],
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,8 +753,21 @@ def canonical_backend_json(value: BackendInfo | BackendAvailability | BackendSta
     """Stable JSON for diagnostics and Python/native fixture comparison."""
 
     if isinstance(value, BackendInfo):
+        compiler_handoff = getattr(value, "compiler_handoff", None)
         payload: Mapping[str, object] = {
             "accelerated": value.accelerated,
+            **(
+                {}
+                if compiler_handoff is None
+                else {
+                    "compiler_handoff": {
+                        **compiler_handoff,
+                        "buffer_widths": dict(
+                            cast(Mapping[str, int], compiler_handoff["buffer_widths"])
+                        ),
+                    }
+                }
+            ),
             "complete_features": sorted(value.complete_features),
             "core_adapter_protocol_version": value.core_adapter_protocol_version,
             "core_api_version": list(value.core_api_version),

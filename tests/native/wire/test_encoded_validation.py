@@ -1,4 +1,4 @@
-"""Private borrowed-column boundary for the unadvertised encoded preflight gate."""
+"""Private borrowed-column boundary for the advertised encoded compiler gate."""
 
 # SPDX-License-Identifier: LGPL-3.0-or-later
 

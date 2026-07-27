@@ -87,6 +87,7 @@ class VerifyBackendFactory:
             core_adapter_protocol_version=native_info.core_adapter_protocol_version,
             complete_features=native_info.complete_features & python_info.complete_features,
             accelerated=False,
+            _compiler_handoff=getattr(native_info, "compiler_handoff", None),
         )
 
     @property

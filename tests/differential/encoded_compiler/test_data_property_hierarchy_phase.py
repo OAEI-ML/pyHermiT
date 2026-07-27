@@ -130,7 +130,7 @@ def test_equivalence_sccs_and_transitive_superproperty_closure_match_scalar() ->
     assert actual == _expected_manifest(snapshot)
     components = cast(list[list[int]], actual["data_components"])
     assert sorted(len(component) for component in components).count(2) == 2
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_empty_model_retains_distinct_builtins_and_reflexive_closure() -> None:
@@ -141,7 +141,7 @@ def test_empty_model_retains_distinct_builtins_and_reflexive_closure() -> None:
     assert actual == _expected_manifest(snapshot)
     assert actual["data_super_components"] == [[0], [1]]
     assert actual["top_component_id"] != actual["bottom_component_id"]
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_cross_slice_cycle_collapses_only_after_union() -> None:
@@ -170,7 +170,7 @@ def test_composite_cross_slice_cycle_collapses_only_after_union() -> None:
 
     assert actual == _expected_manifest(composite)
     assert sum(len(value) == 2 for value in cast(list[list[int]], actual["data_components"])) == 1
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("posting_mode", [1, 2])
@@ -240,7 +240,7 @@ def test_unrelated_data_axioms_do_not_change_the_hierarchy_phase() -> None:
     )
 
     assert _native_manifest(snapshot) == _expected_manifest(snapshot)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_hostile_property_kind_rolls_back_and_valid_retry_is_byte_exact() -> None:

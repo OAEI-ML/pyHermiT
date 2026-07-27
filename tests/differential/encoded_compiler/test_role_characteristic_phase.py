@@ -215,7 +215,7 @@ def test_role_characteristic_clashes_and_provenance_match_scalar_exactly() -> No
     )
 
     assert _native_manifest(snapshot) == _expected_manifest(snapshot)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_characteristics_preserve_exact_nested_provenance() -> None:
@@ -241,7 +241,7 @@ def test_annotated_characteristics_preserve_exact_nested_provenance() -> None:
     assert actual["compiled_roots"] == 4
     assert actual["deferred_roots"] == 0
     assert len(cast(list[object], actual["clashes"])) == 4
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_scope_maps_annotated_anonymous_provenance_exactly() -> None:
@@ -263,7 +263,7 @@ def test_composite_scope_maps_annotated_anonymous_provenance_exactly() -> None:
     assert actual == _expected_manifest(composite)
     assert actual["compiled_roots"] == 4
     assert actual["deferred_roots"] == 0
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_characteristics_remap_ids_and_preserve_clause_provenance() -> None:
@@ -299,7 +299,7 @@ def test_composite_characteristics_remap_ids_and_preserve_clause_provenance() ->
 
     assert actual == _expected_manifest(composite)
     assert actual["compiled_roots"] == 5
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("posting_mode", [1, 2])
@@ -393,4 +393,4 @@ def test_generated_role_characteristics_match_scalar_exactly() -> None:
 
         assert _native_manifest(snapshot) == _expected_manifest(snapshot)
 
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES

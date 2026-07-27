@@ -53,6 +53,7 @@ def test_private_abi_handshake_claims_only_completed_versioned_features() -> Non
         "abi3-py310",
         "cancellable-mock-work",
         "classification",
+        "encoded-structural-compiler-v1",
         "full_reasoner",
         "incremental_updates",
         "realization",

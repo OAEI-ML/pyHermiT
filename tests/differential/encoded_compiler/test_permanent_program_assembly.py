@@ -130,7 +130,7 @@ def _encoded_negotiation(view: pyowl_core.OntologyView) -> object:
 
 
 def _advertise_encoded_compiler(extension: ModuleType) -> None:
-    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    extension.FEATURES = tuple(sorted({*native.FEATURES, ENCODED_NATIVE_FEATURE}))
     extension._validate_encoded_columns_v1 = native._validate_encoded_columns_v1
     extension._validate_encoded_slices_v1 = native._validate_encoded_slices_v1
     extension._encoded_profile_slices_manifest_v1 = native._encoded_profile_slices_manifest_v1
@@ -574,7 +574,7 @@ def test_direct_assembly_publishes_one_complete_dense_scalar_equal_manifest() ->
     program = cast(dict[str, object], manifest["program"])
     assert set(program) == PROGRAM_SECTIONS
     _assert_dense_program(program)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_reversed_composite_slice_order_has_the_same_complete_program() -> None:
@@ -611,7 +611,7 @@ def test_reversed_composite_slice_order_has_the_same_complete_program() -> None:
 
     assert reversed_order == forward
     _assert_dense_program(cast(dict[str, object], forward["program"]))
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_interleaved_source_local_namespaces_freeze_to_one_canonical_namespace() -> None:
@@ -1761,7 +1761,7 @@ def test_direct_program_publication_constructs_the_same_native_session() -> None
     finally:
         encoded.close()
         scalar.close()
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_direct_program_publication_rejects_false_program_digest_then_retries() -> None:
@@ -1833,7 +1833,7 @@ def test_no_reference_lifecycle_matches_scalar_consistency_and_classification() 
 
     with pytest.raises(DisposedReasonerError):
         encoded.check(None)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_direct_lifecycle_discards_nested_data_boolean_beside_absorber() -> None:
@@ -1869,7 +1869,7 @@ def test_direct_lifecycle_discards_nested_data_boolean_beside_absorber() -> None
     finally:
         encoded.close()
         scalar.close()
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_direct_lifecycle_profile_gate_rejects_before_publication_and_allows_retry() -> None:
@@ -1904,7 +1904,7 @@ def test_direct_lifecycle_profile_gate_rejects_before_publication_and_allows_ret
         assert retry.check(None)
     finally:
         retry.close()
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize(
@@ -3050,7 +3050,7 @@ def test_facade_constructs_encoded_services_without_scalar_service_context(
         assert len(events) == before_update + 3
         assert reasoner.diagnostics()["compiler_digest"] == initial_digest
 
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_facade_native_first_dispatch_never_retraverses_the_core_view(
@@ -3093,7 +3093,7 @@ def test_facade_native_first_dispatch_never_retraverses_the_core_view(
         assert reasoner.diagnostics()["encoded_compiler_gil_released"] is True
         assert reasoner.is_consistent()
 
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_verify_facade_pairs_direct_native_compiler_with_scalar_shadow(
@@ -3181,7 +3181,7 @@ def test_verify_facade_pairs_direct_native_compiler_with_scalar_shadow(
     assert scalar_compiles == 3
     assert len(native_candidates) == 3
     assert all(candidate.closed for candidate in native_candidates)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_encoded_services_match_scalar_object_query_families_without_scalar_callbacks(
@@ -3240,7 +3240,7 @@ def test_encoded_services_match_scalar_object_query_families_without_scalar_call
     with Reasoner(snapshot, config=ReasonerConfig()) as candidate:
         assert _object_service_results(candidate) == expected
 
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_encoded_services_match_scalar_data_query_families_without_scalar_callbacks(
@@ -3291,7 +3291,7 @@ def test_encoded_services_match_scalar_data_query_families_without_scalar_callba
     with Reasoner(snapshot, config=ReasonerConfig()) as candidate:
         assert _data_service_results(candidate) == expected
 
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_facade_session_dispatch_never_replays_an_observed_encoded_failure() -> None:

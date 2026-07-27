@@ -151,7 +151,7 @@ def test_chains_transitivity_inverses_and_annotation_stripped_provenance_match_s
     inclusions = cast(list[dict[str, object]], actual["complex_inclusions"])
     assert all(value["provenance_sha256"] != original_digest for value in inclusions)
     assert any(cast(bool, value["inverse_generated"]) for value in inclusions)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_empty_model_contains_only_builtin_top_transitivity() -> None:
@@ -165,7 +165,7 @@ def test_empty_model_contains_only_builtin_top_transitivity() -> None:
     assert len(inclusions) == 1
     assert inclusions[0]["provenance_sha256"] == _BUILTIN_TOP_TRANSITIVITY
     assert inclusions[0]["inverse_generated"] is False
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_explicit_top_transitivity_is_overwritten_by_builtin_provenance() -> None:
@@ -247,7 +247,7 @@ def test_composite_remaps_ids_and_resolves_cross_slice_semantic_duplicates() -> 
 
     assert actual == _expected_manifest(composite)
     assert actual["compiled_roots"] == 4
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("posting_mode", [1, 2])

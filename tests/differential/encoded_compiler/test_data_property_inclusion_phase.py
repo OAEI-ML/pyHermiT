@@ -142,7 +142,7 @@ def test_data_inclusions_and_normalized_provenance_match_scalar_exactly() -> Non
     )
 
     assert _native_manifest(snapshot) == _expected_manifest(snapshot)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_annotated_only_inclusion_uses_annotation_stripped_digest() -> None:
@@ -195,7 +195,7 @@ def test_composite_remaps_ids_and_deduplicates_normalized_edges() -> None:
 
     assert actual == _expected_manifest(composite)
     assert actual["compiled_roots"] == 3
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("posting_mode", [1, 2])
@@ -258,7 +258,7 @@ def test_other_data_axioms_remain_outside_the_inclusion_phase() -> None:
     assert actual["compiled_roots"] == 0
     assert actual["data_inclusions"] == []
     assert actual == _expected_manifest(snapshot)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_hostile_property_kind_rolls_back_to_byte_exact_retry() -> None:

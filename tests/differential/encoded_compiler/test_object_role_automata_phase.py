@@ -164,7 +164,7 @@ def test_chain_subrole_recursion_and_builtin_languages_match_scalar_exactly() ->
         _assert_direct_acceptance(snapshot, graph, target, word)
     for word in ((), (role_ids["a"],), (role_ids["a"], role_ids["c"])):
         _assert_direct_acceptance(snapshot, graph, graph.top_object_role_id, word)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_irregular_graph_emits_no_automata_and_uses_scalar_single_role_fallback() -> None:

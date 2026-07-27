@@ -127,7 +127,7 @@ def test_direct_session_domain_matches_scalar_declared_and_named_sets() -> None:
     assert actual == _expected_manifest(snapshot)
     assert len(cast(list[object], actual["declared_entities"])) == 5
     assert len(cast(list[object], actual["named_individuals"])) == 2
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_generated_reachability_remaps_local_declaration_ids_before_merge() -> None:

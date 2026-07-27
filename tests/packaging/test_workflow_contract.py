@@ -49,7 +49,7 @@ def test_native_wheel_runs_bounded_wp18_encoded_public_dispatch_contract() -> No
     assert workflow.count('CIBW_TEST_COMMAND: ""') == 1
     assert "def test_facade_constructs_encoded_services_without_scalar_service_context" in contract
     assert 'diagnostics["ingestion_path"] == "encoded-native"' in contract
-    assert "assert ENCODED_NATIVE_FEATURE not in native.FEATURES" in contract
+    assert "assert ENCODED_NATIVE_FEATURE in native.FEATURES" in contract
     assert '"tests/differential/encoded_compiler/test_permanent_program_assembly.py"' in provenance
 
 

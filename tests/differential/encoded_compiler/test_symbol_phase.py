@@ -138,7 +138,7 @@ def test_encoded_root_and_entity_seed_manifest_matches_scalar_compiler_exactly()
         ],
     }
     assert observed == expected
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_private_selection_preflight_accepts_source_local_exclusion() -> None:
@@ -166,7 +166,7 @@ def test_private_selection_preflight_accepts_source_local_exclusion() -> None:
         )
         is None
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_private_preflight_rejects_a_hostile_entity_iri_before_scalar_compilation() -> None:

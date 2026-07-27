@@ -23,6 +23,7 @@ from pyhermit.backends.native_input import (
 )
 from pyhermit.core import (
     CapturedOntology,
+    _deferred_capture_eligible,
     capture_compatible_view,
     capture_compatible_view_deferred,
     compiler_cache_key,
@@ -139,6 +140,13 @@ def _patch_overlay_fingerprint_bombs(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(pyowl_core.OntologyOverlay, name, property(forbidden))
 
 
+def _query_expression() -> owl.ObjectSomeValuesFrom:
+    return owl.ObjectSomeValuesFrom(
+        owl.ObjectProperty(owl.IRI("urn:test:deferred#p")),
+        owl.Class(owl.IRI("urn:test:deferred#B")),
+    )
+
+
 def test_overlay_fingerprints_match_annotated_eager_contract() -> None:
     base = _snapshot(
         "overlay",
@@ -181,6 +189,16 @@ def test_zero_delta_overlay_aliases_anchor_structural_fingerprint() -> None:
     )
 
     assert observed[0] == base.structural_fingerprint.hex
+
+
+def test_cyclic_forged_overlay_chain_fails_closed_for_deferred_capture() -> None:
+    overlay = pyowl_core.apply_delta(
+        _snapshot("cyclic-overlay", "Declaration(Class(:A))"),
+        pyowl_core.OntologyDelta(),
+    )
+    object.__setattr__(overlay, "base", overlay)
+
+    assert not _deferred_capture_eligible(overlay)
 
 
 def test_composite_parity_is_order_independent_for_annotated_roots() -> None:
@@ -278,11 +296,9 @@ def test_reasoner_initialization_does_not_read_overlay_fingerprints(
             )
         ),
     )
-    factory = _native_factory()
-    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
     _patch_overlay_fingerprint_bombs(monkeypatch)
 
-    with Reasoner(overlay) as reasoner:
+    with Reasoner(overlay, config=ReasonerConfig(backend="native")) as reasoner:
         assert reasoner.diagnostics()["ingestion_path"] == "encoded-native"
         assert reasoner.is_consistent()
 
@@ -301,9 +317,6 @@ def test_reasoner_initialization_does_not_read_composite_fingerprints(
         "Declaration(Class(:C))",
     )
     composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
-    factory = _native_factory()
-    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
-
     def forbidden(_self: object) -> object:
         raise AssertionError("Python composite semantic fingerprint traversal occurred")
 
@@ -314,7 +327,7 @@ def test_reasoner_initialization_does_not_read_composite_fingerprints(
     ):
         monkeypatch.setattr(pyowl_core.OntologyComposite, name, property(forbidden))
 
-    with Reasoner(composite) as reasoner:
+    with Reasoner(composite, config=ReasonerConfig(backend="native")) as reasoner:
         assert reasoner.diagnostics()["ingestion_path"] == "encoded-native"
         assert reasoner.is_consistent()
 
@@ -362,11 +375,100 @@ def test_temporary_encoded_query_does_not_read_overlay_fingerprints(
 
     with Reasoner(snapshot) as reasoner:
         _patch_overlay_fingerprint_bombs(monkeypatch)
-        expression = owl.ObjectSomeValuesFrom(
-            owl.ObjectProperty(owl.IRI("urn:test:deferred#p")),
-            owl.Class(owl.IRI("urn:test:deferred#B")),
+        assert isinstance(reasoner.is_satisfiable(_query_expression()), bool)
+
+
+@pytest.mark.parametrize("initial_shape", ("overlay", "composite"))
+def test_temporary_query_on_lazy_initial_view_uses_supported_attestation_path(
+    monkeypatch: pytest.MonkeyPatch,
+    initial_shape: str,
+) -> None:
+    base = _snapshot(
+        f"nested-query-{initial_shape}",
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(ObjectProperty(:p))",
+        "SubClassOf(:A ObjectSomeValuesFrom(:p :B))",
+    )
+    if initial_shape == "overlay":
+        view: pyowl_core.OntologyView = pyowl_core.apply_delta(
+            base,
+            pyowl_core.OntologyDelta(),
         )
-        assert isinstance(reasoner.is_satisfiable(expression), bool)
+    else:
+        view = pyowl_core.compose_views(
+            base,
+            _snapshot(
+                "nested-query-composite-peer",
+                "Declaration(Class(:C))",
+            ),
+            roles=("base", "peer"),
+        )
+    factory = _native_factory()
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+
+    with Reasoner(view) as reasoner:
+        assert isinstance(reasoner.is_satisfiable(_query_expression()), bool)
+        assert reasoner.diagnostics()["ingestion_path"] == "encoded-native"
+
+
+def test_repeated_flush_and_query_do_not_read_overlay_chain_fingerprints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(
+        "repeated-flush",
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(Class(:D))",
+        "Declaration(ObjectProperty(:p))",
+        "SubClassOf(:A ObjectSomeValuesFrom(:p :B))",
+    )
+    factory = _native_factory()
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+
+    with Reasoner(snapshot, config=ReasonerConfig(buffer_changes=True)) as reasoner:
+        _patch_overlay_fingerprint_bombs(monkeypatch)
+        for sub_name, super_name in (("B", "C"), ("C", "D")):
+            reasoner.add_axioms(
+                (
+                    owl.SubClassOf(
+                        owl.Class(owl.IRI(f"urn:test:deferred#{sub_name}")),
+                        owl.Class(owl.IRI(f"urn:test:deferred#{super_name}")),
+                    ),
+                )
+            )
+            reasoner.flush()
+        assert isinstance(reasoner.is_satisfiable(_query_expression()), bool)
+        assert reasoner.diagnostics()["ingestion_path"] == "encoded-native"
+
+
+def test_temporary_query_after_buffered_flush_uses_supported_attestation_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(
+        "nested-query-flush",
+        "Declaration(Class(:A))",
+        "Declaration(Class(:B))",
+        "Declaration(Class(:C))",
+        "Declaration(ObjectProperty(:p))",
+        "SubClassOf(:A ObjectSomeValuesFrom(:p :B))",
+    )
+    factory = _native_factory()
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+
+    with Reasoner(snapshot, config=ReasonerConfig(buffer_changes=True)) as reasoner:
+        reasoner.add_axioms(
+            (
+                owl.SubClassOf(
+                    owl.Class(owl.IRI("urn:test:deferred#B")),
+                    owl.Class(owl.IRI("urn:test:deferred#C")),
+                ),
+            )
+        )
+        reasoner.flush()
+        assert isinstance(reasoner.is_satisfiable(_query_expression()), bool)
+        assert reasoner.diagnostics()["ingestion_path"] == "encoded-native"
 
 
 def test_nested_lazy_composite_uses_eager_attestation_without_deferred_metadata(

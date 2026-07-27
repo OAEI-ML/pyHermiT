@@ -5839,8 +5839,8 @@ fn finish_encoded_session_construction(
     )
 }
 
-/// Private direct encoded-program constructor. The production capability remains
-/// unadvertised until the complete WP18 constructor matrix passes.
+/// Private direct encoded-program constructor behind the advertised coarse
+/// encoded-session capability.
 #[pyfunction(name = "_create_encoded_session_v1")]
 #[pyo3(signature = (
     *,
@@ -6190,6 +6190,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
             "abi3-py310",
             "cancellable-mock-work",
             "classification",
+            "encoded-structural-compiler-v1",
             "full_reasoner",
             "incremental_updates",
             "realization",

@@ -48,6 +48,7 @@ from pyhermit.core import (
     COMPILER_CACHE_SCHEMA_VERSION,
     CapturedOntology,
     DeferredCapturedOntology,
+    _deferred_capture_eligible,
     capture_compatible_view,
     capture_compatible_view_deferred,
 )
@@ -921,7 +922,11 @@ class Reasoner:
             self._validated.view,
             pyowl_core.OntologyDelta(add_axioms=owl.CanonicalSet(axioms)),
         )
-        captured = capture_compatible_view_deferred(overlay)
+        captured: CapturedOntology | DeferredCapturedOntology
+        if _deferred_capture_eligible(overlay):
+            captured = capture_compatible_view_deferred(overlay)
+        else:
+            captured = capture_compatible_view(overlay)
         # Query-reduction overlays contain private witness axioms rather than a
         # replacement public ontology.  They are already derived from the
         # validated source and therefore bypass the ontology-profile gate while

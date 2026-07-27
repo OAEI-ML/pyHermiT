@@ -158,7 +158,7 @@ def test_structured_recursive_inverse_and_dependency_cycle_diagnostics_match_sca
         "RIA_INVERSE_RECURSION",
         "RIA_NON_REGULAR_RECURSION",
     }
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_legal_boundary_recursion_top_exception_and_non_simple_closure_match_scalar() -> None:
@@ -179,7 +179,7 @@ def test_legal_boundary_recursion_top_exception_and_non_simple_closure_match_sca
     assert actual == _expected_manifest(snapshot)
     assert actual["regularity_violations"] == []
     assert cast(list[int], actual["non_simple_components"])
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_recomputes_cross_slice_cycle_and_non_simple_propagation() -> None:
@@ -210,7 +210,7 @@ def test_composite_recomputes_cross_slice_cycle_and_non_simple_propagation() -> 
         violation["code"] == "RIA_DEPENDENCY_CYCLE"
         for violation in cast(list[dict[str, object]], actual["regularity_violations"])
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("posting_mode", [1, 2])

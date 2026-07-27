@@ -51,6 +51,7 @@ from pyhermit.core import (
 )
 from pyhermit.encoded_input import (
     ENCODED_BUFFER_WIDTHS,
+    ENCODED_DESCRIPTOR_SHA256,
     ENCODED_NATIVE_FEATURE,
     ENCODED_SCHEMA_NAME,
     ENCODED_SCHEMA_VERSION,
@@ -369,6 +370,17 @@ class NativeBackendFactory:
             core_adapter_protocol_version=core.adapter_protocol_version,
             complete_features=frozenset(features),
             accelerated=True,
+            _compiler_handoff=(
+                {
+                    "buffer_widths": ENCODED_BUFFER_WIDTHS,
+                    "descriptor_sha256": ENCODED_DESCRIPTOR_SHA256.hex(),
+                    "model_schema": core.model_schema_version,
+                    "schema_name": ENCODED_SCHEMA_NAME,
+                    "schema_version": ENCODED_SCHEMA_VERSION,
+                }
+                if ENCODED_NATIVE_FEATURE in features
+                else None
+            ),
         )
 
     @property

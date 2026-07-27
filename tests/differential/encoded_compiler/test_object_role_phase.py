@@ -148,14 +148,14 @@ def test_object_role_symbols_inverse_ids_and_builtins_match_scalar_exactly() -> 
     assert (
         inverse_ids[cast(int, actual["bottom_object_role_id"])] == actual["bottom_object_role_id"]
     )
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_empty_ontology_still_matches_scalar_builtin_role_domain() -> None:
     snapshot = pyowl_core.load_snapshot(functional(), options=OPTIONS)
 
     assert _native_manifest(snapshot) == _expected_manifest(snapshot)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_composite_role_domain_merges_source_local_ids_by_canonical_key() -> None:
@@ -190,7 +190,7 @@ def test_composite_role_domain_merges_source_local_ids_by_canonical_key() -> Non
     ]
     assert displays.count("object_property:urn:test:roles#shared") == 1
     assert displays.count("inverse_object_property:urn:test:roles#shared") == 1
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 @pytest.mark.parametrize("posting_mode", [1, 2])
@@ -231,4 +231,4 @@ def test_source_local_include_and_exclude_rebuild_the_exact_role_domain(
     )
 
     assert actual == _expected_manifest(expected)
-    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES

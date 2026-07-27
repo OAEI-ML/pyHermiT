@@ -23,6 +23,12 @@ from pyhermit import (
     ReasonerInterruptedError,
     ReasonerTimeoutError,
 )
+from pyhermit.encoded_input import (
+    ENCODED_BUFFER_WIDTHS,
+    ENCODED_DESCRIPTOR_SHA256,
+    ENCODED_SCHEMA_NAME,
+    ENCODED_SCHEMA_VERSION,
+)
 
 OPTIONS = pyowl_core.LoadOptions(
     imports=pyowl_core.ImportPolicy.IGNORE,
@@ -109,7 +115,9 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
         "ingestion_path",
         "ir_schema_version",
     }
-    expected_path = "scalar-python" if reasoner.backend.name == "python" else "scalar-wire"
+    expected_path = (
+        "scalar-python" if reasoner.backend.name == "python" else "encoded-native"
+    )
     if reasoner.backend.name in {"native", "verify"}:
         expected_keys.add("native_abi_version")
 
@@ -128,19 +136,31 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
     if reasoner.backend.name in {"native", "verify"}:
         assert diagnostics["native_abi_version"] == pyhermit.NATIVE_ABI_VERSION
     encoded = {key: value for key, value in diagnostics.items() if key.startswith("encoded_")}
-    assert encoded == {
-        "encoded_buffer_bytes": 0,
-        "encoded_buffer_count": 0,
-        "encoded_compiler_gil_released": False,
-        "encoded_detached_buffer_count": 0,
-        "encoded_indexed_buffer_count": 0,
-        "encoded_posting_bytes": 0,
-        "encoded_private_ir_bytes": 0,
-        "encoded_referenced_view_count": 0,
-        "encoded_segment_count": 0,
-        "encoded_staging_copy_bytes": 0,
-        "encoded_zero_copy_buffers": 0,
-    }
+    if reasoner.backend.name == "python":
+        assert encoded == {
+            "encoded_buffer_bytes": 0,
+            "encoded_buffer_count": 0,
+            "encoded_compiler_gil_released": False,
+            "encoded_detached_buffer_count": 0,
+            "encoded_indexed_buffer_count": 0,
+            "encoded_posting_bytes": 0,
+            "encoded_private_ir_bytes": 0,
+            "encoded_referenced_view_count": 0,
+            "encoded_segment_count": 0,
+            "encoded_staging_copy_bytes": 0,
+            "encoded_zero_copy_buffers": 0,
+        }
+    else:
+        assert encoded["encoded_buffer_bytes"] > 0
+        assert encoded["encoded_buffer_count"] > 0
+        assert encoded["encoded_compiler_gil_released"] is True
+        assert (
+            encoded["encoded_detached_buffer_count"]
+            == encoded["encoded_buffer_count"]
+            == encoded["encoded_zero_copy_buffers"]
+        )
+        assert encoded["encoded_segment_count"] > 0
+        assert encoded["encoded_staging_copy_bytes"] == 0
     with pytest.raises(TypeError):
         diagnostics["ingestion_path"] = "encoded-native"  # type: ignore[index]
 
@@ -212,11 +232,22 @@ def test_public_compiler_digest_is_backend_and_ingestion_path_independent() -> N
     diagnostics = tuple(reasoner.diagnostics() for reasoner in reasoners)
 
     assert {value["ingestion_path"] for value in diagnostics} == {
+        "encoded-native",
         "scalar-python",
-        "scalar-wire",
     }
     assert len({value["compiler_digest"] for value in diagnostics}) == 1
-    assert len({reasoner._runtime.compiled.ontology_fingerprint for reasoner in reasoners}) == 3
+    assert len({reasoner._runtime.session.ontology_fingerprint for reasoner in reasoners}) == 3
+    assert reasoners[2]._runtime.session._scalar_bundle is not None
+    expected_handoff = {
+        "buffer_widths": dict(ENCODED_BUFFER_WIDTHS),
+        "descriptor_sha256": ENCODED_DESCRIPTOR_SHA256.hex(),
+        "model_schema": pyowl_core.MODEL_SCHEMA_VERSION,
+        "schema_name": ENCODED_SCHEMA_NAME,
+        "schema_version": ENCODED_SCHEMA_VERSION,
+    }
+    assert getattr(reasoners[0].backend, "compiler_handoff", None) is None
+    assert reasoners[1].backend.compiler_handoff == expected_handoff
+    assert reasoners[2].backend.compiler_handoff == expected_handoff
 
 
 def test_buffered_updates_are_transactional_zero_copy_and_clear_precompute() -> None:
