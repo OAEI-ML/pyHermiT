@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Final, cast
 
+from pyowl_core import Fingerprint
+
 from pyhermit.backends.protocol import CompiledOntology, FingerprintLike
 from pyhermit.clauses.model import (
     Atom,
@@ -53,7 +55,12 @@ from pyhermit.config import (
     ReasonerConfig,
     UnsupportedDatatypePolicy,
 )
-from pyhermit.core import CapturedOntology, compiler_cache_key
+from pyhermit.core import (
+    CapturedOntology,
+    DeferredCapturedOntology,
+    compiler_cache_key,
+    deferred_compiler_cache_template,
+)
 
 SCHEMA_VERSION: Final = 1
 MAGIC: Final = b"PYHMINP\x00"
@@ -937,6 +944,47 @@ def encode_encoded_session_metadata(
     )
 
 
+def encode_deferred_encoded_session_metadata(
+    captured: DeferredCapturedOntology,
+    config: ReasonerConfig,
+    *,
+    structural_mode: str,
+) -> tuple[bytes, tuple[int, str, str, bytes, bytes]]:
+    """Encode explicit v1 placeholders plus authoritative lazy-view evidence."""
+
+    _exact(captured, DeferredCapturedOntology, "deferred captured ontology")
+    _exact(config, ReasonerConfig, "config")
+    if structural_mode not in {"effective", "overlay-anchor-alias"}:
+        raise ValueError("structural_mode is unsupported")
+    if (
+        structural_mode == "overlay-anchor-alias"
+        and captured.structural_context_kind.value != "overlay"
+    ):
+        raise ValueError("overlay-anchor-alias requires an overlay structural context")
+    zero = bytes(32)
+    placeholder = cast(FingerprintLike, Fingerprint("sha256", 1, zero))
+    metadata = _metadata_payload(
+        ontology_fingerprint="0" * 64,
+        structural_fingerprint=placeholder,
+        logical_fingerprint=placeholder,
+        signature_fingerprint=placeholder,
+        program_sha256=zero,
+        core_package_version=captured.core_package_version,
+        core_api_version=captured.core_api_version,
+        core_model_schema_version=captured.core_model_schema_version,
+        core_wire_format_version=captured.core_wire_format_version,
+        core_adapter_protocol_version=captured.core_adapter_protocol_version,
+    )
+    request = (
+        1,
+        captured.structural_context_kind.value,
+        structural_mode,
+        captured.structural_context_bytes,
+        deferred_compiler_cache_template(captured, config),
+    )
+    return metadata, request
+
+
 def _replace_pool_sections(encoder: _ProgramEncoder, sections: list[_Section]) -> list[_Section]:
     return [
         _Section(section.kind, len(encoder.strings.bytes), encoder.strings.bytes, 1)
@@ -1047,6 +1095,7 @@ __all__ = [
     "NativeInputError",
     "SectionKind",
     "encode_config",
+    "encode_deferred_encoded_session_metadata",
     "encode_delta",
     "encode_encoded_session_metadata",
     "encode_ontology",

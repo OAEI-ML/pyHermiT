@@ -258,6 +258,23 @@ def _encoded_slice_records(
     )
 
 
+def _deferred_structural_mode(lease: EncodedStructuralLease) -> str:
+    """Derive the structural digest rule from an already validated segment family."""
+
+    if not isinstance(lease, EncodedStructuralLease):
+        raise TypeError("lease must be EncodedStructuralLease")
+    roles = tuple(segment.role for segment in lease.segments)
+    if roles == (_SEGMENT_OVERLAY_BASE,):
+        base = lease.segments[0]
+        if (
+            base.posting_mode == _POSTINGS_ALL
+            and not base.root_ids.nbytes
+            and not base.anonymous_scope_map.nbytes
+        ):
+            return "overlay-anchor-alias"
+    return "effective"
+
+
 def negotiate_encoded_input(
     view: owl.OntologyView,
     native_schemas: Mapping[str, int],

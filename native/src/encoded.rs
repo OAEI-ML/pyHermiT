@@ -14,6 +14,7 @@ pub mod complex_roles;
 pub mod data_inclusions;
 pub mod data_role_hierarchy;
 pub mod data_roles;
+pub(crate) mod fingerprints;
 pub mod model;
 pub mod named_classes;
 pub mod object_role_hierarchy;

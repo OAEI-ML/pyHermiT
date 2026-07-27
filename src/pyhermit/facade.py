@@ -47,7 +47,9 @@ from pyhermit.config import ReasonerConfig, UnsupportedDatatypePolicy
 from pyhermit.core import (
     COMPILER_CACHE_SCHEMA_VERSION,
     CapturedOntology,
+    DeferredCapturedOntology,
     capture_compatible_view,
+    capture_compatible_view_deferred,
 )
 from pyhermit.events import CancellationSource
 from pyhermit.exceptions import (
@@ -172,6 +174,7 @@ class Reasoner:
             document_iri=document_iri,
             load_options=load_options,
             resolver=resolver,
+            defer_fingerprints=self._supports_deferred_native_capture(),
         )
         self._validated: ValidatedOntology | _CapturedOntologyInput = captured_input
         self._runtime = self._compile_runtime(captured_input)
@@ -609,14 +612,17 @@ class Reasoner:
                     compile_started=compile_started,
                 )
             if native_first:
+                if not isinstance(validated, _CapturedOntologyInput):
+                    raise RuntimeError("native-first input lost its captured state")
                 validated = self._validate_scalar_input(validated)
                 self._validated = validated
+            scalar_validated = cast(ValidatedOntology, validated)
             bundle = compile_captured_bundle(
-                validated.captured,
+                scalar_validated.captured,
                 self._config,
                 cancelled=self._cancelled,
             )
-            session = self._create_backend_session(validated.view, bundle[2])
+            session = self._create_backend_session(scalar_validated.view, bundle[2])
             return self._services(bundle, session, compile_started=compile_started)
         except BaseException:
             if session is not None:
@@ -637,6 +643,11 @@ class Reasoner:
 
     def _is_verify_backend(self) -> bool:
         return getattr(getattr(self._factory, "info", None), "name", None) == "verify"
+
+    def _supports_deferred_native_capture(self) -> bool:
+        return not self._is_verify_backend() and callable(
+            getattr(self._factory, "_create_encoded_lifecycle_handoff", None)
+        )
 
     def _encoded_profile_validator(
         self,
@@ -672,7 +683,7 @@ class Reasoner:
 
     def _create_encoded_lifecycle_session(
         self,
-        captured: CapturedOntology,
+        captured: CapturedOntology | DeferredCapturedOntology,
         *,
         validate_profile: bool = True,
     ) -> BackendSession | None:
@@ -910,7 +921,7 @@ class Reasoner:
             self._validated.view,
             pyowl_core.OntologyDelta(add_axioms=owl.CanonicalSet(axioms)),
         )
-        captured = capture_compatible_view(overlay)
+        captured = capture_compatible_view_deferred(overlay)
         # Query-reduction overlays contain private witness axioms rather than a
         # replacement public ontology.  They are already derived from the
         # validated source and therefore bypass the ontology-profile gate while
@@ -944,7 +955,10 @@ class Reasoner:
         compile_started = perf_counter()
         old = self._runtime
         if old.program is None:
-            captured_input = _capture_ontology_input(proposed)
+            captured_input = _capture_ontology_input(
+                proposed,
+                defer_fingerprints=self._supports_deferred_native_capture(),
+            )
             accepted_input: ValidatedOntology | _CapturedOntologyInput = captured_input
             if self._is_verify_backend():
                 accepted_input = self._validate_scalar_input(captured_input)

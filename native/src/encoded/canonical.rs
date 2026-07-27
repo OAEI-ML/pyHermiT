@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 use sha2::{Digest, Sha256};
+use std::mem::size_of;
 
 use super::model::{
     ComponentKind, ComponentRef, ComponentValue, NodeId, ScalarRef, ValidatedModel,
@@ -16,6 +17,7 @@ use super::{ByteSource, EncodedResult, EncodedValidationError};
 
 const ANONYMOUS_INDIVIDUAL_TAG: u16 = 3;
 const ANONYMOUS_SCOPE_BYTES: usize = 32;
+const ENTITY_TAG: u16 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AnonymousScopeReplacement {
@@ -65,7 +67,7 @@ pub(crate) fn source_axiom_digest<B: ByteSource>(
     scope_maps: &[AnonymousScopeMap],
     budget: &mut impl CanonicalBudget,
 ) -> EncodedResult<[u8; 32]> {
-    let encoded = canonical_node_bytes(model, root, scope_maps, 0, budget)?;
+    let encoded = canonical_node_bytes(model, root, scope_maps, 0, None, budget)?;
     budget.claim_canonical_work(encoded.len())?;
     Ok(Sha256::digest(encoded).into())
 }
@@ -82,7 +84,24 @@ pub(crate) fn canonical_node_key<B: ByteSource>(
     scope_maps: &[AnonymousScopeMap],
     budget: &mut impl CanonicalBudget,
 ) -> EncodedResult<Vec<u8>> {
-    canonical_node_bytes(model, node, scope_maps, 0, budget)
+    canonical_node_bytes(model, node, scope_maps, 0, None, budget)
+}
+
+/// Own one canonical node key while collecting every entity occurrence reached
+/// by that same structural traversal.
+///
+/// Fingerprint compilation deliberately scans the complete selected root,
+/// including ontology annotations, axiom annotations, annotation axioms, and
+/// extensions.  The semantic symbol phase has a narrower reachability contract
+/// and therefore cannot provide the authoritative core signature.
+pub(crate) fn canonical_node_key_with_entities<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    node: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    entity_keys: &mut Vec<Vec<u8>>,
+    budget: &mut impl CanonicalBudget,
+) -> EncodedResult<Vec<u8>> {
+    canonical_node_bytes(model, node, scope_maps, 0, Some(entity_keys), budget)
 }
 
 pub(crate) fn annotation_stripped_axiom_digest<B: ByteSource>(
@@ -90,22 +109,37 @@ pub(crate) fn annotation_stripped_axiom_digest<B: ByteSource>(
     root: NodeId,
     budget: &mut impl CanonicalBudget,
 ) -> EncodedResult<[u8; 32]> {
+    let encoded = annotation_stripped_node_key(model, root, &[], budget)?;
+    budget.claim_canonical_work(encoded.len())?;
+    Ok(Sha256::digest(encoded).into())
+}
+
+/// Own the canonical key for an axiom or extension after removing only its
+/// top-level annotation set and applying the complete anonymous-scope map.
+pub(crate) fn annotation_stripped_node_key<B: ByteSource>(
+    model: &ValidatedModel<B>,
+    root: NodeId,
+    scope_maps: &[AnonymousScopeMap],
+    budget: &mut impl CanonicalBudget,
+) -> EncodedResult<Vec<u8>> {
     let node = model.node(root)?;
     let annotation_index = node.fields().end.checked_sub(1).ok_or_else(|| {
-        EncodedValidationError::invariant("encoded axiom root has no annotation field")
+        EncodedValidationError::invariant(
+            "encoded annotated root has no top-level annotation field",
+        )
     })?;
     let annotation = required_component(
         model.field(annotation_index)?,
-        "encoded axiom annotation field",
+        "encoded top-level annotation field",
     )?;
     let ComponentValue::Collection(annotation) = model.resolve(annotation)? else {
         return Err(EncodedValidationError::invariant(
-            "encoded axiom annotation field is not a collection",
+            "encoded top-level annotation field is not a collection",
         ));
     };
     if annotation.kind() != ComponentKind::Set {
         return Err(EncodedValidationError::invariant(
-            "encoded axiom annotation field is not a canonical set",
+            "encoded top-level annotation field is not a canonical set",
         ));
     }
     let mut encoded = Vec::new();
@@ -117,16 +151,16 @@ pub(crate) fn annotation_stripped_axiom_digest<B: ByteSource>(
             &mut encoded,
             model,
             model.resolve(component)?,
-            &[],
+            scope_maps,
             1,
             false,
+            None,
             budget,
         )?;
     }
     push_byte(&mut encoded, 6, budget)?;
     push_varint(&mut encoded, 0, budget)?;
-    budget.claim_canonical_work(encoded.len())?;
-    Ok(Sha256::digest(encoded).into())
+    Ok(encoded)
 }
 
 fn canonical_node_bytes<B: ByteSource>(
@@ -134,6 +168,7 @@ fn canonical_node_bytes<B: ByteSource>(
     identifier: NodeId,
     scope_maps: &[AnonymousScopeMap],
     depth: usize,
+    mut entity_keys: Option<&mut Vec<Vec<u8>>>,
     budget: &mut impl CanonicalBudget,
 ) -> EncodedResult<Vec<u8>> {
     if depth > budget.canonical_max_depth() {
@@ -158,8 +193,36 @@ fn canonical_node_bytes<B: ByteSource>(
             scope_maps,
             child_depth,
             node.tag() == ANONYMOUS_INDIVIDUAL_TAG && position == 0,
+            entity_keys.as_deref_mut(),
             budget,
         )?;
+    }
+    if node.tag() == ENTITY_TAG {
+        if let Some(keys) = entity_keys {
+            let old_capacity = keys.capacity();
+            keys.try_reserve_exact(1).map_err(|_| {
+                EncodedValidationError::resource(
+                    "canonical signature entity catalog allocation failed",
+                )
+            })?;
+            let added_headers = keys
+                .capacity()
+                .checked_sub(old_capacity)
+                .and_then(|amount| amount.checked_mul(size_of::<Vec<u8>>()))
+                .ok_or_else(|| {
+                    EncodedValidationError::resource(
+                        "canonical signature entity catalog size overflowed",
+                    )
+                })?;
+            budget.claim_canonical_owned(added_headers)?;
+            let mut key = Vec::new();
+            key.try_reserve_exact(encoded.len()).map_err(|_| {
+                EncodedValidationError::resource("canonical signature entity key allocation failed")
+            })?;
+            budget.claim_canonical_owned(key.capacity())?;
+            key.extend_from_slice(&encoded);
+            keys.push(key);
+        }
     }
     Ok(encoded)
 }
@@ -172,13 +235,21 @@ fn append_canonical_component<B: ByteSource>(
     scope_maps: &[AnonymousScopeMap],
     depth: usize,
     anonymous_scope: bool,
+    mut entity_keys: Option<&mut Vec<Vec<u8>>>,
     budget: &mut impl CanonicalBudget,
 ) -> EncodedResult<()> {
     match component {
         ComponentValue::None => push_byte(target, 0, budget),
         ComponentValue::Node(identifier) => {
             push_byte(target, 1, budget)?;
-            let encoded = canonical_node_bytes(model, identifier, scope_maps, depth, budget)?;
+            let encoded = canonical_node_bytes(
+                model,
+                identifier,
+                scope_maps,
+                depth,
+                entity_keys.as_deref_mut(),
+                budget,
+            )?;
             push_frame(target, &encoded, budget)
         }
         ComponentValue::Scalar(scalar) => {
@@ -215,12 +286,25 @@ fn append_canonical_component<B: ByteSource>(
                             "canonical set item is not a node",
                         ));
                     };
-                    let encoded =
-                        canonical_node_bytes(model, identifier, scope_maps, depth, budget)?;
+                    let encoded = canonical_node_bytes(
+                        model,
+                        identifier,
+                        scope_maps,
+                        depth,
+                        entity_keys.as_deref_mut(),
+                        budget,
+                    )?;
                     push_frame(target, &encoded, budget)?;
                 } else {
                     append_canonical_component(
-                        target, model, item, scope_maps, depth, false, budget,
+                        target,
+                        model,
+                        item,
+                        scope_maps,
+                        depth,
+                        false,
+                        entity_keys.as_deref_mut(),
+                        budget,
                     )?;
                 }
             }

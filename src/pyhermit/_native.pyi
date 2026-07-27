@@ -33,6 +33,8 @@ class NativeSession:
     @property
     def ontology_fingerprint(self) -> str: ...
     @property
+    def _debug_source_fingerprints(self) -> tuple[str, str, str]: ...
+    @property
     def permanent_program_sha256(self) -> str: ...
     @property
     def compiler_digest(self) -> str | None: ...
@@ -409,6 +411,8 @@ def _create_encoded_session_v1(
     metadata: bytes,
     config: bytes,
     cancellation: CancellationHandle,
+    validate_profile: bool = True,
+    deferred_fingerprints: tuple[int, str, str, bytes, bytes] | None = None,
     max_owned_bytes: int | None = None,
     cancel_at_checkpoint: int | None = None,
 ) -> NativeSession: ...

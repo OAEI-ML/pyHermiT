@@ -52,6 +52,7 @@ use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyInt, PyMemoryView, PySequence, PySlice, PyString, PyTuple};
+use sha2::{Digest, Sha256};
 
 pub use cancel::{CancellationHandle, CancellationState};
 use error::{ErrorKind, NativeError, NativeResult};
@@ -78,7 +79,23 @@ const EVENT_CAPACITY: usize = 256;
 const POLL_STRIDE_MAX: u64 = 1_000_000;
 const MAX_STATE_TRACE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ENCODED_SESSION_METADATA_BYTES: usize = 4 * 1024;
+const MAX_DEFERRED_FINGERPRINT_CONTEXT_BYTES: usize = 128 * 1024;
+const MAX_DEFERRED_CACHE_TEMPLATE_BYTES: usize = 64 * 1024;
+const DEFERRED_FINGERPRINT_VERSION: u8 = 1;
+const LOGICAL_FINGERPRINT_SENTINEL: &str =
+    "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL";
+const SIGNATURE_FINGERPRINT_SENTINEL: &str =
+    "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS";
+const COMPILER_CACHE_DOMAIN: &[u8] = b"pyhermit/compiler-cache/v1\x00";
+const HERMIT_COMPATIBILITY_ID: &str = "hermit-37ec30a-v1";
+const COMPILER_CACHE_SCHEMA_VERSION: u64 = 1;
 const PYTHON_VERSION_SOURCE: &str = include_str!("../../src/pyhermit/_version.py");
+
+struct DeferredFingerprintRequest {
+    context: encoded::fingerprints::StructuralContextEvidence,
+    structural_mode: encoded::fingerprints::StructuralFingerprintMode,
+    compiler_cache_template: Vec<u8>,
+}
 
 #[derive(Clone, Copy)]
 struct BorrowedPyBytes<'a, 'py> {
@@ -278,6 +295,20 @@ impl NativeSession {
     fn ontology_fingerprint(&self, py: Python<'_>) -> PyResult<String> {
         self.control
             .run(|owned| Ok(hex_digest(&owned.ontology.metadata.ontology_fingerprint)))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    #[getter]
+    fn _debug_source_fingerprints(&self, py: Python<'_>) -> PyResult<(String, String, String)> {
+        self.control
+            .run(|owned| {
+                let metadata = &owned.ontology.metadata;
+                Ok((
+                    hex_digest(&metadata.structural_fingerprint.digest),
+                    hex_digest(&metadata.logical_fingerprint.digest),
+                    hex_digest(&metadata.signature_fingerprint.digest),
+                ))
+            })
             .map_err(|error| error.into_pyerr(py))
     }
 
@@ -1064,6 +1095,122 @@ fn encoded_logical_fingerprint(value: &Bound<'_, PyAny>) -> NativeResult<[u8; 32
     Ok(fingerprint)
 }
 
+fn decode_deferred_fingerprint_request(
+    value: Option<&Bound<'_, PyAny>>,
+) -> NativeResult<Option<DeferredFingerprintRequest>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "deferred fingerprint request is not an exact tuple",
+        ));
+    }
+    let record = value
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("deferred fingerprint request changed type"))?;
+    if record.len() != 5 {
+        return Err(encoded_slice_invalid(
+            "deferred fingerprint request has the wrong field count",
+        ));
+    }
+    let version = tuple_item(record, 0, "deferred fingerprint version")?;
+    if !version.is_exact_instance_of::<PyInt>()
+        || version
+            .extract::<u8>()
+            .map_err(|_| encoded_slice_invalid("deferred fingerprint version is outside u8"))?
+            != DEFERRED_FINGERPRINT_VERSION
+    {
+        return Err(encoded_slice_invalid(
+            "deferred fingerprint request version is unsupported",
+        ));
+    }
+    let kind = tuple_item(record, 1, "deferred fingerprint context kind")?;
+    if !kind.is_exact_instance_of::<PyString>() {
+        return Err(encoded_slice_invalid(
+            "deferred fingerprint context kind is not an exact string",
+        ));
+    }
+    let kind = kind
+        .cast::<PyString>()
+        .map_err(|_| encoded_slice_invalid("deferred fingerprint context kind changed type"))?
+        .to_str()
+        .map_err(|_| encoded_slice_invalid("deferred fingerprint context kind is not UTF-8"))?;
+    let kind = match kind {
+        "overlay" => encoded::fingerprints::StructuralContextKind::Overlay,
+        "composite" => encoded::fingerprints::StructuralContextKind::Composite,
+        _ => {
+            return Err(encoded_slice_invalid(
+                "deferred fingerprint context kind is unsupported",
+            ));
+        }
+    };
+    let structural_mode = tuple_item(record, 2, "deferred structural fingerprint mode")?;
+    if !structural_mode.is_exact_instance_of::<PyString>() {
+        return Err(encoded_slice_invalid(
+            "deferred structural fingerprint mode is not an exact string",
+        ));
+    }
+    let structural_mode = structural_mode
+        .cast::<PyString>()
+        .map_err(|_| encoded_slice_invalid("deferred structural fingerprint mode changed type"))?
+        .to_str()
+        .map_err(|_| encoded_slice_invalid("deferred structural fingerprint mode is not UTF-8"))?;
+    let structural_mode = match structural_mode {
+        "effective" => encoded::fingerprints::StructuralFingerprintMode::Effective,
+        "overlay-anchor-alias" => {
+            encoded::fingerprints::StructuralFingerprintMode::OverlayAnchorAlias
+        }
+        _ => {
+            return Err(encoded_slice_invalid(
+                "deferred structural fingerprint mode is unsupported",
+            ));
+        }
+    };
+    if structural_mode == encoded::fingerprints::StructuralFingerprintMode::OverlayAnchorAlias
+        && kind != encoded::fingerprints::StructuralContextKind::Overlay
+    {
+        return Err(encoded_slice_invalid(
+            "overlay anchor structural alias requires an overlay context",
+        ));
+    }
+    let context = tuple_item(record, 3, "deferred fingerprint context bytes")?;
+    if !context.is_exact_instance_of::<PyBytes>() {
+        return Err(encoded_slice_invalid(
+            "deferred fingerprint context is not exact bytes",
+        ));
+    }
+    let context = context
+        .cast::<PyBytes>()
+        .map_err(|_| encoded_slice_invalid("deferred fingerprint context changed type"))?;
+    let context = copy_capped_bytes(
+        context,
+        MAX_DEFERRED_FINGERPRINT_CONTEXT_BYTES,
+        "deferred fingerprint context",
+    )?;
+    let context = encoded::fingerprints::StructuralContextEvidence::new(kind, context)
+        .map_err(encoded_validation_error)?;
+    let template = tuple_item(record, 4, "deferred compiler-cache template")?;
+    if !template.is_exact_instance_of::<PyBytes>() {
+        return Err(encoded_slice_invalid(
+            "deferred compiler-cache template is not exact bytes",
+        ));
+    }
+    let template = template
+        .cast::<PyBytes>()
+        .map_err(|_| encoded_slice_invalid("deferred compiler-cache template changed type"))?;
+    let compiler_cache_template = copy_capped_bytes(
+        template,
+        MAX_DEFERRED_CACHE_TEMPLATE_BYTES,
+        "deferred compiler-cache template",
+    )?;
+    Ok(Some(DeferredFingerprintRequest {
+        context,
+        structural_mode,
+        compiler_cache_template,
+    }))
+}
+
 fn encoded_validation_error(error: encoded::EncodedValidationError) -> NativeError {
     let kind = match error.code {
         "NATIVE_ENCODED_VIEW_INVALID" => ErrorKind::Wire,
@@ -1091,6 +1238,17 @@ fn encoded_symbol_error(error: encoded::symbols::SymbolPhaseError<NativeError>) 
     match error {
         encoded::symbols::SymbolPhaseError::Encoded(error) => encoded_validation_error(error),
         encoded::symbols::SymbolPhaseError::Control(error) => error,
+    }
+}
+
+fn encoded_fingerprint_error(
+    error: encoded::fingerprints::FingerprintPhaseError<NativeError>,
+) -> NativeError {
+    match error {
+        encoded::fingerprints::FingerprintPhaseError::Encoded(error) => {
+            encoded_validation_error(error)
+        }
+        encoded::fingerprints::FingerprintPhaseError::Control(error) => error,
     }
 }
 
@@ -2050,20 +2208,20 @@ fn decode_encoded_scope_maps<S: encoded::ByteSource>(
     scope_maps: &[S],
     max_owned_bytes: usize,
 ) -> NativeResult<(Vec<encoded::role_characteristics::AnonymousScopeMap>, usize)> {
-    let outer_bytes = scope_maps
+    let requested_outer_bytes = scope_maps
         .len()
         .checked_mul(std::mem::size_of::<
             encoded::role_characteristics::AnonymousScopeMap,
         >())
         .ok_or_else(|| encoded_slice_invalid("anonymous-scope map allocation overflowed"))?;
-    let mut owned_bytes = outer_bytes;
+    let mut requested_owned_bytes = requested_outer_bytes;
     for scope_map in scope_maps {
         validate_encoded_scope_map(*scope_map)?;
-        owned_bytes = owned_bytes
+        requested_owned_bytes = requested_owned_bytes
             .checked_add(scope_map.len())
             .ok_or_else(|| encoded_slice_invalid("anonymous-scope map bytes overflowed"))?;
     }
-    if owned_bytes > max_owned_bytes {
+    if requested_owned_bytes > max_owned_bytes {
         return Err(encoded_validation_error(
             encoded::EncodedValidationError::resource(
                 "anonymous-scope map decoding exceeds the remaining owned-byte limit",
@@ -2076,6 +2234,19 @@ fn decode_encoded_scope_maps<S: encoded::ByteSource>(
             "anonymous-scope map collection allocation failed",
         ))
     })?;
+    let mut owned_bytes = decoded
+        .capacity()
+        .checked_mul(std::mem::size_of::<
+            encoded::role_characteristics::AnonymousScopeMap,
+        >())
+        .ok_or_else(|| encoded_slice_invalid("anonymous-scope map capacity overflowed"))?;
+    if owned_bytes > max_owned_bytes {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "anonymous-scope map allocation exceeds the remaining owned-byte limit",
+            ),
+        ));
+    }
     for scope_map in scope_maps {
         let row_count = scope_map.len() / 64;
         let mut rows = Vec::new();
@@ -2084,6 +2255,22 @@ fn decode_encoded_scope_maps<S: encoded::ByteSource>(
                 "anonymous-scope replacement allocation failed",
             ))
         })?;
+        let row_bytes = rows
+            .capacity()
+            .checked_mul(std::mem::size_of::<
+                encoded::role_characteristics::AnonymousScopeReplacement,
+            >())
+            .ok_or_else(|| encoded_slice_invalid("anonymous-scope row capacity overflowed"))?;
+        owned_bytes = owned_bytes
+            .checked_add(row_bytes)
+            .ok_or_else(|| encoded_slice_invalid("anonymous-scope ownership overflowed"))?;
+        if owned_bytes > max_owned_bytes {
+            return Err(encoded_validation_error(
+                encoded::EncodedValidationError::resource(
+                    "anonymous-scope map allocation exceeds the remaining owned-byte limit",
+                ),
+            ));
+        }
         for offset in (0..scope_map.len()).step_by(64) {
             let mut source = [0_u8; 32];
             let mut target = [0_u8; 32];
@@ -2234,7 +2421,33 @@ fn compile_encoded_slice_program_inputs_controlled<B: encoded::ByteSource>(
     definition_namespace: Option<[u8; 32]>,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<encoded::permanent_program::EncodedSliceProgram> {
-    let limits = encoded::named_classes::NamedClassPhaseLimits::default();
+    compile_encoded_slice_program_inputs_with_fingerprints_controlled(
+        slices,
+        definition_namespace,
+        None,
+        None,
+        poll,
+    )
+    .map(|(program, _fingerprints)| program)
+}
+
+fn compile_encoded_slice_program_inputs_with_fingerprints_controlled<B: encoded::ByteSource>(
+    slices: &[EncodedSliceInput<B>],
+    definition_namespace: Option<[u8; 32]>,
+    fingerprint_request: Option<(
+        &encoded::fingerprints::StructuralContextEvidence,
+        encoded::fingerprints::StructuralFingerprintMode,
+    )>,
+    max_owned_bytes: Option<usize>,
+    poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
+) -> NativeResult<(
+    encoded::permanent_program::EncodedSliceProgram,
+    Option<encoded::fingerprints::ViewFingerprints>,
+)> {
+    let mut limits = encoded::named_classes::NamedClassPhaseLimits::default();
+    if let Some(maximum) = max_owned_bytes {
+        limits.max_owned_bytes = maximum;
+    }
     if slices.is_empty() {
         return Err(encoded_slice_invalid(
             "encoded slice program requires at least one slice",
@@ -2249,6 +2462,161 @@ fn compile_encoded_slice_program_inputs_controlled<B: encoded::ByteSource>(
     }
     poll("program-preflight")?;
     let symbol_phases = compile_encoded_slice_symbol_phases(slices, limits, poll)?;
+    let fingerprints = if let Some((context, structural_mode)) = fingerprint_request {
+        if definition_namespace.is_some() {
+            return Err(encoded_slice_invalid(
+                "encoded deferred fingerprints conflict with an explicit definition namespace",
+            ));
+        }
+        let fingerprint_limits = encoded::fingerprints::FingerprintPhaseLimits {
+            max_owned_bytes: limits.max_owned_bytes,
+            ..encoded::fingerprints::FingerprintPhaseLimits::default()
+        };
+        let symbol_headers = symbol_phases
+            .capacity()
+            .checked_mul(std::mem::size_of::<encoded::symbols::SymbolPhase>())
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded fingerprint symbol headers overflowed",
+                ))
+            })?;
+        let symbol_owned = symbol_phases
+            .iter()
+            .try_fold(symbol_headers, |total, phase| {
+                total.checked_add(phase.owned_bytes).ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded fingerprint retained-symbol ownership overflowed",
+                    ))
+                })
+            })?;
+        let mut contributions = Vec::new();
+        contributions.try_reserve_exact(slices.len()).map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded fingerprint slice transaction allocation failed",
+            ))
+        })?;
+        let contribution_headers = contributions
+            .capacity()
+            .checked_mul(std::mem::size_of::<
+                encoded::fingerprints::FingerprintContributions,
+            >())
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded fingerprint contribution headers overflowed",
+                ))
+            })?;
+        let retained_base = symbol_owned
+            .checked_add(contribution_headers)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded fingerprint retained ownership overflowed",
+                ))
+            })?;
+        if retained_base > fingerprint_limits.max_owned_bytes {
+            return Err(encoded_validation_error(
+                encoded::EncodedValidationError::resource(
+                    "encoded fingerprint retained phases exceed the owned-byte limit",
+                ),
+            ));
+        }
+        let mut contribution_owned = 0_usize;
+        let mut contribution_work = 0_u64;
+        for (slice, symbols) in slices.iter().zip(&symbol_phases) {
+            let model = encoded::model::ValidatedModel::new(
+                slice.columns,
+                encoded::EncodedLimits::default(),
+            )
+            .map_err(encoded_validation_error)?;
+            let retained_owned =
+                retained_base
+                    .checked_add(contribution_owned)
+                    .ok_or_else(|| {
+                        encoded_validation_error(encoded::EncodedValidationError::resource(
+                            "encoded fingerprint contribution ownership overflowed",
+                        ))
+                    })?;
+            let remaining_before_scope = fingerprint_limits
+                .max_owned_bytes
+                .checked_sub(retained_owned)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded fingerprints exceed the aggregate owned-byte limit",
+                    ))
+                })?;
+            let (scope_maps, scope_owned) =
+                decode_encoded_scope_maps(&slice.scope_maps, remaining_before_scope)?;
+            let phase_owned_limit =
+                remaining_before_scope
+                    .checked_sub(scope_owned)
+                    .ok_or_else(|| {
+                        encoded_validation_error(encoded::EncodedValidationError::resource(
+                            "encoded fingerprint scope maps exceed the aggregate owned-byte limit",
+                        ))
+                    })?;
+            let phase_work_limit = fingerprint_limits
+                .max_work
+                .checked_sub(contribution_work)
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded fingerprints exceed the aggregate work limit",
+                    ))
+                })?;
+            let phase_limits = encoded::fingerprints::FingerprintPhaseLimits {
+                max_owned_bytes: phase_owned_limit,
+                max_work: phase_work_limit,
+                ..fingerprint_limits
+            };
+            let contribution = encoded::fingerprints::compile_fingerprint_contributions_controlled(
+                &model,
+                &symbols.roots,
+                &scope_maps,
+                phase_limits,
+                poll,
+            )
+            .map_err(encoded_fingerprint_error)?;
+            contribution_owned = contribution_owned
+                .checked_add(contribution.owned_bytes())
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded fingerprint contribution ownership overflowed",
+                    ))
+                })?;
+            contribution_work = contribution_work
+                .checked_add(contribution.work())
+                .ok_or_else(|| {
+                    encoded_validation_error(encoded::EncodedValidationError::resource(
+                        "encoded fingerprint contribution work overflowed",
+                    ))
+                })?;
+            contributions.push(contribution);
+        }
+        let merge_owned_limit = fingerprint_limits
+            .max_owned_bytes
+            .checked_sub(symbol_owned)
+            .ok_or_else(|| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded fingerprint symbols exceed the aggregate owned-byte limit",
+                ))
+            })?;
+        let merge_limits = encoded::fingerprints::FingerprintPhaseLimits {
+            max_owned_bytes: merge_owned_limit,
+            ..fingerprint_limits
+        };
+        Some(
+            encoded::fingerprints::merge_view_fingerprints_controlled(
+                contributions,
+                context,
+                structural_mode,
+                merge_limits,
+                poll,
+            )
+            .map_err(encoded_fingerprint_error)?,
+        )
+    } else {
+        None
+    };
+    let definition_namespace =
+        fingerprints.map_or(definition_namespace, |value| Some(value.logical));
     let mut symbol_phases = symbol_phases.into_iter();
     let mut phases = Vec::new();
     phases.try_reserve_exact(slices.len()).map_err(|_| {
@@ -3206,21 +3574,24 @@ fn compile_encoded_slice_program_inputs_controlled<B: encoded::ByteSource>(
     .map_err(encoded_validation_error)?;
     // Nothing escapes the coarse call before this final publication checkpoint.
     poll("merged-role-clause-publication")?;
-    Ok(encoded::permanent_program::EncodedSliceProgram {
-        named_classes,
-        object_roles,
-        data_roles,
-        data_inclusions,
-        data_role_hierarchy,
-        simple_roles,
-        complex_roles,
-        role_characteristics,
-        object_role_hierarchy,
-        role_semantics,
-        role_automata,
-        role_model,
-        role_clauses,
-    })
+    Ok((
+        encoded::permanent_program::EncodedSliceProgram {
+            named_classes,
+            object_roles,
+            data_roles,
+            data_inclusions,
+            data_role_hierarchy,
+            simple_roles,
+            complex_roles,
+            role_characteristics,
+            object_role_hierarchy,
+            role_semantics,
+            role_automata,
+            role_model,
+            role_clauses,
+        },
+        fingerprints,
+    ))
 }
 
 #[pyfunction(name = "_validate_encoded_slices_v1")]
@@ -5037,16 +5408,310 @@ fn poll_encoded_session_checkpoint(
     Ok(())
 }
 
+fn validate_deferred_metadata(metadata: &input_wire::OntologyMetadata) -> NativeResult<()> {
+    let placeholders_are_zero = metadata
+        .ontology_fingerprint
+        .iter()
+        .chain(&metadata.structural_fingerprint.digest)
+        .chain(&metadata.logical_fingerprint.digest)
+        .chain(&metadata.signature_fingerprint.digest)
+        .all(|byte| *byte == 0);
+    if !placeholders_are_zero
+        || metadata.structural_fingerprint.schema != 1
+        || metadata.logical_fingerprint.schema != 1
+        || metadata.signature_fingerprint.schema != 1
+        || metadata.program_sha256.iter().any(|byte| *byte != 0)
+    {
+        return Err(encoded_slice_invalid(
+            "versioned deferred metadata does not contain canonical schema-1 placeholders",
+        ));
+    }
+    Ok(())
+}
+
+fn deferred_compiler_cache_key(
+    template: &[u8],
+    metadata: &input_wire::OntologyMetadata,
+    config: &DecodedConfig,
+) -> NativeResult<[u8; 32]> {
+    let expected = serde_json::json!({
+        "compatibility_id": HERMIT_COMPATIBILITY_ID,
+        "compiler_schema": COMPILER_CACHE_SCHEMA_VERSION,
+        "config": {
+            "backend": backend_choice_name(config.backend),
+            "blocking": blocking_choice_name(config.blocking),
+            "buffer_changes": config.buffer_changes,
+            "deterministic": config.deterministic,
+            "disjunction_learning": config.disjunction_learning,
+            "existentials": existential_choice_name(config.existentials),
+            "force_quasi_order_classification": config.force_quasi_order_classification,
+            "fresh_entities": fresh_entity_choice_name(config.fresh_entities),
+            "individual_grouping": individual_grouping_choice_name(config.individual_grouping),
+            "max_memory_bytes": config.max_memory_bytes,
+            "timeout": config.timeout_seconds,
+            "unsupported_datatypes": unsupported_datatype_choice_name(
+                config.unsupported_datatypes
+            ),
+            "workers": config.workers,
+        },
+        "core": {
+            "adapter": metadata.core_adapter_protocol_version,
+            "api": [
+                metadata.core_api_version.0,
+                metadata.core_api_version.1,
+            ],
+            "model": metadata.core_model_schema_version,
+            "package": metadata.core_package_version,
+            "wire": [
+                metadata.core_wire_format_version.0,
+                metadata.core_wire_format_version.1,
+            ],
+        },
+        "logical_fingerprint": LOGICAL_FINGERPRINT_SENTINEL,
+        "signature_fingerprint": SIGNATURE_FINGERPRINT_SENTINEL,
+    });
+    let parsed: serde_json::Value = serde_json::from_slice(template)
+        .map_err(|_| encoded_slice_invalid("deferred compiler-cache template is not valid JSON"))?;
+    if parsed != expected {
+        return Err(encoded_slice_invalid(
+            "deferred compiler-cache template disagrees with metadata or configuration",
+        ));
+    }
+    let mut rust_canonical = serde_json::to_vec(&expected)
+        .map_err(|_| NativeError::invariant("compiler-cache template serialization failed"))?;
+    if let Some(timeout) = config.timeout_seconds {
+        let timeout_range = timeout_token_range(&rust_canonical)?;
+        rust_canonical.splice(timeout_range, python_float_token(timeout)?.bytes());
+    }
+    if template != rust_canonical {
+        return Err(encoded_slice_invalid(
+            "deferred compiler-cache template is not canonical JSON",
+        ));
+    }
+
+    let mut payload = template.to_vec();
+    replace_exact_sentinel(
+        &mut payload,
+        LOGICAL_FINGERPRINT_SENTINEL.as_bytes(),
+        hex_digest(&metadata.logical_fingerprint.digest).as_bytes(),
+        "logical",
+    )?;
+    replace_exact_sentinel(
+        &mut payload,
+        SIGNATURE_FINGERPRINT_SENTINEL.as_bytes(),
+        hex_digest(&metadata.signature_fingerprint.digest).as_bytes(),
+        "signature",
+    )?;
+    let mut hasher = Sha256::new();
+    hasher.update(COMPILER_CACHE_DOMAIN);
+    hasher.update(payload);
+    Ok(hasher.finalize().into())
+}
+
+fn timeout_token_range(bytes: &[u8]) -> NativeResult<std::ops::Range<usize>> {
+    const NEEDLE: &[u8] = b"\"timeout\":";
+    let start = bytes
+        .windows(NEEDLE.len())
+        .position(|window| window == NEEDLE)
+        .ok_or_else(|| encoded_slice_invalid("compiler-cache timeout field is absent"))?;
+    if bytes[start + NEEDLE.len()..]
+        .windows(NEEDLE.len())
+        .any(|window| window == NEEDLE)
+    {
+        return Err(encoded_slice_invalid(
+            "compiler-cache timeout field is duplicated",
+        ));
+    }
+    let value_start = start + NEEDLE.len();
+    let relative_end = bytes[value_start..]
+        .iter()
+        .position(|byte| *byte == b',')
+        .ok_or_else(|| encoded_slice_invalid("compiler-cache timeout field is unterminated"))?;
+    let value_end = value_start + relative_end;
+    if value_end == value_start {
+        return Err(encoded_slice_invalid(
+            "compiler-cache timeout field is empty",
+        ));
+    }
+    Ok(value_start..value_end)
+}
+
+fn python_float_token(value: f64) -> NativeResult<String> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(encoded_slice_invalid(
+            "compiler-cache timeout is not a finite positive float",
+        ));
+    }
+    let ryu = serde_json::to_string(&value)
+        .map_err(|_| NativeError::invariant("compiler-cache timeout serialization failed"))?;
+    let (mantissa, explicit_exponent) = match ryu.find(['e', 'E']) {
+        Some(index) => {
+            let (mantissa, exponent) = ryu.split_at(index);
+            let exponent = exponent[1..]
+                .parse::<i32>()
+                .map_err(|_| NativeError::invariant("serialized timeout exponent is malformed"))?;
+            (mantissa, exponent)
+        }
+        None => (ryu.as_str(), 0),
+    };
+    let unsigned = mantissa.strip_prefix('-').unwrap_or(mantissa);
+    let decimal_index = unsigned.find('.').unwrap_or(unsigned.len());
+    let mut digits = unsigned.replace('.', "");
+    while digits.len() > 1 && digits.ends_with('0') {
+        digits.pop();
+    }
+    let first_nonzero = digits.find(|character| character != '0').ok_or_else(|| {
+        NativeError::invariant("serialized positive timeout has no nonzero digit")
+    })?;
+    if first_nonzero != 0 {
+        digits.drain(..first_nonzero);
+    }
+    let decimal_exponent = i32::try_from(decimal_index)
+        .and_then(|index| i32::try_from(first_nonzero).map(|leading| index - leading - 1))
+        .map_err(|_| NativeError::invariant("timeout decimal exponent exceeds i32"))?
+        .checked_add(explicit_exponent)
+        .ok_or_else(|| NativeError::invariant("timeout decimal exponent overflowed"))?;
+    let negative = mantissa.starts_with('-');
+    let mut output = String::new();
+    if negative {
+        output.push('-');
+    }
+    if !(-4..16).contains(&decimal_exponent) {
+        output.push(char::from(digits.as_bytes()[0]));
+        if digits.len() > 1 {
+            output.push('.');
+            output.push_str(&digits[1..]);
+        }
+        output.push('e');
+        output.push(if decimal_exponent < 0 { '-' } else { '+' });
+        let magnitude = decimal_exponent.unsigned_abs();
+        if magnitude < 10 {
+            output.push('0');
+        }
+        output.push_str(&magnitude.to_string());
+        return Ok(output);
+    }
+    let point = decimal_exponent + 1;
+    if point <= 0 {
+        output.push_str("0.");
+        output.extend(std::iter::repeat_n(
+            '0',
+            usize::try_from(-point)
+                .map_err(|_| NativeError::invariant("timeout zero prefix exceeds usize"))?,
+        ));
+        output.push_str(&digits);
+    } else {
+        let point = usize::try_from(point)
+            .map_err(|_| NativeError::invariant("timeout decimal point exceeds usize"))?;
+        if point >= digits.len() {
+            output.push_str(&digits);
+            output.extend(std::iter::repeat_n('0', point - digits.len()));
+            output.push_str(".0");
+        } else {
+            output.push_str(&digits[..point]);
+            output.push('.');
+            output.push_str(&digits[point..]);
+        }
+    }
+    Ok(output)
+}
+
+fn replace_exact_sentinel(
+    payload: &mut [u8],
+    sentinel: &[u8],
+    replacement: &[u8],
+    name: &'static str,
+) -> NativeResult<()> {
+    if sentinel.len() != replacement.len() {
+        return Err(NativeError::invariant(
+            "compiler-cache fingerprint replacement width changed",
+        ));
+    }
+    let mut matches = payload
+        .windows(sentinel.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == sentinel).then_some(index));
+    let index = matches.next().ok_or_else(|| {
+        encoded_slice_invalid(format!("deferred compiler-cache {name} sentinel is absent"))
+    })?;
+    if matches.next().is_some() {
+        return Err(encoded_slice_invalid(format!(
+            "deferred compiler-cache {name} sentinel is duplicated"
+        )));
+    }
+    payload[index..index + replacement.len()].copy_from_slice(replacement);
+    Ok(())
+}
+
+const fn backend_choice_name(value: input_wire::BackendChoice) -> &'static str {
+    match value {
+        input_wire::BackendChoice::Auto => "auto",
+        input_wire::BackendChoice::Python => "python",
+        input_wire::BackendChoice::Native => "native",
+        input_wire::BackendChoice::Verify => "verify",
+    }
+}
+
+const fn blocking_choice_name(value: input_wire::BlockingChoice) -> &'static str {
+    match value {
+        input_wire::BlockingChoice::Auto => "auto",
+        input_wire::BlockingChoice::Anywhere => "anywhere",
+        input_wire::BlockingChoice::ValidatedAnywhere => "validated_anywhere",
+        input_wire::BlockingChoice::Ancestor => "ancestor",
+    }
+}
+
+const fn existential_choice_name(value: input_wire::ExistentialChoice) -> &'static str {
+    match value {
+        input_wire::ExistentialChoice::Auto => "auto",
+        input_wire::ExistentialChoice::CreationOrder => "creation_order",
+        input_wire::ExistentialChoice::IndividualReuse => "individual_reuse",
+    }
+}
+
+const fn fresh_entity_choice_name(value: input_wire::FreshEntityChoice) -> &'static str {
+    match value {
+        input_wire::FreshEntityChoice::Disallow => "disallow",
+        input_wire::FreshEntityChoice::Allow => "allow",
+    }
+}
+
+const fn individual_grouping_choice_name(
+    value: input_wire::IndividualGroupingChoice,
+) -> &'static str {
+    match value {
+        input_wire::IndividualGroupingChoice::BySameAs => "by_same_as",
+        input_wire::IndividualGroupingChoice::ByName => "by_name",
+    }
+}
+
+const fn unsupported_datatype_choice_name(
+    value: input_wire::UnsupportedDatatypeChoice,
+) -> &'static str {
+    match value {
+        input_wire::UnsupportedDatatypeChoice::Error => "error",
+        input_wire::UnsupportedDatatypeChoice::IgnoreWithWarning => "ignore_with_warning",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compile_encoded_session_phases<B: encoded::ByteSource>(
     slices: &[EncodedSliceInput<B>],
     namespace: Option<[u8; 32]>,
+    fingerprint_request: Option<(
+        &encoded::fingerprints::StructuralContextEvidence,
+        encoded::fingerprints::StructuralFingerprintMode,
+    )>,
+    max_owned_bytes: Option<usize>,
     unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
     validate_profile: bool,
     cancellation_state: &Arc<CancellationState>,
     checkpoint: &mut u64,
     cancel_at_checkpoint: Option<u64>,
-) -> NativeResult<encoded::permanent_program::EncodedSliceProgram> {
+) -> NativeResult<(
+    encoded::permanent_program::EncodedSliceProgram,
+    Option<encoded::fingerprints::ViewFingerprints>,
+)> {
     if validate_profile {
         let mut poll = |phase: &'static str| {
             poll_encoded_session_checkpoint(
@@ -5066,12 +5731,20 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
     let mut poll = |phase: &'static str| {
         poll_encoded_session_checkpoint(cancellation_state, checkpoint, cancel_at_checkpoint, phase)
     };
-    compile_encoded_slice_program_inputs_controlled(slices, namespace, &mut poll)
+    compile_encoded_slice_program_inputs_with_fingerprints_controlled(
+        slices,
+        namespace,
+        fingerprint_request,
+        max_owned_bytes,
+        &mut poll,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn finish_encoded_session_construction(
     phases: encoded::permanent_program::EncodedSliceProgram,
+    fingerprints: Option<encoded::fingerprints::ViewFingerprints>,
+    compiler_cache_template: Option<Vec<u8>>,
     mut metadata: input_wire::OntologyMetadata,
     config: DecodedConfig,
     cancellation_state: Arc<CancellationState>,
@@ -5080,6 +5753,21 @@ fn finish_encoded_session_construction(
     max_owned_bytes: Option<usize>,
     compiler_gil_released: bool,
 ) -> NativeResult<NativeSession> {
+    match (fingerprints, compiler_cache_template) {
+        (Some(fingerprints), Some(template)) => {
+            metadata.structural_fingerprint.digest = fingerprints.structural;
+            metadata.logical_fingerprint.digest = fingerprints.logical;
+            metadata.signature_fingerprint.digest = fingerprints.signature;
+            metadata.ontology_fingerprint =
+                deferred_compiler_cache_key(&template, &metadata, &config)?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(NativeError::invariant(
+                "deferred fingerprint results lost their compiler-cache template",
+            ));
+        }
+    }
     let mut assembly_limits = encoded::permanent_program::PermanentProgramLimits::default();
     if let Some(maximum) = max_owned_bytes {
         assembly_limits.max_owned_bytes = maximum;
@@ -5161,6 +5849,7 @@ fn finish_encoded_session_construction(
     config,
     cancellation,
     validate_profile=true,
+    deferred_fingerprints=None,
     max_owned_bytes=None,
     cancel_at_checkpoint=None
 ))]
@@ -5172,6 +5861,7 @@ fn create_encoded_session_v1(
     config: &Bound<'_, PyBytes>,
     cancellation: PyRef<'_, CancellationHandle>,
     validate_profile: bool,
+    deferred_fingerprints: Option<&Bound<'_, PyAny>>,
     max_owned_bytes: Option<usize>,
     cancel_at_checkpoint: Option<u64>,
 ) -> PyResult<NativeSession> {
@@ -5194,8 +5884,14 @@ fn create_encoded_session_v1(
             &limits,
         )
         .map_err(map_input_wire_error)?;
+        let deferred_fingerprints = decode_deferred_fingerprint_request(deferred_fingerprints)?;
+        if deferred_fingerprints.is_some() {
+            validate_deferred_metadata(&metadata)?;
+        }
         let cancellation_state = cancellation.state();
-        let namespace = Some(metadata.logical_fingerprint.digest);
+        let namespace = deferred_fingerprints
+            .is_none()
+            .then_some(metadata.logical_fingerprint.digest);
         let unsupported_datatypes =
             encoded_profile_policy_from_config(config.unsupported_datatypes);
         let mut checkpoint = 0_u64;
@@ -5203,9 +5899,13 @@ fn create_encoded_session_v1(
         if let Some(retained_leases) = retain_encoded_slice_leases(&borrowed_leases)? {
             let retained_inputs = retained_encoded_slice_inputs(&retained_leases)?;
             return py.detach(move || {
-                let phases = compile_encoded_session_phases(
+                let (phases, fingerprints) = compile_encoded_session_phases(
                     &retained_inputs,
                     namespace,
+                    deferred_fingerprints
+                        .as_ref()
+                        .map(|request| (&request.context, request.structural_mode)),
+                    max_owned_bytes,
                     unsupported_datatypes,
                     validate_profile,
                     &cancellation_state,
@@ -5214,6 +5914,8 @@ fn create_encoded_session_v1(
                 )?;
                 finish_encoded_session_construction(
                     phases,
+                    fingerprints,
+                    deferred_fingerprints.map(|request| request.compiler_cache_template),
                     metadata,
                     config,
                     cancellation_state,
@@ -5225,9 +5927,13 @@ fn create_encoded_session_v1(
             });
         }
         let borrowed_inputs = borrowed_encoded_slice_inputs(&borrowed_leases)?;
-        let phases = compile_encoded_session_phases(
+        let (phases, fingerprints) = compile_encoded_session_phases(
             &borrowed_inputs,
             namespace,
+            deferred_fingerprints
+                .as_ref()
+                .map(|request| (&request.context, request.structural_mode)),
+            max_owned_bytes,
             unsupported_datatypes,
             validate_profile,
             &cancellation_state,
@@ -5237,6 +5943,8 @@ fn create_encoded_session_v1(
         py.detach(move || {
             finish_encoded_session_construction(
                 phases,
+                fingerprints,
+                deferred_fingerprints.map(|request| request.compiler_cache_template),
                 metadata,
                 config,
                 cancellation_state,
@@ -5627,6 +6335,22 @@ mod tests {
     #[test]
     fn native_version_comes_from_the_python_distribution_source() {
         assert_eq!(python_package_version(), Some("0.1.0.dev0"));
+    }
+
+    #[test]
+    fn compiler_cache_float_tokens_match_cpython_json_boundaries() -> NativeResult<()> {
+        let cases = [
+            (1e-4, "0.0001"),
+            (1e-5, "1e-05"),
+            (1e15, "1000000000000000.0"),
+            (1e16, "1e+16"),
+            (f64::from_bits(1), "5e-324"),
+            (f64::MAX, "1.7976931348623157e+308"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(python_float_token(value)?, expected);
+        }
+        Ok(())
     }
 
     #[test]

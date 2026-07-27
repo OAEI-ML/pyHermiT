@@ -20,7 +20,14 @@ from pyowl_core import (
 from pyowl_core.index import OntologyIdentityIndex
 
 from .config import ReasonerConfig, UnsupportedDatatypePolicy
-from .core import CapturedOntology, capture_compatible_view
+from .core import (
+    CapturedOntology,
+    DeferredCapturedOntology,
+    _deferred_capture_eligible,
+    capture_compatible_view,
+    capture_compatible_view_deferred,
+    materialize_deferred_capture,
+)
 from .exceptions import IncompleteImportClosureError
 from .profile import OWL2DLReport, validate_owl2_dl_view
 
@@ -34,12 +41,17 @@ _ProfileValidator = Callable[
 class _CapturedOntologyInput:
     """Complete retained input before the backend-specific profile gate."""
 
-    captured: CapturedOntology
+    captured: CapturedOntology | DeferredCapturedOntology
     identity: OntologyIdentityIndex
 
     def __post_init__(self) -> None:
-        if not isinstance(self.captured, CapturedOntology):
-            raise TypeError("captured must be CapturedOntology")
+        if not isinstance(
+            self.captured,
+            (CapturedOntology, DeferredCapturedOntology),
+        ):
+            raise TypeError(
+                "captured must be CapturedOntology or DeferredCapturedOntology"
+            )
         if not isinstance(self.identity, OntologyIdentityIndex):
             raise TypeError("identity must be OntologyIdentityIndex")
 
@@ -120,6 +132,7 @@ def _capture_ontology_input(
     load_options: LoadOptions | None = None,
     resolver: ImportResolver | None = None,
     cancellation_token: CancellationToken | None = None,
+    defer_fingerprints: bool = False,
 ) -> _CapturedOntologyInput:
     """Capture and prove closure completeness without traversing scalar axioms."""
 
@@ -131,6 +144,8 @@ def _capture_ontology_input(
         raise TypeError("resolver must satisfy ImportResolver or be None")
     if cancellation_token is not None and not isinstance(cancellation_token, CancellationToken):
         raise TypeError("cancellation_token must be pyowl_core.CancellationToken or None")
+    if type(defer_fingerprints) is not bool:
+        raise TypeError("defer_fingerprints must be bool")
     view = pyowl_core.coerce_snapshot(
         source,
         document_iri=document_iri,
@@ -138,7 +153,14 @@ def _capture_ontology_input(
         resolver=resolver,
         cancellation_token=cancellation_token,
     )
-    captured = capture_compatible_view(view)
+    captured: CapturedOntology | DeferredCapturedOntology
+    if defer_fingerprints and isinstance(
+        view,
+        (pyowl_core.OntologyOverlay, pyowl_core.OntologyComposite),
+    ) and _deferred_capture_eligible(view):
+        captured = capture_compatible_view_deferred(view)
+    else:
+        captured = capture_compatible_view(view)
     identity = view.view(OntologyIdentityIndex)
     if not view.is_complete or not identity.is_complete:
         diagnostic_codes = ",".join(
@@ -179,6 +201,10 @@ def _validate_captured_ontology(
     if profile_validator is not None and not callable(profile_validator):
         raise TypeError("profile_validator must be callable or None")
 
+    captured = captured_input.captured
+    if isinstance(captured, DeferredCapturedOntology):
+        captured = materialize_deferred_capture(captured)
+
     def is_cancelled() -> bool:
         return bool(
             (cancellation_token is not None and cancellation_token.cancelled)
@@ -198,7 +224,7 @@ def _validate_captured_ontology(
         )
     report.raise_for_errors()
     return ValidatedOntology(
-        captured_input.captured,
+        captured,
         report,
         captured_input.identity,
     )

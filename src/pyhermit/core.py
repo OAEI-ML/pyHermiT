@@ -40,6 +40,8 @@ from pyowl_core import (
     ParseLimits,
     Severity,
     SnapshotProvider,
+    StructuralContext,
+    StructuralContextKind,
     apply_delta,
     compose_views,
     load_snapshot,
@@ -67,6 +69,8 @@ _REQUIRED_VIEW_FEATURES = frozenset(
     }
 )
 _U32_CAPACITY = 1 << 32
+_LOGICAL_FINGERPRINT_SENTINEL = "L" * 64
+_SIGNATURE_FINGERPRINT_SENTINEL = "S" * 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +177,20 @@ class CapturedOntology:
     core_adapter_protocol_version: int
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class DeferredCapturedOntology:
+    """Retained lazy view identity for one exact encoded-native attempt."""
+
+    view: OntologyView
+    structural_context_kind: StructuralContextKind
+    structural_context_bytes: bytes
+    core_package_version: str
+    core_api_version: tuple[int, int]
+    core_model_schema_version: int
+    core_wire_format_version: tuple[int, int]
+    core_adapter_protocol_version: int
+
+
 def capture_compatible_view(view: OntologyView) -> CapturedOntology:
     """Validate and retain an already-coerced core view by exact identity."""
 
@@ -200,6 +218,99 @@ def capture_compatible_view(view: OntologyView) -> CapturedOntology:
         core_wire_format_version=versions.wire_format_version,
         core_adapter_protocol_version=versions.adapter_protocol_version,
     )
+
+
+def capture_compatible_view_deferred(view: OntologyView) -> DeferredCapturedOntology:
+    """Capture authoritative lazy-view context without reading semantic fingerprints.
+
+    This internal seam is intentionally limited to the two public core view
+    shapes whose effective fingerprints are lazy. Generic capture remains eager,
+    and direct/mapped snapshots retain their existing attestation contract.
+    """
+
+    versions = require_core_compatibility()
+    if not isinstance(view, OntologyView):
+        raise _compatibility_error("OntologyView", "runtime protocol", type(view).__name__)
+    _require_view_capabilities(view.capabilities)
+    expected_kind: StructuralContextKind
+    if isinstance(view, OntologyOverlay):
+        expected_kind = StructuralContextKind.OVERLAY
+    elif isinstance(view, OntologyComposite):
+        expected_kind = StructuralContextKind.COMPOSITE
+    else:
+        raise TypeError("deferred capture requires OntologyOverlay or OntologyComposite")
+    if not _deferred_capture_eligible(view):
+        raise _compatibility_error(
+            "deferred view shape",
+            "top-level overlay/composite with direct or mapped sources",
+            type(view).__name__,
+        )
+    context = view.structural_context
+    if not isinstance(context, StructuralContext) or context.kind is not expected_kind:
+        raise _compatibility_error(
+            "structural_context",
+            f"pyowl_core.StructuralContext[{expected_kind.value}]",
+            type(context).__name__,
+        )
+    canonical = context.canonical_bytes()
+    if type(canonical) is not bytes or not canonical:
+        raise _compatibility_error(
+            "structural_context.canonical_bytes",
+            "nonempty exact bytes",
+            type(canonical).__name__,
+        )
+    return DeferredCapturedOntology(
+        view=view,
+        structural_context_kind=context.kind,
+        structural_context_bytes=canonical,
+        core_package_version=versions.package_version,
+        core_api_version=versions.api_version,
+        core_model_schema_version=versions.model_schema_version,
+        core_wire_format_version=versions.wire_format_version,
+        core_adapter_protocol_version=versions.adapter_protocol_version,
+    )
+
+
+def _deferred_capture_eligible(view: OntologyView) -> bool:
+    """Keep nested lazy sources on the eager semantic-attestation path."""
+
+    if isinstance(view, OntologyOverlay):
+        return isinstance(view.base, OntologySnapshot)
+    if isinstance(view, OntologyComposite):
+        return all(
+            isinstance(member.view, OntologySnapshot)
+            for member in view.provenance_tree
+        )
+    return False
+
+
+def materialize_deferred_capture(captured: DeferredCapturedOntology) -> CapturedOntology:
+    """Resolve the eager scalar contract after an encoded capability miss."""
+
+    if not isinstance(captured, DeferredCapturedOntology):
+        raise TypeError("captured must be DeferredCapturedOntology")
+    eager = capture_compatible_view(captured.view)
+    frozen_versions = (
+        captured.core_package_version,
+        captured.core_api_version,
+        captured.core_model_schema_version,
+        captured.core_wire_format_version,
+        captured.core_adapter_protocol_version,
+    )
+    eager_versions = (
+        eager.core_package_version,
+        eager.core_api_version,
+        eager.core_model_schema_version,
+        eager.core_wire_format_version,
+        eager.core_adapter_protocol_version,
+    )
+    if eager_versions != frozen_versions:
+        raise _compatibility_error(
+            "core versions",
+            repr(frozen_versions),
+            repr(eager_versions),
+        )
+    return eager
 
 
 def _require_view_capabilities(capabilities: CoreCapabilities) -> None:
@@ -247,6 +358,46 @@ def compiler_cache_key(
         raise ValueError("compiler_schema must be a positive integer")
     if not isinstance(compatibility_id, str) or not compatibility_id:
         raise ValueError("compatibility_id must be a nonempty string")
+    encoded = _compiler_cache_payload(
+        captured,
+        config,
+        logical_fingerprint=captured.logical_fingerprint.hex,
+        signature_fingerprint=captured.signature_fingerprint.hex,
+        compiler_schema=compiler_schema,
+        compatibility_id=compatibility_id,
+    )
+    return hashlib.sha256(b"pyhermit/compiler-cache/v1\0" + encoded).hexdigest()
+
+
+def deferred_compiler_cache_template(
+    captured: DeferredCapturedOntology,
+    config: ReasonerConfig,
+) -> bytes:
+    """Return Python-canonical JSON with fixed-width native fingerprint slots."""
+
+    if not isinstance(captured, DeferredCapturedOntology):
+        raise TypeError("captured must be DeferredCapturedOntology")
+    if not isinstance(config, ReasonerConfig):
+        raise TypeError("config must be ReasonerConfig")
+    return _compiler_cache_payload(
+        captured,
+        config,
+        logical_fingerprint=_LOGICAL_FINGERPRINT_SENTINEL,
+        signature_fingerprint=_SIGNATURE_FINGERPRINT_SENTINEL,
+        compiler_schema=COMPILER_CACHE_SCHEMA_VERSION,
+        compatibility_id=HERMIT_COMPATIBILITY_ID,
+    )
+
+
+def _compiler_cache_payload(
+    captured: CapturedOntology | DeferredCapturedOntology,
+    config: ReasonerConfig,
+    *,
+    logical_fingerprint: str,
+    signature_fingerprint: str,
+    compiler_schema: int,
+    compatibility_id: str,
+) -> bytes:
     payload = {
         "compatibility_id": compatibility_id,
         "compiler_schema": compiler_schema,
@@ -258,16 +409,15 @@ def compiler_cache_key(
             "package": captured.core_package_version,
             "wire": captured.core_wire_format_version,
         },
-        "logical_fingerprint": captured.logical_fingerprint.hex,
-        "signature_fingerprint": captured.signature_fingerprint.hex,
+        "logical_fingerprint": logical_fingerprint,
+        "signature_fingerprint": signature_fingerprint,
     }
-    encoded = json.dumps(
+    return json.dumps(
         payload,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-    return hashlib.sha256(b"pyhermit/compiler-cache/v1\0" + encoded).hexdigest()
 
 
 def generated_symbol_iri(

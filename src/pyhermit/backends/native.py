@@ -43,12 +43,19 @@ from pyhermit.backends.protocol import (
 )
 from pyhermit.backends.verify import VerifyBackendFactory
 from pyhermit.config import ReasonerConfig, UnsupportedDatatypePolicy
-from pyhermit.core import CapturedOntology, compiler_cache_key, current_core_versions
+from pyhermit.core import (
+    CapturedOntology,
+    DeferredCapturedOntology,
+    compiler_cache_key,
+    current_core_versions,
+)
 from pyhermit.encoded_input import (
     ENCODED_BUFFER_WIDTHS,
     ENCODED_NATIVE_FEATURE,
     ENCODED_SCHEMA_NAME,
     ENCODED_SCHEMA_VERSION,
+    EncodedStructuralLease,
+    _deferred_structural_mode,
     _encoded_profile_contexts,
     _encoded_slice_records,
     negotiate_encoded_input,
@@ -180,6 +187,14 @@ class _InputCodec(Protocol):
         captured: CapturedOntology,
         config: ReasonerConfig,
     ) -> bytes: ...
+
+    def encode_deferred_encoded_session_metadata(
+        self,
+        captured: DeferredCapturedOntology,
+        config: ReasonerConfig,
+        *,
+        structural_mode: str,
+    ) -> tuple[bytes, tuple[int, str, str, bytes, bytes]]: ...
 
     def encode_ontology(self, ontology: CompiledOntology) -> bytes: ...
 
@@ -528,6 +543,7 @@ class NativeBackendFactory:
             Callable[..., object],
             tuple[tuple[object, ...], ...],
             Mapping[str, bool | int],
+            EncodedStructuralLease,
         ]
         | None
     ):
@@ -561,6 +577,7 @@ class NativeBackendFactory:
             constructor,
             _encoded_slice_records(root_slices),
             _encoded_ingestion_counters(lease),
+            lease,
         )
 
     def _create_encoded_session_handoff(
@@ -586,7 +603,7 @@ class NativeBackendFactory:
         request = self._encoded_session_request(view)
         if request is None:
             return None
-        constructor, slices, ingestion_counters = request
+        constructor, slices, ingestion_counters, _lease = request
         codec = _load_input_codec()
         metadata_encoder = getattr(codec, "encode_ontology_metadata", None)
         if not callable(metadata_encoder):
@@ -614,7 +631,7 @@ class NativeBackendFactory:
 
     def _create_encoded_lifecycle_handoff(
         self,
-        captured: CapturedOntology,
+        captured: CapturedOntology | DeferredCapturedOntology,
         config: ReasonerConfig,
         cancellation: CancellationToken,
         *,
@@ -624,8 +641,10 @@ class NativeBackendFactory:
 
         if ENCODED_NATIVE_FEATURE not in self._info.complete_features:
             return None
-        if not isinstance(captured, CapturedOntology):
-            raise TypeError("captured must be CapturedOntology")
+        if not isinstance(captured, (CapturedOntology, DeferredCapturedOntology)):
+            raise TypeError(
+                "captured must be CapturedOntology or DeferredCapturedOntology"
+            )
         if not isinstance(config, ReasonerConfig):
             raise TypeError("config must be ReasonerConfig")
         if not isinstance(cancellation, CancellationToken):
@@ -636,20 +655,40 @@ class NativeBackendFactory:
         request = self._encoded_session_request(captured.view)
         if request is None:
             return None
-        constructor, slices, ingestion_counters = request
+        constructor, slices, ingestion_counters, lease = request
         codec = _load_input_codec()
-        metadata_encoder = getattr(codec, "encode_encoded_session_metadata", None)
-        if not callable(metadata_encoder):
-            raise BackendVersionError(
-                "native encoded-session metadata codec surface is incomplete",
-                context={"reason": "input_codec_invalid"},
+        deferred_request: tuple[int, str, str, bytes, bytes] | None = None
+        if isinstance(captured, DeferredCapturedOntology):
+            metadata_encoder = getattr(
+                codec,
+                "encode_deferred_encoded_session_metadata",
+                None,
             )
-        metadata = metadata_encoder(captured, config)
+            if not callable(metadata_encoder):
+                raise BackendVersionError(
+                    "native deferred-session metadata codec surface is incomplete",
+                    context={"reason": "input_codec_invalid"},
+                )
+            metadata, deferred_request = metadata_encoder(
+                captured,
+                config,
+                structural_mode=_deferred_structural_mode(lease),
+            )
+            expected_fingerprint = None
+        else:
+            metadata_encoder = getattr(codec, "encode_encoded_session_metadata", None)
+            if not callable(metadata_encoder):
+                raise BackendVersionError(
+                    "native encoded-session metadata codec surface is incomplete",
+                    context={"reason": "input_codec_invalid"},
+                )
+            metadata = metadata_encoder(captured, config)
+            expected_fingerprint = compiler_cache_key(captured, config)
         config_wire = codec.encode_config(config)
         _require_bytes(metadata, "encoded ontology metadata")
         _require_bytes(config_wire, "encoded configuration")
         return self._construct_adapter_session(
-            compiler_cache_key(captured, config),
+            expected_fingerprint,
             config,
             cancellation,
             codec,
@@ -659,13 +698,14 @@ class NativeBackendFactory:
                 config=config_wire,
                 cancellation=handle,
                 validate_profile=validate_profile,
+                deferred_fingerprints=deferred_request,
             ),
             ingestion_counters=ingestion_counters,
         )
 
     def _construct_adapter_session(
         self,
-        expected_fingerprint: str,
+        expected_fingerprint: str | None,
         config: ReasonerConfig,
         cancellation: CancellationToken,
         codec: _InputCodec,
@@ -739,7 +779,7 @@ class NativeBackendSession:
         codec: _InputCodec,
         cancellation: CancellationToken,
         observer_id: int,
-        expected_fingerprint: str,
+        expected_fingerprint: str | None,
         progress: ProgressCallback | None,
         ingestion_counters: Mapping[str, bool | int] | None = None,
     ) -> None:
@@ -747,6 +787,27 @@ class NativeBackendSession:
         self._codec = codec
         self._cancellation = cancellation
         self._observer_id = observer_id
+        if expected_fingerprint is None:
+            actual = native.ontology_fingerprint
+            if (
+                type(actual) is not str
+                or len(actual) != 64
+                or actual.lower() != actual
+            ):
+                raise BackendMismatchError(
+                    "native session returned an invalid ontology fingerprint",
+                    context={"reason": "ontology_fingerprint_invalid"},
+                )
+            try:
+                decoded = bytes.fromhex(actual)
+            except ValueError:
+                decoded = b""
+            if len(decoded) != 32:
+                raise BackendMismatchError(
+                    "native session returned an invalid ontology fingerprint",
+                    context={"reason": "ontology_fingerprint_invalid"},
+                )
+            expected_fingerprint = actual
         self._expected_fingerprint = expected_fingerprint
         self._progress = progress
         self._ingestion_counters = MappingProxyType(dict(ingestion_counters or {}))
