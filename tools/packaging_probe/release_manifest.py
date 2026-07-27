@@ -48,6 +48,7 @@ _INSTALLED_WP18_CONTRACT = (
     "{project}/tests/differential/encoded_compiler/test_permanent_program_assembly.py"
     "::test_facade_constructs_encoded_services_without_scalar_service_context"
 )
+_INSTALLED_WP18_FEATURE = "encoded-structural-compiler-v1"
 _MATERIAL_FILES = (
     ".github/workflows/release.yml",
     ".github/workflows/wheels.yml",
@@ -582,10 +583,11 @@ def _build_provenance(
         "build_requirements": build_requirements,
         "installed_native_contracts": [
             {
-                "capability_state": "unadvertised",
+                "capability": _INSTALLED_WP18_FEATURE,
+                "capability_state": "advertised",
                 "command": _INSTALLED_WP18_CONTRACT,
                 "id": "wp18-encoded-public-dispatch-short",
-                "scope": "bounded-correctness-only",
+                "scope": "installed-public-dispatch-short",
             }
         ],
         "minimum_rust": minimum_rust,

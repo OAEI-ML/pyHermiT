@@ -288,10 +288,11 @@ class ReleaseManifestTests(unittest.TestCase):
             provenance["installed_native_contracts"],
             [
                 {
-                    "capability_state": "unadvertised",
+                    "capability": "encoded-structural-compiler-v1",
+                    "capability_state": "advertised",
                     "command": _INSTALLED_WP18_CONTRACT,
                     "id": "wp18-encoded-public-dispatch-short",
-                    "scope": "bounded-correctness-only",
+                    "scope": "installed-public-dispatch-short",
                 }
             ],
         )
