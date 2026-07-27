@@ -8,6 +8,7 @@ import gc
 import mmap
 import os
 import struct
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
@@ -151,6 +152,7 @@ def test_mmap_direct_session_owns_program_after_handoff_release(tmp_path: Path) 
         config=encode_config(config),
         cancellation=native.CancellationHandle(),
     )
+    assert session.encoded_compiler_gil_released is False
     del slices, columns, encoded, captured
     gc.collect()
     mapped.close()
@@ -161,6 +163,101 @@ def test_mmap_direct_session_owns_program_after_handoff_release(tmp_path: Path) 
         assert session.classify_classes()
     finally:
         session.close()
+
+
+def test_exact_bytes_columns_release_the_gil_and_packed_owner_is_released() -> None:
+    encoded, columns = _direct_columns()
+    source = encoded.owner
+    config = ReasonerConfig()
+    captured = capture_compatible_view(source)
+    packed_owner = b"".join(bytes(columns[name]) for name in _SLICE_COLUMN_ORDER)
+    packed_view = memoryview(packed_owner)
+    packed_columns: dict[str, memoryview] = {}
+    cursor = 0
+    for name in _SLICE_COLUMN_ORDER:
+        following = cursor + columns[name].nbytes
+        packed_columns[name] = packed_view[cursor:following]
+        cursor = following
+    packed_view.release()
+    record = _slice_record(packed_columns)
+
+    assert cursor == len(packed_owner)
+    assert all(value.obj is packed_owner for value in packed_columns.values())
+    session = native._create_encoded_session_v1(
+        slices=(record,),
+        metadata=encode_encoded_session_metadata(captured, config),
+        config=encode_config(config),
+        cancellation=native.CancellationHandle(),
+    )
+    assert session.encoded_compiler_gil_released is True
+
+    del record, packed_owner, captured, columns, encoded
+    for value in packed_columns.values():
+        value.release()
+    packed_columns.clear()
+    gc.collect()
+    try:
+        assert decode_check(session.check(None)).satisfiable
+        assert session.classify_classes()
+    finally:
+        session.close()
+
+
+def test_detached_scope_map_compilation_observes_cross_thread_interrupt_and_retries() -> None:
+    encoded, columns = _direct_columns()
+    source = encoded.owner
+    config = ReasonerConfig()
+    captured = capture_compatible_view(source)
+    row_count = 50_000
+    scope_bytes = b"".join(
+        index.to_bytes(32, "big") + (row_count + index).to_bytes(32, "big")
+        for index in range(row_count)
+    )
+    scope_map = memoryview(scope_bytes)
+    record = _slice_record(
+        columns,
+        member_tokens=(b"m" * 32,),
+        anonymous_scope_maps=(scope_map,),
+    )
+    cancellation = native.CancellationHandle()
+
+    def interrupt_after_detached_poll() -> bool:
+        deadline = time.monotonic() + 10.0
+        while cancellation._debug_poll_count == 0:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.000_1)
+        return cancellation.interrupt("cancel detached encoded scope compilation")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        interrupted = executor.submit(interrupt_after_detached_poll)
+        with pytest.raises(
+            ReasonerInterruptedError,
+            match="cancel detached encoded scope compilation",
+        ):
+            native._create_encoded_session_v1(
+                slices=(record,),
+                metadata=encode_encoded_session_metadata(captured, config),
+                config=encode_config(config),
+                cancellation=cancellation,
+            )
+        assert interrupted.result(timeout=10.0)
+
+    cancellation.reset()
+    retry = native._create_encoded_session_v1(
+        slices=(record,),
+        metadata=encode_encoded_session_metadata(captured, config),
+        config=encode_config(config),
+        cancellation=cancellation,
+    )
+    assert retry.encoded_compiler_gil_released is True
+    scope_map.release()
+    del record, scope_bytes, captured, columns, encoded
+    gc.collect()
+    try:
+        assert decode_check(retry.check(None)).satisfiable
+    finally:
+        retry.close()
 
 
 def test_contextual_multi_slice_call_releases_every_borrow_after_return() -> None:

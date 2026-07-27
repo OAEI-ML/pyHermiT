@@ -148,6 +148,9 @@ class _ExtensionSession(Protocol):
     @property
     def compiler_digest(self) -> str | None: ...
 
+    @property
+    def encoded_compiler_gil_released(self) -> bool: ...
+
     def check(self, query: bytes | None) -> bytes: ...
 
     def _encoded_service_context_v1(self) -> bytes: ...
@@ -684,6 +687,17 @@ class NativeBackendFactory:
             cancellation.check()
             native_value = invoke(handle_value)
             native = _require_native_session(native_value)
+            counters = dict(ingestion_counters or {})
+            if ingestion_counters is not None:
+                gil_released = native.encoded_compiler_gil_released
+                if type(gil_released) is not bool:
+                    raise BackendVersionError(
+                        "native encoded session returned an invalid compiler ownership receipt",
+                        context={"reason": "session_surface_invalid"},
+                    )
+                counters["encoded_compiler_gil_released"] = gil_released
+                if not gil_released:
+                    counters["encoded_detached_buffer_count"] = 0
             adapter = NativeBackendSession(
                 native,
                 codec,
@@ -691,7 +705,7 @@ class NativeBackendFactory:
                 observer_id,
                 expected_fingerprint,
                 config.progress,
-                ingestion_counters,
+                counters,
             )
             cancellation.check()
             return adapter

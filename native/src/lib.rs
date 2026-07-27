@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyInt, PyMemoryView, PySequence, PyString, PyTuple};
+use pyo3::types::{PyBytes, PyInt, PyMemoryView, PySequence, PySlice, PyString, PyTuple};
 
 pub use cancel::{CancellationHandle, CancellationState};
 use error::{ErrorKind, NativeError, NativeResult};
@@ -94,6 +94,76 @@ impl encoded::ByteSource for BorrowedPyBytes<'_, '_> {
     fn byte(self, index: usize) -> Option<u8> {
         self.view.get_item(index).ok()?.extract().ok()
     }
+}
+
+struct BorrowedPyBufferLease<'py> {
+    view: Bound<'py, PyAny>,
+    len: usize,
+}
+
+impl<'py> BorrowedPyBufferLease<'py> {
+    const fn source(&self) -> BorrowedPyBytes<'_, 'py> {
+        BorrowedPyBytes {
+            view: &self.view,
+            len: self.len,
+        }
+    }
+}
+
+struct RetainedPyByteRange<'py> {
+    owner: Bound<'py, PyBytes>,
+    start: usize,
+    end: usize,
+}
+
+impl RetainedPyByteRange<'_> {
+    fn source(&self) -> &[u8] {
+        &self.owner.as_bytes()[self.start..self.end]
+    }
+}
+
+struct BorrowedEncodedSliceLease<'py> {
+    posting_mode: u8,
+    postings: BorrowedPyBufferLease<'py>,
+    context_bytes: usize,
+    scope_maps: Vec<BorrowedPyBufferLease<'py>>,
+    root_kinds: BorrowedPyBufferLease<'py>,
+    root_ids: BorrowedPyBufferLease<'py>,
+    node_tags: BorrowedPyBufferLease<'py>,
+    node_field_offsets: BorrowedPyBufferLease<'py>,
+    field_kinds: BorrowedPyBufferLease<'py>,
+    field_values: BorrowedPyBufferLease<'py>,
+    field_lengths: BorrowedPyBufferLease<'py>,
+    item_kinds: BorrowedPyBufferLease<'py>,
+    item_values: BorrowedPyBufferLease<'py>,
+    item_lengths: BorrowedPyBufferLease<'py>,
+    scalar_bytes: BorrowedPyBufferLease<'py>,
+}
+
+struct RetainedEncodedSliceLease<'py> {
+    posting_mode: u8,
+    postings: RetainedPyByteRange<'py>,
+    context_bytes: usize,
+    scope_maps: Vec<RetainedPyByteRange<'py>>,
+    root_kinds: RetainedPyByteRange<'py>,
+    root_ids: RetainedPyByteRange<'py>,
+    node_tags: RetainedPyByteRange<'py>,
+    node_field_offsets: RetainedPyByteRange<'py>,
+    field_kinds: RetainedPyByteRange<'py>,
+    field_values: RetainedPyByteRange<'py>,
+    field_lengths: RetainedPyByteRange<'py>,
+    item_kinds: RetainedPyByteRange<'py>,
+    item_values: RetainedPyByteRange<'py>,
+    item_lengths: RetainedPyByteRange<'py>,
+    scalar_bytes: RetainedPyByteRange<'py>,
+}
+
+struct EncodedSliceInput<B: encoded::ByteSource> {
+    posting_mode: u8,
+    postings: B,
+    context_bytes: usize,
+    scope_maps: Vec<B>,
+    columns: encoded::EncodedColumns<B>,
 }
 
 struct SessionOwned {
@@ -199,6 +269,7 @@ impl Drop for BusyGuard<'_> {
 struct NativeSession {
     control: Arc<SessionControl>,
     compiler_digest: Option<[u8; 32]>,
+    encoded_compiler_gil_released: bool,
 }
 
 #[pymethods]
@@ -221,6 +292,13 @@ impl NativeSession {
     fn compiler_digest(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.control
             .run(|_owned| Ok(self.compiler_digest.map(|value| hex_digest(&value))))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    #[getter]
+    fn encoded_compiler_gil_released(&self, py: Python<'_>) -> PyResult<bool> {
+        self.control
+            .run(|_owned| Ok(self.encoded_compiler_gil_released))
             .map_err(|error| error.into_pyerr(py))
     }
 
@@ -577,6 +655,398 @@ fn borrowed_py_bytes<'a, 'py>(
         return Err(invalid("has inconsistent byte-length metadata"));
     }
     Ok(BorrowedPyBytes { view: buffer, len })
+}
+
+fn borrowed_py_buffer_lease<'py>(
+    buffer: Bound<'py, PyAny>,
+    name: &str,
+) -> NativeResult<BorrowedPyBufferLease<'py>> {
+    let len = borrowed_py_bytes(&buffer, name)?.len;
+    Ok(BorrowedPyBufferLease { view: buffer, len })
+}
+
+fn tuple_buffer_lease<'py>(
+    record: &Bound<'py, PyTuple>,
+    index: usize,
+    name: &'static str,
+) -> NativeResult<BorrowedPyBufferLease<'py>> {
+    borrowed_py_buffer_lease(tuple_item(record, index, name)?, name)
+}
+
+fn prepare_borrowed_encoded_slices<'py>(
+    slices: &Bound<'py, PyAny>,
+) -> NativeResult<Vec<BorrowedEncodedSliceLease<'py>>> {
+    if !slices.is_exact_instance_of::<PyTuple>() {
+        return Err(encoded_slice_invalid(
+            "encoded slice program is not an exact tuple",
+        ));
+    }
+    let slices = slices
+        .cast::<PyTuple>()
+        .map_err(|_| encoded_slice_invalid("encoded slice program changed type"))?;
+    let max_slices = encoded::named_classes::NamedClassPhaseLimits::default().max_slices;
+    if slices.is_empty() {
+        return Err(encoded_slice_invalid(
+            "encoded slice program requires at least one slice",
+        ));
+    }
+    if slices.len() > max_slices {
+        return Err(encoded_validation_error(
+            encoded::EncodedValidationError::resource(
+                "encoded slice program exceeds its slice limit",
+            ),
+        ));
+    }
+    let mut prepared = Vec::new();
+    prepared.try_reserve_exact(slices.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded slice lease allocation failed",
+        ))
+    })?;
+    for slice_index in 0..slices.len() {
+        let record = tuple_item(slices, slice_index, "record")?;
+        if !record.is_exact_instance_of::<PyTuple>() {
+            return Err(encoded_slice_invalid(
+                "encoded slice record is not an exact tuple",
+            ));
+        }
+        let record = record
+            .cast::<PyTuple>()
+            .map_err(|_| encoded_slice_invalid("encoded slice record changed type"))?;
+        if record.len() != ENCODED_SLICE_RECORD_LEN {
+            return Err(encoded_slice_invalid(
+                "encoded slice record has the wrong field count",
+            ));
+        }
+        let context_bytes = validate_encoded_slice_context(record)?;
+        let posting_mode = tuple_item(record, 0, "posting mode")?;
+        if !posting_mode.is_exact_instance_of::<PyInt>() {
+            return Err(encoded_slice_invalid(
+                "encoded slice posting mode is not an exact integer",
+            ));
+        }
+        let posting_mode = posting_mode
+            .extract::<u8>()
+            .map_err(|_| encoded_slice_invalid("encoded slice posting mode is outside u8"))?;
+        let scope_values = tuple_item(record, 3, "anonymous scope maps")?;
+        let scope_values = scope_values.cast::<PyTuple>().map_err(|_| {
+            encoded_slice_invalid("encoded slice anonymous scope maps changed type")
+        })?;
+        let mut scope_maps = Vec::new();
+        scope_maps
+            .try_reserve_exact(scope_values.len())
+            .map_err(|_| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded anonymous-scope lease allocation failed",
+                ))
+            })?;
+        for index in 0..scope_values.len() {
+            scope_maps.push(borrowed_py_buffer_lease(
+                tuple_item(scope_values, index, "anonymous scope map")?,
+                "anonymous scope map",
+            )?);
+        }
+        prepared.push(BorrowedEncodedSliceLease {
+            posting_mode,
+            postings: tuple_buffer_lease(record, 1, "root postings")?,
+            context_bytes,
+            scope_maps,
+            root_kinds: tuple_buffer_lease(record, 4, "root_kinds")?,
+            root_ids: tuple_buffer_lease(record, 5, "root_ids")?,
+            node_tags: tuple_buffer_lease(record, 6, "node_tags")?,
+            node_field_offsets: tuple_buffer_lease(record, 7, "node_field_offsets")?,
+            field_kinds: tuple_buffer_lease(record, 8, "field_kinds")?,
+            field_values: tuple_buffer_lease(record, 9, "field_values")?,
+            field_lengths: tuple_buffer_lease(record, 10, "field_lengths")?,
+            item_kinds: tuple_buffer_lease(record, 11, "item_kinds")?,
+            item_values: tuple_buffer_lease(record, 12, "item_values")?,
+            item_lengths: tuple_buffer_lease(record, 13, "item_lengths")?,
+            scalar_bytes: tuple_buffer_lease(record, 14, "scalar_bytes")?,
+        });
+    }
+    Ok(prepared)
+}
+
+fn exact_pybytes_owner<'py>(
+    buffer: &BorrowedPyBufferLease<'py>,
+) -> NativeResult<Option<Bound<'py, PyBytes>>> {
+    let owner = buffer
+        .view
+        .getattr("obj")
+        .map_err(|_| encoded_slice_invalid("encoded memoryview owner is unreadable"))?;
+    if !owner.is_exact_instance_of::<PyBytes>() {
+        return Ok(None);
+    }
+    owner
+        .cast_into::<PyBytes>()
+        .map(Some)
+        .map_err(|_| encoded_slice_invalid("encoded memoryview bytes owner changed type"))
+}
+
+fn memoryview_matches_pybytes_range(
+    buffer: &BorrowedPyBufferLease<'_>,
+    owner: &Bound<'_, PyBytes>,
+    start: usize,
+    end: usize,
+) -> NativeResult<bool> {
+    let start = isize::try_from(start)
+        .map_err(|_| encoded_slice_invalid("encoded retained range start exceeds isize"))?;
+    let end = isize::try_from(end)
+        .map_err(|_| encoded_slice_invalid("encoded retained range end exceeds isize"))?;
+    let owner_view = PyMemoryView::from(owner.as_any())
+        .map_err(|_| encoded_slice_invalid("encoded bytes owner cannot provide a memoryview"))?;
+    let expected = owner_view
+        .get_item(PySlice::new(owner.py(), start, end, 1))
+        .map_err(|_| encoded_slice_invalid("encoded retained range is unreadable"))?;
+    buffer
+        .view
+        .eq(expected)
+        .map_err(|_| encoded_slice_invalid("encoded retained range comparison failed"))
+}
+
+fn retain_individual_pybytes_range<'py>(
+    buffer: &BorrowedPyBufferLease<'py>,
+) -> NativeResult<Option<RetainedPyByteRange<'py>>> {
+    let Some(owner) = exact_pybytes_owner(buffer)? else {
+        return Ok(None);
+    };
+    if owner.as_bytes().len() != buffer.len
+        || !memoryview_matches_pybytes_range(buffer, &owner, 0, buffer.len)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(RetainedPyByteRange {
+        owner,
+        start: 0,
+        end: buffer.len,
+    }))
+}
+
+fn retain_encoded_column_ranges<'py>(
+    buffers: [&BorrowedPyBufferLease<'py>; 11],
+) -> NativeResult<Option<[RetainedPyByteRange<'py>; 11]>> {
+    let mut owners = Vec::new();
+    owners.try_reserve_exact(buffers.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded retained-owner allocation failed",
+        ))
+    })?;
+    for buffer in buffers {
+        let Some(owner) = exact_pybytes_owner(buffer)? else {
+            return Ok(None);
+        };
+        owners.push(owner);
+    }
+
+    if owners
+        .iter()
+        .zip(buffers)
+        .all(|(owner, buffer)| owner.as_bytes().len() == buffer.len)
+    {
+        let mut ranges = Vec::new();
+        ranges.try_reserve_exact(buffers.len()).map_err(|_| {
+            encoded_validation_error(encoded::EncodedValidationError::resource(
+                "encoded retained-range allocation failed",
+            ))
+        })?;
+        for (owner, buffer) in owners.into_iter().zip(buffers) {
+            if !memoryview_matches_pybytes_range(buffer, &owner, 0, buffer.len)? {
+                return Ok(None);
+            }
+            ranges.push(RetainedPyByteRange {
+                owner,
+                start: 0,
+                end: buffer.len,
+            });
+        }
+        return ranges
+            .try_into()
+            .map(Some)
+            .map_err(|_| NativeError::invariant("encoded retained column count changed"));
+    }
+
+    let first = &owners[0];
+    if !owners.iter().all(|owner| owner.as_any().is(first.as_any())) {
+        return Ok(None);
+    }
+    let total = buffers.iter().try_fold(0_usize, |sum, buffer| {
+        sum.checked_add(buffer.len)
+            .ok_or_else(|| encoded_slice_invalid("encoded retained column bytes overflowed"))
+    })?;
+    if first.as_bytes().len() != total {
+        return Ok(None);
+    }
+    let mut ranges = Vec::new();
+    ranges.try_reserve_exact(buffers.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded retained-range allocation failed",
+        ))
+    })?;
+    let mut start = 0_usize;
+    for (owner, buffer) in owners.into_iter().zip(buffers) {
+        let end = start
+            .checked_add(buffer.len)
+            .ok_or_else(|| encoded_slice_invalid("encoded retained range overflowed"))?;
+        if !memoryview_matches_pybytes_range(buffer, &owner, start, end)? {
+            return Ok(None);
+        }
+        ranges.push(RetainedPyByteRange { owner, start, end });
+        start = end;
+    }
+    ranges
+        .try_into()
+        .map(Some)
+        .map_err(|_| NativeError::invariant("encoded retained column count changed"))
+}
+
+fn retain_encoded_slice_leases<'py>(
+    slices: &[BorrowedEncodedSliceLease<'py>],
+) -> NativeResult<Option<Vec<RetainedEncodedSliceLease<'py>>>> {
+    let mut retained = Vec::new();
+    retained.try_reserve_exact(slices.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded retained-slice allocation failed",
+        ))
+    })?;
+    for slice in slices {
+        let Some(postings) = retain_individual_pybytes_range(&slice.postings)? else {
+            return Ok(None);
+        };
+        let mut scope_maps = Vec::new();
+        scope_maps
+            .try_reserve_exact(slice.scope_maps.len())
+            .map_err(|_| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded retained anonymous-scope allocation failed",
+                ))
+            })?;
+        for scope_map in &slice.scope_maps {
+            let Some(scope_map) = retain_individual_pybytes_range(scope_map)? else {
+                return Ok(None);
+            };
+            scope_maps.push(scope_map);
+        }
+        let Some(
+            [root_kinds, root_ids, node_tags, node_field_offsets, field_kinds, field_values, field_lengths, item_kinds, item_values, item_lengths, scalar_bytes],
+        ) = retain_encoded_column_ranges([
+            &slice.root_kinds,
+            &slice.root_ids,
+            &slice.node_tags,
+            &slice.node_field_offsets,
+            &slice.field_kinds,
+            &slice.field_values,
+            &slice.field_lengths,
+            &slice.item_kinds,
+            &slice.item_values,
+            &slice.item_lengths,
+            &slice.scalar_bytes,
+        ])?
+        else {
+            return Ok(None);
+        };
+        retained.push(RetainedEncodedSliceLease {
+            posting_mode: slice.posting_mode,
+            postings,
+            context_bytes: slice.context_bytes,
+            scope_maps,
+            root_kinds,
+            root_ids,
+            node_tags,
+            node_field_offsets,
+            field_kinds,
+            field_values,
+            field_lengths,
+            item_kinds,
+            item_values,
+            item_lengths,
+            scalar_bytes,
+        });
+    }
+    Ok(Some(retained))
+}
+
+fn borrowed_encoded_slice_inputs<'a, 'py>(
+    slices: &'a [BorrowedEncodedSliceLease<'py>],
+) -> NativeResult<Vec<EncodedSliceInput<BorrowedPyBytes<'a, 'py>>>> {
+    let mut inputs = Vec::new();
+    inputs.try_reserve_exact(slices.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded borrowed-input allocation failed",
+        ))
+    })?;
+    for slice in slices {
+        let mut scope_maps = Vec::new();
+        scope_maps
+            .try_reserve_exact(slice.scope_maps.len())
+            .map_err(|_| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded borrowed scope-input allocation failed",
+                ))
+            })?;
+        scope_maps.extend(slice.scope_maps.iter().map(BorrowedPyBufferLease::source));
+        inputs.push(EncodedSliceInput {
+            posting_mode: slice.posting_mode,
+            postings: slice.postings.source(),
+            context_bytes: slice.context_bytes,
+            scope_maps,
+            columns: encoded::EncodedColumns {
+                root_kinds: slice.root_kinds.source(),
+                root_ids: slice.root_ids.source(),
+                node_tags: slice.node_tags.source(),
+                node_field_offsets: slice.node_field_offsets.source(),
+                field_kinds: slice.field_kinds.source(),
+                field_values: slice.field_values.source(),
+                field_lengths: slice.field_lengths.source(),
+                item_kinds: slice.item_kinds.source(),
+                item_values: slice.item_values.source(),
+                item_lengths: slice.item_lengths.source(),
+                scalar_bytes: slice.scalar_bytes.source(),
+            },
+        });
+    }
+    Ok(inputs)
+}
+
+fn retained_encoded_slice_inputs<'a>(
+    slices: &'a [RetainedEncodedSliceLease<'_>],
+) -> NativeResult<Vec<EncodedSliceInput<&'a [u8]>>> {
+    let mut inputs = Vec::new();
+    inputs.try_reserve_exact(slices.len()).map_err(|_| {
+        encoded_validation_error(encoded::EncodedValidationError::resource(
+            "encoded retained-input allocation failed",
+        ))
+    })?;
+    for slice in slices {
+        let mut scope_maps = Vec::new();
+        scope_maps
+            .try_reserve_exact(slice.scope_maps.len())
+            .map_err(|_| {
+                encoded_validation_error(encoded::EncodedValidationError::resource(
+                    "encoded retained scope-input allocation failed",
+                ))
+            })?;
+        scope_maps.extend(slice.scope_maps.iter().map(RetainedPyByteRange::source));
+        inputs.push(EncodedSliceInput {
+            posting_mode: slice.posting_mode,
+            postings: slice.postings.source(),
+            context_bytes: slice.context_bytes,
+            scope_maps,
+            columns: encoded::EncodedColumns {
+                root_kinds: slice.root_kinds.source(),
+                root_ids: slice.root_ids.source(),
+                node_tags: slice.node_tags.source(),
+                node_field_offsets: slice.node_field_offsets.source(),
+                field_kinds: slice.field_kinds.source(),
+                field_values: slice.field_values.source(),
+                field_lengths: slice.field_lengths.source(),
+                item_kinds: slice.item_kinds.source(),
+                item_values: slice.item_values.source(),
+                item_lengths: slice.item_lengths.source(),
+                scalar_bytes: slice.scalar_bytes.source(),
+            },
+        });
+    }
+    Ok(inputs)
 }
 
 fn encoded_logical_fingerprint(value: &Bound<'_, PyAny>) -> NativeResult<[u8; 32]> {
@@ -1534,7 +2004,6 @@ fn validate_encoded_slice_context(record: &Bound<'_, PyTuple>) -> NativeResult<u
     for index in 0..scope_maps.len() {
         let value = tuple_item(scope_maps, index, "anonymous scope map")?;
         let scope_map = borrowed_py_bytes(&value, "anonymous scope map")?;
-        validate_encoded_scope_map(scope_map)?;
         context_bytes = context_bytes
             .checked_add(scope_map.len)
             .ok_or_else(|| encoded_slice_invalid("encoded slice context byte count overflowed"))?;
@@ -1570,14 +2039,10 @@ fn validate_encoded_scope_map<S: encoded::ByteSource>(scope_map: S) -> NativeRes
     Ok(())
 }
 
-fn decode_encoded_scope_maps(
-    record: &Bound<'_, PyTuple>,
+fn decode_encoded_scope_maps<S: encoded::ByteSource>(
+    scope_maps: &[S],
     max_owned_bytes: usize,
 ) -> NativeResult<(Vec<encoded::role_characteristics::AnonymousScopeMap>, usize)> {
-    let scope_maps = tuple_item(record, 3, "anonymous scope maps")?;
-    let scope_maps = scope_maps
-        .cast::<PyTuple>()
-        .map_err(|_| encoded_slice_invalid("encoded slice anonymous scope maps changed type"))?;
     let outer_bytes = scope_maps
         .len()
         .checked_mul(std::mem::size_of::<
@@ -1585,11 +2050,10 @@ fn decode_encoded_scope_maps(
         >())
         .ok_or_else(|| encoded_slice_invalid("anonymous-scope map allocation overflowed"))?;
     let mut owned_bytes = outer_bytes;
-    for index in 0..scope_maps.len() {
-        let value = tuple_item(scope_maps, index, "anonymous scope map")?;
-        let scope_map = borrowed_py_bytes(&value, "anonymous scope map")?;
+    for scope_map in scope_maps {
+        validate_encoded_scope_map(*scope_map)?;
         owned_bytes = owned_bytes
-            .checked_add(scope_map.len)
+            .checked_add(scope_map.len())
             .ok_or_else(|| encoded_slice_invalid("anonymous-scope map bytes overflowed"))?;
     }
     if owned_bytes > max_owned_bytes {
@@ -1605,24 +2069,24 @@ fn decode_encoded_scope_maps(
             "anonymous-scope map collection allocation failed",
         ))
     })?;
-    for index in 0..scope_maps.len() {
-        let value = tuple_item(scope_maps, index, "anonymous scope map")?;
-        let scope_map = borrowed_py_bytes(&value, "anonymous scope map")?;
-        let row_count = scope_map.len / 64;
+    for scope_map in scope_maps {
+        let row_count = scope_map.len() / 64;
         let mut rows = Vec::new();
         rows.try_reserve_exact(row_count).map_err(|_| {
             encoded_validation_error(encoded::EncodedValidationError::resource(
                 "anonymous-scope replacement allocation failed",
             ))
         })?;
-        for offset in (0..scope_map.len).step_by(64) {
+        for offset in (0..scope_map.len()).step_by(64) {
             let mut source = [0_u8; 32];
             let mut target = [0_u8; 32];
             for byte_index in 0..32 {
-                source[byte_index] = encoded::ByteSource::byte(scope_map, offset + byte_index)
+                source[byte_index] = encoded::ByteSource::byte(*scope_map, offset + byte_index)
                     .ok_or_else(|| encoded_slice_invalid("anonymous scope source disappeared"))?;
-                target[byte_index] = encoded::ByteSource::byte(scope_map, offset + 32 + byte_index)
-                    .ok_or_else(|| encoded_slice_invalid("anonymous scope target disappeared"))?;
+                target[byte_index] =
+                    encoded::ByteSource::byte(*scope_map, offset + 32 + byte_index).ok_or_else(
+                        || encoded_slice_invalid("anonymous scope target disappeared"),
+                    )?;
             }
             rows.push(encoded::role_characteristics::AnonymousScopeReplacement { source, target });
         }
@@ -1631,8 +2095,8 @@ fn decode_encoded_scope_maps(
     Ok((decoded, owned_bytes))
 }
 
-fn compile_encoded_slice_symbol_phases(
-    slices: &Bound<'_, PyTuple>,
+fn compile_encoded_slice_symbol_phases<B: encoded::ByteSource>(
+    slices: &[EncodedSliceInput<B>],
     limits: encoded::named_classes::NamedClassPhaseLimits,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<Vec<encoded::symbols::SymbolPhase>> {
@@ -1651,23 +2115,12 @@ fn compile_encoded_slice_symbol_phases(
     let mut source_work = 0_u64;
     let mut source_owned = 0_usize;
     let mut context_bytes = 0_usize;
-    for slice_index in 0..slices.len() {
-        let record = tuple_item(slices, slice_index, "record")?;
-        if !record.is_exact_instance_of::<PyTuple>() {
-            return Err(encoded_slice_invalid(
-                "encoded slice record is not an exact tuple",
-            ));
-        }
-        let record = record
-            .cast::<PyTuple>()
-            .map_err(|_| encoded_slice_invalid("encoded slice record changed type"))?;
-        if record.len() != ENCODED_SLICE_RECORD_LEN {
-            return Err(encoded_slice_invalid(
-                "encoded slice record has the wrong field count",
-            ));
+    for slice in slices {
+        for scope_map in &slice.scope_maps {
+            validate_encoded_scope_map(*scope_map)?;
         }
         context_bytes = context_bytes
-            .checked_add(validate_encoded_slice_context(record)?)
+            .checked_add(slice.context_bytes)
             .ok_or_else(|| encoded_slice_invalid("encoded slice context bytes overflowed"))?;
         if context_bytes > limits.max_owned_bytes {
             return Err(encoded_validation_error(
@@ -1676,43 +2129,9 @@ fn compile_encoded_slice_symbol_phases(
                 ),
             ));
         }
-        let posting_mode = tuple_item(record, 0, "posting mode")?;
-        if !posting_mode.is_exact_instance_of::<PyInt>() {
-            return Err(encoded_slice_invalid(
-                "encoded slice posting mode is not an exact integer",
-            ));
-        }
-        let posting_mode = posting_mode
-            .extract::<u8>()
-            .map_err(|_| encoded_slice_invalid("encoded slice posting mode is outside u8"))?;
-        let postings = tuple_item(record, 1, "postings")?;
-        let postings = borrowed_py_bytes(&postings, "root postings")?;
-        let root_kinds = tuple_item(record, 4, "root_kinds")?;
-        let root_ids = tuple_item(record, 5, "root_ids")?;
-        let node_tags = tuple_item(record, 6, "node_tags")?;
-        let node_field_offsets = tuple_item(record, 7, "node_field_offsets")?;
-        let field_kinds = tuple_item(record, 8, "field_kinds")?;
-        let field_values = tuple_item(record, 9, "field_values")?;
-        let field_lengths = tuple_item(record, 10, "field_lengths")?;
-        let item_kinds = tuple_item(record, 11, "item_kinds")?;
-        let item_values = tuple_item(record, 12, "item_values")?;
-        let item_lengths = tuple_item(record, 13, "item_lengths")?;
-        let scalar_bytes = tuple_item(record, 14, "scalar_bytes")?;
-        let columns = borrowed_encoded_columns(
-            &root_kinds,
-            &root_ids,
-            &node_tags,
-            &node_field_offsets,
-            &field_kinds,
-            &field_values,
-            &field_lengths,
-            &item_kinds,
-            &item_values,
-            &item_lengths,
-            &scalar_bytes,
-        )?;
-        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
-            .map_err(encoded_validation_error)?;
+        let model =
+            encoded::model::ValidatedModel::new(slice.columns, encoded::EncodedLimits::default())
+                .map_err(encoded_validation_error)?;
         let symbol_limits = encoded::symbols::SymbolPhaseLimits {
             max_owned_bytes: limits
                 .max_owned_bytes
@@ -1732,8 +2151,8 @@ fn compile_encoded_slice_symbol_phases(
         let (phase, catalog) = encoded::symbols::compile_symbol_phase_selected_with_catalog(
             &model,
             symbol_limits,
-            posting_mode,
-            postings,
+            slice.posting_mode,
+            slice.postings,
         )
         .map_err(encoded_validation_error)?;
         source_work = source_work.checked_add(phase.work).ok_or_else(|| {
@@ -1791,14 +2210,16 @@ fn compile_encoded_slice_program_controlled(
     definition_namespace: Option<[u8; 32]>,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<encoded::permanent_program::EncodedSliceProgram> {
-    if !slices.is_exact_instance_of::<PyTuple>() {
-        return Err(encoded_slice_invalid(
-            "encoded slice program is not an exact tuple",
-        ));
-    }
-    let slices = slices
-        .cast::<PyTuple>()
-        .map_err(|_| encoded_slice_invalid("encoded slice program changed type"))?;
+    let leases = prepare_borrowed_encoded_slices(slices)?;
+    let inputs = borrowed_encoded_slice_inputs(&leases)?;
+    compile_encoded_slice_program_inputs_controlled(&inputs, definition_namespace, poll)
+}
+
+fn compile_encoded_slice_program_inputs_controlled<B: encoded::ByteSource>(
+    slices: &[EncodedSliceInput<B>],
+    definition_namespace: Option<[u8; 32]>,
+    poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
+) -> NativeResult<encoded::permanent_program::EncodedSliceProgram> {
     let limits = encoded::named_classes::NamedClassPhaseLimits::default();
     if slices.is_empty() {
         return Err(encoded_slice_invalid(
@@ -1871,47 +2292,10 @@ fn compile_encoded_slice_program_controlled(
         })?;
     let mut source_work = 0_u64;
     let mut source_owned = 0_usize;
-    for slice_index in 0..slices.len() {
-        let record = tuple_item(slices, slice_index, "record")?;
-        if !record.is_exact_instance_of::<PyTuple>() {
-            return Err(encoded_slice_invalid(
-                "encoded slice record is not an exact tuple",
-            ));
-        }
-        let record = record
-            .cast::<PyTuple>()
-            .map_err(|_| encoded_slice_invalid("encoded slice record changed type"))?;
-        if record.len() != ENCODED_SLICE_RECORD_LEN {
-            return Err(encoded_slice_invalid(
-                "encoded slice record has the wrong field count",
-            ));
-        }
-        let root_kinds = tuple_item(record, 4, "root_kinds")?;
-        let root_ids = tuple_item(record, 5, "root_ids")?;
-        let node_tags = tuple_item(record, 6, "node_tags")?;
-        let node_field_offsets = tuple_item(record, 7, "node_field_offsets")?;
-        let field_kinds = tuple_item(record, 8, "field_kinds")?;
-        let field_values = tuple_item(record, 9, "field_values")?;
-        let field_lengths = tuple_item(record, 10, "field_lengths")?;
-        let item_kinds = tuple_item(record, 11, "item_kinds")?;
-        let item_values = tuple_item(record, 12, "item_values")?;
-        let item_lengths = tuple_item(record, 13, "item_lengths")?;
-        let scalar_bytes = tuple_item(record, 14, "scalar_bytes")?;
-        let columns = borrowed_encoded_columns(
-            &root_kinds,
-            &root_ids,
-            &node_tags,
-            &node_field_offsets,
-            &field_kinds,
-            &field_values,
-            &field_lengths,
-            &item_kinds,
-            &item_values,
-            &item_lengths,
-            &scalar_bytes,
-        )?;
-        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
-            .map_err(encoded_validation_error)?;
+    for slice in slices {
+        let model =
+            encoded::model::ValidatedModel::new(slice.columns, encoded::EncodedLimits::default())
+                .map_err(encoded_validation_error)?;
         let symbols = symbol_phases.next().ok_or_else(|| {
             NativeError::new(
                 ErrorKind::Invariant,
@@ -2170,7 +2554,7 @@ fn compile_encoded_slice_program_controlled(
         });
         let (scope_maps, scope_map_owned) =
             if has_role_characteristics || has_named_axiom_provenance {
-                decode_encoded_scope_maps(record, remaining_after_complex_owned)?
+                decode_encoded_scope_maps(&slice.scope_maps, remaining_after_complex_owned)?
             } else {
                 (Vec::new(), 0)
             };
@@ -3011,14 +3395,16 @@ fn compile_encoded_profile_slices_controlled(
     unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<encoded::profile::ProfilePhase> {
-    if !slices.is_exact_instance_of::<PyTuple>() {
-        return Err(encoded_slice_invalid(
-            "encoded profile slice program is not an exact tuple",
-        ));
-    }
-    let slices = slices
-        .cast::<PyTuple>()
-        .map_err(|_| encoded_slice_invalid("encoded profile slice program changed type"))?;
+    let leases = prepare_borrowed_encoded_slices(slices)?;
+    let inputs = borrowed_encoded_slice_inputs(&leases)?;
+    compile_encoded_profile_slice_inputs_controlled(&inputs, unsupported_datatypes, poll)
+}
+
+fn compile_encoded_profile_slice_inputs_controlled<B: encoded::ByteSource>(
+    slices: &[EncodedSliceInput<B>],
+    unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
+    poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
+) -> NativeResult<encoded::profile::ProfilePhase> {
     let limits = encoded::profile::ProfilePhaseLimits::default();
     if slices.is_empty() {
         return Err(encoded_slice_invalid(
@@ -3042,23 +3428,9 @@ fn compile_encoded_profile_slices_controlled(
     let mut source_work = 0_u64;
     let mut source_owned = 0_usize;
     let mut context_bytes = 0_usize;
-    for slice_index in 0..slices.len() {
-        let record = tuple_item(slices, slice_index, "profile record")?;
-        if !record.is_exact_instance_of::<PyTuple>() {
-            return Err(encoded_slice_invalid(
-                "encoded profile slice record is not an exact tuple",
-            ));
-        }
-        let record = record
-            .cast::<PyTuple>()
-            .map_err(|_| encoded_slice_invalid("encoded profile slice record changed type"))?;
-        if record.len() != ENCODED_SLICE_RECORD_LEN {
-            return Err(encoded_slice_invalid(
-                "encoded profile slice record has the wrong field count",
-            ));
-        }
+    for slice in slices {
         context_bytes = context_bytes
-            .checked_add(validate_encoded_slice_context(record)?)
+            .checked_add(slice.context_bytes)
             .ok_or_else(|| encoded_slice_invalid("encoded profile slice context overflowed"))?;
         if context_bytes > limits.max_owned_bytes {
             return Err(encoded_validation_error(
@@ -3068,17 +3440,6 @@ fn compile_encoded_profile_slices_controlled(
             ));
         }
 
-        let posting_mode = tuple_item(record, 0, "profile posting mode")?;
-        if !posting_mode.is_exact_instance_of::<PyInt>() {
-            return Err(encoded_slice_invalid(
-                "encoded profile slice posting mode is not an exact integer",
-            ));
-        }
-        let posting_mode = posting_mode.extract::<u8>().map_err(|_| {
-            encoded_slice_invalid("encoded profile slice posting mode is outside u8")
-        })?;
-        let postings = tuple_item(record, 1, "profile postings")?;
-        let postings = borrowed_py_bytes(&postings, "profile root postings")?;
         let remaining_before_scope = limits
             .max_owned_bytes
             .checked_sub(source_owned)
@@ -3087,7 +3448,8 @@ fn compile_encoded_profile_slices_controlled(
                     "encoded profile slice ownership exceeded its aggregate limit",
                 ))
             })?;
-        let (scope_maps, scope_owned) = decode_encoded_scope_maps(record, remaining_before_scope)?;
+        let (scope_maps, scope_owned) =
+            decode_encoded_scope_maps(&slice.scope_maps, remaining_before_scope)?;
         let phase_owned_limit =
             remaining_before_scope
                 .checked_sub(scope_owned)
@@ -3102,32 +3464,9 @@ fn compile_encoded_profile_slices_controlled(
             ))
         })?;
 
-        let root_kinds = tuple_item(record, 4, "profile root_kinds")?;
-        let root_ids = tuple_item(record, 5, "profile root_ids")?;
-        let node_tags = tuple_item(record, 6, "profile node_tags")?;
-        let node_field_offsets = tuple_item(record, 7, "profile node_field_offsets")?;
-        let field_kinds = tuple_item(record, 8, "profile field_kinds")?;
-        let field_values = tuple_item(record, 9, "profile field_values")?;
-        let field_lengths = tuple_item(record, 10, "profile field_lengths")?;
-        let item_kinds = tuple_item(record, 11, "profile item_kinds")?;
-        let item_values = tuple_item(record, 12, "profile item_values")?;
-        let item_lengths = tuple_item(record, 13, "profile item_lengths")?;
-        let scalar_bytes = tuple_item(record, 14, "profile scalar_bytes")?;
-        let columns = borrowed_encoded_columns(
-            &root_kinds,
-            &root_ids,
-            &node_tags,
-            &node_field_offsets,
-            &field_kinds,
-            &field_values,
-            &field_lengths,
-            &item_kinds,
-            &item_values,
-            &item_lengths,
-            &scalar_bytes,
-        )?;
-        let model = encoded::model::ValidatedModel::new(columns, encoded::EncodedLimits::default())
-            .map_err(encoded_validation_error)?;
+        let model =
+            encoded::model::ValidatedModel::new(slice.columns, encoded::EncodedLimits::default())
+                .map_err(encoded_validation_error)?;
         let phase = encoded::profile::compile_profile_phase_selected_controlled_with_policy(
             &model,
             &scope_maps,
@@ -3136,8 +3475,8 @@ fn compile_encoded_profile_slices_controlled(
                 max_work: phase_work_limit,
                 ..limits
             },
-            posting_mode,
-            postings,
+            slice.posting_mode,
+            slice.postings,
             unsupported_datatypes,
             poll,
         )
@@ -4684,6 +5023,120 @@ fn poll_encoded_session_checkpoint(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn compile_encoded_session_phases<B: encoded::ByteSource>(
+    slices: &[EncodedSliceInput<B>],
+    namespace: Option<[u8; 32]>,
+    unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
+    validate_profile: bool,
+    cancellation_state: &Arc<CancellationState>,
+    checkpoint: &mut u64,
+    cancel_at_checkpoint: Option<u64>,
+) -> NativeResult<encoded::permanent_program::EncodedSliceProgram> {
+    if validate_profile {
+        let mut poll = |phase: &'static str| {
+            poll_encoded_session_checkpoint(
+                cancellation_state,
+                checkpoint,
+                cancel_at_checkpoint,
+                phase,
+            )
+        };
+        let profile = compile_encoded_profile_slice_inputs_controlled(
+            slices,
+            unsupported_datatypes,
+            &mut poll,
+        )?;
+        ensure_encoded_profile_conforms(profile.conforms, &profile.issues)?;
+    }
+    let mut poll = |phase: &'static str| {
+        poll_encoded_session_checkpoint(cancellation_state, checkpoint, cancel_at_checkpoint, phase)
+    };
+    compile_encoded_slice_program_inputs_controlled(slices, namespace, &mut poll)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_encoded_session_construction(
+    phases: encoded::permanent_program::EncodedSliceProgram,
+    mut metadata: input_wire::OntologyMetadata,
+    config: DecodedConfig,
+    cancellation_state: Arc<CancellationState>,
+    mut checkpoint: u64,
+    cancel_at_checkpoint: Option<u64>,
+    max_owned_bytes: Option<usize>,
+    compiler_gil_released: bool,
+) -> NativeResult<NativeSession> {
+    let mut assembly_limits = encoded::permanent_program::PermanentProgramLimits::default();
+    if let Some(maximum) = max_owned_bytes {
+        assembly_limits.max_owned_bytes = maximum;
+    }
+    let assembled = {
+        let mut poll = |phase: &'static str| {
+            poll_encoded_session_checkpoint(
+                &cancellation_state,
+                &mut checkpoint,
+                cancel_at_checkpoint,
+                phase,
+            )
+        };
+        let assembled = encoded::permanent_program::assemble_encoded_permanent_program(
+            phases,
+            assembly_limits,
+            &mut poll,
+        )
+        .map_err(encoded_permanent_error)?;
+        poll("encoded-session-publication")?;
+        assembled
+    };
+    let mut poll = |phase: &'static str| {
+        poll_encoded_session_checkpoint(
+            &cancellation_state,
+            &mut checkpoint,
+            cancel_at_checkpoint,
+            phase,
+        )
+    };
+    let assembled_sha256 = assembled
+        .semantic_sha256_controlled(&mut poll)
+        .map_err(encoded_permanent_error)?;
+    if metadata.program_sha256.iter().all(|byte| *byte == 0) {
+        metadata.program_sha256 = assembled_sha256;
+    } else if metadata.program_sha256 != assembled_sha256 {
+        return Err(NativeError::new(
+            ErrorKind::Wire,
+            "NATIVE_ENCODED_PARITY_MISMATCH",
+            "encoded permanent-program digest differs from its metadata",
+        )
+        .with_context("section", "program_sha256"));
+    }
+    let compiler_digest = {
+        let mut poll = |phase: &'static str| {
+            poll_encoded_session_checkpoint(
+                &cancellation_state,
+                &mut checkpoint,
+                cancel_at_checkpoint,
+                phase,
+            )
+        };
+        assembled
+            .compiler_sha256_controlled(&metadata, &mut poll)
+            .map_err(encoded_permanent_error)?
+    };
+    let ontology = DecodedOntology {
+        metadata,
+        program: assembled.program,
+        declared_entities: assembled.declared_entities,
+        named_individuals: assembled.named_individuals,
+    };
+    construct_native_session(
+        ontology,
+        config,
+        cancellation_state,
+        Some(compiler_digest),
+        compiler_gil_released,
+    )
+}
+
 /// Private direct encoded-program constructor. The production capability remains
 /// unadvertised until the complete WP18 constructor matrix passes.
 #[pyfunction(name = "_create_encoded_session_v1")]
@@ -4715,7 +5168,7 @@ fn create_encoded_session_v1(
             ));
         }
         let limits = DecodeLimits::default();
-        let mut metadata = decode_ontology_metadata(&copy_capped_bytes(
+        let metadata = decode_ontology_metadata(&copy_capped_bytes(
             metadata,
             MAX_ENCODED_SESSION_METADATA_BYTES,
             "encoded session metadata",
@@ -4729,98 +5182,55 @@ fn create_encoded_session_v1(
         .map_err(map_input_wire_error)?;
         let cancellation_state = cancellation.state();
         let namespace = Some(metadata.logical_fingerprint.digest);
+        let unsupported_datatypes =
+            encoded_profile_policy_from_config(config.unsupported_datatypes);
         let mut checkpoint = 0_u64;
-        if validate_profile {
-            let mut poll = |phase: &'static str| {
-                poll_encoded_session_checkpoint(
+        let borrowed_leases = prepare_borrowed_encoded_slices(slices)?;
+        if let Some(retained_leases) = retain_encoded_slice_leases(&borrowed_leases)? {
+            let retained_inputs = retained_encoded_slice_inputs(&retained_leases)?;
+            return py.detach(move || {
+                let phases = compile_encoded_session_phases(
+                    &retained_inputs,
+                    namespace,
+                    unsupported_datatypes,
+                    validate_profile,
                     &cancellation_state,
                     &mut checkpoint,
                     cancel_at_checkpoint,
-                    phase,
-                )
-            };
-            let profile = compile_encoded_profile_slices_controlled(
-                slices,
-                encoded_profile_policy_from_config(config.unsupported_datatypes),
-                &mut poll,
-            )?;
-            ensure_encoded_profile_conforms(profile.conforms, &profile.issues)?;
-        }
-        let phases = {
-            let mut poll = |phase: &'static str| {
-                poll_encoded_session_checkpoint(
-                    &cancellation_state,
-                    &mut checkpoint,
-                    cancel_at_checkpoint,
-                    phase,
-                )
-            };
-            compile_encoded_slice_program_controlled(slices, namespace, &mut poll)?
-        };
-        py.detach(move || {
-            let mut assembly_limits = encoded::permanent_program::PermanentProgramLimits::default();
-            if let Some(maximum) = max_owned_bytes {
-                assembly_limits.max_owned_bytes = maximum;
-            }
-            let assembled = {
-                let mut poll = |phase: &'static str| {
-                    poll_encoded_session_checkpoint(
-                        &cancellation_state,
-                        &mut checkpoint,
-                        cancel_at_checkpoint,
-                        phase,
-                    )
-                };
-                let assembled = encoded::permanent_program::assemble_encoded_permanent_program(
+                )?;
+                finish_encoded_session_construction(
                     phases,
-                    assembly_limits,
-                    &mut poll,
-                )
-                .map_err(encoded_permanent_error)?;
-                poll("encoded-session-publication")?;
-                assembled
-            };
-            let mut poll = |phase: &'static str| {
-                poll_encoded_session_checkpoint(
-                    &cancellation_state,
-                    &mut checkpoint,
+                    metadata,
+                    config,
+                    cancellation_state,
+                    checkpoint,
                     cancel_at_checkpoint,
-                    phase,
+                    max_owned_bytes,
+                    true,
                 )
-            };
-            let assembled_sha256 = assembled
-                .semantic_sha256_controlled(&mut poll)
-                .map_err(encoded_permanent_error)?;
-            if metadata.program_sha256.iter().all(|byte| *byte == 0) {
-                metadata.program_sha256 = assembled_sha256;
-            } else if metadata.program_sha256 != assembled_sha256 {
-                return Err(NativeError::new(
-                    ErrorKind::Wire,
-                    "NATIVE_ENCODED_PARITY_MISMATCH",
-                    "encoded permanent-program digest differs from its metadata",
-                )
-                .with_context("section", "program_sha256"));
-            }
-            let compiler_digest = {
-                let mut poll = |phase: &'static str| {
-                    poll_encoded_session_checkpoint(
-                        &cancellation_state,
-                        &mut checkpoint,
-                        cancel_at_checkpoint,
-                        phase,
-                    )
-                };
-                assembled
-                    .compiler_sha256_controlled(&metadata, &mut poll)
-                    .map_err(encoded_permanent_error)?
-            };
-            let ontology = DecodedOntology {
+            });
+        }
+        let borrowed_inputs = borrowed_encoded_slice_inputs(&borrowed_leases)?;
+        let phases = compile_encoded_session_phases(
+            &borrowed_inputs,
+            namespace,
+            unsupported_datatypes,
+            validate_profile,
+            &cancellation_state,
+            &mut checkpoint,
+            cancel_at_checkpoint,
+        )?;
+        py.detach(move || {
+            finish_encoded_session_construction(
+                phases,
                 metadata,
-                program: assembled.program,
-                declared_entities: assembled.declared_entities,
-                named_individuals: assembled.named_individuals,
-            };
-            construct_native_session(ontology, config, cancellation_state, Some(compiler_digest))
+                config,
+                cancellation_state,
+                checkpoint,
+                cancel_at_checkpoint,
+                max_owned_bytes,
+                false,
+            )
         })
     }));
     match result {
@@ -4863,7 +5273,7 @@ fn create_session(
     let result = catch_unwind(AssertUnwindSafe(|| {
         py.detach(move || {
             let (ontology, config) = decode_session_inputs(ontology_wire, config_wire, &limits)?;
-            construct_native_session(ontology, config, cancellation_state, None)
+            construct_native_session(ontology, config, cancellation_state, None, false)
         })
     }));
     match result {
@@ -4882,6 +5292,7 @@ fn construct_native_session(
     config: DecodedConfig,
     cancellation_state: Arc<CancellationState>,
     compiler_digest: Option<[u8; 32]>,
+    encoded_compiler_gil_released: bool,
 ) -> NativeResult<NativeSession> {
     // Session construction preserves the WPR0 lifecycle contract: operation timeout and
     // observed-memory failures are surfaced by the first semantic operation, not while the
@@ -4904,6 +5315,7 @@ fn construct_native_session(
     let scheduler = SessionScheduler::new(tableau, SessionLimits::default())?;
     Ok(NativeSession {
         compiler_digest,
+        encoded_compiler_gil_released,
         control: Arc::new(SessionControl {
             owner_pid: std::process::id(),
             closed: AtomicBool::new(false),

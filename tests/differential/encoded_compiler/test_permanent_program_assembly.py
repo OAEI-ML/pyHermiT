@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
@@ -2752,11 +2753,54 @@ def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(
         counters = session.ingestion_counters
         assert counters["encoded_buffer_count"] == len(ENCODED_BUFFER_WIDTHS)
         assert counters["encoded_buffer_bytes"] > 0
+        assert counters["encoded_compiler_gil_released"] is True
         assert counters["encoded_detached_buffer_count"] == counters["encoded_buffer_count"]
         assert counters["encoded_zero_copy_buffers"] == counters["encoded_buffer_count"]
         assert counters["encoded_private_ir_bytes"] == 0
     finally:
         session.close()
+
+
+def test_mmap_lifecycle_receipt_reports_gil_held_fallback(
+    tmp_path: Path,
+) -> None:
+    source = _direct_snapshot()
+    path = tmp_path / "encoded-receipt.pyocore"
+    path.write_bytes(pyowl_core.encode_snapshot(source))
+    mapped = pyowl_core.open_snapshot(path, mmap=True, verify=True)
+    config = ReasonerConfig()
+    captured = capture_compatible_view(mapped)
+
+    extension = ModuleType("encoded_mmap_receipt_test_extension")
+    extension.__version__ = native.__version__
+    extension.ABI_VERSION = native.ABI_VERSION
+    extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
+    _advertise_encoded_compiler(extension)
+    extension.CancellationHandle = native.CancellationHandle
+    extension.self_test = native.self_test
+    extension.create_session = native.create_session
+    extension._create_encoded_session_v1 = native._create_encoded_session_v1
+    factory = NativeBackendFactory(extension)
+
+    session = factory._create_encoded_lifecycle_handoff(
+        captured,
+        config,
+        CancellationToken(),
+    )
+    assert session is not None
+    try:
+        counters = session.ingestion_counters
+        assert counters["encoded_compiler_gil_released"] is False
+        assert counters["encoded_detached_buffer_count"] == 0
+        assert counters["encoded_buffer_count"] == len(ENCODED_BUFFER_WIDTHS)
+        assert counters["encoded_zero_copy_buffers"] == counters["encoded_buffer_count"]
+        mapped.close()
+        assert mapped.closed
+        assert session.check(None).satisfiable
+    finally:
+        session.close()
+        if not mapped.closed:
+            mapped.close()
 
 
 def test_advertised_lifecycle_preserves_cardinality_limit_without_fallback(

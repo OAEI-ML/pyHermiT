@@ -16,6 +16,7 @@ pub struct CancellationState {
     deadline_nanos: AtomicU64,
     memory_bytes: AtomicU64,
     max_memory_bytes: AtomicU64,
+    poll_count: AtomicU64,
 }
 
 impl CancellationState {
@@ -28,6 +29,7 @@ impl CancellationState {
             deadline_nanos: AtomicU64::new(deadline_nanos),
             memory_bytes: AtomicU64::new(0),
             max_memory_bytes: AtomicU64::new(max_memory_bytes),
+            poll_count: AtomicU64::new(0),
         })
     }
 
@@ -67,6 +69,7 @@ impl CancellationState {
         self.max_memory_bytes
             .store(max_memory_bytes, Ordering::Release);
         self.deadline_nanos.store(deadline_nanos, Ordering::Release);
+        self.poll_count.store(0, Ordering::Release);
         self.interrupted.store(false, Ordering::Release);
         drop(reason);
         Ok(())
@@ -77,6 +80,11 @@ impl CancellationState {
     }
 
     pub fn poll(&self) -> NativeResult<()> {
+        let _ = self
+            .poll_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                Some(count.saturating_add(1))
+            });
         let deadline_nanos = self.deadline_nanos.load(Ordering::Acquire);
         if deadline_nanos != 0 && monotonic_nanos() >= deadline_nanos {
             return Err(NativeError::new(
@@ -116,6 +124,11 @@ impl CancellationState {
     #[must_use]
     pub fn interrupted(&self) -> bool {
         self.interrupted.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn poll_count(&self) -> u64 {
+        self.poll_count.load(Ordering::Acquire)
     }
 }
 
@@ -313,6 +326,11 @@ impl CancellationHandle {
     #[getter]
     fn interrupted(&self) -> bool {
         self.state.interrupted()
+    }
+
+    #[getter]
+    fn _debug_poll_count(&self) -> u64 {
+        self.state.poll_count()
     }
 }
 
