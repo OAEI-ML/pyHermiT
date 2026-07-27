@@ -89,7 +89,7 @@ upstream_components = ["src/main/java/org/semanticweb/HermiT/tableau/Node.java",
 
 [[adapted_file]]
 path = "src/pyhermit/clauses/compiler.py"
-sha256 = "b695f0265500526b4b2ffcc5a35159ad1b278a71cee3a49409be2cb73eb5cf04"
+sha256 = "e31d6c29ed19e9d0f1ba13e2bd8d2331355eb4009bd125e659b8c756d1e53ff8"
 adaptation = "Deterministic Python clausification retaining pinned HermiT structural translation shapes"
 upstream_components = ["src/main/java/org/semanticweb/HermiT/structural/OWLClausification.java", "src/main/java/org/semanticweb/HermiT/structural/ReducedABoxOnlyClausification.java"]
 
@@ -179,7 +179,7 @@ upstream_components = ["src/main/java/org/semanticweb/HermiT/structural/Expressi
 
 [[adapted_file]]
 path = "src/pyhermit/normalize/normalizer.py"
-sha256 = "3b9e9da514f502bbb4a073b358e93cee05373754c93ad2d4d32b5f3e65e7921e"
+sha256 = "0c08366aaa2181bf47e5bab18901ad99b6964e957dff465ecc1ed1629af580a4"
 adaptation = "Deterministic Python OWL normalization adapted from HermiT structural rules"
 upstream_components = ["src/main/java/org/semanticweb/HermiT/structural/ExpressionManager.java", "src/main/java/org/semanticweb/HermiT/structural/OWLNormalization.java"]
 
