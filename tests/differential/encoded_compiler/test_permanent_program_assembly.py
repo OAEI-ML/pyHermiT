@@ -128,6 +128,13 @@ def _encoded_negotiation(view: pyowl_core.OntologyView) -> object:
     return SimpleNamespace(lease=lease)
 
 
+def _advertise_encoded_compiler(extension: ModuleType) -> None:
+    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    extension._validate_encoded_columns_v1 = native._validate_encoded_columns_v1
+    extension._validate_encoded_slices_v1 = native._validate_encoded_slices_v1
+    extension._encoded_profile_slices_manifest_v1 = native._encoded_profile_slices_manifest_v1
+
+
 def _scope_map(replacements: dict[bytes, bytes]) -> memoryview:
     return memoryview(b"".join(source + target for source, target in sorted(replacements.items())))
 
@@ -2252,7 +2259,7 @@ def test_advertised_lifecycle_adapter_uses_no_reference_program_or_scalar_wire(
     extension.__version__ = native.__version__
     extension.ABI_VERSION = native.ABI_VERSION
     extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
-    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    _advertise_encoded_compiler(extension)
     extension.CancellationHandle = native.CancellationHandle
     extension.self_test = native.self_test
 
@@ -2325,7 +2332,7 @@ def test_advertised_lifecycle_is_ineligible_for_deferred_roots_without_fallback(
     extension.__version__ = native.__version__
     extension.ABI_VERSION = native.ABI_VERSION
     extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
-    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    _advertise_encoded_compiler(extension)
     extension.CancellationHandle = native.CancellationHandle
     extension.self_test = native.self_test
 
@@ -2388,7 +2395,7 @@ def test_facade_rejects_mismatched_compiler_digest_then_retries(
     extension.__version__ = native.__version__
     extension.ABI_VERSION = native.ABI_VERSION
     extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
-    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    _advertise_encoded_compiler(extension)
     extension.CancellationHandle = native.CancellationHandle
     extension.self_test = native.self_test
 
@@ -2435,7 +2442,7 @@ def test_facade_constructs_encoded_services_without_scalar_service_context(
     extension.__version__ = native.__version__
     extension.ABI_VERSION = native.ABI_VERSION
     extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
-    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    _advertise_encoded_compiler(extension)
     extension.CancellationHandle = native.CancellationHandle
     extension.self_test = native.self_test
 
@@ -2562,7 +2569,7 @@ def test_verify_facade_pairs_direct_native_compiler_with_scalar_shadow(
     extension.__version__ = native.__version__
     extension.ABI_VERSION = native.ABI_VERSION
     extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
-    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    _advertise_encoded_compiler(extension)
     extension.CancellationHandle = native.CancellationHandle
     extension.self_test = native.self_test
 
@@ -2645,7 +2652,7 @@ def test_encoded_services_match_scalar_object_query_families_without_scalar_call
     extension.__version__ = native.__version__
     extension.ABI_VERSION = native.ABI_VERSION
     extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
-    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    _advertise_encoded_compiler(extension)
     extension.CancellationHandle = native.CancellationHandle
     extension.self_test = native.self_test
 
@@ -2704,7 +2711,7 @@ def test_encoded_services_match_scalar_data_query_families_without_scalar_callba
     extension.__version__ = native.__version__
     extension.ABI_VERSION = native.ABI_VERSION
     extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
-    extension.FEATURES = tuple(sorted((*native.FEATURES, ENCODED_NATIVE_FEATURE)))
+    _advertise_encoded_compiler(extension)
     extension.CancellationHandle = native.CancellationHandle
     extension.self_test = native.self_test
 

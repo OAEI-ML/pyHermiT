@@ -409,6 +409,35 @@ def test_factory_rejects_an_incomplete_feature_handshake() -> None:
         NativeBackendFactory(extension)
 
 
+@pytest.mark.parametrize(
+    "missing_surface",
+    (
+        "_create_encoded_session_v1",
+        "_validate_encoded_columns_v1",
+        "_validate_encoded_slices_v1",
+        "_encoded_profile_slices_manifest_v1",
+    ),
+)
+def test_factory_rejects_an_incomplete_encoded_compiler_handshake(
+    missing_surface: str,
+) -> None:
+    extension, _handles, _sessions = _extension()
+    extension.FEATURES = tuple(sorted((*extension.FEATURES, ENCODED_NATIVE_FEATURE)))
+    extension._create_encoded_session_v1 = lambda **_values: object()
+    extension._validate_encoded_columns_v1 = lambda **_values: None
+    extension._validate_encoded_slices_v1 = lambda **_values: None
+    extension._encoded_profile_slices_manifest_v1 = lambda **_values: b"{}"
+    delattr(extension, missing_surface)
+
+    with pytest.raises(
+        BackendVersionError,
+        match="encoded compiler capability surface is incomplete",
+    ) as caught:
+        NativeBackendFactory(extension)
+
+    assert caught.value.context["reason"] == "incomplete_features"
+
+
 def test_factory_rejects_a_package_version_mismatch() -> None:
     extension, _handles, _sessions = _extension()
     extension.__version__ = "0.1.0.other"

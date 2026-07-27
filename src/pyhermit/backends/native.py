@@ -305,17 +305,25 @@ class NativeBackendFactory:
             _version_error("native encoded validator is invalid", "metadata_invalid")
         if create_encoded_session is not None and not callable(create_encoded_session):
             _version_error("native encoded session constructor is invalid", "metadata_invalid")
-        if ENCODED_NATIVE_FEATURE in features and not callable(create_encoded_session):
-            _version_error(
-                "native encoded session capability has no constructor",
-                "incomplete_features",
-            )
         if validate_encoded_selection is not None and not callable(validate_encoded_selection):
             _version_error("native encoded selection validator is invalid", "metadata_invalid")
         if validate_encoded_slices is not None and not callable(validate_encoded_slices):
             _version_error("native encoded slice validator is invalid", "metadata_invalid")
         if profile_encoded_slices is not None and not callable(profile_encoded_slices):
             _version_error("native encoded profile compiler is invalid", "metadata_invalid")
+        if ENCODED_NATIVE_FEATURE in features and not all(
+            callable(surface)
+            for surface in (
+                create_encoded_session,
+                validate_encoded,
+                validate_encoded_slices,
+                profile_encoded_slices,
+            )
+        ):
+            _version_error(
+                "native encoded compiler capability surface is incomplete",
+                "incomplete_features",
+            )
         try:
             self_test()
         except Exception as error:
