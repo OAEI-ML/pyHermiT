@@ -321,7 +321,7 @@ class VerifyBackendSession:
             )
         return bundle
 
-    def _encoded_service_context(self, signature: object) -> object:
+    def _encoded_service_context(self) -> object:
         digest = self.compiler_digest
         loader = getattr(self._native, "_encoded_service_context", None)
         if not callable(loader):
@@ -330,7 +330,7 @@ class VerifyBackendSession:
                 context={"reason": "session_surface_invalid"},
             )
         with self._operation("encoded_service_context"):
-            context = loader(signature)
+            context = loader()
             if getattr(context, "compiler_digest", None) != digest:
                 self._mismatch_operation = "compiler_digest"
                 raise BackendMismatchError(

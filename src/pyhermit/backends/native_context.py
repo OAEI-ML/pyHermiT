@@ -23,7 +23,14 @@ from pyhermit.exceptions import BackendMismatchError
 
 _HEX_256 = re.compile(r"^[0-9a-f]{64}$")
 _DOMAIN_KINDS = frozenset(
-    {"class", "data_property", "individual", "object_property", "source_literal"}
+    {
+        "class",
+        "data_property",
+        "entity",
+        "individual",
+        "object_property",
+        "source_literal",
+    }
 )
 _BUILTIN_ENTITIES = frozenset(
     {
@@ -72,16 +79,12 @@ def decode_service_context(
     encoded: bytes,
     *,
     query_scope_digest: str,
-    signature: Iterable[owl.Entity],
 ) -> NativeServiceContext:
     """Decode one exact native context and bind every ID to a public core value."""
 
     if type(encoded) is not bytes:
         raise TypeError("encoded service context must be exact bytes")
     _digest(query_scope_digest, "query_scope_digest")
-    signature_values = tuple(signature)
-    if not all(isinstance(value, owl.Entity) for value in signature_values):
-        raise TypeError("signature must contain exact pyowl-core Entity values")
     try:
         root = json.loads(
             encoded.decode("utf-8", errors="strict"),
@@ -105,7 +108,7 @@ def decode_service_context(
             "native encoded service context has an incompatible shape",
             "encoded_service_context_invalid",
         )
-    if _integer(payload["schema_version"], "service context schema") != 2:
+    if _integer(payload["schema_version"], "service context schema") != 3:
         _fail(
             "native encoded service context schema is unsupported",
             "encoded_service_context_schema",
@@ -165,7 +168,9 @@ def decode_service_context(
             "encoded_service_context_invalid",
         )
 
-    source_signature = frozenset((*signature_values, *_BUILTIN_ENTITIES))
+    source_signature = frozenset(
+        (*_decode_entities(domains["entity"]).values(), *_BUILTIN_ENTITIES)
+    )
     classes = _bind_domain(
         domains["class"],
         (value for value in source_signature if isinstance(value, owl.Class)),
@@ -235,6 +240,25 @@ def _bind_domain(
             "encoded_service_domain_mismatch",
         )
     return MappingProxyType(result)
+
+
+def _decode_entities(rows: Mapping[int, bytes]) -> Mapping[int, owl.Entity]:
+    values: dict[int, owl.Entity] = {}
+    for identifier, encoded in rows.items():
+        try:
+            decoded = owl.decode_canonical(encoded)
+        except (TypeError, ValueError) as error:
+            raise _mismatch(
+                "native encoded source-entity key is malformed",
+                "encoded_service_symbol_invalid",
+            ) from error
+        if not isinstance(decoded, owl.Entity) or decoded.canonical_bytes() != encoded:
+            _fail(
+                "native encoded source-entity key is not a canonical entity",
+                "encoded_service_symbol_invalid",
+            )
+        values[identifier] = decoded
+    return MappingProxyType(values)
 
 
 def _decode_literals(rows: Mapping[int, bytes]) -> Mapping[int, owl.Literal]:

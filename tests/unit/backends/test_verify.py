@@ -309,7 +309,7 @@ def test_verify_factory_pairs_direct_native_compilation_with_scalar_shadow(
     native_session.compiler_digest = expected_digest
     native_session.ingestion_counters = {"encoded_buffer_count": 1}
     context = SimpleNamespace(compiler_digest=expected_digest)
-    native_session._encoded_service_context = lambda _signature: context
+    native_session._encoded_service_context = lambda: context
 
     class NativeFactory(_Factory):
         def __init__(self) -> None:
@@ -365,7 +365,7 @@ def test_verify_factory_pairs_direct_native_compilation_with_scalar_shadow(
     assert native.direct_calls == [(captured, config, cancellation, False)]
     assert session.compiler_digest == expected_digest
     assert session.ingestion_counters == {"encoded_buffer_count": 1}
-    assert session._encoded_service_context(object()) is context
+    assert session._encoded_service_context() is context
     assert session.check() == CheckResult(True)
     session.close()
     assert native_session.closed

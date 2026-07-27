@@ -55,7 +55,13 @@ from pyhermit.exceptions import (
     ConcurrentMutationError,
     DisposedReasonerError,
 )
-from pyhermit.inputs import ValidatedOntology, capture_ontology
+from pyhermit.inputs import (
+    ValidatedOntology,
+    _capture_ontology_input,
+    _CapturedOntologyInput,
+    _validate_captured_ontology,
+    capture_ontology,
+)
 from pyhermit.normalize import NormalizedOntology
 from pyhermit.profile import OWL2DLReport
 from pyhermit.services import (
@@ -161,18 +167,14 @@ class Reasoner:
             max_memory_bytes=selected_config.max_memory_bytes,
         )
         self._factory = select_backend_factory(selected_config)
-        profile_validator = self._encoded_profile_validator()
-        validated = capture_ontology(
+        captured_input = _capture_ontology_input(
             ontology,
-            config=selected_config,
             document_iri=document_iri,
             load_options=load_options,
             resolver=resolver,
-            cancelled=self._cancelled,
-            _profile_validator=profile_validator if callable(profile_validator) else None,
         )
-        self._validated = validated
-        self._runtime = self._compile_runtime(validated)
+        self._validated: ValidatedOntology | _CapturedOntologyInput = captured_input
+        self._runtime = self._compile_runtime(captured_input)
         self._pending_additions: set[owl.AxiomNode] = set()
         self._pending_removals: set[owl.AxiomNode] = set()
         self._precomputed: set[InferenceType] = set()
@@ -585,10 +587,18 @@ class Reasoner:
         with self._operation():
             self._flush_locked()
 
-    def _compile_runtime(self, validated: ValidatedOntology) -> _Runtime:
-        validate_encoded = getattr(self._factory, "_validate_encoded_handoff", None)
-        if callable(validate_encoded):
-            validate_encoded(validated.view)
+    def _compile_runtime(
+        self,
+        validated: ValidatedOntology | _CapturedOntologyInput,
+    ) -> _Runtime:
+        if isinstance(validated, _CapturedOntologyInput) and self._is_verify_backend():
+            validated = self._validate_scalar_input(validated)
+            self._validated = validated
+        native_first = isinstance(validated, _CapturedOntologyInput)
+        if not native_first:
+            validate_encoded = getattr(self._factory, "_validate_encoded_handoff", None)
+            if callable(validate_encoded):
+                validate_encoded(validated.view)
         compile_started = perf_counter()
         session = self._create_encoded_lifecycle_session(validated.captured)
         try:
@@ -598,6 +608,9 @@ class Reasoner:
                     session,
                     compile_started=compile_started,
                 )
+            if native_first:
+                validated = self._validate_scalar_input(validated)
+                self._validated = validated
             bundle = compile_captured_bundle(
                 validated.captured,
                 self._config,
@@ -609,6 +622,21 @@ class Reasoner:
             if session is not None:
                 session.close()
             raise
+
+    def _validate_scalar_input(
+        self,
+        captured_input: _CapturedOntologyInput,
+    ) -> ValidatedOntology:
+        profile_validator = self._encoded_profile_validator()
+        return _validate_captured_ontology(
+            captured_input,
+            config=self._config,
+            cancelled=self._cancelled,
+            profile_validator=profile_validator if callable(profile_validator) else None,
+        )
+
+    def _is_verify_backend(self) -> bool:
+        return getattr(getattr(self._factory, "info", None), "name", None) == "verify"
 
     def _encoded_profile_validator(
         self,
@@ -687,7 +715,7 @@ class Reasoner:
 
     def _encoded_services(
         self,
-        validated: ValidatedOntology,
+        validated: ValidatedOntology | _CapturedOntologyInput,
         session: BackendSession,
         *,
         compile_started: float,
@@ -698,7 +726,7 @@ class Reasoner:
                 "encoded native session has no service-context exporter",
                 context={"reason": "session_surface_invalid"},
             )
-        context = context_loader(validated.view.signature())
+        context = context_loader()
         if self._factory.info.name == "verify":
             scalar_bundle = getattr(session, "_encoded_scalar_bundle", None)
             if (
@@ -913,17 +941,14 @@ class Reasoner:
                 remove_axioms=owl.CanonicalSet(removals),
             ),
         )
-        profile_validator = self._encoded_profile_validator()
-        validated = capture_ontology(
-            proposed,
-            config=self._config,
-            cancelled=self._cancelled,
-            _profile_validator=profile_validator if callable(profile_validator) else None,
-        )
         compile_started = perf_counter()
         old = self._runtime
         if old.program is None:
-            session = self._create_encoded_lifecycle_session(validated.captured)
+            captured_input = _capture_ontology_input(proposed)
+            accepted_input: ValidatedOntology | _CapturedOntologyInput = captured_input
+            if self._is_verify_backend():
+                accepted_input = self._validate_scalar_input(captured_input)
+            session = self._create_encoded_lifecycle_session(accepted_input.captured)
             if session is None:
                 raise BackendVersionError(
                     "encoded update compilation lost its negotiated native capability",
@@ -931,7 +956,7 @@ class Reasoner:
                 )
             try:
                 runtime = self._encoded_services(
-                    validated,
+                    accepted_input,
                     session,
                     compile_started=compile_started,
                 )
@@ -943,13 +968,20 @@ class Reasoner:
             except BaseException:
                 session.close()
                 raise
-            self._validated = validated
+            self._validated = accepted_input
             self._runtime = runtime
             self._pending_additions.clear()
             self._pending_removals.clear()
             self._precomputed.clear()
             return
 
+        profile_validator = self._encoded_profile_validator()
+        validated = capture_ontology(
+            proposed,
+            config=self._config,
+            cancelled=self._cancelled,
+            _profile_validator=profile_validator if callable(profile_validator) else None,
+        )
         bundle = compile_captured_bundle(
             validated.captured,
             self._config,

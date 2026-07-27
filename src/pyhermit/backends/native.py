@@ -13,12 +13,12 @@ from __future__ import annotations
 import importlib
 import json
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from types import MappingProxyType, ModuleType
 from typing import NoReturn, Protocol, TypeVar, cast
 
-from pyowl_core import Entity, OntologyView
+from pyowl_core import OntologyView
 
 from pyhermit._version import __version__
 from pyhermit.backends.native_context import NativeServiceContext, decode_service_context
@@ -816,10 +816,7 @@ class NativeBackendSession:
 
         return self._ingestion_counters
 
-    def _encoded_service_context(
-        self,
-        signature: Iterable[Entity],
-    ) -> NativeServiceContext:
+    def _encoded_service_context(self) -> NativeServiceContext:
         self._begin_call()
         exporter = getattr(self._native, "_encoded_service_context_v1", None)
         if not callable(exporter):
@@ -833,7 +830,6 @@ class NativeBackendSession:
             context = decode_service_context(
                 encoded,
                 query_scope_digest=self.ontology_fingerprint,
-                signature=signature,
             )
             if context.permanent_program_sha256 != self.permanent_program_sha256:
                 raise BackendMismatchError(

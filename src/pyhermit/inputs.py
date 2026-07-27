@@ -31,6 +31,24 @@ _ProfileValidator = Callable[
 
 
 @dataclass(frozen=True, slots=True)
+class _CapturedOntologyInput:
+    """Complete retained input before the backend-specific profile gate."""
+
+    captured: CapturedOntology
+    identity: OntologyIdentityIndex
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.captured, CapturedOntology):
+            raise TypeError("captured must be CapturedOntology")
+        if not isinstance(self.identity, OntologyIdentityIndex):
+            raise TypeError("identity must be OntologyIdentityIndex")
+
+    @property
+    def view(self) -> OntologyView:
+        return self.captured.view
+
+
+@dataclass(frozen=True, slots=True)
 class ValidatedOntology:
     captured: CapturedOntology
     profile: OWL2DLReport
@@ -79,6 +97,40 @@ def capture_ontology(
         raise TypeError("cancelled must be callable or None")
     if _profile_validator is not None and not callable(_profile_validator):
         raise TypeError("_profile_validator must be callable or None")
+    captured_input = _capture_ontology_input(
+        source,
+        document_iri=document_iri,
+        load_options=load_options,
+        resolver=resolver,
+        cancellation_token=cancellation_token,
+    )
+    return _validate_captured_ontology(
+        captured_input,
+        config=selected_config,
+        cancellation_token=cancellation_token,
+        cancelled=cancelled,
+        profile_validator=_profile_validator,
+    )
+
+
+def _capture_ontology_input(
+    source: OntologyInput,
+    *,
+    document_iri: IRI | str | None = None,
+    load_options: LoadOptions | None = None,
+    resolver: ImportResolver | None = None,
+    cancellation_token: CancellationToken | None = None,
+) -> _CapturedOntologyInput:
+    """Capture and prove closure completeness without traversing scalar axioms."""
+
+    if load_options is not None and not isinstance(load_options, LoadOptions):
+        raise TypeError("load_options must be LoadOptions or None")
+    if document_iri is not None and not isinstance(document_iri, (IRI, str)):
+        raise TypeError("document_iri must be IRI, str, or None")
+    if resolver is not None and not isinstance(resolver, ImportResolver):
+        raise TypeError("resolver must satisfy ImportResolver or be None")
+    if cancellation_token is not None and not isinstance(cancellation_token, CancellationToken):
+        raise TypeError("cancellation_token must be pyowl_core.CancellationToken or None")
     view = pyowl_core.coerce_snapshot(
         source,
         document_iri=document_iri,
@@ -103,6 +155,29 @@ def capture_ontology(
                 "structural_fingerprint": view.structural_fingerprint.hex,
             },
         )
+    return _CapturedOntologyInput(captured, identity)
+
+
+def _validate_captured_ontology(
+    captured_input: _CapturedOntologyInput,
+    *,
+    config: ReasonerConfig,
+    cancellation_token: CancellationToken | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    profile_validator: _ProfileValidator | None = None,
+) -> ValidatedOntology:
+    """Run the scalar compatibility profile gate over an existing capture."""
+
+    if not isinstance(captured_input, _CapturedOntologyInput):
+        raise TypeError("captured_input must be _CapturedOntologyInput")
+    if not isinstance(config, ReasonerConfig):
+        raise TypeError("config must be ReasonerConfig")
+    if cancellation_token is not None and not isinstance(cancellation_token, CancellationToken):
+        raise TypeError("cancellation_token must be pyowl_core.CancellationToken or None")
+    if cancelled is not None and not callable(cancelled):
+        raise TypeError("cancelled must be callable or None")
+    if profile_validator is not None and not callable(profile_validator):
+        raise TypeError("profile_validator must be callable or None")
 
     def is_cancelled() -> bool:
         return bool(
@@ -111,14 +186,22 @@ def capture_ontology(
         )
 
     report = validate_owl2_dl_view(
-        view,
-        unsupported_datatypes=selected_config.unsupported_datatypes,
+        captured_input.view,
+        unsupported_datatypes=config.unsupported_datatypes,
         cancelled=is_cancelled if cancelled is not None or cancellation_token is not None else None,
     )
-    if _profile_validator is not None:
-        _profile_validator(view, report, selected_config.unsupported_datatypes)
+    if profile_validator is not None:
+        profile_validator(
+            captured_input.view,
+            report,
+            config.unsupported_datatypes,
+        )
     report.raise_for_errors()
-    return ValidatedOntology(captured, report, identity)
+    return ValidatedOntology(
+        captured_input.captured,
+        report,
+        captured_input.identity,
+    )
 
 
 __all__ = ["ValidatedOntology", "capture_ontology"]

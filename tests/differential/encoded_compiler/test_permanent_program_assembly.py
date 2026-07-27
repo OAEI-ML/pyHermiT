@@ -2503,10 +2503,21 @@ def test_encoded_service_context_is_compact_strict_cancel_safe_and_close_safe() 
         "predicates",
         "provenance",
     }.intersection(payload)
+    assert payload["schema_version"] == 3
+    assert {
+        cast(dict[str, object], domain)["kind"]
+        for domain in cast(list[object], payload["domains"])
+    } == {
+        "class",
+        "data_property",
+        "entity",
+        "individual",
+        "object_property",
+        "source_literal",
+    }
     context = decode_service_context(
         encoded,
         query_scope_digest=session.ontology_fingerprint,
-        signature=snapshot.signature(),
     )
     assert context.compiler_digest == session.compiler_digest
     assert context.permanent_program_sha256 == session.permanent_program_sha256
@@ -2519,12 +2530,11 @@ def test_encoded_service_context_is_compact_strict_cancel_safe_and_close_safe() 
     assert session._encoded_service_context_v1() == encoded
 
     hostile = dict(payload)
-    hostile["schema_version"] = 3
+    hostile["schema_version"] = 4
     with pytest.raises(BackendMismatchError):
         decode_service_context(
             json.dumps(hostile, separators=(",", ":")).encode(),
             query_scope_digest=session.ontology_fingerprint,
-            signature=snapshot.signature(),
         )
 
     session.close()
@@ -3039,6 +3049,49 @@ def test_facade_constructs_encoded_services_without_scalar_service_context(
         reasoner.flush()
         assert len(events) == before_update + 3
         assert reasoner.diagnostics()["compiler_digest"] == initial_digest
+
+    assert ENCODED_NATIVE_FEATURE not in native.FEATURES
+
+
+def test_facade_native_first_dispatch_never_retraverses_the_core_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _direct_snapshot()
+    negotiation = _encoded_negotiation(snapshot)
+
+    extension = ModuleType("encoded_native_first_dispatch_extension")
+    extension.__version__ = native.__version__
+    extension.ABI_VERSION = native.ABI_VERSION
+    extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
+    _advertise_encoded_compiler(extension)
+    extension.CancellationHandle = native.CancellationHandle
+    extension.self_test = native.self_test
+    extension.create_session = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("scalar native session constructor was called")
+    )
+    extension._create_encoded_session_v1 = native._create_encoded_session_v1
+    factory = NativeBackendFactory(extension)
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("production native dispatch traversed the scalar core view")
+
+    monkeypatch.setattr(
+        native_backend,
+        "negotiate_encoded_input",
+        lambda _view, *_args, **_kwargs: negotiation,
+    )
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+    monkeypatch.setattr(facade_module, "_validate_captured_ontology", forbidden)
+    monkeypatch.setattr(facade_module, "compile_captured_bundle", forbidden)
+    monkeypatch.setattr(native_backend, "_encoded_profile_contexts", forbidden)
+    monkeypatch.setattr(type(snapshot), "iter_axioms", forbidden)
+    monkeypatch.setattr(type(snapshot), "iter_extensions", forbidden)
+    monkeypatch.setattr(type(snapshot), "signature", forbidden)
+
+    with Reasoner(snapshot) as reasoner:
+        assert reasoner.diagnostics()["ingestion_path"] == "encoded-native"
+        assert reasoner.diagnostics()["encoded_compiler_gil_released"] is True
+        assert reasoner.is_consistent()
 
     assert ENCODED_NATIVE_FEATURE not in native.FEATURES
 

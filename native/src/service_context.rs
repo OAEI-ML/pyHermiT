@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::error::{ErrorKind, NativeError, NativeResult};
 use crate::input_wire::{DecodedOntology, DecodedSymbolValue, SymbolKind};
 
-const SERVICE_CONTEXT_SCHEMA_VERSION: u16 = 2;
+const SERVICE_CONTEXT_SCHEMA_VERSION: u16 = 3;
 const MAX_SERVICE_CONTEXT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize)]
@@ -56,6 +56,7 @@ pub(crate) fn encode_service_context(
     }
     let program = &ontology.program;
     let domains = vec![
+        service_domain(program, SymbolKind::Entity, "entity", |_value| true)?,
         service_domain(program, SymbolKind::ClassExpression, "class", |value| {
             value.display.starts_with("class:")
         })?,
