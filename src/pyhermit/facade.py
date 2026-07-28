@@ -52,6 +52,7 @@ from pyhermit.core import (
     capture_compatible_view,
     capture_compatible_view_deferred,
 )
+from pyhermit.encoded_input import _ENCODED_FORBIDDEN_WORK_COUNTERS
 from pyhermit.events import CancellationSource
 from pyhermit.exceptions import (
     BackendVersionError,
@@ -93,6 +94,12 @@ _ENCODED_DIAGNOSTIC_DEFAULTS: Mapping[str, bool | int] = MappingProxyType(
         "encoded_zero_copy_buffers": 0,
     }
 )
+_ENCODED_SESSION_DIAGNOSTIC_DEFAULTS: Mapping[str, bool | int] = MappingProxyType(
+    {
+        **{name: 0 for name in _ENCODED_FORBIDDEN_WORK_COUNTERS},
+        **_ENCODED_DIAGNOSTIC_DEFAULTS,
+    }
+)
 
 
 class InferenceType(str, Enum):
@@ -122,13 +129,16 @@ class _Runtime:
 
 def _encoded_session_diagnostics(session: BackendSession) -> Mapping[str, bool | int]:
     values = getattr(session, "ingestion_counters", None)
-    if not isinstance(values, Mapping) or values.keys() != _ENCODED_DIAGNOSTIC_DEFAULTS.keys():
+    if (
+        not isinstance(values, Mapping)
+        or values.keys() != _ENCODED_SESSION_DIAGNOSTIC_DEFAULTS.keys()
+    ):
         raise BackendVersionError(
             "encoded native session has no complete ingestion ledger",
             context={"reason": "session_surface_invalid"},
         )
     canonical: dict[str, bool | int] = {}
-    for key, expected in _ENCODED_DIAGNOSTIC_DEFAULTS.items():
+    for key, expected in _ENCODED_SESSION_DIAGNOSTIC_DEFAULTS.items():
         value = values[key]
         if type(value) is not type(expected) or (type(value) is int and value < 0):
             raise BackendVersionError(

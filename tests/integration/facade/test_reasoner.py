@@ -34,6 +34,18 @@ OPTIONS = pyowl_core.LoadOptions(
     imports=pyowl_core.ImportPolicy.IGNORE,
     backend=pyowl_core.BackendPreference.PYTHON,
 )
+_ENCODED_FORBIDDEN_WORK_COUNTERS = {
+    "base_flattening_bytes",
+    "materialized_scalar_rows",
+    "parser_calls",
+    "per_row_ffi_calls",
+    "resolver_calls",
+    "scalar_axiom_materializations",
+    "scalar_term_materializations",
+    "structural_copy_bytes",
+    "wire_decoder_calls",
+    "wire_encoder_calls",
+}
 
 
 def functional(*body: str) -> bytes:
@@ -120,6 +132,7 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
     )
     if reasoner.backend.name in {"native", "verify"}:
         expected_keys.add("native_abi_version")
+        expected_keys.update(_ENCODED_FORBIDDEN_WORK_COUNTERS)
 
     assert tuple(diagnostics) == tuple(sorted(expected_keys))
     assert diagnostics["ingestion_path"] == expected_path
@@ -135,6 +148,10 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
     assert diagnostics["consumer_compile_seconds"] >= 0.0
     if reasoner.backend.name in {"native", "verify"}:
         assert diagnostics["native_abi_version"] == pyhermit.NATIVE_ABI_VERSION
+        assert all(
+            type(diagnostics[name]) is int and diagnostics[name] == 0
+            for name in _ENCODED_FORBIDDEN_WORK_COUNTERS
+        )
     encoded = {key: value for key, value in diagnostics.items() if key.startswith("encoded_")}
     if reasoner.backend.name == "python":
         assert encoded == {
@@ -166,6 +183,49 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
 
     reasoner.dispose()
     assert reasoner.diagnostics() == diagnostics
+
+
+def test_public_encoded_native_handoff_has_complete_zero_forbidden_work_ledger() -> None:
+    if not pyhermit.backend_info().native.available:
+        pytest.skip("native extension is unavailable")
+    snapshot = pyowl_core.load_snapshot(
+        functional("Declaration(Class(:A))"),
+        options=OPTIONS,
+    )
+
+    with Reasoner(snapshot, config=ReasonerConfig(backend="native")) as reasoner:
+        diagnostics = reasoner.diagnostics()
+
+    expected_keys = {
+        "compiler_cache_schema_version",
+        "compiler_digest",
+        "consumer_compile_seconds",
+        "encoded_buffer_bytes",
+        "encoded_buffer_count",
+        "encoded_compiler_gil_released",
+        "encoded_detached_buffer_count",
+        "encoded_indexed_buffer_count",
+        "encoded_posting_bytes",
+        "encoded_private_ir_bytes",
+        "encoded_referenced_view_count",
+        "encoded_segment_count",
+        "encoded_staging_copy_bytes",
+        "encoded_zero_copy_buffers",
+        "implementation_version",
+        "ingestion_path",
+        "ir_schema_version",
+        "native_abi_version",
+        *_ENCODED_FORBIDDEN_WORK_COUNTERS,
+    }
+    assert tuple(diagnostics) == tuple(sorted(expected_keys))
+    assert diagnostics["ingestion_path"] == "encoded-native"
+    assert {
+        name: diagnostics[name] for name in sorted(_ENCODED_FORBIDDEN_WORK_COUNTERS)
+    } == dict.fromkeys(sorted(_ENCODED_FORBIDDEN_WORK_COUNTERS), 0)
+    assert all(
+        type(diagnostics[name]) is int
+        for name in _ENCODED_FORBIDDEN_WORK_COUNTERS
+    )
 
 
 def test_consumer_compile_seconds_measures_each_successful_compilation(

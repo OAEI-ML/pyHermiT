@@ -50,6 +50,7 @@ from pyhermit.core import (
     current_core_versions,
 )
 from pyhermit.encoded_input import (
+    _ENCODED_FORBIDDEN_WORK_COUNTERS,
     ENCODED_BUFFER_WIDTHS,
     ENCODED_DESCRIPTOR_SHA256,
     ENCODED_NATIVE_FEATURE,
@@ -118,6 +119,7 @@ def _encoded_ingestion_counters(lease: object) -> Mapping[str, bool | int]:
     )
     return MappingProxyType(
         {
+            **{name: 0 for name in _ENCODED_FORBIDDEN_WORK_COUNTERS},
             "encoded_buffer_bytes": buffer_bytes,
             "encoded_buffer_count": buffer_count,
             "encoded_compiler_gil_released": False,

@@ -22,6 +22,18 @@ from .exceptions import ResourceLimitError
 ENCODED_SCHEMA_NAME = "pyowl-core/structural-columns"
 ENCODED_SCHEMA_VERSION = 1
 ENCODED_NATIVE_FEATURE = "encoded-structural-compiler-v1"
+_ENCODED_FORBIDDEN_WORK_COUNTERS = (
+    "base_flattening_bytes",
+    "materialized_scalar_rows",
+    "parser_calls",
+    "per_row_ffi_calls",
+    "resolver_calls",
+    "scalar_axiom_materializations",
+    "scalar_term_materializations",
+    "structural_copy_bytes",
+    "wire_decoder_calls",
+    "wire_encoder_calls",
+)
 ENCODED_DESCRIPTOR_SHA256 = bytes.fromhex(
     "9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5"
 )
