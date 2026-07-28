@@ -1907,6 +1907,91 @@ def test_direct_lifecycle_profile_gate_rejects_before_publication_and_allows_ret
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
+def test_public_native_profile_errors_preserve_document_scoped_identity_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = (
+        b"Prefix(:=<urn:test:identity-origin#>) "
+        b"Ontology(<http://www.w3.org/2002/07/owl#ontology> "
+        b"Declaration(Class(:A)))"
+    )
+    left = pyowl_core.load_snapshot(
+        body,
+        document_iri="urn:test:identity-origin:left",
+        options=OPTIONS,
+    )
+    right = pyowl_core.load_snapshot(
+        body,
+        document_iri="urn:test:identity-origin:right",
+        options=OPTIONS,
+    )
+    composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
+    with pytest.raises(OntologyProfileError) as scalar:
+        Reasoner(composite, config=ReasonerConfig(backend="python"))
+
+    extension = ModuleType("encoded_profile_origin_session_extension")
+    extension.__version__ = native.__version__
+    extension.ABI_VERSION = native.ABI_VERSION
+    extension.IR_SCHEMA_VERSION = native.IR_SCHEMA_VERSION
+    _advertise_encoded_compiler(extension)
+    extension.CancellationHandle = native.CancellationHandle
+    extension.self_test = native.self_test
+    extension.create_session = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("scalar native session constructor was called")
+    )
+    extension._create_encoded_session_v1 = native._create_encoded_session_v1
+    factory = NativeBackendFactory(extension)
+    monkeypatch.setattr(
+        native_backend,
+        "negotiate_encoded_input",
+        lambda view, *_args, **_kwargs: _encoded_negotiation(view),
+    )
+    monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
+
+    with pytest.raises(OntologyProfileError) as encoded:
+        Reasoner(composite)
+
+    assert encoded.value.as_dict() == scalar.value.as_dict()
+    assert encoded.value.context == {
+        "issue_count": 2,
+        "rule_ids": "OWL2DL_RESERVED_ONTOLOGY_IRI",
+    }
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
+
+
+def test_profile_context_session_cancellation_is_transactional() -> None:
+    snapshot = _direct_snapshot()
+    config = ReasonerConfig()
+    captured = capture_compatible_view(snapshot)
+    contexts = native_backend._encoded_profile_contexts(snapshot)
+    request: dict[str, Any] = {
+        "slices": (_slice_record(snapshot),),
+        "metadata": encode_encoded_session_metadata(captured, config),
+        "config": encode_config(config),
+        "cancellation": native.CancellationHandle(),
+        "ontology_identity_context": contexts.ontology_identity_context,
+        "origin_context": contexts.origin_context,
+    }
+
+    with pytest.raises(ReasonerInterruptedError) as interrupted:
+        native._create_encoded_session_v1(
+            **request,
+            cancel_at_checkpoint=1,
+        )
+
+    assert (
+        interrupted.value.context["phase"]
+        == "profile-ontology-identity-context-preflight"
+    )
+    retry = native._create_encoded_session_v1(**request)
+    try:
+        assert retry.check(None)
+    finally:
+        retry.close()
+    assert ENCODED_NATIVE_FEATURE in native.FEATURES
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -3058,6 +3143,8 @@ def test_facade_native_first_dispatch_never_retraverses_the_core_view(
 ) -> None:
     snapshot = _direct_snapshot()
     negotiation = _encoded_negotiation(snapshot)
+    context_calls = 0
+    build_contexts = native_backend._encoded_profile_contexts
 
     extension = ModuleType("encoded_native_first_dispatch_extension")
     extension.__version__ = native.__version__
@@ -3075,6 +3162,11 @@ def test_facade_native_first_dispatch_never_retraverses_the_core_view(
     def forbidden(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("production native dispatch traversed the scalar core view")
 
+    def tracked_contexts(view: pyowl_core.OntologyView) -> Any:
+        nonlocal context_calls
+        context_calls += 1
+        return build_contexts(view)
+
     monkeypatch.setattr(
         native_backend,
         "negotiate_encoded_input",
@@ -3083,7 +3175,7 @@ def test_facade_native_first_dispatch_never_retraverses_the_core_view(
     monkeypatch.setattr(facade_module, "select_backend_factory", lambda _config: factory)
     monkeypatch.setattr(facade_module, "_validate_captured_ontology", forbidden)
     monkeypatch.setattr(facade_module, "compile_captured_bundle", forbidden)
-    monkeypatch.setattr(native_backend, "_encoded_profile_contexts", forbidden)
+    monkeypatch.setattr(native_backend, "_encoded_profile_contexts", tracked_contexts)
     monkeypatch.setattr(type(snapshot), "iter_axioms", forbidden)
     monkeypatch.setattr(type(snapshot), "iter_extensions", forbidden)
     monkeypatch.setattr(type(snapshot), "signature", forbidden)
@@ -3093,6 +3185,7 @@ def test_facade_native_first_dispatch_never_retraverses_the_core_view(
         assert reasoner.diagnostics()["encoded_compiler_gil_released"] is True
         assert reasoner.is_consistent()
 
+    assert context_calls == 1
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 

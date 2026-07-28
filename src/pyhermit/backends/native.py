@@ -627,6 +627,7 @@ class NativeBackendFactory:
         config_wire = codec.encode_config(config)
         _require_bytes(metadata, "encoded ontology metadata")
         _require_bytes(config_wire, "encoded configuration")
+        contexts = _encoded_profile_contexts(view)
         return self._construct_adapter_session(
             ontology.ontology_fingerprint,
             config,
@@ -637,6 +638,8 @@ class NativeBackendFactory:
                 metadata=metadata,
                 config=config_wire,
                 cancellation=handle,
+                ontology_identity_context=contexts.ontology_identity_context,
+                origin_context=contexts.origin_context,
             ),
             ingestion_counters=ingestion_counters,
         )
@@ -699,6 +702,7 @@ class NativeBackendFactory:
         config_wire = codec.encode_config(config)
         _require_bytes(metadata, "encoded ontology metadata")
         _require_bytes(config_wire, "encoded configuration")
+        contexts = _encoded_profile_contexts(captured.view) if validate_profile else None
         return self._construct_adapter_session(
             expected_fingerprint,
             config,
@@ -711,6 +715,10 @@ class NativeBackendFactory:
                 cancellation=handle,
                 validate_profile=validate_profile,
                 deferred_fingerprints=deferred_request,
+                ontology_identity_context=(
+                    None if contexts is None else contexts.ontology_identity_context
+                ),
+                origin_context=None if contexts is None else contexts.origin_context,
             ),
             ingestion_counters=ingestion_counters,
         )

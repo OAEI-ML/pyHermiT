@@ -2047,13 +2047,13 @@ fn decode_profile_origin_context(
             ));
         }
         origins.push(encoded::profile::ProfileOrigin {
-            provenance_sha256,
+            root_digest_sha256: provenance_sha256,
             document_keys,
         });
     }
     if origins
         .windows(2)
-        .any(|pair| pair[0].provenance_sha256 >= pair[1].provenance_sha256)
+        .any(|pair| pair[0].root_digest_sha256 >= pair[1].root_digest_sha256)
     {
         return Err(encoded_slice_invalid(
             "encoded profile origin rows are not sorted by unique provenance",
@@ -3899,24 +3899,13 @@ fn compile_encoded_profile_slices_manifest_controlled(
         decode_profile_ontology_identity_context(ontology_identity_context, limits, poll)?;
     let origins = decode_profile_origin_context(origin_context, limits, poll)?;
     let phase = compile_encoded_profile_slices_controlled(slices, unsupported_datatypes, poll)?;
-    let phase = if ontology_identifiers.is_empty() {
-        phase
-    } else {
-        encoded::profile::apply_ontology_identity_context_controlled(
-            phase,
-            &ontology_identifiers,
-            origins.is_some(),
-            limits,
-            poll,
-        )
-        .map_err(encoded_profile_error)?
-    };
-    let phase = if let Some(origins) = origins.as_deref() {
-        encoded::profile::apply_origin_context_controlled(phase, origins, limits, poll)
-            .map_err(encoded_profile_error)?
-    } else {
-        phase
-    };
+    let phase = apply_encoded_profile_contexts_controlled(
+        phase,
+        &ontology_identifiers,
+        origins.as_deref(),
+        limits,
+        poll,
+    )?;
     if origins.is_some() {
         phase
             .canonical_origin_manifest_json()
@@ -3926,6 +3915,33 @@ fn compile_encoded_profile_slices_manifest_controlled(
             .canonical_manifest_json()
             .map_err(encoded_validation_error)
     }
+}
+
+fn apply_encoded_profile_contexts_controlled(
+    phase: encoded::profile::ProfilePhase,
+    ontology_identifiers: &[encoded::profile::ProfileOntologyIdentifier],
+    origins: Option<&[encoded::profile::ProfileOrigin]>,
+    limits: encoded::profile::ProfilePhaseLimits,
+    poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
+) -> NativeResult<encoded::profile::ProfilePhase> {
+    let phase = if ontology_identifiers.is_empty() {
+        phase
+    } else {
+        encoded::profile::apply_ontology_identity_context_controlled(
+            phase,
+            ontology_identifiers,
+            origins.is_some(),
+            limits,
+            poll,
+        )
+        .map_err(encoded_profile_error)?
+    };
+    Ok(if let Some(origins) = origins {
+        encoded::profile::apply_origin_context_controlled(phase, origins, limits, poll)
+            .map_err(encoded_profile_error)?
+    } else {
+        phase
+    })
 }
 
 #[pyfunction(name = "_encoded_profile_slices_manifest_v1")]
@@ -5704,6 +5720,8 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
     )>,
     max_owned_bytes: Option<usize>,
     unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
+    ontology_identifiers: &[encoded::profile::ProfileOntologyIdentifier],
+    origins: Option<&[encoded::profile::ProfileOrigin]>,
     validate_profile: bool,
     cancellation_state: &Arc<CancellationState>,
     checkpoint: &mut u64,
@@ -5724,6 +5742,13 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
         let profile = compile_encoded_profile_slice_inputs_controlled(
             slices,
             unsupported_datatypes,
+            &mut poll,
+        )?;
+        let profile = apply_encoded_profile_contexts_controlled(
+            profile,
+            ontology_identifiers,
+            origins,
+            encoded::profile::ProfilePhaseLimits::default(),
             &mut poll,
         )?;
         ensure_encoded_profile_conforms(profile.conforms, &profile.issues)?;
@@ -5850,6 +5875,8 @@ fn finish_encoded_session_construction(
     cancellation,
     validate_profile=true,
     deferred_fingerprints=None,
+    ontology_identity_context=None,
+    origin_context=None,
     max_owned_bytes=None,
     cancel_at_checkpoint=None
 ))]
@@ -5862,6 +5889,8 @@ fn create_encoded_session_v1(
     cancellation: PyRef<'_, CancellationHandle>,
     validate_profile: bool,
     deferred_fingerprints: Option<&Bound<'_, PyAny>>,
+    ontology_identity_context: Option<&Bound<'_, PyAny>>,
+    origin_context: Option<&Bound<'_, PyAny>>,
     max_owned_bytes: Option<usize>,
     cancel_at_checkpoint: Option<u64>,
 ) -> PyResult<NativeSession> {
@@ -5889,12 +5918,41 @@ fn create_encoded_session_v1(
             validate_deferred_metadata(&metadata)?;
         }
         let cancellation_state = cancellation.state();
+        if !validate_profile && (ontology_identity_context.is_some() || origin_context.is_some()) {
+            return Err(encoded_slice_invalid(
+                "encoded profile contexts require profile validation",
+            ));
+        }
+        let mut checkpoint = 0_u64;
+        let (ontology_identifiers, origins) = if validate_profile {
+            let mut poll = |phase: &'static str| {
+                poll_encoded_session_checkpoint(
+                    &cancellation_state,
+                    &mut checkpoint,
+                    cancel_at_checkpoint,
+                    phase,
+                )
+            };
+            (
+                decode_profile_ontology_identity_context(
+                    ontology_identity_context,
+                    encoded::profile::ProfilePhaseLimits::default(),
+                    &mut poll,
+                )?,
+                decode_profile_origin_context(
+                    origin_context,
+                    encoded::profile::ProfilePhaseLimits::default(),
+                    &mut poll,
+                )?,
+            )
+        } else {
+            (Vec::new(), None)
+        };
         let namespace = deferred_fingerprints
             .is_none()
             .then_some(metadata.logical_fingerprint.digest);
         let unsupported_datatypes =
             encoded_profile_policy_from_config(config.unsupported_datatypes);
-        let mut checkpoint = 0_u64;
         let borrowed_leases = prepare_borrowed_encoded_slices(slices)?;
         if let Some(retained_leases) = retain_encoded_slice_leases(&borrowed_leases)? {
             let retained_inputs = retained_encoded_slice_inputs(&retained_leases)?;
@@ -5907,6 +5965,8 @@ fn create_encoded_session_v1(
                         .map(|request| (&request.context, request.structural_mode)),
                     max_owned_bytes,
                     unsupported_datatypes,
+                    &ontology_identifiers,
+                    origins.as_deref(),
                     validate_profile,
                     &cancellation_state,
                     &mut checkpoint,
@@ -5935,6 +5995,8 @@ fn create_encoded_session_v1(
                 .map(|request| (&request.context, request.structural_mode)),
             max_owned_bytes,
             unsupported_datatypes,
+            &ontology_identifiers,
+            origins.as_deref(),
             validate_profile,
             &cancellation_state,
             &mut checkpoint,

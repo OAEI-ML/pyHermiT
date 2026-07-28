@@ -261,7 +261,9 @@ def test_valid_handoff_retains_owner_and_read_only_buffers(
     ]
 
 
-def test_profile_side_contexts_are_canonical_and_union_composite_origins() -> None:
+def test_profile_side_contexts_are_canonical_and_union_composite_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     options = owl.LoadOptions(
         imports=owl.ImportPolicy.IGNORE,
         backend=owl.BackendPreference.PYTHON,
@@ -278,6 +280,13 @@ def test_profile_side_contexts_are_canonical_and_union_composite_origins() -> No
     )
     composite = owl.compose_views(left, right, roles=("left", "right"))
 
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("profile side-context construction traversed scalar roots")
+
+    monkeypatch.setattr(type(composite), "iter_axioms", forbidden)
+    monkeypatch.setattr(type(composite), "iter_extensions", forbidden)
+    monkeypatch.setattr(type(composite), "signature", forbidden)
+
     contexts = encoded_input._encoded_profile_contexts(composite)
 
     identity_version, identity_rows = contexts.ontology_identity_context
@@ -291,6 +300,9 @@ def test_profile_side_contexts_are_canonical_and_union_composite_origins() -> No
     assert origin_version == 1
     assert origin_rows == tuple(sorted(origin_rows))
     assert len(origin_rows) == 3
+    assert {digest for digest, _document_keys in origin_rows} == set(
+        composite.origin_index.entries
+    )
     assert all(len(provenance) == 32 for provenance, _document_keys in origin_rows)
     assert all(
         document_keys == tuple(sorted(document_keys)) and len(document_keys) == 2

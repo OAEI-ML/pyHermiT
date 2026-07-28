@@ -38,6 +38,7 @@ use super::symbols::RootHandler;
 use super::{u32_at, ByteSource, EncodedResult, EncodedValidationError};
 
 const PROFILE_PHASE_SCHEMA_VERSION: u16 = 1;
+const CORE_STRUCTURAL_DIGEST_PREFIX: &[u8] = b"pyowl-core:structural-value:v1\x00\x01";
 const POSTINGS_ALL: u8 = 0;
 const POSTINGS_INCLUDE: u8 = 1;
 const POSTINGS_EXCLUDE: u8 = 2;
@@ -437,11 +438,23 @@ pub struct ProfileOntologyIdentifier {
     pub version_iri: Option<Vec<u8>>,
 }
 
-/// One canonical provenance-to-document row from the private origin side context.
+/// One canonical root-digest-to-document row from the private origin side context.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProfileOrigin {
-    pub provenance_sha256: [u8; 32],
+    pub root_digest_sha256: [u8; 32],
     pub document_keys: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProfileRootDigestBridge {
+    raw_provenance_sha256: [u8; 32],
+    core_structural_sha256: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileOriginDigestDomain {
+    RawProvenance,
+    CoreStructural,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2611,6 +2624,74 @@ pub fn apply_ontology_identity_context_controlled<E>(
     Ok(phase)
 }
 
+fn build_profile_root_digest_bridge<E>(
+    phase: &ProfilePhase,
+    budget: &mut PhaseBudget,
+    control: &mut impl FnMut(&'static str) -> Result<(), E>,
+) -> ControlledResult<Vec<ProfileRootDigestBridge>, E> {
+    let root_count = phase
+        .axiom_keys
+        .len()
+        .checked_add(phase.extension_keys.len())
+        .ok_or_else(|| {
+            ProfilePhaseError::Encoded(EncodedValidationError::resource(
+                "profile origin root count overflowed",
+            ))
+        })?;
+    let mut bridge = Vec::new();
+    bridge.try_reserve_exact(root_count).map_err(|_| {
+        ProfilePhaseError::Encoded(EncodedValidationError::resource(
+            "profile origin root-digest allocation failed",
+        ))
+    })?;
+    budget
+        .claim_owned(
+            root_count
+                .checked_mul(size_of::<ProfileRootDigestBridge>())
+                .ok_or_else(|| {
+                    EncodedValidationError::resource("profile origin root-digest size overflowed")
+                })?,
+        )
+        .map_err(ProfilePhaseError::Encoded)?;
+    for key in phase.axiom_keys.iter().chain(&phase.extension_keys) {
+        poll(control, "profile-origin-root-digest")?;
+        budget
+            .claim_work(
+                key.len()
+                    .checked_mul(2)
+                    .and_then(|value| value.checked_add(CORE_STRUCTURAL_DIGEST_PREFIX.len()))
+                    .ok_or_else(|| {
+                        EncodedValidationError::resource(
+                            "profile origin root-digest work overflowed",
+                        )
+                    })?,
+            )
+            .map_err(ProfilePhaseError::Encoded)?;
+        let raw_provenance_sha256 = Sha256::digest(key).into();
+        let mut structural = Sha256::new();
+        structural.update(CORE_STRUCTURAL_DIGEST_PREFIX);
+        structural.update(key);
+        bridge.push(ProfileRootDigestBridge {
+            raw_provenance_sha256,
+            core_structural_sha256: structural.finalize().into(),
+        });
+    }
+    budget
+        .claim_work(sort_work(bridge.len()))
+        .map_err(ProfilePhaseError::Encoded)?;
+    bridge.sort_unstable();
+    if bridge
+        .windows(2)
+        .any(|pair| pair[0].raw_provenance_sha256 == pair[1].raw_provenance_sha256)
+    {
+        return Err(EncodedValidationError::invariant(
+            "profile root digest bridge contains ambiguous raw provenance",
+        )
+        .into());
+    }
+    Ok(bridge)
+}
+
 /// Attach exact effective-origin document keys to every provenance-bearing issue.
 pub fn apply_origin_context_controlled<E>(
     mut phase: ProfilePhase,
@@ -2644,7 +2725,7 @@ pub fn apply_origin_context_controlled<E>(
         .map_err(ProfilePhaseError::Encoded)?;
     if origins
         .windows(2)
-        .any(|pair| pair[0].provenance_sha256 >= pair[1].provenance_sha256)
+        .any(|pair| pair[0].root_digest_sha256 >= pair[1].root_digest_sha256)
     {
         return Err(EncodedValidationError::protocol(
             "profile origin rows are not ordered by unique provenance",
@@ -2687,6 +2768,16 @@ pub fn apply_origin_context_controlled<E>(
             .claim_work(origin.document_keys.len())
             .map_err(ProfilePhaseError::Encoded)?;
     }
+    let digest_bridge = if phase
+        .issues
+        .iter()
+        .any(|issue| issue.provenance_sha256.is_some())
+    {
+        build_profile_root_digest_bridge(&phase, &mut budget, control)?
+    } else {
+        Vec::new()
+    };
+    let mut selected_domain = None;
     for issue in &mut phase.issues {
         poll(control, "profile-origin-issue")?;
         let Some(provenance) = issue.provenance_sha256 else {
@@ -2695,13 +2786,54 @@ pub fn apply_origin_context_controlled<E>(
         budget
             .claim_work(search_work(origins.len()))
             .map_err(ProfilePhaseError::Encoded)?;
-        let position = origins
-            .binary_search_by_key(&provenance, |origin| origin.provenance_sha256)
-            .map_err(|_| {
+        let raw_position = origins
+            .binary_search_by_key(&provenance, |origin| origin.root_digest_sha256)
+            .ok();
+        budget
+            .claim_work(search_work(digest_bridge.len()))
+            .map_err(ProfilePhaseError::Encoded)?;
+        let structural = digest_bridge
+            .binary_search_by_key(&provenance, |row| row.raw_provenance_sha256)
+            .ok()
+            .and_then(|position| digest_bridge.get(position))
+            .map(|row| row.core_structural_sha256)
+            .ok_or_else(|| {
                 ProfilePhaseError::Encoded(EncodedValidationError::protocol(
                     "profile origin context is missing a provenance-bearing issue",
                 ))
             })?;
+        budget
+            .claim_work(search_work(origins.len()))
+            .map_err(ProfilePhaseError::Encoded)?;
+        let structural_position = origins
+            .binary_search_by_key(&structural, |origin| origin.root_digest_sha256)
+            .ok();
+        let (domain, position) = match (raw_position, structural_position) {
+            (Some(position), None) => (ProfileOriginDigestDomain::RawProvenance, position),
+            (None, Some(position)) => (ProfileOriginDigestDomain::CoreStructural, position),
+            (Some(position), Some(_)) if provenance == structural => {
+                (ProfileOriginDigestDomain::RawProvenance, position)
+            }
+            (Some(_), Some(_)) => {
+                return Err(EncodedValidationError::protocol(
+                    "profile origin context mixes ambiguous digest domains",
+                )
+                .into());
+            }
+            (None, None) => {
+                return Err(EncodedValidationError::protocol(
+                    "profile origin context is missing a provenance-bearing issue",
+                )
+                .into());
+            }
+        };
+        if selected_domain.is_some_and(|selected| selected != domain) {
+            return Err(EncodedValidationError::protocol(
+                "profile origin context mixes digest domains",
+            )
+            .into());
+        }
+        selected_domain = Some(domain);
         let document_keys = &origins[position].document_keys;
         issue
             .document_keys
@@ -8253,14 +8385,14 @@ mod tests {
     }
 
     #[test]
-    fn origin_context_restores_document_keys_transactionally() -> EncodedResult<()> {
+    fn origin_context_bridges_explicit_digest_domains_transactionally() -> EncodedResult<()> {
         let columns = invalid_data_arity_columns();
         let phase = compile_profile_phase(&model(&columns)?, &[], ProfilePhaseLimits::default())?;
         let provenance = phase.issues[0].provenance_sha256.ok_or_else(|| {
             EncodedValidationError::invariant("profile origin fixture lost its provenance")
         })?;
         let origins = vec![ProfileOrigin {
-            provenance_sha256: provenance,
+            root_digest_sha256: provenance,
             document_keys: vec!["document:a".to_owned(), "document:b".to_owned()],
         }];
         let applied = into_encoded(apply_origin_context_controlled(
@@ -8288,6 +8420,57 @@ mod tests {
         assert!(projected_manifest["issues"][0]
             .as_object()
             .is_some_and(|issue| !issue.contains_key("document_keys")));
+
+        let canonical_key = phase
+            .axiom_keys
+            .iter()
+            .find(|key| <[u8; 32]>::from(Sha256::digest(key)) == provenance)
+            .ok_or_else(|| {
+                EncodedValidationError::invariant(
+                    "profile origin fixture lost its canonical root key",
+                )
+            })?;
+        let mut structural_hasher = Sha256::new();
+        structural_hasher.update(CORE_STRUCTURAL_DIGEST_PREFIX);
+        structural_hasher.update(canonical_key);
+        let structural: [u8; 32] = structural_hasher.finalize().into();
+        assert_eq!(
+            crate::model::hex(&provenance),
+            "6a1bfbadd77d1f86ac453a99501c3f363d5b71f420e67ade72d564f590a16aa7"
+        );
+        assert_eq!(
+            crate::model::hex(&structural),
+            "9954a3e3ad4ca47cfd0e8a589bc39ecc9e7bb317c1d29e24827dfa5031f02d59"
+        );
+        let structural_origins = vec![ProfileOrigin {
+            root_digest_sha256: structural,
+            document_keys: vec!["document:a".to_owned(), "document:b".to_owned()],
+        }];
+        let structurally_applied = into_encoded(apply_origin_context_controlled(
+            phase.clone(),
+            &structural_origins,
+            ProfilePhaseLimits::default(),
+            &mut |_phase| Ok::<(), Infallible>(()),
+        ))?;
+        assert_eq!(
+            structurally_applied.issues[0].document_keys,
+            ["document:a", "document:b"]
+        );
+
+        let mut ambiguous_origins = vec![origins[0].clone(), structural_origins[0].clone()];
+        ambiguous_origins.sort_unstable();
+        let ambiguous = apply_origin_context_controlled(
+            phase.clone(),
+            &ambiguous_origins,
+            ProfilePhaseLimits::default(),
+            &mut |_phase| Ok::<(), Infallible>(()),
+        );
+        let Err(ProfilePhaseError::Encoded(error)) = ambiguous else {
+            return Err(EncodedValidationError::invariant(
+                "ambiguous profile origin digest domains unexpectedly succeeded",
+            ));
+        };
+        assert_eq!(error.code, "NATIVE_ENCODED_VIEW_INVALID");
 
         let cancelled = apply_origin_context_controlled(
             phase.clone(),

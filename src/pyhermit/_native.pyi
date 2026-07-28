@@ -413,6 +413,12 @@ def _create_encoded_session_v1(
     cancellation: CancellationHandle,
     validate_profile: bool = True,
     deferred_fingerprints: tuple[int, str, str, bytes, bytes] | None = None,
+    ontology_identity_context: (
+        tuple[int, tuple[tuple[str, str | None, str | None], ...]] | None
+    ) = None,
+    origin_context: (
+        tuple[int, tuple[tuple[bytes, tuple[str, ...]], ...]] | None
+    ) = None,
     max_owned_bytes: int | None = None,
     cancel_at_checkpoint: int | None = None,
 ) -> NativeSession: ...

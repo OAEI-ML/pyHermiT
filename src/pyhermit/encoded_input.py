@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from itertools import chain
 from types import MappingProxyType
 from typing import Any, TypeAlias, cast
 
@@ -219,21 +218,16 @@ def _encoded_profile_contexts(view: owl.OntologyView) -> _EncodedProfileContexts
             )
         ),
     )
-    documents_by_provenance: dict[bytes, set[str]] = {}
-    for value in chain(view.iter_axioms(), view.iter_extensions()):
-        document_keys = {
-            origin.document_key for origin in view.origin_index.origins_for(value)
-        }
+    origin_rows: list[tuple[bytes, tuple[str, ...]]] = []
+    for provenance, occurrences in view.origin_index.entries.items():
+        document_keys = tuple(sorted({occurrence.document_key for occurrence in occurrences}))
         if not document_keys:
             continue
-        provenance = hashlib.sha256(value.canonical_bytes()).digest()
-        documents_by_provenance.setdefault(provenance, set()).update(document_keys)
+        origin_rows.append((provenance, document_keys))
+    origin_rows.sort()
     origin_context: _ProfileOriginContext = (
         1,
-        tuple(
-            (provenance, tuple(sorted(document_keys)))
-            for provenance, document_keys in sorted(documents_by_provenance.items())
-        ),
+        tuple(origin_rows),
     )
     return _EncodedProfileContexts(ontology_identity_context, origin_context)
 
