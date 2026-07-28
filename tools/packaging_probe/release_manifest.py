@@ -49,6 +49,8 @@ _INSTALLED_WP18_CONTRACT = (
     "::test_facade_constructs_encoded_services_without_scalar_service_context"
 )
 _INSTALLED_WP18_FEATURE = "encoded-structural-compiler-v1"
+_CORE_REQUIREMENT = "pyowl-core>=0.1,<0.2"
+_CORE_COMPATIBILITY_PATH = "release/core-compatibility.json"
 _MATERIAL_FILES = (
     ".github/workflows/release.yml",
     ".github/workflows/wheels.yml",
@@ -61,6 +63,7 @@ _MATERIAL_FILES = (
     "native/Cargo.lock",
     "native/Cargo.toml",
     "pyproject.toml",
+    _CORE_COMPATIBILITY_PATH,
     "reports/licensing/adapted-files.toml",
     "setup.cfg",
     "setup.py",
@@ -427,6 +430,40 @@ def _build_provenance(
         for requirement in build_requirements
     ):
         raise ReleaseManifestError("every PEP 517 build requirement must be exactly pinned")
+    project = require_mapping(pyproject.get("project"), "project")
+    runtime_requirements = [
+        require_str(value, "project dependency")
+        for value in require_list(project.get("dependencies"), "project.dependencies")
+    ]
+    if runtime_requirements.count(_CORE_REQUIREMENT) != 1:
+        raise ReleaseManifestError(
+            "runtime dependencies must select the reviewed pyowl-core compatibility range"
+        )
+    try:
+        compatibility = json.loads(
+            _material_payload(root, snapshots, _CORE_COMPATIBILITY_PATH)
+        )
+    except (TypeError, ValueError) as error:
+        raise ReleaseManifestError("core compatibility pin is not valid JSON") from error
+    if not isinstance(compatibility, dict):
+        raise ReleaseManifestError("core compatibility pin is not an object")
+    tested_core = compatibility.get("tested_source")
+    redesign = compatibility.get("native_ontology_redesign")
+    if (
+        compatibility.get("schema") != "pyhermit.core-compatibility/1"
+        or compatibility.get("dependency_constraint") != _CORE_REQUIREMENT
+        or not isinstance(tested_core, dict)
+        or tested_core.get("repository") != "https://github.com/OAEI-ML/pyOWLCore"
+        or tested_core.get("version") != "0.1.0.dev0"
+        or not isinstance(tested_core.get("commit"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", tested_core["commit"]) is None
+        or not isinstance(redesign, dict)
+        or redesign.get("commit") != tested_core["commit"]
+        or redesign.get("classification")
+        != "behavior-preserving-native-ontology-redesign"
+        or redesign.get("workpackages") != ["WP14", "WP15", "WP16", "WP17", "WP18"]
+    ):
+        raise ReleaseManifestError("core compatibility pin is invalid")
 
     workflow_text = _material_payload(
         root,
@@ -597,6 +634,9 @@ def _build_provenance(
         "rustup": rustup_version,
         "rustup_hosts": rustup_hosts,
         "rustup_installer_sha256": installer_checksums,
+        "tested_runtime": {
+            "pyowl_core": dict(sorted(tested_core.items())),
+        },
         "workflow_actions": _workflow_actions_from_texts(
             [
                 workflow_text,

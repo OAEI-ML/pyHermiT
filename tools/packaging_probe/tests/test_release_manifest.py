@@ -300,6 +300,17 @@ class ReleaseManifestTests(unittest.TestCase):
             "tests/differential/encoded_compiler/test_permanent_program_assembly.py",
             _MATERIAL_FILES,
         )
+        self.assertIn("release/core-compatibility.json", _MATERIAL_FILES)
+        self.assertEqual(
+            provenance["tested_runtime"],
+            {
+                "pyowl_core": {
+                    "commit": "21503cf5a35c22c1fa35653c13df958df4fca100",
+                    "repository": "https://github.com/OAEI-ML/pyOWLCore",
+                    "version": "0.1.0.dev0",
+                }
+            },
+        )
         self.assertEqual(
             provenance["musllinux_smoke_image"],
             {
@@ -360,6 +371,32 @@ class ReleaseManifestTests(unittest.TestCase):
                 ReleaseManifestError,
                 "bounded WP18 encoded public-dispatch contract",
             ),
+        ):
+            _build_provenance(self.root)
+
+    def test_unbound_core_implementation_is_rejected(self) -> None:
+        compatibility = (self.root / "release/core-compatibility.json").read_bytes()
+        mutated = compatibility.replace(
+            b"21503cf5a35c22c1fa35653c13df958df4fca100",
+            b"not-a-reviewed-commit",
+        )
+        self.assertNotEqual(mutated, compatibility)
+
+        def material_payload(
+            root: Path,
+            _snapshots: object,
+            relative: str,
+        ) -> bytes:
+            if relative == "release/core-compatibility.json":
+                return mutated
+            return (root / relative).read_bytes()
+
+        with (
+            patch(
+                "tools.packaging_probe.release_manifest._material_payload",
+                side_effect=material_payload,
+            ),
+            self.assertRaisesRegex(ReleaseManifestError, "core compatibility pin"),
         ):
             _build_provenance(self.root)
 

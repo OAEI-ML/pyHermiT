@@ -1,0 +1,14 @@
+{
+  "schema": "pyhermit.core-compatibility/1",
+  "dependency_constraint": "pyowl-core>=0.1,<0.2",
+  "tested_source": {
+    "repository": "https://github.com/OAEI-ML/pyOWLCore",
+    "commit": "21503cf5a35c22c1fa35653c13df958df4fca100",
+    "version": "0.1.0.dev0"
+  },
+  "native_ontology_redesign": {
+    "commit": "21503cf5a35c22c1fa35653c13df958df4fca100",
+    "classification": "behavior-preserving-native-ontology-redesign",
+    "workpackages": ["WP14", "WP15", "WP16", "WP17", "WP18"]
+  }
+}
