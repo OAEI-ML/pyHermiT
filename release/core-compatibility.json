@@ -1,14 +1,24 @@
 {
-  "schema": "pyhermit.core-compatibility/1",
+  "schema": "pyhermit.core-compatibility/2",
   "dependency_constraint": "pyowl-core>=0.1,<0.2",
   "tested_source": {
     "repository": "https://github.com/OAEI-ML/pyOWLCore",
-    "commit": "21503cf5a35c22c1fa35653c13df958df4fca100",
+    "commit": "005c3ccad129757b3a9be125dc064b812b607ef5",
+    "tree": "d4f3f29f6594b59f3d45a4811c38fb761a7028b9",
     "version": "0.1.0.dev0"
   },
   "native_ontology_redesign": {
-    "commit": "21503cf5a35c22c1fa35653c13df958df4fca100",
+    "commit": "005c3ccad129757b3a9be125dc064b812b607ef5",
+    "tree": "d4f3f29f6594b59f3d45a4811c38fb761a7028b9",
     "classification": "behavior-preserving-native-ontology-redesign",
     "workpackages": ["WP14", "WP15", "WP16", "WP17", "WP18"]
+  },
+  "encoded_ingestion": {
+    "schema_name": "pyowl-core/structural-columns",
+    "schema_version": 1,
+    "descriptor_sha256": "9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5",
+    "capability_state": "advertised",
+    "required_ingestion_path": "encoded-native",
+    "parity_contract": "wp18-encoded-public-dispatch-short"
   }
 }

@@ -305,10 +305,24 @@ class ReleaseManifestTests(unittest.TestCase):
             provenance["tested_runtime"],
             {
                 "pyowl_core": {
-                    "commit": "21503cf5a35c22c1fa35653c13df958df4fca100",
+                    "commit": "005c3ccad129757b3a9be125dc064b812b607ef5",
                     "repository": "https://github.com/OAEI-ML/pyOWLCore",
+                    "tree": "d4f3f29f6594b59f3d45a4811c38fb761a7028b9",
                     "version": "0.1.0.dev0",
                 }
+            },
+        )
+        self.assertEqual(
+            provenance["encoded_ingestion_contract"],
+            {
+                "capability_state": "advertised",
+                "descriptor_sha256": (
+                    "9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5"
+                ),
+                "parity_contract": "wp18-encoded-public-dispatch-short",
+                "required_ingestion_path": "encoded-native",
+                "schema_name": "pyowl-core/structural-columns",
+                "schema_version": 1,
             },
         )
         self.assertEqual(
@@ -377,8 +391,8 @@ class ReleaseManifestTests(unittest.TestCase):
     def test_unbound_core_implementation_is_rejected(self) -> None:
         compatibility = (self.root / "release/core-compatibility.json").read_bytes()
         mutated = compatibility.replace(
-            b"21503cf5a35c22c1fa35653c13df958df4fca100",
-            b"not-a-reviewed-commit",
+            b"005c3ccad129757b3a9be125dc064b812b607ef5",
+            b"105c3ccad129757b3a9be125dc064b812b607ef5",
         )
         self.assertNotEqual(mutated, compatibility)
 
@@ -399,6 +413,46 @@ class ReleaseManifestTests(unittest.TestCase):
             self.assertRaisesRegex(ReleaseManifestError, "core compatibility pin"),
         ):
             _build_provenance(self.root)
+
+    def test_divergent_core_tree_or_encoded_contract_is_rejected(self) -> None:
+        compatibility = (self.root / "release/core-compatibility.json").read_bytes()
+        mutations = (
+            (
+                b"d4f3f29f6594b59f3d45a4811c38fb761a7028b9",
+                b"e4f3f29f6594b59f3d45a4811c38fb761a7028b9",
+            ),
+            (
+                b"9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5",
+                b"8ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5",
+            ),
+            (b"encoded-native", b"scalar-wire"),
+        )
+        for bound_value, replacement in mutations:
+            with self.subTest(bound_value=bound_value):
+                mutated = compatibility.replace(bound_value, replacement)
+                self.assertNotEqual(mutated, compatibility)
+
+                def material_payload(
+                    root: Path,
+                    _snapshots: object,
+                    relative: str,
+                    mutated_payload: bytes = mutated,
+                ) -> bytes:
+                    if relative == "release/core-compatibility.json":
+                        return mutated_payload
+                    return (root / relative).read_bytes()
+
+                with (
+                    patch(
+                        "tools.packaging_probe.release_manifest._material_payload",
+                        side_effect=material_payload,
+                    ),
+                    self.assertRaisesRegex(
+                        ReleaseManifestError,
+                        "core compatibility pin",
+                    ),
+                ):
+                    _build_provenance(self.root)
 
     def test_mutable_musllinux_smoke_image_is_rejected(self) -> None:
         workflow = (self.root / ".github/workflows/wheels.yml").read_bytes()
