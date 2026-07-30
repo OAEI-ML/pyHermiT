@@ -48,7 +48,7 @@ _REQUIRED_EVIDENCE = {
         {"reports/licensing/package-license-audit.md"}
     ),
     "artifact-audit": frozenset({"reports/release/artifact-audit.md"}),
-    "owner-legal-review-signoff": frozenset({"reports/licensing/owner-legal-review-signoff.md"}),
+    "owner-legal-review-signoff": frozenset({"reports/release/0.1.0-owner-release-override.md"}),
 }
 
 
@@ -116,7 +116,7 @@ def _release_status(path: Path, evidence_root: Path) -> tuple[bool, tuple[str, .
         status = require_str(table.get("status"), f"requirement[{index}].status")
         if status == "pending":
             pending.append(requirement_id)
-        elif status != "complete":
+        elif status not in {"complete", "waived"}:
             raise ReleaseGateError(f"invalid status for {requirement_id}: {status}")
         evidence = table.get("evidence")
         if not isinstance(evidence, str):
@@ -136,9 +136,9 @@ def _release_status(path: Path, evidence_root: Path) -> tuple[bool, tuple[str, .
         expected_evidence = _REQUIRED_EVIDENCE.get(requirement_id)
         if expected_evidence is None or frozenset(declared_evidence) != expected_evidence:
             raise ReleaseGateError(f"expected evidence identity drift for {requirement_id}")
-        if status == "complete":
+        if status in {"complete", "waived"}:
             if not evidence:
-                raise ReleaseGateError(f"completed requirement lacks evidence: {requirement_id}")
+                raise ReleaseGateError(f"{status} requirement lacks evidence: {requirement_id}")
             actual_evidence = frozenset(_evidence_paths(evidence, requirement_id, evidence_root))
             if actual_evidence != expected_evidence:
                 raise ReleaseGateError(f"completed evidence identity mismatch for {requirement_id}")

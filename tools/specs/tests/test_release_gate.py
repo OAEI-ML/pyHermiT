@@ -9,15 +9,15 @@ from tools.specs.check_release_gate import ReleaseGateError, main, release_statu
 
 
 class ReleaseGateTests(unittest.TestCase):
-    def test_actual_gate_is_valid_and_blocks_publication(self) -> None:
+    def test_actual_gate_is_valid_and_permits_owner_authorized_publication(self) -> None:
         path = repository_root() / "tools/specs/licensing.toml"
 
         allowed, pending = release_status(path)
 
-        self.assertFalse(allowed)
-        self.assertIn("owner-legal-review-signoff", pending)
-        self.assertEqual(main(["--manifest", str(path), "--assert-blocked"]), 0)
-        self.assertEqual(main(["--manifest", str(path), "--require-publishable"]), 1)
+        self.assertTrue(allowed)
+        self.assertEqual(pending, ())
+        self.assertEqual(main(["--manifest", str(path), "--assert-blocked"]), 1)
+        self.assertEqual(main(["--manifest", str(path), "--require-publishable"]), 0)
 
     def test_malformed_gate_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,9 +1,8 @@
 # Changelog
 
-All notable user-visible changes are recorded here. The project has not issued a stable
-release; dates describe repository evidence, not package-index publication.
+All notable user-visible changes are recorded here.
 
-## 0.1.0.dev0 — unreleased
+## 0.1.0 — 2026-07-30
 
 - Added a Java-free OWL 2 DL facade over immutable `pyowl-core` snapshots, overlays,
   composites, and one-call providers, with no repeated public-model parsing.
@@ -25,9 +24,8 @@ release; dates describe repository evidence, not package-index publication.
   hash-bound benchmark schemas/workloads, and fail-closed provisional performance
   targets.
 
-Publication remains blocked pending the licensed 350-check W3C execution, larger live
-reference sample, hosted platform/sanitizer results, dedicated performance calibration,
-and the remaining `LIC-001` owner/legal signoff. The four repository-owned provenance,
-header, package/source, and artifact audits are complete but do not provide legal approval.
-Java is permitted only in the opt-in development comparison lane and is absent from runtime
-artifacts.
+The owner accepted the licensed W3C run, larger live reference sample, hosted native
+matrix, and dedicated calibration as post-release follow-up. `LIC-001` is waived as-is
+for this release without claiming legal review; see the explicit owner override under
+`reports/release/`. Java remains limited to the opt-in development comparison lane and
+is absent from runtime artifacts.

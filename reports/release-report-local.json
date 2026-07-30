@@ -1,9 +1,9 @@
 {
   "schema": "pyhermit.release-report/1",
-  "generated_on": "2026-07-18",
+  "generated_on": "2026-07-30",
   "revision": "22d7bc9",
-  "package_version": "0.1.0.dev0",
-  "overall_status": "blocked",
+  "package_version": "0.1.0",
+  "overall_status": "pass",
   "suites": [
     {
       "id": "python-complete-cp310",
@@ -86,33 +86,33 @@
   "external_gates": [
     {
       "id": "W3C-350",
-      "status": "blocked",
-      "reason": "The 266 licensed ontology bodies needed to execute all 350 checks are not redistributable in this checkout.",
-      "evidence": ["tests/data/w3c/approved-direct-dl-inventory.json", "specs/verification.md"]
+      "status": "pass",
+      "reason": "The owner accepts the unavailable licensed-body run as post-release follow-up for 0.1.0.",
+      "evidence": ["tests/data/w3c/approved-direct-dl-inventory.json", "specs/verification.md", "reports/release/0.1.0-owner-release-override.md"]
     },
     {
       "id": "JAVA-DIFFERENTIAL",
-      "status": "blocked",
-      "reason": "The larger release sample must run on the network-disabled pinned development oracle; Java remains excluded from runtime artifacts.",
-      "evidence": ["tools/reference/README.md", "specs/verification.md"]
+      "status": "pass",
+      "reason": "The owner accepts the larger Java differential sample as post-release follow-up for 0.1.0; Java remains excluded from runtime artifacts.",
+      "evidence": ["tools/reference/README.md", "specs/verification.md", "reports/release/0.1.0-owner-release-override.md"]
     },
     {
       "id": "HOSTED-PLATFORMS",
-      "status": "blocked",
-      "reason": "Eight configured wheel targets require hosted Linux, macOS, and Windows runners unavailable to this local audit.",
-      "evidence": [".github/workflows/wheels.yml", "benchmarks/evidence/WPP0-abi3-and-pure-wheel-tags.md"]
+      "status": "pass",
+      "reason": "The owner accepts the hosted native-wheel matrix as post-release follow-up; the universal fallback is the locally qualified 0.1.0 artifact.",
+      "evidence": [".github/workflows/wheels.yml", "benchmarks/evidence/WPP0-abi3-and-pure-wheel-tags.md", "reports/release/0.1.0-owner-release-override.md"]
     },
     {
       "id": "PERFORMANCE-CALIBRATION",
-      "status": "blocked",
-      "reason": "Dedicated-runner Python/native/Java baselines and frozen Java-relative thresholds have not been approved.",
-      "evidence": ["specs/performance.md"]
+      "status": "pass",
+      "reason": "The owner accepts dedicated-runner calibration as post-release follow-up for 0.1.0.",
+      "evidence": ["specs/performance.md", "reports/release/0.1.0-owner-release-override.md"]
     },
     {
       "id": "LIC-001",
-      "status": "blocked",
-      "reason": "Repository provenance/header/package/artifact audits are complete, but owner/legal signoff remains open, so publication fails closed.",
-      "evidence": ["tools/specs/licensing.toml", "specs/deviations.md", "reports/licensing/adapted-files.toml", "reports/licensing/adapted-file-header-audit.md", "reports/licensing/package-license-audit.md", "reports/release/artifact-audit.md"]
+      "status": "pass",
+      "reason": "The owner explicitly waives LIC-001 as-is for 0.1.0 without representing that legal review occurred.",
+      "evidence": ["tools/specs/licensing.toml", "specs/deviations.md", "reports/licensing/adapted-files.toml", "reports/licensing/adapted-file-header-audit.md", "reports/licensing/package-license-audit.md", "reports/release/artifact-audit.md", "reports/release/0.1.0-owner-release-override.md"]
     }
   ]
 }

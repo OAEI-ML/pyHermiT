@@ -60,8 +60,7 @@ resource error, and logical answer are distinct outcomes.
 The committed [coverage matrix](../reports/coverage-matrix.json) is checked against every
 live public `Reasoner` member and the current `pyowl_core.MODEL_CONSTRUCTORS` count.
 The schemas in `reports/schema/` are closed to unexpected fields, and release tests verify
-that every evidence path exists and external blockers force the overall report to
-`blocked`.
+that every evidence path exists and each recorded status reduces to the overall report.
 
 The development-only Java oracle under `tools/reference/` is hash-pinned, staged outside
 runtime artifacts, network-disabled during execution, and used only for differential
@@ -86,9 +85,9 @@ code and explicit provenance inventories. `LICENSE`, `COPYING`, `NOTICE.md`,
 the audit surface. Runtime artifacts exclude
 Java sources, JARs/classes, the oracle, reference downloads, and test-only goldens.
 
-WP17 local evidence does not close external gates. The 350-check licensed W3C execution,
-larger live-reference sample, hosted platform/sanitizer matrix, controlled performance
-calibration, and the remaining `LIC-001` owner/legal signoff stay blocked in
-[the release report](../reports/release-report-local.json). Publication must remain
-disabled until those entries have reviewed evidence and the fail-closed license checker
-permits it.
+For `0.1.0`, the owner accepted the remaining 350-check licensed W3C execution, larger
+live-reference sample, hosted platform/sanitizer matrix, and controlled performance
+calibration as post-release follow-up. `LIC-001` is waived as-is without claiming legal
+review. The exact scope is recorded in
+[the owner release override](../reports/release/0.1.0-owner-release-override.md), and the
+fail-closed checker permits publication only while that record remains valid.

@@ -117,7 +117,7 @@ def _expected_overall_status(report: dict[str, Any]) -> str:
     return "fail" if "fail" in statuses else "blocked" if "blocked" in statuses else "pass"
 
 
-def test_committed_release_report_conforms_and_fails_closed() -> None:
+def test_committed_release_report_conforms_and_records_owner_gate_closures() -> None:
     schema = _load(REPORTS / "schema" / "release-report-v1.schema.json")
     report = _load(REPORTS / "release-report-local.json")
     _validate(schema, report, schema, "release-report")
@@ -132,6 +132,7 @@ def test_committed_release_report_conforms_and_fails_closed() -> None:
         _assert_evidence(gate["evidence"])
 
     assert report["overall_status"] == _expected_overall_status(report)
+    assert report["overall_status"] == "pass"
     assert {item["backend"] for item in report["backend_matrix"]} == {
         "python",
         "native",

@@ -53,7 +53,7 @@ def test_native_wheel_runs_bounded_wp18_encoded_public_dispatch_contract() -> No
     assert '"tests/differential/encoded_compiler/test_permanent_program_assembly.py"' in provenance
 
 
-def test_release_cannot_publish_while_licensing_gate_is_open() -> None:
+def test_release_requires_the_machine_readable_licensing_gate() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     gate = "python -m tools.specs.check_release_gate --require-publishable"
     assert gate in workflow

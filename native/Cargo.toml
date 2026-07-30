@@ -1,6 +1,6 @@
 [package]
 name = "pyhermit-native"
-version = "0.1.0-dev"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.83"
 license = "LGPL-3.0-or-later"

@@ -13,7 +13,7 @@ class ProjectMetadataTests(unittest.TestCase):
 
         self.assertEqual(summary["dependencies"], 25)
         self.assertEqual(summary["reference_areas"], 12)
-        self.assertEqual(summary["licensing_pending"], 1)
+        self.assertEqual(summary["licensing_pending"], 0)
         self.assertEqual(summary["planned_native_targets"], 8)
 
     def test_all_local_documentation_links_resolve(self) -> None:

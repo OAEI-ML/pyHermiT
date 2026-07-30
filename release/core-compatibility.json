@@ -3,13 +3,13 @@
   "dependency_constraint": "pyowl-core>=0.1,<0.2",
   "tested_source": {
     "repository": "https://github.com/OAEI-ML/pyOWLCore",
-    "commit": "005c3ccad129757b3a9be125dc064b812b607ef5",
-    "tree": "d4f3f29f6594b59f3d45a4811c38fb761a7028b9",
-    "version": "0.1.0.dev0"
+    "commit": "d3e7893b0609fcd7df390375267a00356f09cb22",
+    "tree": "32cc4cbf9c99f1b45785cb29f4f059ec0f86a691",
+    "version": "0.1.0"
   },
   "native_ontology_redesign": {
-    "commit": "005c3ccad129757b3a9be125dc064b812b607ef5",
-    "tree": "d4f3f29f6594b59f3d45a4811c38fb761a7028b9",
+    "commit": "d3e7893b0609fcd7df390375267a00356f09cb22",
+    "tree": "32cc4cbf9c99f1b45785cb29f4f059ec0f86a691",
     "classification": "behavior-preserving-native-ontology-redesign",
     "workpackages": ["WP14", "WP15", "WP16", "WP17", "WP18"]
   },

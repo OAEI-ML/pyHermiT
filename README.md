@@ -55,9 +55,10 @@ error handling.
 The owner has selected the source-guided implementation mode and
 `LGPL-3.0-or-later`, matching the pinned upstream declaration. `LICENSE` contains the
 LGPL text, `COPYING` the GPL text it incorporates, and `NOTICE.md` the initial upstream
-attribution. No release may be published while the repository-owned `LIC-001`
-provenance/header/package/artifact audits await the final owner/legal-review signoff
-required by [`specs/deviations.md`](specs/deviations.md). The local audits are under
+attribution. For `0.1.0`, the owner explicitly waived the remaining `LIC-001` legal-review
+signoff as-is without representing that legal review occurred. The waiver is recorded in
+[`reports/release/0.1.0-owner-release-override.md`](reports/release/0.1.0-owner-release-override.md).
+The completed repository audits are under
 [`reports/licensing/`](reports/licensing/) and
 [`reports/release/artifact-audit.md`](reports/release/artifact-audit.md).
 
@@ -70,11 +71,11 @@ shared-view loading, every service family, updates, concurrency, and errors. The
 private IR and Python/Rust engines. The [documentation index](docs/index.md) links the
 normative specifications and machine-readable evidence.
 
-Release-candidate state is recorded in the [release report](reports/release-report-local.json),
+Release qualification is recorded in the [release report](reports/release-report-local.json),
 [coverage matrix](reports/coverage-matrix.json), and
-[benchmark audit](benchmarks/evidence/WP17-local-audit.md). They intentionally report
-`blocked` until the licensed W3C bodies, larger live-reference sample, hosted platform
-matrix, dedicated performance calibration, and `LIC-001` review have accepted evidence.
+[benchmark audit](benchmarks/evidence/WP17-local-audit.md). The owner accepted the
+remaining external runs and hosted-platform evidence as post-release follow-up for
+`0.1.0`; this does not certify unexecuted native targets.
 
 ## Development
 
@@ -92,7 +93,7 @@ python -m pytest
 python -m tools.specs.check_workpackages
 python -m tools.specs.check_project
 python -m tools.specs.check_links
-python -m tools.specs.check_release_gate --assert-blocked
+python -m tools.specs.check_release_gate --require-publishable
 ruff format --check .
 ruff check .
 mypy
@@ -122,5 +123,5 @@ audits Rust advisories/licenses/sources, ABI, and external libraries; installs o
 3.10 and 3.12; compares
 pure/native metadata and Python payloads, and verifies local-index resolver preference.
 The target manifest remains `configured-awaiting-hosted-validation` until those hosted
-jobs pass. The release workflow deliberately has no package-index upload action while
-LIC-001 remains open.
+jobs pass. The universal Python fallback is the portable production artifact while
+additional native wheels complete that hosted validation.

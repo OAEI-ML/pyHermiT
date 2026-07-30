@@ -85,8 +85,9 @@ included in wheels.
 ### LIC-001 — release-blocking project/derivative license decision
 
 Status: **decision recorded (owner, 2026-07-17); repository-owned implementation and
-artifact audits completed 2026-07-18; owner/legal review is still pending — every public
-artifact release/publish remains blocked until that signoff is recorded.**
+artifact audits completed 2026-07-18; the owner explicitly waived the remaining
+owner/legal-review signoff as-is for `0.1.0` on 2026-07-30. This is a release override,
+not legal advice and not a representation that legal review occurred.**
 
 Recorded decision (owner, 2026-07-17):
 
@@ -110,10 +111,12 @@ Recorded decision (owner, 2026-07-17):
   local artifact audit are recorded under `reports/licensing/` and
   `reports/release/artifact-audit.md`. Their executable checks leave the machine gate
   open and publication disabled.
-- Still required before any publication: owner/legal review of the inventory boundary,
-  aggregate notice layout (the pinned source contains more than one copyright-header
-  variant), source-distribution strategy, and artifact policy, followed by an explicit
-  `reports/licensing/owner-legal-review-signoff.md` decision.
+- Still recommended as post-release follow-up: owner/legal review of the inventory
+  boundary, aggregate notice layout (the pinned source contains more than one
+  copyright-header variant), source-distribution strategy, and artifact policy. The
+  `0.1.0` release proceeds under
+  `reports/release/0.1.0-owner-release-override.md`, which does not substitute for that
+  review.
 
 Historical context: the repository previously contained the GNU GPL version 3 text as
 `LICENSE`, while pinned HermiT declares `LGPL-3.0-or-later`. Merely placing a license
@@ -142,11 +145,11 @@ selected above):
    source-guided, copied-test, generated-fixture, and third-party components; the combined
    artifact policy must be reviewed as a whole.
 
-Until LIC-001 is fully closed, local development/test artifacts may be built but packaging
-metadata must be clearly provisional and release workflows MUST fail before upload. The
-decision, license texts, metadata, adapted-file/header inventory, package-source policy, and
-local artifact audit are recorded above. Closing the record now requires the owner/legal
-review signoff entry; no repository audit may substitute for it.
+LIC-001 remains fail-closed unless every repository requirement is completed or explicitly
+waived with repository evidence. For `0.1.0`, the owner waiver closes the machine gate
+without marking the legal-review requirement complete. The decision, license texts,
+metadata, adapted-file/header inventory, package-source policy, local artifact audit, and
+release override are all part of the release record.
 
 Release requirements:
 

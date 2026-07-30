@@ -124,7 +124,12 @@ def test_licensing_reports_are_finalized_but_do_not_claim_legal_signoff() -> Non
         assert "publish_allowed" in text or "publication" in text
 
 
-def test_lic_001_remains_blocked_only_on_owner_legal_signoff() -> None:
+def test_lic_001_records_owner_waiver_without_claiming_legal_signoff() -> None:
     allowed, pending = release_status(ROOT / "tools" / "specs" / "licensing.toml")
-    assert not allowed
-    assert pending == ("owner-legal-review-signoff",)
+    assert allowed
+    assert pending == ()
+    override = (ROOT / "reports/release/0.1.0-owner-release-override.md").read_text(
+        encoding="utf-8"
+    )
+    assert "not an owner/legal-review signoff" in override
+    assert "not legal advice" in override

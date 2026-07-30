@@ -1,11 +1,13 @@
 schema = 1
 gate_id = "LIC-001"
-gate_status = "open"
+gate_status = "closed"
 decision_status = "recorded"
 decision_date = "2026-07-17"
+closure_date = "2026-07-30"
+closure_basis = "owner-release-waiver"
 implementation_mode = "source-guided"
 project_license = "LGPL-3.0-or-later"
-publish_allowed = false
+publish_allowed = true
 authority = "specs/deviations.md#lic-001--release-blocking-projectderivative-license-decision"
 
 [[requirement]]
@@ -58,6 +60,6 @@ expected_evidence = ["reports/release/artifact-audit.md"]
 
 [[requirement]]
 id = "owner-legal-review-signoff"
-status = "pending"
-evidence = ""
-expected_evidence = ["reports/licensing/owner-legal-review-signoff.md"]
+status = "waived"
+evidence = "reports/release/0.1.0-owner-release-override.md"
+expected_evidence = ["reports/release/0.1.0-owner-release-override.md"]

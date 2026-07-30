@@ -43,12 +43,12 @@ jobs:
       - name: Test
         run: python -m pytest
 
-      - name: Validate specifications, metadata, dependencies, and blocked release
+      - name: Validate specifications, metadata, dependencies, and release authorization
         run: |
           python -m tools.specs.check_workpackages
           python -m tools.specs.check_project
           python -m tools.specs.check_links
-          python -m tools.specs.check_release_gate --assert-blocked
+          python -m tools.specs.check_release_gate --require-publishable
 
       - name: Lint, types, and imports
         if: matrix.python == '3.12'
@@ -91,9 +91,5 @@ jobs:
       - name: Prove optional failure and wheel-tag preference
         run: python -m tools.packaging_probe.run_probe
 
-      - name: Prove publication is unavailable
-        run: |
-          if python -m tools.specs.check_release_gate --require-publishable; then
-            echo "LIC-001 unexpectedly allowed publication"
-            exit 1
-          fi
+      - name: Verify publication authorization
+        run: python -m tools.specs.check_release_gate --require-publishable

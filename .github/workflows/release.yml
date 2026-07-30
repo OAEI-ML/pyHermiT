@@ -1,4 +1,4 @@
-name: Release candidate (publication blocked by LIC-001)
+name: Release
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
     uses: ./.github/workflows/wheels.yml
 
   licensing-gate:
-    name: Refuse publication until LIC-001 closes
+    name: Verify release authorization
     needs: distribution-matrix
     runs-on: ubuntu-latest
     steps:
@@ -39,8 +39,8 @@ jobs:
           --bundle artifacts --source-revision "${GITHUB_SHA}"
           --source-date-epoch 946684800 --verify
 
-      # Deliberately no package-index upload permission or action. Publication remains
-      # unavailable until LIC-001 evidence is complete and owner-reviewed.
+      # Package-index upload is performed locally for 0.1.0 because coordinated
+      # consumers require pyowl-core to exist on PyPI before their CI can resolve it.
 
   attest-candidate:
     name: Sigstore/GitHub provenance for the complete candidate
@@ -80,5 +80,5 @@ jobs:
         with:
           subject-path: artifacts/*
 
-      # This job records provenance only after LIC-001 closes. It does not publish the
+      # This job records provenance for the complete candidate. It does not publish the
       # distribution to TestPyPI, PyPI, or another package index.

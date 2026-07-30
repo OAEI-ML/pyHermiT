@@ -13,7 +13,7 @@ python -m pip install --upgrade pip
 python -m pip install pyHermiT
 ```
 
-For an unreleased checkout, install the matching core and force a compiler-free
+For a coordinated checkout, install the matching core and force a compiler-free
 editable build:
 
 ```shell
@@ -21,9 +21,8 @@ python -m pip install /path/to/pyOWLCore
 PYHERMIT_BUILD_NATIVE=0 python -m pip install --no-deps -e /path/to/pyHermiT
 ```
 
-`--no-deps` is intentional only for coordinated development checkouts: the
-locally installed `pyowl-core 0.1.0.dev0` precedes the declared stable
-`>=0.1,<0.2` release line.
+`--no-deps` is intentional only for coordinated development checkouts where the
+compatible `pyowl-core 0.1.0` checkout is already installed.
 
 Source builds use `PYHERMIT_BUILD_NATIVE=auto|0|1`: `auto` tries Rust and otherwise
 builds a truthful pure wheel, `0` always builds the fallback, and `1` fails if the
@@ -182,6 +181,6 @@ The required methodology separates load, validation, compilation, first/repeated
 reasoning, classification, realization, updates, and peak RSS; see
 [the performance specification](../specs/performance.md).
 
-Local wheels and semantic suites are verified, but the machine-readable
-[release report](../reports/release-report-local.json) remains blocked until the
-external WP17 gates are completed.
+Local wheels and semantic suites are verified. The machine-readable
+[release report](../reports/release-report-local.json) records the owner's acceptance of
+the remaining external WP17 runs as post-release follow-up for `0.1.0`.

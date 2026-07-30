@@ -86,7 +86,7 @@ jobs:
           python -m tools.packaging_probe.check_artifact --pure dist/*-py3-none-any.whl
           python -m tools.packaging_probe.check_artifact dist/*.tar.gz
           python -m tools.packaging_probe.run_probe
-          python -m tools.specs.check_release_gate --assert-blocked
+          python -m tools.specs.check_release_gate --require-publishable
 
       - name: Audit the publish-disabled Cargo package source list
         run: |

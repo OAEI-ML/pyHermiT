@@ -82,8 +82,8 @@ def _validate_project_metadata(root: Path, pyproject: dict[str, Any]) -> dict[st
         raise ProjectCheckError("setuptools must read pyhermit._version.__version__")
     version_source = (root / "src/pyhermit/_version.py").read_text(encoding="utf-8")
     match = re.search(r'^__version__ = "([^"]+)"$', version_source, flags=re.MULTILINE)
-    if match is None or match.group(1) != "0.1.0.dev0":
-        raise ProjectCheckError("runtime version source must be 0.1.0.dev0")
+    if match is None or match.group(1) != "0.1.0":
+        raise ProjectCheckError("runtime version source must be 0.1.0")
     if require_str(project.get("requires-python"), "project.requires-python") != ">=3.10":
         raise ProjectCheckError("project requires-python must be >=3.10")
     if require_str(project.get("license"), "project.license") != "LGPL-3.0-or-later":
@@ -267,8 +267,7 @@ def _validate_licensing(path: Path, root: Path) -> tuple[int, int]:
         raise ProjectCheckError("implementation mode must remain source-guided")
     if require_str(data.get("project_license"), "project_license") != "LGPL-3.0-or-later":
         raise ProjectCheckError("license gate project license is inconsistent")
-    if require_bool(data.get("publish_allowed"), "publish_allowed"):
-        raise ProjectCheckError("WP00 must fail closed: publish_allowed cannot be true")
+    publish_allowed = require_bool(data.get("publish_allowed"), "publish_allowed")
     requirements = require_list(data.get("requirement"), "licensing requirement")
     statuses: list[str] = []
     seen: set[str] = set()
@@ -279,12 +278,12 @@ def _validate_licensing(path: Path, root: Path) -> tuple[int, int]:
             raise ProjectCheckError(f"duplicate licensing requirement: {requirement_id}")
         seen.add(requirement_id)
         status = require_str(table.get("status"), f"requirement[{index}].status")
-        if status not in {"complete", "pending"}:
+        if status not in {"complete", "pending", "waived"}:
             raise ProjectCheckError(f"invalid licensing requirement status: {status}")
         evidence = table.get("evidence")
         if not isinstance(evidence, str):
             raise ProjectCheckError(f"requirement[{index}].evidence must be a string")
-        if status == "complete":
+        if status in {"complete", "waived"}:
             if not evidence:
                 raise ProjectCheckError(
                     f"completed licensing requirement lacks evidence: {requirement_id}"
@@ -296,8 +295,14 @@ def _validate_licensing(path: Path, root: Path) -> tuple[int, int]:
                     )
         statuses.append(status)
     pending = statuses.count("pending")
-    if not pending or require_str(data.get("gate_status"), "gate_status") != "open":
-        raise ProjectCheckError("LIC-001 must remain open while requirements are pending")
+    gate_status = require_str(data.get("gate_status"), "gate_status")
+    if pending:
+        if gate_status != "open" or publish_allowed:
+            raise ProjectCheckError(
+                "LIC-001 must remain fail-closed while requirements are pending"
+            )
+    elif gate_status != "closed" or not publish_allowed:
+        raise ProjectCheckError("closed LIC-001 must permit publication")
     return len(statuses), pending
 
 

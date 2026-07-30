@@ -25,8 +25,8 @@ pyHermiT reimplements the core reasoning behavior of **HermiT**:
 No HermiT source or binary is vendored in this repository. Files that
 translate or adapt pinned HermiT material carry upstream copyright and
 license notices plus a modification statement. The repository-owned inventory
-is `reports/licensing/adapted-files.toml`; its scope and headers remain subject
-to the owner/legal review required by `specs/deviations.md` §4–5 before any
-artifact is published.
+is `reports/licensing/adapted-files.toml`. For `0.1.0`, the owner waived the pending
+legal-review signoff as-is without representing that legal review occurred; see
+`reports/release/0.1.0-owner-release-override.md`.
 
 pyHermiT does not claim endorsement by the original HermiT authors.
