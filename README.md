@@ -9,7 +9,7 @@ HermiT OWL 2 DL reasoner, with a complete pure-Python fallback. It targets Pytho
 and uses the Java-free `pyowl-core` package for shared ontology parsing, immutable views,
 overlays, composites, and zero-reparse communication with Exact-OM and other consumers.
 
-The pre-release implementation provides the public reasoner facade, complete
+The 0.1.0 production implementation provides the public reasoner facade, complete
 pure-Python path, and an optional private Rust backend. The normative architecture,
 compatibility rules, backend completeness requirements, and verification plan begin at
 [`specs/README.md`](specs/README.md). Built runtime artifacts contain no Java, JVM
