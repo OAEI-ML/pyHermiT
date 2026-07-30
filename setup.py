@@ -18,7 +18,7 @@ from setuptools.command.sdist import sdist as _sdist
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from pyhermit_build import normalize_macho_uuid  # noqa: E402
+from pyhermit_build import normalize_macho_binary  # noqa: E402
 
 _VALID_MODES = frozenset({"auto", "0", "1"})
 
@@ -110,7 +110,7 @@ if mode != "0" and manifest.is_file() and (mode == "1" or _cargo_available()):
             for module_name, dylib_path in dylib_paths:
                 if not module_name:
                     module_name = Path(dylib_path).name.removeprefix("lib").split(".", 1)[0]
-                normalize_macho_uuid(Path(self.get_dylib_ext_path(ext, module_name)))
+                normalize_macho_binary(Path(self.get_dylib_ext_path(ext, module_name)))
 
     command_classes["build_rust"] = ReproducibleBuildRust
     encoded_flags = os.environ.get("CARGO_ENCODED_RUSTFLAGS")

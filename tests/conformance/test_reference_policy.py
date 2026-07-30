@@ -40,7 +40,7 @@ def test_every_data_artifact_has_an_acquisition_decision() -> None:
     assert sources["w3c-owl2-test-export-in-hermit"]["decision"] == "fetch-only"
     artifacts = {artifact["path"]: artifact for artifact in provenance["artifact"]}
     data_files = {
-        str(path.relative_to(ROOT))
+        path.relative_to(ROOT).as_posix()
         for directory in (
             ROOT / "tests/data/clauses",
             ROOT / "tests/data/datatypes",

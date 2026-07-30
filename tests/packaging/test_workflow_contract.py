@@ -7,6 +7,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_checkout_preserves_hash_bound_fixture_bytes_across_platforms() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+
+    assert "* text=auto eol=lf" in attributes.splitlines()
+
+
 def test_wheel_workflow_has_all_tier_one_targets_and_no_publish_action() -> None:
     workflow = (ROOT / ".github/workflows/wheels.yml").read_text(encoding="utf-8")
     for token in (
@@ -75,7 +81,8 @@ def test_setup_preserves_musl_and_macos_linker_requirements() -> None:
 
     assert 'host_gnu_type.endswith("-linux-musl")' in setup
     assert 'rust_flags.append("-Ctarget-feature=-crt-static")' in setup
-    assert "normalize_macho_uuid" in setup
+    assert "normalize_macho_binary" in setup
+    assert "org.oaeiml.pyhermit._native" in (ROOT / "pyhermit_build.py").read_text(encoding="utf-8")
     assert "no_uuid" not in setup
 
 
