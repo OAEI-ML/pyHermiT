@@ -565,10 +565,10 @@ def _build_provenance(
     requirement_path = "tools/specs/release-verifier-requirements.txt"
     if (
         workflow_text.count(requirement_path) != 1
-        or release_workflow_text.count(requirement_path) != 2
+        or release_workflow_text.count(requirement_path) != 3
     ):
         raise ReleaseManifestError(
-            "producer, licensing, and attestation jobs must install the verifier lock"
+            "producer, licensing, attestation, and publication jobs must install the verifier lock"
         )
     required_pip_flags = (
         "--force-reinstall",
@@ -577,7 +577,7 @@ def _build_provenance(
         "--require-hashes",
     )
     if any(
-        flag not in workflow_text or release_workflow_text.count(flag) != 2
+        flag not in workflow_text or release_workflow_text.count(flag) != 3
         for flag in required_pip_flags
     ):
         raise ReleaseManifestError("release verifier installs are not fail-closed and hash-bound")
@@ -594,6 +594,23 @@ def _build_provenance(
     ):
         raise ReleaseManifestError(
             "attestation job must semantically verify the bundle before attesting"
+        )
+    try:
+        publication_job = release_workflow_text.split("  publish-pypi:\n", 1)[1]
+    except IndexError as error:
+        raise ReleaseManifestError("release workflow omits the trusted publication job") from error
+    publication_marker = "uses: pypa/gh-action-pypi-publish@"
+    if (
+        "needs: attest-candidate" not in publication_job
+        or verification_marker not in publication_job
+        or publication_marker not in publication_job
+        or publication_job.index(verification_marker) > publication_job.index(publication_marker)
+        or "environment:\n      name: pypi" not in publication_job
+        or "id-token: write" not in publication_job
+        or "skip-existing: false" not in publication_job
+    ):
+        raise ReleaseManifestError(
+            "trusted publication must follow attestation and reverify the complete bundle"
         )
 
     smoke_image_matches = re.findall(

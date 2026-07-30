@@ -1,7 +1,15 @@
 name: Release
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the complete staged set to PyPI (select the matching version tag)
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,9 +46,6 @@ jobs:
           python -m tools.packaging_probe.release_manifest
           --bundle artifacts --source-revision "${GITHUB_SHA}"
           --source-date-epoch 946684800 --verify
-
-      # Package-index upload is performed locally for 0.1.1 because coordinated
-      # consumers require pyowl-core to exist on PyPI before their CI can resolve it.
 
   attest-candidate:
     name: Sigstore/GitHub provenance for the complete candidate
@@ -80,5 +85,78 @@ jobs:
         with:
           subject-path: artifacts/*
 
-      # This job records provenance for the complete candidate. It does not publish the
-      # distribution to TestPyPI, PyPI, or another package index.
+  publish-pypi:
+    name: Trusted PyPI publication
+    needs: attest-candidate
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pyHermiT
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install checksum-pinned release verifier dependency
+        run: >-
+          python -m pip install --force-reinstall --no-deps --only-binary=:all:
+          --require-hashes -r tools/specs/release-verifier-requirements.txt
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: artifacts
+
+      - name: Reverify the exact candidate and tag immediately before publication
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python -m tools.packaging_probe.release_manifest \
+            --bundle artifacts --source-revision "${GITHUB_SHA}" \
+            --source-date-epoch 946684800 --verify
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version_source = Path("src/pyhermit/_version.py").read_text(encoding="utf-8")
+          match = re.search(r'^__version__ = "([^"]+)"$', version_source, flags=re.MULTILINE)
+          assert match is not None, "runtime version is missing"
+          assert os.environ["RELEASE_REF"].startswith("refs/tags/v"), os.environ["RELEASE_REF"]
+          assert os.environ["RELEASE_TAG"] == f"v{match.group(1)}", (
+              os.environ["RELEASE_TAG"],
+              match.group(1),
+          )
+
+          artifacts = Path("artifacts")
+          distributions = sorted((*artifacts.glob("*.whl"), *artifacts.glob("*.tar.gz")))
+          native = [path for path in distributions if "-cp310-abi3-" in path.name]
+          pure = [path for path in distributions if path.name.endswith("-py3-none-any.whl")]
+          sdist = [path for path in distributions if path.name.endswith(".tar.gz")]
+          assert (len(native), len(pure), len(sdist)) == (8, 1, 1), (
+              native,
+              pure,
+              sdist,
+          )
+
+          destination = Path("publish")
+          destination.mkdir()
+          for path in distributions:
+              path.rename(destination / path.name)
+          PY
+
+      - name: Publish the complete same-version distribution set
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: publish
+          skip-existing: false
+          verbose: true

@@ -71,8 +71,8 @@ status = "pending"
     def test_owner_waiver_must_match_the_runtime_release_version(self) -> None:
         source = repository_root() / "tools/specs/licensing.toml"
         content = source.read_text(encoding="utf-8").replace(
+            "reports/release/0.1.2-owner-release-override.md",
             "reports/release/0.1.1-owner-release-override.md",
-            "reports/release/0.1.0-owner-release-override.md",
         )
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "licensing.toml"

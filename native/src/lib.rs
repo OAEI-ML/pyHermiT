@@ -6397,7 +6397,7 @@ mod tests {
 
     #[test]
     fn native_version_comes_from_the_python_distribution_source() {
-        assert_eq!(python_package_version(), Some("0.1.1"));
+        assert_eq!(python_package_version(), Some("0.1.2"));
     }
 
     #[test]

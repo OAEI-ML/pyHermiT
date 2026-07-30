@@ -181,6 +181,7 @@ The required methodology separates load, validation, compilation, first/repeated
 reasoning, classification, realization, updates, and peak RSS; see
 [the performance specification](../specs/performance.md).
 
-Local wheels and semantic suites are verified. The machine-readable
-[release report](../reports/release-report-local.json) records the owner's acceptance of
-the remaining external WP17 runs as post-release follow-up for `0.1.1`.
+Local wheels and semantic suites are verified. The historical `0.1.1`
+[release report](../reports/release-report-local.json) records the prior universal
+publication, while the `0.1.2` workflow requires the complete hosted wheel set. The owner
+accepted only the remaining external WP17 runs as post-release follow-up.

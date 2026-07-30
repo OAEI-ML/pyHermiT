@@ -9,7 +9,7 @@ HermiT OWL 2 DL reasoner, with a complete pure-Python fallback. It targets Pytho
 and uses the Java-free `pyowl-core` package for shared ontology parsing, immutable views,
 overlays, composites, and zero-reparse communication with Exact-OM and other consumers.
 
-The 0.1.1 production implementation provides the public reasoner facade, complete
+The 0.1.2 production implementation provides the public reasoner facade, complete
 pure-Python path, and an optional private Rust backend. The normative architecture,
 compatibility rules, backend completeness requirements, and verification plan begin at
 [`specs/README.md`](specs/README.md). Built runtime artifacts contain no Java, JVM
@@ -55,9 +55,9 @@ error handling.
 The owner has selected the source-guided implementation mode and
 `LGPL-3.0-or-later`, matching the pinned upstream declaration. `LICENSE` contains the
 LGPL text, `COPYING` the GPL text it incorporates, and `NOTICE.md` the initial upstream
-attribution. For `0.1.1`, the owner explicitly waived the remaining `LIC-001` legal-review
+attribution. For `0.1.2`, the owner explicitly waived the remaining `LIC-001` legal-review
 signoff as-is without representing that legal review occurred. The waiver is recorded in
-[`reports/release/0.1.1-owner-release-override.md`](reports/release/0.1.1-owner-release-override.md).
+[`reports/release/0.1.2-owner-release-override.md`](reports/release/0.1.2-owner-release-override.md).
 The completed repository audits are under
 [`reports/licensing/`](reports/licensing/) and
 [`reports/release/artifact-audit.md`](reports/release/artifact-audit.md).
@@ -71,11 +71,13 @@ shared-view loading, every service family, updates, concurrency, and errors. The
 private IR and Python/Rust engines. The [documentation index](docs/index.md) links the
 normative specifications and machine-readable evidence.
 
-Release qualification is recorded in the [release report](reports/release-report-local.json),
+The historical `0.1.1` qualification is recorded in the
+[release report](reports/release-report-local.json),
 [coverage matrix](reports/coverage-matrix.json), and
 [benchmark audit](benchmarks/evidence/WP17-local-audit.md). The owner accepted the
-remaining external runs and hosted-platform evidence as post-release follow-up for
-`0.1.1`; this does not certify unexecuted native targets.
+remaining licensed W3C, live-reference, and dedicated-performance runs as post-release
+follow-up for `0.1.2`. The release workflow separately requires every configured native
+target to pass before trusted publication.
 
 ## Development
 

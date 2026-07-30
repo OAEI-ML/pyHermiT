@@ -24,7 +24,7 @@ from tools.packaging_probe.release_manifest import (
 )
 
 _REVISION = "a" * 40
-_VERSION = "0.1.1"
+_VERSION = "0.1.2"
 _NATIVE_PLATFORMS = (
     "manylinux_2_17_x86_64",
     "manylinux_2_17_aarch64",
@@ -484,13 +484,27 @@ class ReleaseManifestTests(unittest.TestCase):
 
     def test_attestation_job_reverifies_the_hash_locked_bundle(self) -> None:
         release_workflow = (self.root / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        attestation_job = release_workflow.split("  attest-candidate:\n", 1)[1]
+        attestation_job = release_workflow.split("  attest-candidate:\n", 1)[1].split(
+            "  publish-pypi:\n", 1
+        )[0]
 
         self.assertIn("--require-hashes", attestation_job)
         self.assertIn("release-verifier-requirements.txt", attestation_job)
         self.assertLess(
             attestation_job.index("python -m tools.packaging_probe.release_manifest"),
             attestation_job.index("uses: actions/attest-build-provenance@"),
+        )
+
+    def test_publication_job_reverifies_after_attestation_and_requires_a_tag(self) -> None:
+        release_workflow = (self.root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        publication_job = release_workflow.split("  publish-pypi:\n", 1)[1]
+
+        self.assertIn("needs: attest-candidate", publication_job)
+        self.assertIn("--require-hashes", publication_job)
+        self.assertIn('RELEASE_REF"].startswith("refs/tags/v")', publication_job)
+        self.assertLess(
+            publication_job.index("python -m tools.packaging_probe.release_manifest"),
+            publication_job.index("uses: pypa/gh-action-pypi-publish@"),
         )
 
     def test_workflow_action_tags_are_rejected_as_mutable(self) -> None:

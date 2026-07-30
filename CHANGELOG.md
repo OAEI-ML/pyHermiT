@@ -2,6 +2,15 @@
 
 All notable user-visible changes are recorded here.
 
+## 0.1.2 — 2026-07-30
+
+- Completed the fail-closed eight-platform native wheel matrix while retaining the
+  compiler-free universal wheel and sdist fallback.
+- Added tag-bound trusted PyPI publishing for the verified, attested ten-file
+  distribution set.
+- Hardened reproducible native builds, cross-platform artifact inspection, and
+  pyowl-core backend compatibility checks.
+
 ## 0.1.1 — 2026-07-30
 
 - Corrected the README quick start to call the public `Reasoner.class_hierarchy()`

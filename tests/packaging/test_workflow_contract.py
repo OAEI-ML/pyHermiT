@@ -108,10 +108,18 @@ def test_installed_suite_loads_runtime_before_repository_test_support() -> None:
     assert runner.index("import pyhermit") < runner.index("sys.path.insert(0, {str(root)!r})")
 
 
-def test_release_requires_the_machine_readable_licensing_gate() -> None:
+def test_release_requires_gates_attestation_and_atomic_trusted_publication() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     gate = "python -m tools.specs.check_release_gate --require-publishable"
+    attestation = "actions/attest-build-provenance@"
+    publish = "pypa/gh-action-pypi-publish@"
     assert gate in workflow
-    assert "actions/attest-build-provenance@" in workflow
-    assert workflow.index(gate) < workflow.index("actions/attest-build-provenance@")
-    assert "gh-action-pypi-publish" not in workflow
+    assert attestation in workflow
+    assert publish in workflow
+    assert workflow.index(gate) < workflow.index(attestation) < workflow.index(publish)
+    assert "needs: attest-candidate" in workflow
+    assert "if: github.event_name == 'workflow_dispatch' && inputs.publish" in workflow
+    assert 'assert os.environ["RELEASE_REF"].startswith("refs/tags/v")' in workflow
+    assert 'os.environ["RELEASE_TAG"] == f"v{match.group(1)}"' in workflow
+    assert "(len(native), len(pure), len(sdist)) == (8, 1, 1)" in workflow
+    assert "skip-existing: false" in workflow
