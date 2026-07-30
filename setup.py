@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from setuptools import setup
+from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 from setuptools.command.sdist import sdist as _sdist
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from pyhermit_build import normalize_macho_binary  # noqa: E402
+from pyhermit_build import normalize_macho_binary, normalize_wheel_metadata  # noqa: E402
 
 _VALID_MODES = frozenset({"auto", "0", "1"})
 
@@ -86,10 +87,22 @@ class ReproducibleSdist(_sdist):
             _normalize_sdist(Path(archive))
 
 
+class ReproducibleBdistWheel(_bdist_wheel):
+    """Canonicalize backend-generated text metadata after wheel assembly."""
+
+    def run(self) -> None:
+        super().run()
+        for wheel in Path(self.dist_dir).glob("*.whl"):
+            normalize_wheel_metadata(wheel)
+
+
 mode = _native_mode()
 manifest = Path("native/Cargo.toml")
 rust_extensions = []
-command_classes: dict[str, type[Any]] = {"sdist": ReproducibleSdist}
+command_classes: dict[str, type[Any]] = {
+    "bdist_wheel": ReproducibleBdistWheel,
+    "sdist": ReproducibleSdist,
+}
 
 if mode != "0" and manifest.is_file() and (mode == "1" or _cargo_available()):
     from setuptools_rust import Binding, RustExtension
