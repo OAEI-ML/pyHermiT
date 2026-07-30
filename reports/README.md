@@ -2,8 +2,10 @@
 
 This directory contains closed, versioned JSON contracts for WP17 evidence:
 
-- `release-report-local.json` records exact locally completed suites, backend and
-  historical artifact checks, and every remaining external gate;
+- `release-report-local.json` records exact locally completed suites, backend checks,
+  the published universal artifact set, and every remaining external gate;
+- `release/0.1.1-publication.md` binds the `0.1.1` PyPI filenames and hashes to the
+  tagged source and records the post-publication installation checks;
 - `coverage-matrix.json` binds all live `Reasoner` members and the compatible
   `pyowl_core.MODEL_CONSTRUCTORS` count to positive, negative, interaction, and backend
   evidence; and
@@ -14,17 +16,14 @@ The committed examples are validated without a new runtime dependency by
 unexpected fields are rejected, and any blocked or failed external gate prevents an
 overall `pass`.
 
-Evidence paths are repository-relative at the report's `revision`. They are not a promise
-that every development test, hosted workflow, or reference-oracle path is copied into the
-release sdist; resolve them in the source repository at that revision. The sdist retains
-the reports, schemas, specifications, documentation, and benchmark evidence while its
-artifact policy deliberately excludes test trees, hosted workflow files, and development
-reference runners.
+The report's `revision` identifies the immutable release source under audit. Most evidence
+paths resolve at that revision. A post-publication record necessarily lives in a later
+evidence-only commit; it names and hashes the release source and artifacts rather than
+claiming inclusion in the earlier tag or sdist. Development tests, hosted workflows, and
+reference-oracle paths are not necessarily copied into a release sdist.
 
-Artifact digests in the local report are the previously completed WPP0 artifacts named
-by their linked evidence and explicit `source_revision`, not hashes of an archive
-containing the report itself. A
-release candidate must publish its artifact digest manifest as an external attestation
-after the immutable artifacts have been built; embedding an archive's own SHA-256 inside
-that archive is impossible. No report in this directory authorizes publication while
-`LIC-001` or another external gate remains open.
+Artifact digests in the local report are the externally verified PyPI files named by the
+linked publication record and explicit `source_revision`, not hashes embedded inside the
+archives themselves. The separately labeled historical artifact audit remains the record
+of earlier WPP0 development artifacts. No report in this directory independently
+authorizes publication while `LIC-001` or another external gate remains open.

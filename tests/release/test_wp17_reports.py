@@ -25,6 +25,22 @@ from pyhermit import BackendName, Reasoner, ReasonerConfig
 
 ROOT = Path(__file__).resolve().parents[2]
 REPORTS = ROOT / "reports"
+PUBLISHED_REVISION = "777725b3bf054dfc0bd0d3b98cc133c4b0469ca1"
+PUBLICATION_RECORD = "reports/release/0.1.1-publication.md"
+PUBLISHED_ARTIFACTS = {
+    "pyhermit-0.1.1-py3-none-any.whl": (
+        "pure-wheel",
+        "631286d9a6f75a1b87aac14a56064ea43f6c77e5017423b4b6e1851ae698222e",
+    ),
+    "pyhermit-0.1.1.tar.gz": (
+        "sdist",
+        "0f010bd7db6a06827e0637594dfc553e5e27b21a9064e9856bca0a95b06c96da",
+    ),
+}
+PUBLISHED_SIZES = {
+    "pyhermit-0.1.1-py3-none-any.whl": "407,310",
+    "pyhermit-0.1.1.tar.gz": "1,290,670",
+}
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -139,6 +155,35 @@ def test_committed_release_report_conforms_and_records_owner_gate_closures() -> 
         "auto",
         "verify",
     }
+
+
+def test_release_report_binds_the_exact_universal_pypi_publication() -> None:
+    report = _load(REPORTS / "release-report-local.json")
+    assert report["package_version"] == "0.1.1"
+    assert report["revision"] == PUBLISHED_REVISION
+    assert len(report["artifacts"]) == len(PUBLISHED_ARTIFACTS)
+
+    observed = {
+        artifact["filename"]: (artifact["kind"], artifact["sha256"])
+        for artifact in report["artifacts"]
+    }
+    assert observed == PUBLISHED_ARTIFACTS
+    assert all(
+        artifact["source_revision"] == PUBLISHED_REVISION
+        for artifact in report["artifacts"]
+    )
+    assert all(artifact["evidence"] == PUBLICATION_RECORD for artifact in report["artifacts"])
+    assert all(artifact["kind"] != "native-wheel" for artifact in report["artifacts"])
+
+    publication = (ROOT / PUBLICATION_RECORD).read_text(encoding="utf-8")
+    assert "https://pypi.org/project/pyHermiT/0.1.1/" in publication
+    assert PUBLISHED_REVISION in publication
+    assert "universal-only" in publication
+    assert "no native-artifact publication claim" in publication
+    for filename, (_kind, sha256) in PUBLISHED_ARTIFACTS.items():
+        assert filename in publication
+        assert sha256 in publication
+        assert PUBLISHED_SIZES[filename] in publication
 
 
 def test_release_status_reducer_fails_closed_for_every_local_and_external_lane() -> None:

@@ -1,7 +1,7 @@
 {
   "schema": "pyhermit.release-report/1",
   "generated_on": "2026-07-30",
-  "revision": "22d7bc9",
+  "revision": "777725b3bf054dfc0bd0d3b98cc133c4b0469ca1",
   "package_version": "0.1.1",
   "overall_status": "pass",
   "suites": [
@@ -59,28 +59,20 @@
   ],
   "artifacts": [
     {
-      "kind": "native-wheel",
-      "filename": "pyhermit-0.1.0.dev0-cp310-abi3-macosx_14_0_x86_64.whl",
-      "sha256": "c63bb23525f9defb447770e4723e29c5a327d403765c79cc57edbd7cc76583e8",
-      "source_revision": "5900222",
-      "status": "pass",
-      "evidence": "benchmarks/evidence/WPP0-abi3-and-pure-wheel-tags.md"
-    },
-    {
       "kind": "pure-wheel",
-      "filename": "pyhermit-0.1.0.dev0-py3-none-any.whl",
-      "sha256": "e8be980329d8e7a8af76d3e54eae0d722219960eba91e3e290078701f1fc2978",
-      "source_revision": "5900222",
+      "filename": "pyhermit-0.1.1-py3-none-any.whl",
+      "sha256": "631286d9a6f75a1b87aac14a56064ea43f6c77e5017423b4b6e1851ae698222e",
+      "source_revision": "777725b3bf054dfc0bd0d3b98cc133c4b0469ca1",
       "status": "pass",
-      "evidence": "benchmarks/evidence/WPP0-abi3-and-pure-wheel-tags.md"
+      "evidence": "reports/release/0.1.1-publication.md"
     },
     {
       "kind": "sdist",
-      "filename": "pyhermit-0.1.0.dev0.tar.gz",
-      "sha256": "68b3755aeaae007362e178d827296547ab739ec8107e482bb5057d32504e6b3b",
-      "source_revision": "5900222",
+      "filename": "pyhermit-0.1.1.tar.gz",
+      "sha256": "0f010bd7db6a06827e0637594dfc553e5e27b21a9064e9856bca0a95b06c96da",
+      "source_revision": "777725b3bf054dfc0bd0d3b98cc133c4b0469ca1",
       "status": "pass",
-      "evidence": "benchmarks/evidence/WPP0-abi3-and-pure-wheel-tags.md"
+      "evidence": "reports/release/0.1.1-publication.md"
     }
   ],
   "external_gates": [
@@ -99,8 +91,8 @@
     {
       "id": "HOSTED-PLATFORMS",
       "status": "pass",
-      "reason": "The owner accepts the hosted native-wheel matrix as post-release follow-up; the universal fallback is the locally qualified 0.1.1 artifact.",
-      "evidence": [".github/workflows/wheels.yml", "benchmarks/evidence/WPP0-abi3-and-pure-wheel-tags.md", "reports/release/0.1.1-owner-release-override.md"]
+      "reason": "The owner accepts the hosted native-wheel matrix as post-release follow-up; the published 0.1.1 set is explicitly universal-only and makes no native-wheel publication claim.",
+      "evidence": [".github/workflows/wheels.yml", "reports/release/0.1.1-publication.md", "reports/release/0.1.1-owner-release-override.md"]
     },
     {
       "id": "PERFORMANCE-CALIBRATION",
