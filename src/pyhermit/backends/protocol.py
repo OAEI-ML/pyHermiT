@@ -627,9 +627,7 @@ def _freeze_compiler_handoff(
         return None
     if not isinstance(value, Mapping):
         raise TypeError("compiler_handoff must be a mapping or None")
-    if set(value) != _COMPILER_HANDOFF_FIELDS or not all(
-        isinstance(name, str) for name in value
-    ):
+    if set(value) != _COMPILER_HANDOFF_FIELDS or not all(isinstance(name, str) for name in value):
         raise ValueError("compiler_handoff fields are incompatible")
     schema_name = value["schema_name"]
     if type(schema_name) is not str or not schema_name:

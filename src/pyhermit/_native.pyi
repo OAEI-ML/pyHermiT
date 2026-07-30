@@ -416,9 +416,7 @@ def _create_encoded_session_v1(
     ontology_identity_context: (
         tuple[int, tuple[tuple[str, str | None, str | None], ...]] | None
     ) = None,
-    origin_context: (
-        tuple[int, tuple[tuple[bytes, tuple[str, ...]], ...]] | None
-    ) = None,
+    origin_context: (tuple[int, tuple[tuple[bytes, tuple[str, ...]], ...]] | None) = None,
     max_owned_bytes: int | None = None,
     cancel_at_checkpoint: int | None = None,
 ) -> NativeSession: ...

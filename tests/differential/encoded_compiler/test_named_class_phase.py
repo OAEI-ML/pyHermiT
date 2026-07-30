@@ -317,8 +317,7 @@ def _expected_manifest(
         )
     ]
     data_range_remap = {
-        value.identifier: identifier
-        for identifier, value in enumerate(retained_data_ranges)
+        value.identifier: identifier for identifier, value in enumerate(retained_data_ranges)
     }
     entity_id_by_key = {value.key_hex: value.identifier for value in entity_domain.values}
     declared_class_ids = {
@@ -679,8 +678,7 @@ def _expected_manifest(
         {
             value.role_id
             for value in program.predicates.predicates
-            if value.kind is PredicateKind.ANNOTATED_EQUALITY
-            and value.role_id is not None
+            if value.kind is PredicateKind.ANNOTATED_EQUALITY and value.role_id is not None
         }
         if include_annotated_equality_predicates
         else set()
@@ -688,8 +686,7 @@ def _expected_manifest(
     annotated_equality_role_predicates = {
         value.predicate_id
         for value in program.predicates.predicates
-        if value.kind is PredicateKind.OBJECT_ROLE
-        and value.role_id in annotated_equality_role_ids
+        if value.kind is PredicateKind.OBJECT_ROLE and value.role_id in annotated_equality_role_ids
     }
     at_least_data_role_ids = (
         {
@@ -756,8 +753,7 @@ def _expected_manifest(
         data_quantifier_definition_predicates.update(
             cast(int, value.filler_predicate_id)
             for value in program.predicates.predicates
-            if value.kind is PredicateKind.AT_LEAST_DATA
-            and value.filler_predicate_id is not None
+            if value.kind is PredicateKind.AT_LEAST_DATA and value.filler_predicate_id is not None
         )
     datatype_definition_predicates = {
         atom.predicate_id
@@ -789,8 +785,7 @@ def _expected_manifest(
             value.predicate_id
             for value in program.predicates.predicates
             if value.kind is PredicateKind.DATA_RANGE
-            and value.symbol_id
-            in complemented_data_range_symbols | {universal_data_range_id}
+            and value.symbol_id in complemented_data_range_symbols | {universal_data_range_id}
         )
     key_role_predicates = {
         atom.predicate_id
@@ -868,8 +863,7 @@ def _expected_manifest(
             "argument_sorts": [sort.value for sort in value.argument_sorts],
             "symbol_id": (
                 data_range_remap[value.symbol_id]
-                if value.kind
-                in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
+                if value.kind in {PredicateKind.DATA_RANGE, PredicateKind.NEGATED_DATA_RANGE}
                 and value.symbol_id is not None
                 else value.symbol_id
             ),
@@ -900,8 +894,7 @@ def _expected_manifest(
             in {PredicateKind.NOMINAL, PredicateKind.NEGATED_NOMINAL}
             for atom in clause.body + clause.head
         ) and all(
-            isinstance(argument, IndividualTerm)
-            or argument == Variable(0, TermSort.OBJECT)
+            isinstance(argument, IndividualTerm) or argument == Variable(0, TermSort.OBJECT)
             for atom in clause.body + clause.head
             for argument in atom.arguments
         )
@@ -1036,21 +1029,21 @@ def test_atomic_complement_subclass_literals_match_scalar_exactly() -> None:
     manifest = _native_manifest(snapshot)
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=6)
-    class_symbols = cast(
-        list[dict[str, object]], manifest["class_expression_symbols"]
-    )
+    class_symbols = cast(list[dict[str, object]], manifest["class_expression_symbols"])
     complement_count = sum(
-        str(value["display"]).startswith("ObjectComplementOf:")
-        for value in class_symbols
+        str(value["display"]).startswith("ObjectComplementOf:") for value in class_symbols
     )
     assert complement_count == 3
     assert len(cast(list[object], manifest["class_signature"])) == (
         len(class_symbols) - complement_count
     )
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
-    ) == 3
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 3
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -1075,9 +1068,7 @@ def test_trivial_atomic_complement_subclasses_normalize_without_symbol_leaks(
     assert manifest == _expected_manifest(snapshot, compiled_roots=1)
     assert all(
         not str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -1090,8 +1081,7 @@ def test_atomic_complement_equivalent_classes_match_scalar_exactly() -> None:
             "Declaration(Class(:C))",
             "Declaration(AnnotationProperty(:note))",
             "EquivalentClasses(:A ObjectComplementOf(:B) :C)",
-            'EquivalentClasses(Annotation(:note "duplicate") :A '
-            "ObjectComplementOf(:B) :C)",
+            'EquivalentClasses(Annotation(:note "duplicate") :A ObjectComplementOf(:B) :C)',
             "EquivalentClasses(ObjectComplementOf(:A) ObjectComplementOf(:C))",
         ),
         options=OPTIONS,
@@ -1100,16 +1090,20 @@ def test_atomic_complement_equivalent_classes_match_scalar_exactly() -> None:
     manifest = _native_manifest(snapshot)
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=3)
-    assert sum(
-        str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            str(value["display"]).startswith("ObjectComplementOf:")
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 3
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
-    ) == 3
+        == 3
+    )
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 3
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -1121,8 +1115,7 @@ def test_atomic_complement_disjoint_classes_match_scalar_exactly() -> None:
             "Declaration(Class(:C))",
             "Declaration(AnnotationProperty(:note))",
             "DisjointClasses(:A ObjectComplementOf(:B) :C)",
-            'DisjointClasses(Annotation(:note "duplicate") :A '
-            "ObjectComplementOf(:B) :C)",
+            'DisjointClasses(Annotation(:note "duplicate") :A ObjectComplementOf(:B) :C)',
             "DisjointClasses(ObjectComplementOf(:A) ObjectComplementOf(:C))",
             "DisjointClasses(:A ObjectComplementOf(:A))",
             "DisjointClasses(owl:Thing ObjectComplementOf(:B))",
@@ -1133,16 +1126,20 @@ def test_atomic_complement_disjoint_classes_match_scalar_exactly() -> None:
     manifest = _native_manifest(snapshot)
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=5)
-    assert sum(
-        str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            str(value["display"]).startswith("ObjectComplementOf:")
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 3
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
-    ) == 3
+        == 3
+    )
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 3
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -1160,9 +1157,7 @@ def test_trivial_complement_disjoint_with_bottom_drops_without_symbol_leaks() ->
     assert manifest == _expected_manifest(snapshot, compiled_roots=1)
     assert all(
         not str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -1178,8 +1173,7 @@ def test_atomic_complement_property_constraints_and_keys_match_scalar_exactly() 
             "Declaration(DataProperty(:d))",
             "Declaration(AnnotationProperty(:note))",
             "ObjectPropertyDomain(:p ObjectComplementOf(:A))",
-            'ObjectPropertyDomain(Annotation(:note "duplicate") :p '
-            "ObjectComplementOf(:A))",
+            'ObjectPropertyDomain(Annotation(:note "duplicate") :p ObjectComplementOf(:A))',
             "ObjectPropertyRange(ObjectInverseOf(:q) ObjectComplementOf(:B))",
             "DataPropertyDomain(:d ObjectComplementOf(:C))",
             "HasKey(ObjectComplementOf(:A) (:p) (:d))",
@@ -1196,16 +1190,20 @@ def test_atomic_complement_property_constraints_and_keys_match_scalar_exactly() 
         include_data_domains=True,
         include_keys=True,
     )
-    assert sum(
-        str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            str(value["display"]).startswith("ObjectComplementOf:")
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 3
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
-    ) == 3
+        == 3
+    )
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 3
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -1239,9 +1237,7 @@ def test_builtin_complements_normalize_without_expression_symbol_leaks() -> None
     )
     assert all(
         not str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
@@ -1621,7 +1617,7 @@ def test_source_local_selection_retains_generated_restriction_dependencies(
             "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:d))",
             "Declaration(AnnotationProperty(:note))",
-            "ObjectPropertyRange(Annotation(:note \"selected\") ObjectInverseOf(:p) "
+            'ObjectPropertyRange(Annotation(:note "selected") ObjectInverseOf(:p) '
             "ObjectIntersectionOf(ObjectExactCardinality(2 :q "
             "ObjectIntersectionOf(:A :B)) DataExactCardinality(1 :d "
             "DataUnionOf(xsd:string xsd:integer))))",
@@ -1639,9 +1635,7 @@ def test_source_local_selection_retains_generated_restriction_dependencies(
     )
     assert len(range_roots) == 1
     selected_roots = range_roots if posting_mode == 1 else declaration_roots
-    postings = memoryview(
-        b"".join(struct.pack("<I", value) for value in selected_roots)
-    )
+    postings = memoryview(b"".join(struct.pack("<I", value) for value in selected_roots))
 
     actual = _native_slices_manifest(
         _slice_record(snapshot, posting_mode=posting_mode, postings=postings),
@@ -1668,9 +1662,7 @@ def test_source_local_selection_retains_generated_restriction_dependencies(
     data_namespace = f":data:{snapshot.logical_fingerprint.hex}:"
     assert all(
         class_namespace in str(value["display"])
-        for value in cast(
-            list[dict[str, object]], actual["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], actual["class_expression_symbols"])
         if value["generated"]
     )
     assert all(
@@ -1707,9 +1699,7 @@ def test_source_local_selection_excludes_unsupported_restriction_without_leaks()
         index + 1 for index, node_id in enumerate(root_ids) if node_tags[node_id - 1] == 75
     )
     excluded_roots = tuple(
-        index + 1
-        for index, node_id in enumerate(root_ids)
-        if node_tags[node_id - 1] in {60, 61}
+        index + 1 for index, node_id in enumerate(root_ids) if node_tags[node_id - 1] in {60, 61}
     )
     assert len(range_roots) == 1
     included = _native_slices_manifest(
@@ -1724,9 +1714,7 @@ def test_source_local_selection_excludes_unsupported_restriction_without_leaks()
         _slice_record(
             snapshot,
             posting_mode=2,
-            postings=memoryview(
-                b"".join(struct.pack("<I", value) for value in excluded_roots)
-            ),
+            postings=memoryview(b"".join(struct.pack("<I", value) for value in excluded_roots)),
         ),
         logical_fingerprint=snapshot.logical_fingerprint.digest,
     )
@@ -1736,9 +1724,7 @@ def test_source_local_selection_excludes_unsupported_restriction_without_leaks()
     assert included["deferred_roots"] == 0
     assert any(
         value["generated"]
-        for value in cast(
-            list[dict[str, object]], included["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], included["class_expression_symbols"])
     )
     assert any(
         value["generated"]
@@ -1746,9 +1732,7 @@ def test_source_local_selection_excludes_unsupported_restriction_without_leaks()
     )
     assert all(
         value["display"] != "class:urn:test:named#C"
-        for value in cast(
-            list[dict[str, object]], included["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], included["class_expression_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -1783,10 +1767,7 @@ def test_composite_selection_retains_cross_slice_restriction_declarations(
     declaration_buffers = produce_encoded_structural_view_v1(declarations).buffers
     declaration_count = len(memoryview(declaration_buffers["root_ids"]).cast("I"))
     declaration_postings = memoryview(
-        b"".join(
-            struct.pack("<I", root_id)
-            for root_id in range(1, declaration_count + 1)
-        )
+        b"".join(struct.pack("<I", root_id) for root_id in range(1, declaration_count + 1))
     )
     records = _composite_selected_records(
         composite,
@@ -1858,23 +1839,16 @@ def test_composite_selection_excludes_unreachable_declaration_proof_without_leak
     declaration_buffers = produce_encoded_structural_view_v1(declarations).buffers
     declaration_count = len(memoryview(declaration_buffers["root_ids"]).cast("I"))
     declaration_postings = memoryview(
-        b"".join(
-            struct.pack("<I", root_id)
-            for root_id in range(1, declaration_count + 1)
-        )
+        b"".join(struct.pack("<I", root_id) for root_id in range(1, declaration_count + 1))
     )
     logical_buffers = produce_encoded_structural_view_v1(logical).buffers
     root_ids = memoryview(logical_buffers["root_ids"]).cast("I")
     node_tags = memoryview(logical_buffers["node_tags"]).cast("H")
     range_root = next(
-        index + 1
-        for index, node_id in enumerate(root_ids)
-        if node_tags[node_id - 1] == 75
+        index + 1 for index, node_id in enumerate(root_ids) if node_tags[node_id - 1] == 75
     )
     unsupported_root = next(
-        index + 1
-        for index, node_id in enumerate(root_ids)
-        if node_tags[node_id - 1] == 61
+        index + 1 for index, node_id in enumerate(root_ids) if node_tags[node_id - 1] == 61
     )
     included = _composite_selected_records(
         composite,
@@ -1910,9 +1884,7 @@ def test_composite_selection_excludes_unreachable_declaration_proof_without_leak
     assert include_manifest["deferred_roots"] == 0
     assert all(
         value["display"] != "class:urn:test:named#C"
-        for value in cast(
-            list[dict[str, object]], include_manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], include_manifest["class_expression_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -1987,14 +1959,11 @@ def test_atomic_complement_class_assertions_match_scalar_exactly() -> None:
     manifest = _native_manifest(snapshot)
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=2)
-    class_symbols = cast(
-        list[dict[str, object]], manifest["class_expression_symbols"]
-    )
+    class_symbols = cast(list[dict[str, object]], manifest["class_expression_symbols"])
     assert len(cast(list[object], manifest["class_signature"])) == len(class_symbols) - 1
-    assert sum(
-        str(value["display"]).startswith("ObjectComplementOf:")
-        for value in class_symbols
-    ) == 1
+    assert (
+        sum(str(value["display"]).startswith("ObjectComplementOf:") for value in class_symbols) == 1
+    )
     predicates = cast(list[dict[str, object]], manifest["predicates"])
     negative_facts = cast(list[dict[str, object]], manifest["negative_facts"])
     assert len(negative_facts) == 1
@@ -2023,26 +1992,15 @@ def test_named_nominal_class_assertions_match_scalar_semantics_exactly() -> None
     manifest = _native_manifest(snapshot)
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=4)
-    class_symbols = cast(
-        list[dict[str, object]], manifest["class_expression_symbols"]
-    )
-    assert sum(
-        str(value["display"]).startswith("ObjectOneOf:")
-        for value in class_symbols
-    ) == 2
+    class_symbols = cast(list[dict[str, object]], manifest["class_expression_symbols"])
+    assert sum(str(value["display"]).startswith("ObjectOneOf:") for value in class_symbols) == 2
     predicates = cast(list[dict[str, object]], manifest["predicates"])
-    assert sum(
-        predicate["kind"] == PredicateKind.NOMINAL.value
-        for predicate in predicates
-    ) == 2
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value
-        for predicate in predicates
-    ) == 1
-    assert sum(
-        predicate["kind"] == PredicateKind.EQUALITY.value
-        for predicate in predicates
-    ) == 1
+    assert sum(predicate["kind"] == PredicateKind.NOMINAL.value for predicate in predicates) == 2
+    assert (
+        sum(predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value for predicate in predicates)
+        == 1
+    )
+    assert sum(predicate["kind"] == PredicateKind.EQUALITY.value for predicate in predicates) == 1
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -2061,11 +2019,9 @@ def test_named_nominal_class_axioms_constraints_and_keys_match_scalar_exactly() 
             'SubClassOf(Annotation(:note "duplicate") ObjectOneOf(:a :b) :A)',
             "SubClassOf(:A ObjectComplementOf(ObjectOneOf(:c)))",
             "EquivalentClasses(:A ObjectOneOf(:member))",
-            "DisjointClasses(:A ObjectOneOf(:a) "
-            "ObjectComplementOf(ObjectOneOf(:b)))",
+            "DisjointClasses(:A ObjectOneOf(:a) ObjectComplementOf(ObjectOneOf(:b)))",
             "ObjectPropertyDomain(:p ObjectOneOf(:a :b))",
-            "ObjectPropertyRange(ObjectInverseOf(:p) "
-            "ObjectComplementOf(ObjectOneOf(:c)))",
+            "ObjectPropertyRange(ObjectInverseOf(:p) ObjectComplementOf(ObjectOneOf(:c)))",
             "DataPropertyDomain(:data ObjectOneOf(:member))",
             "HasKey(ObjectComplementOf(ObjectOneOf(:a :b)) (:p) (:data))",
         ),
@@ -2081,26 +2037,17 @@ def test_named_nominal_class_axioms_constraints_and_keys_match_scalar_exactly() 
         include_data_domains=True,
         include_keys=True,
     )
-    class_symbols = cast(
-        list[dict[str, object]], manifest["class_expression_symbols"]
+    class_symbols = cast(list[dict[str, object]], manifest["class_expression_symbols"])
+    assert sum(str(value["display"]).startswith("ObjectOneOf:") for value in class_symbols) == 5
+    assert (
+        sum(str(value["display"]).startswith("ObjectComplementOf:") for value in class_symbols) == 3
     )
-    assert sum(
-        str(value["display"]).startswith("ObjectOneOf:")
-        for value in class_symbols
-    ) == 5
-    assert sum(
-        str(value["display"]).startswith("ObjectComplementOf:")
-        for value in class_symbols
-    ) == 3
     predicates = cast(list[dict[str, object]], manifest["predicates"])
-    assert sum(
-        predicate["kind"] == PredicateKind.NOMINAL.value
-        for predicate in predicates
-    ) == 5
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value
-        for predicate in predicates
-    ) == 3
+    assert sum(predicate["kind"] == PredicateKind.NOMINAL.value for predicate in predicates) == 5
+    assert (
+        sum(predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value for predicate in predicates)
+        == 3
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -2141,26 +2088,20 @@ def test_nested_atomic_class_complements_reduce_by_parity_exactly() -> None:
         include_data_domains=True,
         include_keys=True,
     )
-    class_symbols = cast(
-        list[dict[str, object]], manifest["class_expression_symbols"]
+    class_symbols = cast(list[dict[str, object]], manifest["class_expression_symbols"])
+    assert (
+        sum(str(value["display"]).startswith("ObjectComplementOf:") for value in class_symbols) == 3
     )
-    assert sum(
-        str(value["display"]).startswith("ObjectComplementOf:")
-        for value in class_symbols
-    ) == 3
-    assert sum(
-        str(value["display"]).startswith("ObjectOneOf:")
-        for value in class_symbols
-    ) == 1
+    assert sum(str(value["display"]).startswith("ObjectOneOf:") for value in class_symbols) == 1
     predicates = cast(list[dict[str, object]], manifest["predicates"])
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value
-        for predicate in predicates
-    ) == 2
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value
-        for predicate in predicates
-    ) == 1
+    assert (
+        sum(predicate["kind"] == PredicateKind.NEGATED_CONCEPT.value for predicate in predicates)
+        == 2
+    )
+    assert (
+        sum(predicate["kind"] == PredicateKind.NEGATED_NOMINAL.value for predicate in predicates)
+        == 1
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -2174,25 +2115,20 @@ def test_reducible_class_booleans_collapse_to_atomic_literals_exactly() -> None:
             "Declaration(NamedIndividual(:a))",
             "Declaration(NamedIndividual(:i))",
             "ClassAssertion(ObjectIntersectionOf(:A owl:Thing) :i)",
-            "SubClassOf(ObjectUnionOf(:A owl:Nothing) "
-            "ObjectIntersectionOf(:B owl:Thing))",
+            "SubClassOf(ObjectUnionOf(:A owl:Nothing) ObjectIntersectionOf(:B owl:Thing))",
             "EquivalentClasses(ObjectIntersectionOf(ObjectComplementOf(:A) "
             "owl:Thing) ObjectUnionOf(:B owl:Nothing))",
             "DisjointClasses(ObjectUnionOf(ObjectOneOf(:a) owl:Nothing) "
             "ObjectIntersectionOf(:B owl:Thing))",
             "ObjectPropertyDomain(:p ObjectIntersectionOf(:A owl:Thing))",
             "ObjectPropertyRange(:p ObjectUnionOf(:B owl:Nothing))",
-            "DataPropertyDomain(:d ObjectIntersectionOf(ObjectComplementOf(:A) "
-            "owl:Thing))",
+            "DataPropertyDomain(:d ObjectIntersectionOf(ObjectComplementOf(:A) owl:Thing))",
             "HasKey(ObjectUnionOf(ObjectOneOf(:a) owl:Nothing) (:p) (:d))",
             "SubClassOf(ObjectIntersectionOf(:A owl:Nothing) :B)",
             "SubClassOf(:A ObjectUnionOf(:B owl:Thing))",
-            "SubClassOf(ObjectIntersectionOf(:A "
-            "ObjectComplementOf(ObjectComplementOf(:A))) :B)",
-            "SubClassOf(ObjectComplementOf(ObjectUnionOf("
-            "ObjectComplementOf(:A) owl:Nothing)) :B)",
-            "DisjointClasses(ObjectIntersectionOf(:A owl:Thing) "
-            "ObjectUnionOf(:A owl:Nothing))",
+            "SubClassOf(ObjectIntersectionOf(:A ObjectComplementOf(ObjectComplementOf(:A))) :B)",
+            "SubClassOf(ObjectComplementOf(ObjectUnionOf(ObjectComplementOf(:A) owl:Nothing)) :B)",
+            "DisjointClasses(ObjectIntersectionOf(:A owl:Thing) ObjectUnionOf(:A owl:Nothing))",
         ),
         options=OPTIONS,
     )
@@ -2206,13 +2142,9 @@ def test_reducible_class_booleans_collapse_to_atomic_literals_exactly() -> None:
         include_data_domains=True,
         include_keys=True,
     )
-    class_symbols = cast(
-        list[dict[str, object]], manifest["class_expression_symbols"]
-    )
+    class_symbols = cast(list[dict[str, object]], manifest["class_expression_symbols"])
     assert not any(
-        str(value["display"]).startswith(
-            ("ObjectIntersectionOf:", "ObjectUnionOf:")
-        )
+        str(value["display"]).startswith(("ObjectIntersectionOf:", "ObjectUnionOf:"))
         for value in class_symbols
     )
     assert manifest["deferred_roots"] == 0
@@ -2228,8 +2160,7 @@ def test_absorbing_booleans_discard_supported_nested_operands_exactly() -> None:
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "Declaration(Datatype(:T))",
-            "SubClassOf(ObjectUnionOf(owl:Thing "
-            "ObjectSomeValuesFrom(:p :A)) :B)",
+            "SubClassOf(ObjectUnionOf(owl:Thing ObjectSomeValuesFrom(:p :A)) :B)",
             "DataPropertyRange(:d DataUnionOf(rdfs:Literal "
             "DataIntersectionOf(xsd:string xsd:integer)))",
             "DataPropertyRange(:e DataIntersectionOf("
@@ -2252,9 +2183,7 @@ def test_absorbing_booleans_discard_supported_nested_operands_exactly() -> None:
     )
     assert not any(
         value["generated"]
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert (
         sum(
@@ -2265,9 +2194,7 @@ def test_absorbing_booleans_discard_supported_nested_operands_exactly() -> None:
     )
     assert not any(
         value["generated"]
-        or str(value["display"]).startswith(
-            ("DataIntersectionOf:", "DataUnionOf:")
-        )
+        or str(value["display"]).startswith(("DataIntersectionOf:", "DataUnionOf:"))
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert manifest["deferred_roots"] == 0
@@ -2284,8 +2211,7 @@ def test_flat_boolean_subclass_definitions_match_scalar_exactly() -> None:
             "Declaration(NamedIndividual(:i))",
             "Declaration(AnnotationProperty(:note))",
             "SubClassOf(:A ObjectIntersectionOf(:B :C))",
-            'SubClassOf(Annotation(:note "same definition") :A '
-            "ObjectIntersectionOf(:B :C))",
+            'SubClassOf(Annotation(:note "same definition") :A ObjectIntersectionOf(:B :C))',
             "SubClassOf(ObjectIntersectionOf(ObjectComplementOf(:A) :B) :C)",
             "SubClassOf(:A ObjectUnionOf(ObjectComplementOf(:B) :C))",
             "SubClassOf(ObjectUnionOf(ObjectOneOf(:i) :B) :C)",
@@ -2299,9 +2225,7 @@ def test_flat_boolean_subclass_definitions_match_scalar_exactly() -> None:
     assert manifest == _expected_manifest(snapshot, compiled_roots=6)
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     assert len(generated) == 6
@@ -2329,15 +2253,11 @@ def test_recursive_class_boolean_definitions_match_scalar_exactly() -> None:
             "ObjectComplementOf(:B) ObjectComplementOf("
             "ObjectIntersectionOf(:C :D)))) :i)",
             "SubClassOf(ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) :D)",
-            "EquivalentClasses(:E ObjectIntersectionOf(:A "
-            "ObjectUnionOf(:B :C)))",
-            "ObjectPropertyDomain(:p ObjectIntersectionOf(:A "
-            "ObjectUnionOf(:B :C)))",
-            "DataPropertyDomain(:d ObjectUnionOf(:B "
-            "ObjectIntersectionOf(:C :D)))",
+            "EquivalentClasses(:E ObjectIntersectionOf(:A ObjectUnionOf(:B :C)))",
+            "ObjectPropertyDomain(:p ObjectIntersectionOf(:A ObjectUnionOf(:B :C)))",
+            "DataPropertyDomain(:d ObjectUnionOf(:B ObjectIntersectionOf(:C :D)))",
             "HasKey(ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) (:p) (:d))",
-            "DisjointClasses(ObjectIntersectionOf(:A "
-            "ObjectUnionOf(:B :C)) :D)",
+            "DisjointClasses(ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) :D)",
             "ObjectPropertyRange(:p ObjectUnionOf("
             "ObjectIntersectionOf(:A :B) ObjectIntersectionOf("
             ":C ObjectUnionOf(:D :E))))",
@@ -2356,15 +2276,11 @@ def test_recursive_class_boolean_definitions_match_scalar_exactly() -> None:
     )
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     assert len(generated) == 10
-    assert {
-        str(value["display"]).split(":")[-2] for value in generated
-    } == {"negative", "positive"}
+    assert {str(value["display"]).split(":")[-2] for value in generated} == {"negative", "positive"}
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -2475,8 +2391,7 @@ def test_recursive_object_quantifier_fillers_match_scalar_exactly() -> None:
             "SubClassOf(:E ObjectComplementOf(ObjectSomeValuesFrom(:q "
             "ObjectIntersectionOf(:B :C))))",
             "ClassAssertion(ObjectAllValuesFrom(:p ObjectHasSelf(:q)) :i)",
-            "DisjointClasses(ObjectSomeValuesFrom(:p "
-            "ObjectUnionOf(:A ObjectHasSelf(:q))) :E)",
+            "DisjointClasses(ObjectSomeValuesFrom(:p ObjectUnionOf(:A ObjectHasSelf(:q))) :E)",
         ),
         options=OPTIONS,
     )
@@ -2557,10 +2472,8 @@ def test_unsupported_recursive_quantifier_cardinality_fillers_defer_without_symb
             "Declaration(Class(:C))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
-            "SubClassOf(ObjectSomeValuesFrom(:p "
-            "ObjectMinCardinality(4294967296 :q :A)) :B)",
-            "SubClassOf(:A ObjectAllValuesFrom(:p "
-            "ObjectMinCardinality(4294967296 :q :B)))",
+            "SubClassOf(ObjectSomeValuesFrom(:p ObjectMinCardinality(4294967296 :q :A)) :B)",
+            "SubClassOf(:A ObjectAllValuesFrom(:p ObjectMinCardinality(4294967296 :q :B)))",
             "SubClassOf(ObjectSomeValuesFrom(:p ObjectIntersectionOf("
             "ObjectSomeValuesFrom(:q :A) "
             "ObjectMinCardinality(4294967296 :q :B))) :C)",
@@ -2689,16 +2602,13 @@ def test_at_least_object_definitions_cover_duality_and_recursive_fillers() -> No
             "Declaration(ObjectProperty(:q))",
             "Declaration(AnnotationProperty(:note))",
             "SubClassOf(:A ObjectSomeValuesFrom(:p :B))",
-            'SubClassOf(Annotation(:note "same at-least") :A '
-            "ObjectSomeValuesFrom(:p :B))",
+            'SubClassOf(Annotation(:note "same at-least") :A ObjectSomeValuesFrom(:p :B))',
             "SubClassOf(:C ObjectComplementOf(ObjectAllValuesFrom("
             "ObjectInverseOf(:p) ObjectComplementOf(:A))))",
             "SubClassOf(ObjectComplementOf(ObjectSomeValuesFrom("
             "ObjectInverseOf(:p) ObjectComplementOf(:B))) :C)",
-            "ClassAssertion(ObjectSomeValuesFrom(:q "
-            "ObjectIntersectionOf(:A :B)) :i)",
-            "DisjointClasses(ObjectAllValuesFrom(:q "
-            "ObjectUnionOf(:A :B)) :C)",
+            "ClassAssertion(ObjectSomeValuesFrom(:q ObjectIntersectionOf(:A :B)) :i)",
+            "DisjointClasses(ObjectAllValuesFrom(:q ObjectUnionOf(:A :B)) :C)",
             "SubClassOf(:B ObjectSomeValuesFrom(:p ObjectOneOf(:i)))",
             "SubClassOf(ObjectAllValuesFrom(:p ObjectOneOf(:i)) :B)",
         ),
@@ -2802,8 +2712,7 @@ def test_object_self_definitions_match_scalar_exactly() -> None:
             "Declaration(DataProperty(:d))",
             "Declaration(AnnotationProperty(:note))",
             "SubClassOf(:A ObjectHasSelf(:p))",
-            'SubClassOf(Annotation(:note "same definition") :A '
-            "ObjectHasSelf(:p))",
+            'SubClassOf(Annotation(:note "same definition") :A ObjectHasSelf(:p))',
             "SubClassOf(ObjectHasSelf(:p) :B)",
             "EquivalentClasses(:A ObjectHasSelf(:q))",
             "ClassAssertion(ObjectHasSelf(:p) :i)",
@@ -2828,15 +2737,11 @@ def test_object_self_definitions_match_scalar_exactly() -> None:
     )
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     assert len(generated) == 4
-    assert {
-        str(value["display"]).split(":")[-2] for value in generated
-    } == {"negative", "positive"}
+    assert {str(value["display"]).split(":")[-2] for value in generated} == {"negative", "positive"}
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -2877,9 +2782,7 @@ def test_composite_object_self_definitions_use_global_namespace() -> None:
     )
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     assert len(generated) == 2
@@ -2929,12 +2832,13 @@ def test_recursive_object_self_definitions_match_scalar_exactly() -> None:
         include_data_domains=True,
         include_keys=True,
     )
-    assert sum(
-        bool(value["generated"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 16
+        == 16
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -2950,16 +2854,14 @@ def test_composite_recursive_object_self_definitions_reuse_global_identity() -> 
     left = pyowl_core.load_snapshot(
         functional(
             *declarations,
-            "SubClassOf(:A ObjectUnionOf(:B "
-            "ObjectComplementOf(ObjectHasSelf(:p))))",
+            "SubClassOf(:A ObjectUnionOf(:B ObjectComplementOf(ObjectHasSelf(:p))))",
         ),
         options=OPTIONS,
     )
     right = pyowl_core.load_snapshot(
         functional(
             *declarations,
-            "ClassAssertion(ObjectUnionOf(:B "
-            "ObjectComplementOf(ObjectHasSelf(:p))) :i)",
+            "ClassAssertion(ObjectUnionOf(:B ObjectComplementOf(ObjectHasSelf(:p))) :i)",
             "DisjointUnion(:U ObjectHasSelf(:p) :A)",
         ),
         options=OPTIONS,
@@ -2978,9 +2880,7 @@ def test_composite_recursive_object_self_definitions_reuse_global_identity() -> 
     )
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     assert len(generated) == 5
@@ -3050,8 +2950,7 @@ def test_object_minimum_cardinality_above_u32_defers_without_symbol_leaks() -> N
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 1
     assert not any(
-        value["generated"]
-        or str(value["display"]).startswith("ObjectMinCardinality:")
+        value["generated"] or str(value["display"]).startswith("ObjectMinCardinality:")
         for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
@@ -3076,18 +2975,14 @@ def test_object_minimum_definitions_cover_recursive_and_nominal_fillers() -> Non
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(AnnotationProperty(:note))",
-            "SubClassOf(:A ObjectMinCardinality(2 :p "
-            "ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
+            "SubClassOf(:A ObjectMinCardinality(2 :p ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
             'SubClassOf(Annotation(:note "same minimum") :A '
             "ObjectMinCardinality(2 :p "
             "ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
             "SubClassOf(ObjectMinCardinality(3 :p ObjectUnionOf(:B :C)) :A)",
-            "ClassAssertion(ObjectMinCardinality(4 ObjectInverseOf(:p) "
-            "ObjectOneOf(:i)) :i)",
-            "DisjointClasses(ObjectMinCardinality(2 :q "
-            "ObjectComplementOf(:B)) :C)",
-            "ObjectPropertyDomain(:q ObjectMinCardinality(3 :p "
-            "ObjectSomeValuesFrom(:q :B)))",
+            "ClassAssertion(ObjectMinCardinality(4 ObjectInverseOf(:p) ObjectOneOf(:i)) :i)",
+            "DisjointClasses(ObjectMinCardinality(2 :q ObjectComplementOf(:B)) :C)",
+            "ObjectPropertyDomain(:q ObjectMinCardinality(3 :p ObjectSomeValuesFrom(:q :B)))",
         ),
         options=OPTIONS,
     )
@@ -3175,15 +3070,12 @@ def test_object_minimum_one_normalizes_to_scalar_existential_identity() -> None:
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(AnnotationProperty(:note))",
-            "SubClassOf(:A ObjectMinCardinality(1 :p "
-            "ObjectIntersectionOf(:B :C)))",
+            "SubClassOf(:A ObjectMinCardinality(1 :p ObjectIntersectionOf(:B :C)))",
             'SubClassOf(Annotation(:note "same existential") :A '
             "ObjectMinCardinality(1 :p ObjectIntersectionOf(:B :C)))",
             "SubClassOf(:A ObjectSomeValuesFrom(:p ObjectIntersectionOf(:B :C)))",
-            "SubClassOf(ObjectMinCardinality(1 ObjectInverseOf(:q) "
-            "ObjectOneOf(:i)) :A)",
-            "SubClassOf(:C ObjectMinCardinality(1 :q "
-            "ObjectSomeValuesFrom(:p :B)))",
+            "SubClassOf(ObjectMinCardinality(1 ObjectInverseOf(:q) ObjectOneOf(:i)) :A)",
+            "SubClassOf(:C ObjectMinCardinality(1 :q ObjectSomeValuesFrom(:p :B)))",
         ),
         options=OPTIONS,
     )
@@ -3198,9 +3090,7 @@ def test_object_minimum_one_normalizes_to_scalar_existential_identity() -> None:
     )
     assert not any(
         str(value["display"]).startswith("ObjectMinCardinality:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert {
         predicate["cardinality"]
@@ -3222,16 +3112,12 @@ def test_object_minimum_one_covers_generated_class_contexts() -> None:
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:data))",
-            "ClassAssertion(ObjectMinCardinality(1 :p "
-            "ObjectUnionOf(:A :B)) :i)",
+            "ClassAssertion(ObjectMinCardinality(1 :p ObjectUnionOf(:A :B)) :i)",
             "ObjectPropertyDomain(:q ObjectMinCardinality(1 :p "
             "ObjectIntersectionOf(:A ObjectHasSelf(:q))))",
-            "DataPropertyDomain(:data ObjectMinCardinality(1 "
-            "ObjectInverseOf(:q) ObjectOneOf(:i)))",
-            "HasKey(ObjectMinCardinality(1 :p "
-            "ObjectSomeValuesFrom(:q :B)) (:q) (:data))",
-            "DisjointClasses(ObjectMinCardinality(1 :q "
-            "ObjectComplementOf(:A)) :C)",
+            "DataPropertyDomain(:data ObjectMinCardinality(1 ObjectInverseOf(:q) ObjectOneOf(:i)))",
+            "HasKey(ObjectMinCardinality(1 :p ObjectSomeValuesFrom(:q :B)) (:q) (:data))",
+            "DisjointClasses(ObjectMinCardinality(1 :q ObjectComplementOf(:A)) :C)",
             "DisjointUnion(:U ObjectMinCardinality(1 :p :B) :A)",
             "SubClassOf(ObjectIntersectionOf(:B ObjectMinCardinality(1 :p "
             "ObjectUnionOf(:A :C))) :A)",
@@ -3253,9 +3139,7 @@ def test_object_minimum_one_covers_generated_class_contexts() -> None:
     )
     assert not any(
         str(value["display"]).startswith("ObjectMinCardinality:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -3304,9 +3188,7 @@ def test_composite_object_minimum_one_reuses_explicit_existential_identity() -> 
     )
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     namespace = f":class:{composite.logical_fingerprint.hex}:"
@@ -3314,9 +3196,7 @@ def test_composite_object_minimum_one_reuses_explicit_existential_identity() -> 
     assert all(namespace in str(value["display"]) for value in generated)
     assert not any(
         str(value["display"]).startswith("ObjectMinCardinality:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -3333,13 +3213,10 @@ def test_object_maximum_definitions_match_scalar_annotated_equalities() -> None:
             "SubClassOf(:A ObjectMaxCardinality(1 :p :B))",
             "SubClassOf(ObjectMaxCardinality(2 ObjectInverseOf(:q) :C) :A)",
             "EquivalentClasses(:B ObjectMaxCardinality(2 :p :C))",
-            "SubClassOf(:C ObjectComplementOf("
-            "ObjectMaxCardinality(1 :q :A)))",
-            "SubClassOf(:A ObjectComplementOf("
-            "ObjectMinCardinality(3 :q :B)))",
+            "SubClassOf(:C ObjectComplementOf(ObjectMaxCardinality(1 :q :A)))",
+            "SubClassOf(:A ObjectComplementOf(ObjectMinCardinality(3 :q :B)))",
             "SubClassOf(:B ObjectMaxCardinality(0 :p :C))",
-            "SubClassOf(:C ObjectComplementOf("
-            "ObjectMaxCardinality(0 :q :A)))",
+            "SubClassOf(:C ObjectComplementOf(ObjectMaxCardinality(0 :q :A)))",
         ),
         options=OPTIONS,
     )
@@ -3362,8 +3239,7 @@ def test_object_maximum_definitions_match_scalar_annotated_equalities() -> None:
     ]
     assert {predicate["cardinality"] for predicate in annotated} == {1, 2}
     assert all(
-        predicate["role_id"] is not None
-        and predicate["filler_predicate_id"] is not None
+        predicate["role_id"] is not None and predicate["filler_predicate_id"] is not None
         for predicate in annotated
     )
     at_least = [
@@ -3372,10 +3248,7 @@ def test_object_maximum_definitions_match_scalar_annotated_equalities() -> None:
         if predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
     ]
     assert {predicate["cardinality"] for predicate in at_least} == {1, 2, 3}
-    assert any(
-        predicate["kind"] == PredicateKind.ORDERING_GUARD.value
-        for predicate in predicates
-    )
+    assert any(predicate["kind"] == PredicateKind.ORDERING_GUARD.value for predicate in predicates)
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -3397,8 +3270,7 @@ def test_object_maximum_cardinality_overflow_defers_without_symbol_leaks() -> No
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 2
     assert not any(
-        value["generated"]
-        or str(value["display"]).startswith("ObjectMaxCardinality:")
+        value["generated"] or str(value["display"]).startswith("ObjectMaxCardinality:")
         for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
@@ -3430,12 +3302,9 @@ def test_object_maximum_definitions_cover_recursive_and_nominal_fillers() -> Non
             "ObjectMaxCardinality(2 ObjectInverseOf(:p) "
             "ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
             "SubClassOf(ObjectMaxCardinality(1 :p ObjectUnionOf(:B :C)) :A)",
-            "ClassAssertion(ObjectMaxCardinality(2 ObjectInverseOf(:p) "
-            "ObjectOneOf(:i)) :i)",
-            "DisjointClasses(ObjectMaxCardinality(1 :q "
-            "ObjectComplementOf(:B)) :C)",
-            "ObjectPropertyDomain(:q ObjectMaxCardinality(2 :p "
-            "ObjectSomeValuesFrom(:q :B)))",
+            "ClassAssertion(ObjectMaxCardinality(2 ObjectInverseOf(:p) ObjectOneOf(:i)) :i)",
+            "DisjointClasses(ObjectMaxCardinality(1 :q ObjectComplementOf(:B)) :C)",
+            "ObjectPropertyDomain(:q ObjectMaxCardinality(2 :p ObjectSomeValuesFrom(:q :B)))",
         ),
         options=OPTIONS,
     )
@@ -3477,8 +3346,7 @@ def test_composite_object_maximum_definitions_reuse_global_identity() -> None:
         functional(
             *declarations,
             f"SubClassOf(:A {maximum})",
-            "SubClassOf(ObjectMaxCardinality(1 :q "
-            "ObjectUnionOf(:B :C)) :A)",
+            "SubClassOf(ObjectMaxCardinality(1 :q ObjectUnionOf(:B :C)) :A)",
         ),
         options=OPTIONS,
     )
@@ -3529,14 +3397,11 @@ def test_object_exact_definitions_match_scalar_minimum_maximum_expansion() -> No
             "SubClassOf(:A ObjectExactCardinality(2 :p :B))",
             "SubClassOf(ObjectExactCardinality(3 ObjectInverseOf(:q) :C) :A)",
             "EquivalentClasses(:B ObjectExactCardinality(2 :p :C))",
-            "SubClassOf(:C ObjectComplementOf("
-            "ObjectExactCardinality(2 :q :A)))",
+            "SubClassOf(:C ObjectComplementOf(ObjectExactCardinality(2 :q :A)))",
             "SubClassOf(:A ObjectExactCardinality(1 :q :B))",
-            "SubClassOf(:B ObjectComplementOf("
-            "ObjectExactCardinality(1 :p :C)))",
+            "SubClassOf(:B ObjectComplementOf(ObjectExactCardinality(1 :p :C)))",
             "SubClassOf(:B ObjectExactCardinality(0 :p :C))",
-            "SubClassOf(:C ObjectComplementOf("
-            "ObjectExactCardinality(0 :q :A)))",
+            "SubClassOf(:C ObjectComplementOf(ObjectExactCardinality(0 :q :A)))",
         ),
         options=OPTIONS,
     )
@@ -3566,9 +3431,7 @@ def test_object_exact_definitions_match_scalar_minimum_maximum_expansion() -> No
     assert {predicate["cardinality"] for predicate in at_least} == {1, 2, 3, 4}
     assert not any(
         str(value["display"]).startswith("ObjectExactCardinality:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -3581,8 +3444,7 @@ def test_object_exact_cardinality_overflow_defers_without_symbol_leaks() -> None
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
             "SubClassOf(:A ObjectExactCardinality(4294967295 :p :B))",
-            "SubClassOf(:A ObjectComplementOf("
-            "ObjectExactCardinality(4294967295 :p :B)))",
+            "SubClassOf(:A ObjectComplementOf(ObjectExactCardinality(4294967295 :p :B)))",
             "SubClassOf(:A ObjectExactCardinality(4294967296 :p :B))",
         ),
         options=OPTIONS,
@@ -3603,9 +3465,7 @@ def test_object_exact_cardinality_overflow_defers_without_symbol_leaks() -> None
                 "ObjectExactCardinality:",
             )
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"]
@@ -3636,14 +3496,11 @@ def test_object_exact_definitions_cover_recursive_and_nominal_fillers() -> None:
             'SubClassOf(Annotation(:note "same exact") :A '
             "ObjectExactCardinality(2 ObjectInverseOf(:p) "
             "ObjectIntersectionOf(:B ObjectHasSelf(:q))))",
-            "SubClassOf(ObjectExactCardinality(1 :p "
-            "ObjectUnionOf(:B :C)) :A)",
-            "ClassAssertion(ObjectExactCardinality(2 ObjectInverseOf(:p) "
-            "ObjectOneOf(:i)) :i)",
+            "SubClassOf(ObjectExactCardinality(1 :p ObjectUnionOf(:B :C)) :A)",
+            "ClassAssertion(ObjectExactCardinality(2 ObjectInverseOf(:p) ObjectOneOf(:i)) :i)",
             "DisjointClasses(ObjectComplementOf(ObjectExactCardinality(2 :q "
             "ObjectComplementOf(:B))) :C)",
-            "ObjectPropertyDomain(:q ObjectExactCardinality(3 :p "
-            "ObjectSomeValuesFrom(:q :B)))",
+            "ObjectPropertyDomain(:q ObjectExactCardinality(3 :p ObjectSomeValuesFrom(:q :B)))",
         ),
         options=OPTIONS,
     )
@@ -3683,8 +3540,7 @@ def test_composite_object_exact_definitions_reuse_global_identity() -> None:
         functional(
             *declarations,
             f"SubClassOf(:A {exact})",
-            "SubClassOf(ObjectComplementOf(ObjectExactCardinality(3 :q "
-            "ObjectUnionOf(:B :C))) :A)",
+            "SubClassOf(ObjectComplementOf(ObjectExactCardinality(3 :q ObjectUnionOf(:B :C))) :A)",
         ),
         options=OPTIONS,
     )
@@ -3715,9 +3571,7 @@ def test_composite_object_exact_definitions_reuse_global_identity() -> None:
     assert len(annotated) == 1
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     namespace = f":class:{composite.logical_fingerprint.hex}:"
@@ -3737,12 +3591,10 @@ def test_object_has_value_definitions_match_scalar_singleton_nominals() -> None:
             "Declaration(ObjectProperty(:q))",
             "Declaration(AnnotationProperty(:note))",
             "SubClassOf(:A ObjectHasValue(:p :i))",
-            'SubClassOf(Annotation(:note "same value") :A '
-            "ObjectHasValue(:p :i))",
+            'SubClassOf(Annotation(:note "same value") :A ObjectHasValue(:p :i))',
             "SubClassOf(ObjectHasValue(ObjectInverseOf(:q) :j) :A)",
             "EquivalentClasses(:B ObjectHasValue(:p :j))",
-            "SubClassOf(:A ObjectComplementOf("
-            "ObjectHasValue(ObjectInverseOf(:p) :i)))",
+            "SubClassOf(:A ObjectComplementOf(ObjectHasValue(ObjectInverseOf(:p) :i)))",
             "SubClassOf(ObjectComplementOf(ObjectHasValue(:q :j)) :B)",
             "SubClassOf(:A ObjectSomeValuesFrom(:p ObjectOneOf(:i)))",
             "SubClassOf(:A ObjectAllValuesFrom(ObjectInverseOf(:p) "
@@ -3775,9 +3627,7 @@ def test_object_has_value_definitions_match_scalar_singleton_nominals() -> None:
     }
     assert not any(
         str(value["display"]).startswith("ObjectHasValue:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -3823,8 +3673,7 @@ def test_undeclared_named_object_has_value_matches_scalar_exactly() -> None:
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "SubClassOf(:A ObjectHasValue(:p :implicit))",
-            "SubClassOf(ObjectComplementOf(ObjectHasValue("
-            "ObjectInverseOf(:q) :implicit)) :B)",
+            "SubClassOf(ObjectComplementOf(ObjectHasValue(ObjectInverseOf(:q) :implicit)) :B)",
             "SubClassOf(:A ObjectSomeValuesFrom(:p ObjectOneOf(:implicit)))",
         ),
         options=OPTIONS,
@@ -3838,14 +3687,10 @@ def test_undeclared_named_object_has_value_matches_scalar_exactly() -> None:
         include_generated_object_quantifier_definitions=True,
         include_at_least_object_predicates=True,
     )
-    assert cast(list[dict[str, object]], manifest["individual_signature"])[0][
-        "declared"
-    ] is False
+    assert cast(list[dict[str, object]], manifest["individual_signature"])[0]["declared"] is False
     singleton_nominals = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if str(value["display"]).startswith("ObjectOneOf:")
     ]
     assert len(singleton_nominals) == 1
@@ -3865,16 +3710,14 @@ def test_composite_object_has_value_reuses_explicit_quantifier_identity() -> Non
         functional(
             *declarations,
             "SubClassOf(:A ObjectHasValue(:p :i))",
-            "SubClassOf(ObjectComplementOf(ObjectHasValue("
-            "ObjectInverseOf(:q) :i)) :B)",
+            "SubClassOf(ObjectComplementOf(ObjectHasValue(ObjectInverseOf(:q) :i)) :B)",
         ),
         options=OPTIONS,
     )
     right = pyowl_core.load_snapshot(
         functional(
             *declarations,
-            "ObjectPropertyDomain(:q "
-            "ObjectSomeValuesFrom(:p ObjectOneOf(:i)))",
+            "ObjectPropertyDomain(:q ObjectSomeValuesFrom(:p ObjectOneOf(:i)))",
         ),
         options=OPTIONS,
     )
@@ -3894,17 +3737,13 @@ def test_composite_object_has_value_reuses_explicit_quantifier_identity() -> Non
     )
     singleton_nominals = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if str(value["display"]).startswith("ObjectOneOf:")
     ]
     assert len(singleton_nominals) == 1
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     namespace = f":class:{composite.logical_fingerprint.hex}:"
@@ -3942,15 +3781,17 @@ def test_composite_undeclared_named_object_has_value_remaps_exactly() -> None:
         logical_fingerprint=composite.logical_fingerprint.digest,
     )
 
-    assert forward == reverse == _expected_manifest(
-        composite,
-        compiled_roots=2,
-        include_generated_object_quantifier_definitions=True,
-        include_at_least_object_predicates=True,
+    assert (
+        forward
+        == reverse
+        == _expected_manifest(
+            composite,
+            compiled_roots=2,
+            include_generated_object_quantifier_definitions=True,
+            include_at_least_object_predicates=True,
+        )
     )
-    assert cast(list[dict[str, object]], forward["individual_signature"])[0][
-        "declared"
-    ] is False
+    assert cast(list[dict[str, object]], forward["individual_signature"])[0]["declared"] is False
     assert forward["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -3965,8 +3806,7 @@ def test_object_has_value_partially_unsupported_inputs_defer_without_symbol_leak
             "Declaration(DataProperty(:d))",
             "SubClassOf(:A ObjectHasValue(:p :undeclared))",
             "SubClassOf(:A ObjectHasValue(:p _:anonymous))",
-            'EquivalentClasses(:A ObjectHasValue(:p :i) '
-            'DataHasValue(:undeclared "value"))',
+            'EquivalentClasses(:A ObjectHasValue(:p :i) DataHasValue(:undeclared "value"))',
         ),
         options=OPTIONS,
     )
@@ -3975,17 +3815,13 @@ def test_object_has_value_partially_unsupported_inputs_defer_without_symbol_leak
 
     assert manifest["compiled_roots"] == 1
     assert manifest["deferred_roots"] == 2
-    class_symbols = cast(
-        list[dict[str, object]], manifest["class_expression_symbols"]
-    )
+    class_symbols = cast(list[dict[str, object]], manifest["class_expression_symbols"])
     assert sum(value["generated"] for value in class_symbols) == 1
-    assert sum(
-        str(value["display"]).startswith("ObjectOneOf:") for value in class_symbols
-    ) == 1
-    assert sum(
-        str(value["display"]).startswith("ObjectSomeValuesFrom:")
-        for value in class_symbols
-    ) == 1
+    assert sum(str(value["display"]).startswith("ObjectOneOf:") for value in class_symbols) == 1
+    assert (
+        sum(str(value["display"]).startswith("ObjectSomeValuesFrom:") for value in class_symbols)
+        == 1
+    )
     assert not any(
         str(value["display"]).startswith(
             ("ObjectComplementOf:", "ObjectAllValuesFrom:", "ObjectHasValue:")
@@ -3994,19 +3830,16 @@ def test_object_has_value_partially_unsupported_inputs_defer_without_symbol_leak
     )
     predicates = cast(list[dict[str, object]], manifest["predicates"])
     nominal_predicates = [
-        predicate
-        for predicate in predicates
-        if predicate["kind"] == PredicateKind.NOMINAL.value
+        predicate for predicate in predicates if predicate["kind"] == PredicateKind.NOMINAL.value
     ]
     assert [predicate["annotation"] for predicate in nominal_predicates] == [[1]]
-    assert sum(
-        predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value
-        for predicate in predicates
-    ) == 1
-    assert sum(
-        predicate["kind"] == PredicateKind.OBJECT_ROLE.value
-        for predicate in predicates
-    ) == 1
+    assert (
+        sum(predicate["kind"] == PredicateKind.AT_LEAST_OBJECT.value for predicate in predicates)
+        == 1
+    )
+    assert (
+        sum(predicate["kind"] == PredicateKind.OBJECT_ROLE.value for predicate in predicates) == 1
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -4019,15 +3852,12 @@ def test_atomic_data_quantifier_definitions_match_scalar_exactly() -> None:
             "Declaration(DataProperty(:e))",
             "Declaration(AnnotationProperty(:note))",
             "SubClassOf(DataSomeValuesFrom(:d xsd:string) :A)",
-            'SubClassOf(Annotation(:note "same definition") '
-            "DataSomeValuesFrom(:d xsd:string) :A)",
+            'SubClassOf(Annotation(:note "same definition") DataSomeValuesFrom(:d xsd:string) :A)',
             "SubClassOf(:A DataSomeValuesFrom(:d xsd:boolean))",
             "SubClassOf(DataAllValuesFrom(:d xsd:decimal) :B)",
             "SubClassOf(:A DataAllValuesFrom(:e xsd:integer))",
-            "SubClassOf(ObjectComplementOf("
-            "DataAllValuesFrom(:e xsd:string)) :B)",
-            "SubClassOf(:B ObjectComplementOf("
-            "DataSomeValuesFrom(:d xsd:integer)))",
+            "SubClassOf(ObjectComplementOf(DataAllValuesFrom(:e xsd:string)) :B)",
+            "SubClassOf(:B ObjectComplementOf(DataSomeValuesFrom(:d xsd:integer)))",
             'EquivalentClasses(:A DataSomeValuesFrom(:e DataOneOf("value")))',
         ),
         options=OPTIONS,
@@ -4072,10 +3902,8 @@ def test_atomic_data_quantifiers_cover_generated_class_contexts() -> None:
             "ObjectPropertyDomain(:p DataSomeValuesFrom(:d xsd:boolean))",
             "DataPropertyDomain(:e DataAllValuesFrom(:d xsd:decimal))",
             "HasKey(DataSomeValuesFrom(:e xsd:integer) (:p) (:d))",
-            "DisjointClasses(ObjectComplementOf("
-            "DataSomeValuesFrom(:d xsd:string)) :A)",
-            "SubClassOf(ObjectIntersectionOf(:B "
-            "DataAllValuesFrom(:e DataOneOf(\"value\"))) :A)",
+            "DisjointClasses(ObjectComplementOf(DataSomeValuesFrom(:d xsd:string)) :A)",
+            'SubClassOf(ObjectIntersectionOf(:B DataAllValuesFrom(:e DataOneOf("value"))) :A)',
         ),
         options=OPTIONS,
     )
@@ -4135,9 +3963,7 @@ def test_composite_atomic_data_quantifiers_reuse_global_identity() -> None:
     )
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     namespace = f":class:{composite.logical_fingerprint.hex}:"
@@ -4155,18 +3981,14 @@ def test_recursive_data_quantifier_fillers_match_scalar_exactly() -> None:
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "Declaration(AnnotationProperty(:note))",
-            "SubClassOf(DataSomeValuesFrom(:d "
-            "DataIntersectionOf(xsd:string xsd:integer)) :A)",
+            "SubClassOf(DataSomeValuesFrom(:d DataIntersectionOf(xsd:string xsd:integer)) :A)",
             'SubClassOf(Annotation(:note "same definitions") '
             "DataSomeValuesFrom(:d "
             "DataIntersectionOf(xsd:string xsd:integer)) :A)",
-            "SubClassOf(:A DataSomeValuesFrom(:d "
-            "DataUnionOf(xsd:boolean xsd:decimal)))",
+            "SubClassOf(:A DataSomeValuesFrom(:d DataUnionOf(xsd:boolean xsd:decimal)))",
             "DataPropertyRange(:e DataUnionOf(xsd:boolean xsd:decimal))",
-            "SubClassOf(DataAllValuesFrom(:e "
-            "DataUnionOf(xsd:string xsd:integer)) :B)",
-            "SubClassOf(:B DataAllValuesFrom(:e "
-            "DataIntersectionOf(xsd:boolean xsd:decimal)))",
+            "SubClassOf(DataAllValuesFrom(:e DataUnionOf(xsd:string xsd:integer)) :B)",
+            "SubClassOf(:B DataAllValuesFrom(:e DataIntersectionOf(xsd:boolean xsd:decimal)))",
             "SubClassOf(ObjectComplementOf(DataSomeValuesFrom(:e "
             "DataIntersectionOf(xsd:string xsd:decimal))) :A)",
             "SubClassOf(:B ObjectComplementOf(DataAllValuesFrom(:d "
@@ -4204,14 +4026,11 @@ def test_recursive_data_quantifier_fillers_cover_generated_class_contexts() -> N
             "Declaration(ObjectProperty(:p))",
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
-            "ClassAssertion(DataAllValuesFrom(:d "
-            "DataUnionOf(xsd:string xsd:integer)) :i)",
+            "ClassAssertion(DataAllValuesFrom(:d DataUnionOf(xsd:string xsd:integer)) :i)",
             "ObjectPropertyDomain(:p DataSomeValuesFrom(:d "
             "DataIntersectionOf(xsd:boolean xsd:decimal)))",
-            "DataPropertyDomain(:e DataAllValuesFrom(:d "
-            "DataUnionOf(xsd:decimal xsd:integer)))",
-            "HasKey(DataSomeValuesFrom(:e "
-            "DataIntersectionOf(xsd:string xsd:boolean)) (:p) (:d))",
+            "DataPropertyDomain(:e DataAllValuesFrom(:d DataUnionOf(xsd:decimal xsd:integer)))",
+            "HasKey(DataSomeValuesFrom(:e DataIntersectionOf(xsd:string xsd:boolean)) (:p) (:d))",
             "DisjointClasses(ObjectComplementOf(DataSomeValuesFrom(:d "
             "DataUnionOf(xsd:string xsd:decimal))) :A)",
             "SubClassOf(ObjectIntersectionOf(:B DataAllValuesFrom(:e "
@@ -4244,8 +4063,7 @@ def test_composite_recursive_data_quantifier_fillers_reuse_global_identity() -> 
         "Declaration(DataProperty(:d))",
     )
     restriction = (
-        "DataSomeValuesFrom(:d "
-        "DataIntersectionOf(xsd:string DataUnionOf(xsd:integer xsd:boolean)))"
+        "DataSomeValuesFrom(:d DataIntersectionOf(xsd:string DataUnionOf(xsd:integer xsd:boolean)))"
     )
     left = pyowl_core.load_snapshot(
         functional(
@@ -4280,18 +4098,22 @@ def test_composite_recursive_data_quantifier_fillers_reuse_global_identity() -> 
     )
     class_namespace = f":class:{composite.logical_fingerprint.hex}:"
     data_namespace = f":data:{composite.logical_fingerprint.hex}:"
-    assert sum(
-        class_namespace in str(value["display"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            class_namespace in str(value["display"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+            if value["generated"]
         )
-        if value["generated"]
-    ) == 2
-    assert sum(
-        data_namespace in str(value["display"])
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-        if value["generated"]
-    ) == 4
+        == 2
+    )
+    assert (
+        sum(
+            data_namespace in str(value["display"])
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+            if value["generated"]
+        )
+        == 4
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -4304,12 +4126,11 @@ def test_unsupported_data_quantifier_inputs_defer_without_symbol_leaks() -> None
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "SubClassOf(:A DataSomeValuesFrom(:d :e xsd:string))",
-            "SubClassOf(DataAllValuesFrom(:d :e "
-            "DataIntersectionOf(xsd:string xsd:integer)) :B)",
+            "SubClassOf(DataAllValuesFrom(:d :e DataIntersectionOf(xsd:string xsd:integer)) :B)",
             "SubClassOf(:A DataSomeValuesFrom(:undeclared xsd:string))",
             "EquivalentClasses(:A DataSomeValuesFrom(:d "
             "DataUnionOf(xsd:string xsd:integer)) "
-            "DataHasValue(:undeclared \"value\"))",
+            'DataHasValue(:undeclared "value"))',
         ),
         options=OPTIONS,
     )
@@ -4320,18 +4141,12 @@ def test_unsupported_data_quantifier_inputs_defer_without_symbol_leaks() -> None
     assert manifest["deferred_roots"] == 4
     assert not any(
         value["generated"]
-        or str(value["display"]).startswith(
-            ("DataSomeValuesFrom:", "DataAllValuesFrom:")
-        )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        or str(value["display"]).startswith(("DataSomeValuesFrom:", "DataAllValuesFrom:"))
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert not any(
         value["generated"]
-        or str(value["display"]).startswith(
-            ("DataIntersectionOf:", "DataUnionOf:")
-        )
+        or str(value["display"]).startswith(("DataIntersectionOf:", "DataUnionOf:"))
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert all(
@@ -4354,12 +4169,10 @@ def test_data_minimum_definitions_match_scalar_at_least_predicates() -> None:
             "Declaration(DataProperty(:e))",
             "Declaration(AnnotationProperty(:note))",
             "SubClassOf(:A DataMinCardinality(2 :d xsd:string))",
-            'SubClassOf(Annotation(:note "same minimum") '
-            ":A DataMinCardinality(2 :d xsd:string))",
+            'SubClassOf(Annotation(:note "same minimum") :A DataMinCardinality(2 :d xsd:string))',
             "SubClassOf(DataMinCardinality(3 :e xsd:boolean) :B)",
             'EquivalentClasses(:A DataMinCardinality(4 :e DataOneOf("value")))',
-            "SubClassOf(:B DataMinCardinality(4294967295 :d "
-            "DataComplementOf(xsd:integer)))",
+            "SubClassOf(:B DataMinCardinality(4294967295 :d DataComplementOf(xsd:integer)))",
         ),
         options=OPTIONS,
     )
@@ -4474,9 +4287,7 @@ def test_composite_data_minimum_definitions_reuse_global_identity() -> None:
     )
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     namespace = f":class:{composite.logical_fingerprint.hex}:"
@@ -4494,21 +4305,18 @@ def test_recursive_data_minimum_fillers_match_scalar_exactly() -> None:
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "Declaration(AnnotationProperty(:note))",
-            "SubClassOf(:A DataMinCardinality(2 :d "
-            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "SubClassOf(:A DataMinCardinality(2 :d DataIntersectionOf(xsd:string xsd:integer)))",
             'SubClassOf(Annotation(:note "same dependencies") :A '
             "DataMinCardinality(2 :d "
             "DataIntersectionOf(xsd:string xsd:integer)))",
-            "SubClassOf(DataMinCardinality(3 :e "
-            "DataUnionOf(xsd:boolean xsd:decimal)) :B)",
+            "SubClassOf(DataMinCardinality(3 :e DataUnionOf(xsd:boolean xsd:decimal)) :B)",
             "SubClassOf(:B DataMinCardinality(1 :d DataIntersectionOf("
             "xsd:string DataUnionOf(xsd:integer xsd:boolean))))",
             "SubClassOf(ObjectComplementOf(DataMinCardinality(3 :d "
             "DataUnionOf(xsd:string xsd:decimal))) :A)",
             "SubClassOf(:A ObjectComplementOf(DataMinCardinality(1 :e "
             "DataIntersectionOf(xsd:boolean xsd:integer))))",
-            "DataPropertyRange(:e "
-            "DataIntersectionOf(xsd:string xsd:integer))",
+            "DataPropertyRange(:e DataIntersectionOf(xsd:string xsd:integer))",
         ),
         options=OPTIONS,
     )
@@ -4537,16 +4345,12 @@ def test_recursive_data_minimum_fillers_cover_generated_class_contexts() -> None
             "Declaration(ObjectProperty(:p))",
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
-            "ClassAssertion(DataMinCardinality(2 :d "
-            "DataUnionOf(xsd:string xsd:integer)) :i)",
+            "ClassAssertion(DataMinCardinality(2 :d DataUnionOf(xsd:string xsd:integer)) :i)",
             "ObjectPropertyDomain(:p DataMinCardinality(3 :e "
             "DataIntersectionOf(xsd:boolean xsd:decimal)))",
-            "DataPropertyDomain(:d DataMinCardinality(4 :e "
-            "DataUnionOf(xsd:decimal xsd:integer)))",
-            "HasKey(DataMinCardinality(5 :d "
-            "DataIntersectionOf(xsd:string xsd:boolean)) (:p) (:e))",
-            "DisjointClasses(DataMinCardinality(2 :e "
-            "DataUnionOf(xsd:string xsd:decimal)) :A)",
+            "DataPropertyDomain(:d DataMinCardinality(4 :e DataUnionOf(xsd:decimal xsd:integer)))",
+            "HasKey(DataMinCardinality(5 :d DataIntersectionOf(xsd:string xsd:boolean)) (:p) (:e))",
+            "DisjointClasses(DataMinCardinality(2 :e DataUnionOf(xsd:string xsd:decimal)) :A)",
             "SubClassOf(ObjectIntersectionOf(:B DataMinCardinality(3 :d "
             "DataIntersectionOf(xsd:boolean xsd:integer))) :A)",
         ),
@@ -4613,18 +4417,22 @@ def test_composite_recursive_data_minimum_fillers_reuse_global_identity() -> Non
     )
     class_namespace = f":class:{composite.logical_fingerprint.hex}:"
     data_namespace = f":data:{composite.logical_fingerprint.hex}:"
-    assert sum(
-        class_namespace in str(value["display"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            class_namespace in str(value["display"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+            if value["generated"]
         )
-        if value["generated"]
-    ) == 2
-    assert sum(
-        data_namespace in str(value["display"])
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-        if value["generated"]
-    ) == 4
+        == 2
+    )
+    assert (
+        sum(
+            data_namespace in str(value["display"])
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+            if value["generated"]
+        )
+        == 4
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -4636,8 +4444,7 @@ def test_unsupported_data_minimum_inputs_defer_without_symbol_leaks() -> None:
             "Declaration(Class(:B))",
             "Declaration(DataProperty(:d))",
             "SubClassOf(:A DataMinCardinality(4294967296 :d xsd:string))",
-            "SubClassOf(:A ObjectComplementOf("
-            "DataMinCardinality(4294967296 :d xsd:string)))",
+            "SubClassOf(:A ObjectComplementOf(DataMinCardinality(4294967296 :d xsd:string)))",
             "SubClassOf(:A DataMinCardinality(2 :undeclared xsd:string))",
             "EquivalentClasses(:A DataMinCardinality(2 :d "
             "DataIntersectionOf(xsd:string xsd:integer)) "
@@ -4651,17 +4458,12 @@ def test_unsupported_data_minimum_inputs_defer_without_symbol_leaks() -> None:
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 4
     assert not any(
-        value["generated"]
-        or str(value["display"]).startswith("DataMinCardinality:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        value["generated"] or str(value["display"]).startswith("DataMinCardinality:")
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert not any(
         value["generated"]
-        or str(value["display"]).startswith(
-            ("DataIntersectionOf:", "DataUnionOf:")
-        )
+        or str(value["display"]).startswith(("DataIntersectionOf:", "DataUnionOf:"))
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert all(
@@ -4685,8 +4487,7 @@ def test_data_maximum_definitions_match_scalar_at_most_clauses() -> None:
             "Declaration(DataProperty(:e))",
             "Declaration(AnnotationProperty(:note))",
             "SubClassOf(:A DataMaxCardinality(1 :d xsd:string))",
-            'SubClassOf(Annotation(:note "same maximum") '
-            ":A DataMaxCardinality(1 :d xsd:string))",
+            'SubClassOf(Annotation(:note "same maximum") :A DataMaxCardinality(1 :d xsd:string))',
             "SubClassOf(DataMaxCardinality(2 :e xsd:boolean) :B)",
             'EquivalentClasses(:A DataMaxCardinality(3 :e DataOneOf("value")))',
         ),
@@ -4729,12 +4530,9 @@ def test_data_cardinality_boundaries_and_complement_duals_match_scalar() -> None
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "SubClassOf(:A DataMaxCardinality(0 :d xsd:string))",
-            "SubClassOf(ObjectComplementOf("
-            "DataMaxCardinality(0 :d xsd:string)) :B)",
-            "SubClassOf(:A ObjectComplementOf("
-            "DataMinCardinality(2 :d xsd:string)))",
-            "SubClassOf(ObjectComplementOf("
-            "DataMaxCardinality(2 :e xsd:boolean)) :B)",
+            "SubClassOf(ObjectComplementOf(DataMaxCardinality(0 :d xsd:string)) :B)",
+            "SubClassOf(:A ObjectComplementOf(DataMinCardinality(2 :d xsd:string)))",
+            "SubClassOf(ObjectComplementOf(DataMaxCardinality(2 :e xsd:boolean)) :B)",
             "SubClassOf(:A DataMinCardinality(1 :e xsd:integer))",
         ),
         options=OPTIONS,
@@ -4834,9 +4632,7 @@ def test_composite_data_maximum_definitions_reuse_global_identity() -> None:
     )
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     namespace = f":class:{composite.logical_fingerprint.hex}:"
@@ -4854,13 +4650,11 @@ def test_recursive_data_maximum_fillers_match_scalar_exactly() -> None:
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "Declaration(AnnotationProperty(:note))",
-            "SubClassOf(:A DataMaxCardinality(1 :d "
-            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "SubClassOf(:A DataMaxCardinality(1 :d DataIntersectionOf(xsd:string xsd:integer)))",
             'SubClassOf(Annotation(:note "same dependencies") :A '
             "DataMaxCardinality(1 :d "
             "DataIntersectionOf(xsd:string xsd:integer)))",
-            "SubClassOf(DataMaxCardinality(2 :e "
-            "DataUnionOf(xsd:boolean xsd:decimal)) :B)",
+            "SubClassOf(DataMaxCardinality(2 :e DataUnionOf(xsd:boolean xsd:decimal)) :B)",
             "SubClassOf(:B DataMaxCardinality(0 :d DataIntersectionOf("
             "xsd:string DataUnionOf(xsd:integer xsd:boolean))))",
             "SubClassOf(ObjectComplementOf(DataMaxCardinality(0 :e "
@@ -4896,16 +4690,12 @@ def test_recursive_data_maximum_fillers_cover_generated_class_contexts() -> None
             "Declaration(ObjectProperty(:p))",
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
-            "ClassAssertion(DataMaxCardinality(1 :d "
-            "DataUnionOf(xsd:string xsd:integer)) :i)",
+            "ClassAssertion(DataMaxCardinality(1 :d DataUnionOf(xsd:string xsd:integer)) :i)",
             "ObjectPropertyDomain(:p DataMaxCardinality(2 :e "
             "DataIntersectionOf(xsd:boolean xsd:decimal)))",
-            "DataPropertyDomain(:d DataMaxCardinality(3 :e "
-            "DataUnionOf(xsd:decimal xsd:integer)))",
-            "HasKey(DataMaxCardinality(1 :d "
-            "DataIntersectionOf(xsd:string xsd:boolean)) (:p) (:e))",
-            "DisjointClasses(DataMaxCardinality(2 :e "
-            "DataUnionOf(xsd:string xsd:decimal)) :A)",
+            "DataPropertyDomain(:d DataMaxCardinality(3 :e DataUnionOf(xsd:decimal xsd:integer)))",
+            "HasKey(DataMaxCardinality(1 :d DataIntersectionOf(xsd:string xsd:boolean)) (:p) (:e))",
+            "DisjointClasses(DataMaxCardinality(2 :e DataUnionOf(xsd:string xsd:decimal)) :A)",
             "SubClassOf(ObjectIntersectionOf(:B DataMaxCardinality(1 :d "
             "DataIntersectionOf(xsd:boolean xsd:integer))) :A)",
         ),
@@ -4972,18 +4762,22 @@ def test_composite_recursive_data_maximum_fillers_reuse_global_identity() -> Non
     )
     class_namespace = f":class:{composite.logical_fingerprint.hex}:"
     data_namespace = f":data:{composite.logical_fingerprint.hex}:"
-    assert sum(
-        class_namespace in str(value["display"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            class_namespace in str(value["display"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+            if value["generated"]
         )
-        if value["generated"]
-    ) == 2
-    assert sum(
-        data_namespace in str(value["display"])
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-        if value["generated"]
-    ) == 4
+        == 2
+    )
+    assert (
+        sum(
+            data_namespace in str(value["display"])
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+            if value["generated"]
+        )
+        == 4
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -4997,8 +4791,7 @@ def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
             "SubClassOf(:A DataMaxCardinality(4294967295 :d xsd:string))",
             "SubClassOf(:A DataMaxCardinality(4294967296 :d xsd:string))",
             "SubClassOf(:A DataMaxCardinality(2 :undeclared xsd:string))",
-            "SubClassOf(ObjectComplementOf("
-            "DataMaxCardinality(4294967295 :d xsd:string)) :B)",
+            "SubClassOf(ObjectComplementOf(DataMaxCardinality(4294967295 :d xsd:string)) :B)",
             "EquivalentClasses(:A DataMaxCardinality(2 :d "
             "DataIntersectionOf(xsd:string xsd:integer)) "
             'DataHasValue(:undeclared "value"))',
@@ -5012,18 +4805,12 @@ def test_unsupported_data_maximum_inputs_defer_without_symbol_leaks() -> None:
     assert manifest["deferred_roots"] == 5
     assert not any(
         value["generated"]
-        or str(value["display"]).startswith(
-            ("DataMinCardinality:", "DataMaxCardinality:")
-        )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        or str(value["display"]).startswith(("DataMinCardinality:", "DataMaxCardinality:"))
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert not any(
         value["generated"]
-        or str(value["display"]).startswith(
-            ("DataIntersectionOf:", "DataUnionOf:")
-        )
+        or str(value["display"]).startswith(("DataIntersectionOf:", "DataUnionOf:"))
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert all(
@@ -5048,8 +4835,7 @@ def test_data_exact_cardinality_definitions_match_scalar_normalization() -> None
             "Declaration(DataProperty(:e))",
             "Declaration(AnnotationProperty(:note))",
             "SubClassOf(:A DataExactCardinality(1 :d xsd:string))",
-            'SubClassOf(Annotation(:note "same exact") '
-            ":A DataExactCardinality(1 :d xsd:string))",
+            'SubClassOf(Annotation(:note "same exact") :A DataExactCardinality(1 :d xsd:string))',
             "SubClassOf(DataExactCardinality(2 :e xsd:boolean) :B)",
             'EquivalentClasses(:A DataExactCardinality(2 :e DataOneOf("value")))',
         ),
@@ -5077,9 +4863,7 @@ def test_data_exact_cardinality_definitions_match_scalar_normalization() -> None
     )
     assert not any(
         str(value["display"]).startswith("DataExactCardinality:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -5093,13 +4877,10 @@ def test_data_exact_cardinality_boundaries_and_complements_match_scalar() -> Non
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "SubClassOf(:A DataExactCardinality(0 :d xsd:string))",
-            "SubClassOf(ObjectComplementOf("
-            "DataExactCardinality(0 :d xsd:string)) :B)",
+            "SubClassOf(ObjectComplementOf(DataExactCardinality(0 :d xsd:string)) :B)",
             "SubClassOf(:A DataExactCardinality(1 :e xsd:boolean))",
-            "SubClassOf(ObjectComplementOf("
-            "DataExactCardinality(1 :e xsd:boolean)) :B)",
-            "SubClassOf(:A ObjectComplementOf("
-            "DataExactCardinality(2 :d DataOneOf(\"value\"))))",
+            "SubClassOf(ObjectComplementOf(DataExactCardinality(1 :e xsd:boolean)) :B)",
+            'SubClassOf(:A ObjectComplementOf(DataExactCardinality(2 :d DataOneOf("value"))))',
         ),
         options=OPTIONS,
     )
@@ -5195,9 +4976,7 @@ def test_composite_data_exact_cardinality_definitions_reuse_global_identity() ->
     )
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     namespace = f":class:{composite.logical_fingerprint.hex}:"
@@ -5215,13 +4994,11 @@ def test_recursive_data_exact_cardinality_fillers_match_scalar_exactly() -> None
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
             "Declaration(AnnotationProperty(:note))",
-            "SubClassOf(:A DataExactCardinality(1 :d "
-            "DataIntersectionOf(xsd:string xsd:integer)))",
+            "SubClassOf(:A DataExactCardinality(1 :d DataIntersectionOf(xsd:string xsd:integer)))",
             'SubClassOf(Annotation(:note "same dependencies") :A '
             "DataExactCardinality(1 :d "
             "DataIntersectionOf(xsd:string xsd:integer)))",
-            "SubClassOf(DataExactCardinality(2 :e "
-            "DataUnionOf(xsd:boolean xsd:decimal)) :B)",
+            "SubClassOf(DataExactCardinality(2 :e DataUnionOf(xsd:boolean xsd:decimal)) :B)",
             "SubClassOf(:B DataExactCardinality(0 :d DataIntersectionOf("
             "xsd:string DataUnionOf(xsd:integer xsd:boolean))))",
             "SubClassOf(ObjectComplementOf(DataExactCardinality(0 :e "
@@ -5246,9 +5023,7 @@ def test_recursive_data_exact_cardinality_fillers_match_scalar_exactly() -> None
     )
     assert not any(
         str(value["display"]).startswith("DataExactCardinality:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -5263,16 +5038,14 @@ def test_recursive_data_exact_cardinality_fillers_cover_generated_contexts() -> 
             "Declaration(ObjectProperty(:p))",
             "Declaration(DataProperty(:d))",
             "Declaration(DataProperty(:e))",
-            "ClassAssertion(DataExactCardinality(1 :d "
-            "DataUnionOf(xsd:string xsd:integer)) :i)",
+            "ClassAssertion(DataExactCardinality(1 :d DataUnionOf(xsd:string xsd:integer)) :i)",
             "ObjectPropertyDomain(:p DataExactCardinality(2 :e "
             "DataIntersectionOf(xsd:boolean xsd:decimal)))",
             "DataPropertyDomain(:d DataExactCardinality(3 :e "
             "DataUnionOf(xsd:decimal xsd:integer)))",
             "HasKey(DataExactCardinality(1 :d "
             "DataIntersectionOf(xsd:string xsd:boolean)) (:p) (:e))",
-            "DisjointClasses(DataExactCardinality(2 :e "
-            "DataUnionOf(xsd:string xsd:decimal)) :A)",
+            "DisjointClasses(DataExactCardinality(2 :e DataUnionOf(xsd:string xsd:decimal)) :A)",
             "SubClassOf(ObjectIntersectionOf(:B DataExactCardinality(1 :d "
             "DataIntersectionOf(xsd:boolean xsd:integer))) :A)",
         ),
@@ -5294,9 +5067,7 @@ def test_recursive_data_exact_cardinality_fillers_cover_generated_contexts() -> 
     )
     assert not any(
         str(value["display"]).startswith("DataExactCardinality:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -5346,23 +5117,25 @@ def test_composite_recursive_data_exact_fillers_reuse_global_identity() -> None:
     )
     class_namespace = f":class:{composite.logical_fingerprint.hex}:"
     data_namespace = f":data:{composite.logical_fingerprint.hex}:"
-    assert sum(
-        class_namespace in str(value["display"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            class_namespace in str(value["display"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
+            if value["generated"]
         )
-        if value["generated"]
-    ) == 6
-    assert sum(
-        data_namespace in str(value["display"])
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-        if value["generated"]
-    ) == 4
+        == 6
+    )
+    assert (
+        sum(
+            data_namespace in str(value["display"])
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+            if value["generated"]
+        )
+        == 4
+    )
     assert not any(
         str(value["display"]).startswith("DataExactCardinality:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -5377,8 +5150,7 @@ def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() 
             "SubClassOf(:A DataExactCardinality(4294967295 :d xsd:string))",
             "SubClassOf(:A DataExactCardinality(4294967296 :d xsd:string))",
             "SubClassOf(:A DataExactCardinality(2 :undeclared xsd:string))",
-            "SubClassOf(ObjectComplementOf("
-            "DataExactCardinality(4294967295 :d xsd:string)) :B)",
+            "SubClassOf(ObjectComplementOf(DataExactCardinality(4294967295 :d xsd:string)) :B)",
             "EquivalentClasses(:A DataExactCardinality(2 :d "
             "DataIntersectionOf(xsd:string xsd:integer)) "
             'DataHasValue(:undeclared "value"))',
@@ -5401,9 +5173,7 @@ def test_unsupported_data_exact_cardinality_inputs_defer_without_symbol_leaks() 
                 "DataExactCardinality:",
             )
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"]
@@ -5427,8 +5197,7 @@ def test_data_has_value_definitions_match_scalar_singleton_quantifiers() -> None
             "Declaration(DataProperty(:e))",
             "Declaration(AnnotationProperty(:note))",
             'SubClassOf(:A DataHasValue(:d "value"))',
-            'SubClassOf(Annotation(:note "same value") :A '
-            'DataHasValue(:d "value"))',
+            'SubClassOf(Annotation(:note "same value") :A DataHasValue(:d "value"))',
             'SubClassOf(DataHasValue(:e "other") :B)',
             'EquivalentClasses(:A DataHasValue(:e "value"))',
             'SubClassOf(:B DataSomeValuesFrom(:d DataOneOf("value")))',
@@ -5452,9 +5221,7 @@ def test_data_has_value_definitions_match_scalar_singleton_quantifiers() -> None
     assert len(singleton_ranges) == 2
     assert not any(
         str(value["display"]).startswith("DataHasValue:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -5536,9 +5303,7 @@ def test_composite_data_has_value_definitions_reuse_global_identity() -> None:
     )
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     namespace = f":class:{composite.logical_fingerprint.hex}:"
@@ -5579,9 +5344,7 @@ def test_partially_unsupported_data_has_value_inputs_defer_without_symbol_leaks(
             )
         )
         for value in (
-            *cast(
-                list[dict[str, object]], manifest["class_expression_symbols"]
-            ),
+            *cast(list[dict[str, object]], manifest["class_expression_symbols"]),
             *cast(list[dict[str, object]], manifest["data_range_symbols"]),
         )
     )
@@ -5603,8 +5366,7 @@ def test_partial_object_self_equivalence_defers_without_symbol_leaks() -> None:
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
-            "EquivalentClasses(:A ObjectHasSelf(:p) "
-            "ObjectMinCardinality(4294967296 :q :B))",
+            "EquivalentClasses(:A ObjectHasSelf(:p) ObjectMinCardinality(4294967296 :q :B))",
         ),
         options=OPTIONS,
     )
@@ -5614,11 +5376,8 @@ def test_partial_object_self_equivalence_defers_without_symbol_leaks() -> None:
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 1
     assert not any(
-        value["generated"]
-        or str(value["display"]).startswith("ObjectHasSelf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        value["generated"] or str(value["display"]).startswith("ObjectHasSelf:")
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -5641,11 +5400,8 @@ def test_partial_nested_object_self_root_defers_without_symbol_leaks() -> None:
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 1
     assert not any(
-        value["generated"]
-        or str(value["display"]).startswith("ObjectHasSelf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        value["generated"] or str(value["display"]).startswith("ObjectHasSelf:")
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -5675,15 +5431,11 @@ def test_flat_boolean_equivalent_class_definitions_match_scalar_exactly() -> Non
     assert manifest == _expected_manifest(snapshot, compiled_roots=4)
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     assert len(generated) == 6
-    assert {
-        str(value["display"]).split(":")[-2] for value in generated
-    } == {"negative", "positive"}
+    assert {str(value["display"]).split(":")[-2] for value in generated} == {"negative", "positive"}
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -5706,15 +5458,11 @@ def test_partial_boolean_equivalence_defers_without_generated_symbol_leaks() -> 
     assert manifest["deferred_roots"] == 1
     assert not any(
         value["generated"]
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert not any(
         str(value["display"]).startswith("ObjectIntersectionOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -5728,10 +5476,8 @@ def test_flat_boolean_class_assertion_definitions_match_scalar_exactly() -> None
             "Declaration(NamedIndividual(:i))",
             "Declaration(AnnotationProperty(:note))",
             "ClassAssertion(ObjectIntersectionOf(:A :B) :i)",
-            'ClassAssertion(Annotation(:note "same definition") '
-            "ObjectIntersectionOf(:A :B) :i)",
-            "ClassAssertion(ObjectUnionOf(ObjectComplementOf(:B) "
-            "ObjectOneOf(:i)) _:anonymous)",
+            'ClassAssertion(Annotation(:note "same definition") ObjectIntersectionOf(:A :B) :i)',
+            "ClassAssertion(ObjectUnionOf(ObjectComplementOf(:B) ObjectOneOf(:i)) _:anonymous)",
             "SubClassOf(:C ObjectIntersectionOf(:A :B))",
         ),
         options=OPTIONS,
@@ -5740,12 +5486,13 @@ def test_flat_boolean_class_assertion_definitions_match_scalar_exactly() -> None
     manifest = _native_manifest(snapshot)
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=4)
-    assert sum(
-        bool(value["generated"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 2
+        == 2
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -5764,10 +5511,8 @@ def test_flat_boolean_property_constraint_definitions_match_scalar_exactly() -> 
             "ObjectPropertyDomain(:p ObjectIntersectionOf(:A :B))",
             'ObjectPropertyDomain(Annotation(:note "same definition") :p '
             "ObjectIntersectionOf(:A :B))",
-            "ObjectPropertyRange(ObjectInverseOf(:q) "
-            "ObjectUnionOf(ObjectComplementOf(:B) :C))",
-            "DataPropertyDomain(:data "
-            "ObjectIntersectionOf(ObjectOneOf(:i) :D))",
+            "ObjectPropertyRange(ObjectInverseOf(:q) ObjectUnionOf(ObjectComplementOf(:B) :C))",
+            "DataPropertyDomain(:data ObjectIntersectionOf(ObjectOneOf(:i) :D))",
             "SubClassOf(:C ObjectIntersectionOf(:A :B))",
         ),
         options=OPTIONS,
@@ -5781,12 +5526,13 @@ def test_flat_boolean_property_constraint_definitions_match_scalar_exactly() -> 
         include_object_constraints=True,
         include_data_domains=True,
     )
-    assert sum(
-        bool(value["generated"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 3
+        == 3
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -5803,8 +5549,7 @@ def test_flat_boolean_key_definitions_match_scalar_exactly() -> None:
             "Declaration(NamedIndividual(:i))",
             "Declaration(AnnotationProperty(:note))",
             "HasKey(ObjectIntersectionOf(:A :B) (:p :q) (:d))",
-            'HasKey(Annotation(:note "same definition") '
-            "ObjectIntersectionOf(:A :B) (:p :q) (:d))",
+            'HasKey(Annotation(:note "same definition") ObjectIntersectionOf(:A :B) (:p :q) (:d))',
             "HasKey(ObjectUnionOf(ObjectComplementOf(:B) ObjectOneOf(:i)) () (:e))",
             "SubClassOf(ObjectIntersectionOf(:A :B) :C)",
         ),
@@ -5818,12 +5563,13 @@ def test_flat_boolean_key_definitions_match_scalar_exactly() -> None:
         compiled_roots=4,
         include_keys=True,
     )
-    assert sum(
-        bool(value["generated"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 2
+        == 2
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -5837,8 +5583,7 @@ def test_flat_boolean_disjoint_definitions_match_scalar_exactly() -> None:
             "Declaration(NamedIndividual(:i))",
             "Declaration(AnnotationProperty(:note))",
             "DisjointClasses(ObjectIntersectionOf(:A :B) :C)",
-            'DisjointClasses(Annotation(:note "same definition") '
-            "ObjectIntersectionOf(:A :B) :C)",
+            'DisjointClasses(Annotation(:note "same definition") ObjectIntersectionOf(:A :B) :C)',
             "DisjointClasses(:A ObjectUnionOf(ObjectComplementOf(:B) :C) "
             "ObjectIntersectionOf(ObjectOneOf(:i) :D))",
             "SubClassOf(ObjectIntersectionOf(:A :B) :D)",
@@ -5851,12 +5596,13 @@ def test_flat_boolean_disjoint_definitions_match_scalar_exactly() -> None:
     manifest = _native_manifest(snapshot)
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=6)
-    assert sum(
-        bool(value["generated"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 5
+        == 5
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -5867,8 +5613,7 @@ def test_partial_boolean_disjoint_defers_without_generated_symbol_leaks() -> Non
             "Declaration(Class(:B))",
             "Declaration(Class(:C))",
             "Declaration(ObjectProperty(:p))",
-            "DisjointClasses(ObjectIntersectionOf(:A :B) "
-            "ObjectMinCardinality(4294967296 :p :C))",
+            "DisjointClasses(ObjectIntersectionOf(:A :B) ObjectMinCardinality(4294967296 :p :C))",
         ),
         options=OPTIONS,
     )
@@ -5879,9 +5624,7 @@ def test_partial_boolean_disjoint_defers_without_generated_symbol_leaks() -> Non
     assert manifest["deferred_roots"] == 1
     assert not any(
         value["generated"]
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -5905,9 +5648,7 @@ def test_generated_class_entity_remapping_matches_scalar_exactly() -> None:
     assert manifest == _expected_manifest(snapshot, compiled_roots=2)
     assert any(
         value["generated"]
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -5946,9 +5687,7 @@ def test_composite_boolean_definitions_use_the_global_logical_namespace() -> Non
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(
         namespace in str(value["display"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -5988,9 +5727,7 @@ def test_composite_recursive_class_booleans_reuse_normalized_definitions() -> No
     assert manifest == _expected_manifest(composite, compiled_roots=2)
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     assert len(generated) == 2
@@ -6042,9 +5779,7 @@ def test_composite_boolean_property_constraints_match_scalar_exactly() -> None:
     namespace = f":class:{composite.logical_fingerprint.hex}:"
     assert all(
         namespace in str(value["display"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -6116,8 +5851,7 @@ def test_implicit_builtin_datatype_minimum_zero_reduces_exactly(
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(DataProperty(:d))",
-            "SubClassOf(DataMinCardinality("
-            f"0 :d <{datatype_iri}>) :B)",
+            f"SubClassOf(DataMinCardinality(0 :d <{datatype_iri}>) :B)",
         ),
         options=OPTIONS,
     )
@@ -6126,8 +5860,7 @@ def test_implicit_builtin_datatype_minimum_zero_reduces_exactly(
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=1)
     assert [
-        value["display"]
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        value["display"] for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -6141,21 +5874,14 @@ def test_implicit_builtin_datatype_restriction_reductions_match_scalar() -> None
             "Declaration(DataProperty(:d))",
             "SubClassOf(:A DataSomeValuesFrom(:d "
             "DataIntersectionOf(xsd:string DataComplementOf(rdfs:Literal))))",
-            "SubClassOf(DataAllValuesFrom(:d "
-            "DataUnionOf(xsd:string rdfs:Literal)) :B)",
-            "SubClassOf(:A DataSomeValuesFrom("
-            "owl:bottomDataProperty xsd:string))",
-            "SubClassOf(DataAllValuesFrom("
-            "owl:bottomDataProperty xsd:string) :B)",
+            "SubClassOf(DataAllValuesFrom(:d DataUnionOf(xsd:string rdfs:Literal)) :B)",
+            "SubClassOf(:A DataSomeValuesFrom(owl:bottomDataProperty xsd:string))",
+            "SubClassOf(DataAllValuesFrom(owl:bottomDataProperty xsd:string) :B)",
             "SubClassOf(DataMinCardinality(0 :d xsd:string) :B)",
-            "SubClassOf(DataMinCardinality("
-            "2 owl:bottomDataProperty xsd:string) :B)",
-            "SubClassOf(:A DataMaxCardinality("
-            "2 owl:bottomDataProperty xsd:string))",
-            "SubClassOf(DataExactCardinality("
-            "0 owl:bottomDataProperty xsd:string) :B)",
-            "SubClassOf(:A DataExactCardinality("
-            "2 owl:bottomDataProperty xsd:string))",
+            "SubClassOf(DataMinCardinality(2 owl:bottomDataProperty xsd:string) :B)",
+            "SubClassOf(:A DataMaxCardinality(2 owl:bottomDataProperty xsd:string))",
+            "SubClassOf(DataExactCardinality(0 owl:bottomDataProperty xsd:string) :B)",
+            "SubClassOf(:A DataExactCardinality(2 owl:bottomDataProperty xsd:string))",
         ),
         options=OPTIONS,
     )
@@ -6164,8 +5890,7 @@ def test_implicit_builtin_datatype_restriction_reductions_match_scalar() -> None
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=9)
     assert [
-        value["display"]
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        value["display"] for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
     assert not any(
         value["generated"]
@@ -6178,9 +5903,7 @@ def test_implicit_builtin_datatype_restriction_reductions_match_scalar() -> None
                 "DataExactCardinality:",
             )
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -6192,10 +5915,8 @@ def test_discarded_data_range_values_reduce_without_symbols() -> None:
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(DataProperty(:d))",
-            'SubClassOf(:A DataSomeValuesFrom(owl:bottomDataProperty '
-            'DataOneOf("discarded")))',
-            'SubClassOf(DataAllValuesFrom(owl:bottomDataProperty '
-            'DataOneOf("discarded")) :B)',
+            'SubClassOf(:A DataSomeValuesFrom(owl:bottomDataProperty DataOneOf("discarded")))',
+            'SubClassOf(DataAllValuesFrom(owl:bottomDataProperty DataOneOf("discarded")) :B)',
             "SubClassOf(:A DataSomeValuesFrom(owl:bottomDataProperty "
             'DatatypeRestriction(xsd:string xsd:minLength "1"^^xsd:integer)))',
             "SubClassOf(DataAllValuesFrom(owl:bottomDataProperty "
@@ -6203,8 +5924,7 @@ def test_discarded_data_range_values_reduce_without_symbols() -> None:
             'SubClassOf(DataMinCardinality(0 :d DataOneOf("discarded")) :B)',
             "SubClassOf(:A ObjectComplementOf(DataMinCardinality(0 :d "
             'DatatypeRestriction(xsd:string xsd:minLength "1"^^xsd:integer))))',
-            'SubClassOf(:A DataMaxCardinality(2 owl:bottomDataProperty '
-            'DataOneOf("discarded")))',
+            'SubClassOf(:A DataMaxCardinality(2 owl:bottomDataProperty DataOneOf("discarded")))',
             "SubClassOf(DataExactCardinality(2 owl:bottomDataProperty "
             'DatatypeRestriction(xsd:string xsd:minLength "1"^^xsd:integer)) :B)',
         ),
@@ -6217,8 +5937,7 @@ def test_discarded_data_range_values_reduce_without_symbols() -> None:
     assert manifest["source_literal_symbols"] == []
     assert manifest["data_value_symbols"] == []
     assert [
-        value["display"]
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        value["display"] for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
     assert not any(
         value["generated"]
@@ -6231,9 +5950,7 @@ def test_discarded_data_range_values_reduce_without_symbols() -> None:
                 "DataExactCardinality:",
             )
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -6243,8 +5960,7 @@ def test_composite_discarded_data_range_value_keeps_shared_live_literal() -> Non
     left = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
-            'SubClassOf(:A DataSomeValuesFrom(owl:bottomDataProperty '
-            'DataOneOf("shared")))',
+            'SubClassOf(:A DataSomeValuesFrom(owl:bottomDataProperty DataOneOf("shared")))',
         ),
         options=OPTIONS,
     )
@@ -6268,11 +5984,15 @@ def test_composite_discarded_data_range_value_keeps_shared_live_literal() -> Non
         logical_fingerprint=composite.logical_fingerprint.digest,
     )
 
-    assert forward == reverse == _expected_manifest(
-        composite,
-        compiled_roots=2,
-        include_generated_data_quantifier_definitions=True,
-        include_at_least_data_predicates=True,
+    assert (
+        forward
+        == reverse
+        == _expected_manifest(
+            composite,
+            compiled_roots=2,
+            include_generated_data_quantifier_definitions=True,
+            include_at_least_data_predicates=True,
+        )
     )
     assert len(cast(list[object], forward["source_literal_symbols"])) == 1
     assert len(cast(list[object], forward["data_value_symbols"])) == 1
@@ -6287,7 +6007,7 @@ def test_discarded_data_boolean_operands_prune_normalized_symbols() -> None:
             "Declaration(DataProperty(:d))",
             "Declaration(Datatype(:T))",
             "Declaration(Datatype(:U))",
-            'DatatypeDefinition(:T DataIntersectionOf('
+            "DatatypeDefinition(:T DataIntersectionOf("
             'DataComplementOf(rdfs:Literal) DataOneOf("discarded-one")))',
             "DatatypeDefinition(:U DataUnionOf(rdfs:Literal "
             "DatatypeRestriction(xsd:string "
@@ -6295,8 +6015,7 @@ def test_discarded_data_boolean_operands_prune_normalized_symbols() -> None:
             "SubClassOf(:A DataSomeValuesFrom(:d "
             "DataUnionOf(rdfs:Literal DataOneOf("
             '"discarded-two"))))',
-            "SubClassOf(:A DataMaxCardinality(2 :d "
-            "DataIntersectionOf(rdfs:Literal xsd:boolean)))",
+            "SubClassOf(:A DataMaxCardinality(2 :d DataIntersectionOf(rdfs:Literal xsd:boolean)))",
             "SubClassOf(:A DataExactCardinality(2 :d "
             "DataIntersectionOf(rdfs:Literal xsd:boolean)))",
         ),
@@ -6332,8 +6051,7 @@ def test_composite_discarded_data_boolean_keeps_shared_live_literal() -> None:
     left = pyowl_core.load_snapshot(
         functional(
             "Declaration(Datatype(:T))",
-            "DatatypeDefinition(:T DataUnionOf("
-            'rdfs:Literal DataOneOf("shared")))',
+            'DatatypeDefinition(:T DataUnionOf(rdfs:Literal DataOneOf("shared")))',
         ),
         options=OPTIONS,
     )
@@ -6357,12 +6075,16 @@ def test_composite_discarded_data_boolean_keeps_shared_live_literal() -> None:
         logical_fingerprint=composite.logical_fingerprint.digest,
     )
 
-    assert forward == reverse == _expected_manifest(
-        composite,
-        compiled_roots=2,
-        include_generated_data_quantifier_definitions=True,
-        include_at_least_data_predicates=True,
-        include_datatype_definitions=True,
+    assert (
+        forward
+        == reverse
+        == _expected_manifest(
+            composite,
+            compiled_roots=2,
+            include_generated_data_quantifier_definitions=True,
+            include_at_least_data_predicates=True,
+            include_datatype_definitions=True,
+        )
     )
     assert len(cast(list[object], forward["source_literal_symbols"])) == 1
     assert len(cast(list[object], forward["data_value_symbols"])) == 1
@@ -6371,17 +6093,13 @@ def test_composite_discarded_data_boolean_keeps_shared_live_literal() -> None:
 
 
 def test_complemented_reduced_data_booleans_match_scalar_roots() -> None:
-    retained_one_of = (
-        'DataComplementOf(DataIntersectionOf(rdfs:Literal DataOneOf("retained")))'
-    )
+    retained_one_of = 'DataComplementOf(DataIntersectionOf(rdfs:Literal DataOneOf("retained")))'
     retained_restriction = (
         "DataComplementOf(DataUnionOf(DataComplementOf(rdfs:Literal) "
         "DatatypeRestriction(xsd:string "
         'xsd:minLength "1"^^xsd:integer)))'
     )
-    discarded_one_of = (
-        'DataComplementOf(DataUnionOf(rdfs:Literal DataOneOf("discarded")))'
-    )
+    discarded_one_of = 'DataComplementOf(DataUnionOf(rdfs:Literal DataOneOf("discarded")))'
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:d))",
@@ -6409,9 +6127,7 @@ def test_complemented_reduced_data_booleans_match_scalar_roots() -> None:
         include_datatype_definitions=True,
     )
     assert not any(
-        str(value["display"]).startswith(
-            ("DataIntersectionOf:", "DataUnionOf:")
-        )
+        str(value["display"]).startswith(("DataIntersectionOf:", "DataUnionOf:"))
         for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     )
     assert all(
@@ -6424,8 +6140,7 @@ def test_complemented_reduced_data_booleans_match_scalar_roots() -> None:
 
 def test_complemented_reduced_atomic_class_booleans_match_scalar_contexts() -> None:
     expressions = (
-        "ObjectComplementOf(ObjectIntersectionOf("
-        "owl:Thing ObjectOneOf(:i)))",
+        "ObjectComplementOf(ObjectIntersectionOf(owl:Thing ObjectOneOf(:i)))",
         "ObjectComplementOf(ObjectUnionOf(owl:Nothing :A))",
     )
     contexts = (
@@ -6446,11 +6161,7 @@ def test_complemented_reduced_atomic_class_booleans_match_scalar_contexts() -> N
             "Declaration(ObjectProperty(:p))",
             "Declaration(DataProperty(:d))",
             "Declaration(NamedIndividual(:i))",
-            *(
-                context.format(expression)
-                for expression in expressions
-                for context in contexts
-            ),
+            *(context.format(expression) for expression in expressions for context in contexts),
         ),
         options=OPTIONS,
     )
@@ -6465,12 +6176,8 @@ def test_complemented_reduced_atomic_class_booleans_match_scalar_contexts() -> N
         include_keys=True,
     )
     assert not any(
-        str(value["display"]).startswith(
-            ("ObjectIntersectionOf:", "ObjectUnionOf:")
-        )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        str(value["display"]).startswith(("ObjectIntersectionOf:", "ObjectUnionOf:"))
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -6481,8 +6188,7 @@ def test_complemented_reduced_atomic_class_booleans_match_scalar_contexts() -> N
     (
         (
             "union/direct",
-            "ObjectComplementOf(ObjectUnionOf("
-            "owl:Thing ObjectHasSelf(:discarded)))",
+            "ObjectComplementOf(ObjectUnionOf(owl:Thing ObjectHasSelf(:discarded)))",
         ),
         (
             "union/complemented-multi-live",
@@ -6496,8 +6202,7 @@ def test_complemented_reduced_atomic_class_booleans_match_scalar_contexts() -> N
         ),
         (
             "intersection/direct",
-            "ObjectComplementOf(ObjectIntersectionOf("
-            "owl:Nothing ObjectHasSelf(:discarded)))",
+            "ObjectComplementOf(ObjectIntersectionOf(owl:Nothing ObjectHasSelf(:discarded)))",
         ),
         (
             "intersection/complemented-multi-live",
@@ -6552,9 +6257,7 @@ def test_absorbing_class_booleans_discard_object_self_in_scalar_contexts(
     ), mode
     assert not any(
         str(value["display"]).startswith("ObjectHasSelf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -6565,8 +6268,7 @@ def test_absorbing_class_booleans_discard_object_self_in_scalar_contexts(
     (
         (
             "union/direct",
-            "ObjectComplementOf(ObjectUnionOf("
-            "owl:Thing ObjectHasValue(:discarded :dead)))",
+            "ObjectComplementOf(ObjectUnionOf(owl:Thing ObjectHasValue(:discarded :dead)))",
         ),
         (
             "union/complemented-multi-live",
@@ -6643,9 +6345,7 @@ def test_absorbing_class_booleans_discard_object_values_in_scalar_contexts(
         str(value["display"]).startswith(
             ("ObjectOneOf:", "ObjectSomeValuesFrom:", "ObjectAllValuesFrom:")
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         "urn:test:named#dead" not in str(value["display"])
@@ -6670,15 +6370,11 @@ def test_absorbing_class_booleans_discard_object_quantifiers_in_scalar_contexts(
     complemented = f"ObjectComplementOf({direct})"
     expressions = (
         f"ObjectComplementOf(ObjectUnionOf(owl:Thing {direct}))",
-        "ObjectComplementOf(ObjectUnionOf("
-        f":A :B owl:Thing {complemented}))",
-        "ObjectComplementOf(ObjectUnionOf("
-        f"owl:Thing ObjectIntersectionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectUnionOf(:A :B owl:Thing {complemented}))",
+        f"ObjectComplementOf(ObjectUnionOf(owl:Thing ObjectIntersectionOf(:A {direct})))",
         f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing {direct}))",
-        "ObjectComplementOf(ObjectIntersectionOf("
-        f":A :B owl:Nothing {complemented}))",
-        "ObjectComplementOf(ObjectIntersectionOf("
-        f"owl:Nothing ObjectUnionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectIntersectionOf(:A :B owl:Nothing {complemented}))",
+        f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing ObjectUnionOf(:A {direct})))",
     )
     contexts = (
         "SubClassOf({} :Z)",
@@ -6700,11 +6396,7 @@ def test_absorbing_class_booleans_discard_object_quantifiers_in_scalar_contexts(
             "Declaration(ObjectProperty(:p))",
             "Declaration(DataProperty(:d))",
             "Declaration(NamedIndividual(:i))",
-            *(
-                context.format(expression)
-                for expression in expressions
-                for context in contexts
-            ),
+            *(context.format(expression) for expression in expressions for context in contexts),
         ),
         options=OPTIONS,
     )
@@ -6721,12 +6413,8 @@ def test_absorbing_class_booleans_discard_object_quantifiers_in_scalar_contexts(
         include_keys=True,
     ), label
     assert not any(
-        str(value["display"]).startswith(
-            ("ObjectSomeValuesFrom:", "ObjectAllValuesFrom:")
-        )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        str(value["display"]).startswith(("ObjectSomeValuesFrom:", "ObjectAllValuesFrom:"))
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"] != PredicateKind.AT_LEAST_OBJECT.value
@@ -6752,15 +6440,11 @@ def test_absorbing_class_booleans_discard_object_cardinalities_in_scalar_context
     complemented = f"ObjectComplementOf({direct})"
     expressions = (
         f"ObjectComplementOf(ObjectUnionOf(owl:Thing {direct}))",
-        "ObjectComplementOf(ObjectUnionOf("
-        f":A :B owl:Thing {complemented}))",
-        "ObjectComplementOf(ObjectUnionOf("
-        f"owl:Thing ObjectIntersectionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectUnionOf(:A :B owl:Thing {complemented}))",
+        f"ObjectComplementOf(ObjectUnionOf(owl:Thing ObjectIntersectionOf(:A {direct})))",
         f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing {direct}))",
-        "ObjectComplementOf(ObjectIntersectionOf("
-        f":A :B owl:Nothing {complemented}))",
-        "ObjectComplementOf(ObjectIntersectionOf("
-        f"owl:Nothing ObjectUnionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectIntersectionOf(:A :B owl:Nothing {complemented}))",
+        f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing ObjectUnionOf(:A {direct})))",
     )
     contexts = (
         "SubClassOf({} :Z)",
@@ -6782,11 +6466,7 @@ def test_absorbing_class_booleans_discard_object_cardinalities_in_scalar_context
             "Declaration(ObjectProperty(:p))",
             "Declaration(DataProperty(:d))",
             "Declaration(NamedIndividual(:i))",
-            *(
-                context.format(expression)
-                for expression in expressions
-                for context in contexts
-            ),
+            *(context.format(expression) for expression in expressions for context in contexts),
         ),
         options=OPTIONS,
     )
@@ -6813,9 +6493,7 @@ def test_absorbing_class_booleans_discard_object_cardinalities_in_scalar_context
                 "ObjectAllValuesFrom:",
             )
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"]
@@ -6844,15 +6522,11 @@ def test_absorbing_class_booleans_discard_data_quantifiers_in_scalar_contexts(
     complemented = f"ObjectComplementOf({direct})"
     expressions = (
         f"ObjectComplementOf(ObjectUnionOf(owl:Thing {direct}))",
-        "ObjectComplementOf(ObjectUnionOf("
-        f":A :B owl:Thing {complemented}))",
-        "ObjectComplementOf(ObjectUnionOf("
-        f"owl:Thing ObjectIntersectionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectUnionOf(:A :B owl:Thing {complemented}))",
+        f"ObjectComplementOf(ObjectUnionOf(owl:Thing ObjectIntersectionOf(:A {direct})))",
         f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing {direct}))",
-        "ObjectComplementOf(ObjectIntersectionOf("
-        f":A :B owl:Nothing {complemented}))",
-        "ObjectComplementOf(ObjectIntersectionOf("
-        f"owl:Nothing ObjectUnionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectIntersectionOf(:A :B owl:Nothing {complemented}))",
+        f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing ObjectUnionOf(:A {direct})))",
     )
     contexts = (
         "SubClassOf({} :Z)",
@@ -6874,11 +6548,7 @@ def test_absorbing_class_booleans_discard_data_quantifiers_in_scalar_contexts(
             "Declaration(DataProperty(:discarded))",
             "Declaration(DataProperty(:d))",
             "Declaration(NamedIndividual(:i))",
-            *(
-                context.format(expression)
-                for expression in expressions
-                for context in contexts
-            ),
+            *(context.format(expression) for expression in expressions for context in contexts),
         ),
         options=OPTIONS,
     )
@@ -6895,20 +6565,15 @@ def test_absorbing_class_booleans_discard_data_quantifiers_in_scalar_contexts(
         include_keys=True,
     ), label
     assert not any(
-        str(value["display"]).startswith(
-            ("DataSomeValuesFrom:", "DataAllValuesFrom:")
-        )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        str(value["display"]).startswith(("DataSomeValuesFrom:", "DataAllValuesFrom:"))
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"] != PredicateKind.AT_LEAST_DATA.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert [
-        value["display"]
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        value["display"] for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -6919,15 +6584,11 @@ def test_absorbing_class_booleans_discard_data_values_in_scalar_contexts() -> No
     complemented = f"ObjectComplementOf({direct})"
     expressions = (
         f"ObjectComplementOf(ObjectUnionOf(owl:Thing {direct}))",
-        "ObjectComplementOf(ObjectUnionOf("
-        f":A :B owl:Thing {complemented}))",
-        "ObjectComplementOf(ObjectUnionOf("
-        f"owl:Thing ObjectIntersectionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectUnionOf(:A :B owl:Thing {complemented}))",
+        f"ObjectComplementOf(ObjectUnionOf(owl:Thing ObjectIntersectionOf(:A {direct})))",
         f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing {direct}))",
-        "ObjectComplementOf(ObjectIntersectionOf("
-        f":A :B owl:Nothing {complemented}))",
-        "ObjectComplementOf(ObjectIntersectionOf("
-        f"owl:Nothing ObjectUnionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectIntersectionOf(:A :B owl:Nothing {complemented}))",
+        f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing ObjectUnionOf(:A {direct})))",
     )
     contexts = (
         "SubClassOf({} :Z)",
@@ -6949,11 +6610,7 @@ def test_absorbing_class_booleans_discard_data_values_in_scalar_contexts() -> No
             "Declaration(DataProperty(:discarded))",
             "Declaration(DataProperty(:d))",
             "Declaration(NamedIndividual(:i))",
-            *(
-                context.format(expression)
-                for expression in expressions
-                for context in contexts
-            ),
+            *(context.format(expression) for expression in expressions for context in contexts),
         ),
         options=OPTIONS,
     )
@@ -6973,9 +6630,7 @@ def test_absorbing_class_booleans_discard_data_values_in_scalar_contexts() -> No
         str(value["display"]).startswith(
             ("DataHasValue:", "DataSomeValuesFrom:", "DataAllValuesFrom:")
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"] != PredicateKind.AT_LEAST_DATA.value
@@ -7003,15 +6658,11 @@ def test_absorbing_class_booleans_discard_data_cardinalities_in_scalar_contexts(
     complemented = f"ObjectComplementOf({direct})"
     expressions = (
         f"ObjectComplementOf(ObjectUnionOf(owl:Thing {direct}))",
-        "ObjectComplementOf(ObjectUnionOf("
-        f":A :B owl:Thing {complemented}))",
-        "ObjectComplementOf(ObjectUnionOf("
-        f"owl:Thing ObjectIntersectionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectUnionOf(:A :B owl:Thing {complemented}))",
+        f"ObjectComplementOf(ObjectUnionOf(owl:Thing ObjectIntersectionOf(:A {direct})))",
         f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing {direct}))",
-        "ObjectComplementOf(ObjectIntersectionOf("
-        f":A :B owl:Nothing {complemented}))",
-        "ObjectComplementOf(ObjectIntersectionOf("
-        f"owl:Nothing ObjectUnionOf(:A {direct})))",
+        f"ObjectComplementOf(ObjectIntersectionOf(:A :B owl:Nothing {complemented}))",
+        f"ObjectComplementOf(ObjectIntersectionOf(owl:Nothing ObjectUnionOf(:A {direct})))",
     )
     contexts = (
         "SubClassOf({} :Z)",
@@ -7033,11 +6684,7 @@ def test_absorbing_class_booleans_discard_data_cardinalities_in_scalar_contexts(
             "Declaration(DataProperty(:discarded))",
             "Declaration(DataProperty(:d))",
             "Declaration(NamedIndividual(:i))",
-            *(
-                context.format(expression)
-                for expression in expressions
-                for context in contexts
-            ),
+            *(context.format(expression) for expression in expressions for context in contexts),
         ),
         options=OPTIONS,
     )
@@ -7063,17 +6710,14 @@ def test_absorbing_class_booleans_discard_data_cardinalities_in_scalar_contexts(
                 "DataAllValuesFrom:",
             )
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"] != PredicateKind.AT_LEAST_DATA.value
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert [
-        value["display"]
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        value["display"] for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
     ] == ["datatype:http://www.w3.org/2000/01/rdf-schema#Literal"]
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -7092,18 +6736,12 @@ def test_declared_bottom_property_restrictions_reduce_exactly() -> None:
             "SubClassOf(ObjectSomeValuesFrom(owl:bottomObjectProperty :A) :B)",
             "SubClassOf(:A ObjectAllValuesFrom(owl:bottomObjectProperty :B))",
             "SubClassOf(ObjectHasValue(owl:bottomObjectProperty :a) :B)",
-            "SubClassOf(DataSomeValuesFrom(owl:bottomDataProperty "
-            f"{string_datatype}) :B)",
-            "SubClassOf(:A DataAllValuesFrom(owl:bottomDataProperty "
-            f"{string_datatype}))",
-            "SubClassOf(DataMinCardinality(2 owl:bottomDataProperty "
-            f"{string_datatype}) :B)",
-            "SubClassOf(:A DataMaxCardinality(2 owl:bottomDataProperty "
-            f"{string_datatype}))",
-            "SubClassOf(DataExactCardinality(0 owl:bottomDataProperty "
-            f"{string_datatype}) :B)",
-            "SubClassOf(DataExactCardinality(2 owl:bottomDataProperty "
-            f"{string_datatype}) :B)",
+            f"SubClassOf(DataSomeValuesFrom(owl:bottomDataProperty {string_datatype}) :B)",
+            f"SubClassOf(:A DataAllValuesFrom(owl:bottomDataProperty {string_datatype}))",
+            f"SubClassOf(DataMinCardinality(2 owl:bottomDataProperty {string_datatype}) :B)",
+            f"SubClassOf(:A DataMaxCardinality(2 owl:bottomDataProperty {string_datatype}))",
+            f"SubClassOf(DataExactCardinality(0 owl:bottomDataProperty {string_datatype}) :B)",
+            f"SubClassOf(DataExactCardinality(2 owl:bottomDataProperty {string_datatype}) :B)",
             'SubClassOf(DataHasValue(owl:bottomDataProperty "pruned") :B)',
         ),
         options=OPTIONS,
@@ -7188,8 +6826,7 @@ def test_implicit_builtin_property_reductions_remap_composite_slices_exactly() -
             "Declaration(Class(:C))",
             "Declaration(Class(:D))",
             "SubClassOf(:C ObjectSomeValuesFrom(owl:topObjectProperty :D))",
-            "SubClassOf(DataMinCardinality(0 owl:bottomDataProperty "
-            "rdfs:Literal) :D)",
+            "SubClassOf(DataMinCardinality(0 owl:bottomDataProperty rdfs:Literal) :D)",
         ),
         options=OPTIONS,
     )
@@ -7205,11 +6842,15 @@ def test_implicit_builtin_property_reductions_remap_composite_slices_exactly() -
         logical_fingerprint=composite.logical_fingerprint.digest,
     )
 
-    assert forward == reverse == _expected_manifest(
-        composite,
-        compiled_roots=3,
-        include_generated_object_quantifier_definitions=True,
-        include_at_least_object_predicates=True,
+    assert (
+        forward
+        == reverse
+        == _expected_manifest(
+            composite,
+            compiled_roots=3,
+            include_generated_object_quantifier_definitions=True,
+            include_at_least_object_predicates=True,
+        )
     )
     assert forward["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -7223,8 +6864,7 @@ def test_bottom_data_has_value_reduces_without_literal_symbols() -> None:
             "Declaration(AnnotationProperty(:note))",
             'SubClassOf(Annotation(:note "pruned") '
             'DataHasValue(owl:bottomDataProperty "pruned") :B)',
-            'SubClassOf(:A ObjectComplementOf(DataHasValue('
-            'owl:bottomDataProperty "pruned")))',
+            'SubClassOf(:A ObjectComplementOf(DataHasValue(owl:bottomDataProperty "pruned")))',
         ),
         options=OPTIONS,
     )
@@ -7294,11 +6934,15 @@ def test_bottom_data_has_value_reduction_remaps_composite_literals_exactly() -> 
         logical_fingerprint=composite.logical_fingerprint.digest,
     )
 
-    assert forward == reverse == _expected_manifest(
-        composite,
-        compiled_roots=2,
-        include_generated_data_quantifier_definitions=True,
-        include_at_least_data_predicates=True,
+    assert (
+        forward
+        == reverse
+        == _expected_manifest(
+            composite,
+            compiled_roots=2,
+            include_generated_data_quantifier_definitions=True,
+            include_at_least_data_predicates=True,
+        )
     )
     assert len(cast(list[object], forward["source_literal_symbols"])) == 1
     assert len(cast(list[object], forward["data_value_symbols"])) == 1
@@ -7311,8 +6955,7 @@ def test_bottom_object_has_value_drops_implicit_individual_exactly() -> None:
         functional(
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
-            "SubClassOf(:A ObjectHasValue("
-            "owl:bottomObjectProperty :discarded))",
+            "SubClassOf(:A ObjectHasValue(owl:bottomObjectProperty :discarded))",
             "SubClassOf(ObjectComplementOf(ObjectHasValue("
             "owl:bottomObjectProperty :discarded)) :B)",
         ),
@@ -7333,8 +6976,7 @@ def test_composite_bottom_object_has_value_keeps_shared_live_individual() -> Non
     left = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
-            "SubClassOf(:A ObjectHasValue("
-            "owl:bottomObjectProperty :shared))",
+            "SubClassOf(:A ObjectHasValue(owl:bottomObjectProperty :shared))",
         ),
         options=OPTIONS,
     )
@@ -7358,16 +7000,18 @@ def test_composite_bottom_object_has_value_keeps_shared_live_individual() -> Non
         logical_fingerprint=composite.logical_fingerprint.digest,
     )
 
-    assert forward == reverse == _expected_manifest(
-        composite,
-        compiled_roots=2,
-        include_generated_object_quantifier_definitions=True,
-        include_at_least_object_predicates=True,
+    assert (
+        forward
+        == reverse
+        == _expected_manifest(
+            composite,
+            compiled_roots=2,
+            include_generated_object_quantifier_definitions=True,
+            include_at_least_object_predicates=True,
+        )
     )
     assert len(cast(list[object], forward["individual_symbols"])) == 1
-    assert cast(list[dict[str, object]], forward["individual_signature"])[0][
-        "declared"
-    ] is False
+    assert cast(list[dict[str, object]], forward["individual_signature"])[0]["declared"] is False
     assert forward["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -7377,8 +7021,7 @@ def test_reduced_restriction_disjoint_duplicates_force_empty_exactly() -> None:
         functional(
             "Declaration(Class(:A))",
             "Declaration(ObjectProperty(:p))",
-            "DisjointClasses(ObjectMinCardinality(0 :p :A) "
-            "ObjectMaxCardinality(2 :p owl:Nothing))",
+            "DisjointClasses(ObjectMinCardinality(0 :p :A) ObjectMaxCardinality(2 :p owl:Nothing))",
         ),
         options=OPTIONS,
     )
@@ -7474,11 +7117,8 @@ def test_reducible_disjoint_unions_match_scalar_exactly() -> None:
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=4)
     assert not any(
-        value["generated"]
-        or str(value["display"]).startswith("ObjectUnionOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        value["generated"] or str(value["display"]).startswith("ObjectUnionOf:")
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -7506,12 +7146,13 @@ def test_generated_disjoint_unions_match_scalar_exactly() -> None:
     manifest = _native_manifest(snapshot)
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=4)
-    assert sum(
-        bool(value["generated"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 2
+        == 2
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -7526,8 +7167,7 @@ def test_recursive_generated_disjoint_unions_match_scalar_exactly() -> None:
             "Declaration(Class(:U))",
             "Declaration(Class(:V))",
             "Declaration(AnnotationProperty(:note))",
-            "DisjointUnion(:U ObjectIntersectionOf(:A "
-            "ObjectUnionOf(:B :C)) :D)",
+            "DisjointUnion(:U ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) :D)",
             'DisjointUnion(Annotation(:note "same recursive definitions") :U '
             "ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) :D)",
             "DisjointUnion(:V ObjectUnionOf(:A :B) :C)",
@@ -7539,12 +7179,13 @@ def test_recursive_generated_disjoint_unions_match_scalar_exactly() -> None:
     manifest = _native_manifest(snapshot)
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=4)
-    assert sum(
-        bool(value["generated"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 7
+        == 7
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -7562,16 +7203,14 @@ def test_recursive_disjoint_unions_remap_composite_slices_exactly() -> None:
     left = pyowl_core.load_snapshot(
         functional(
             *declarations,
-            "DisjointUnion(:U ObjectIntersectionOf(:A "
-            "ObjectUnionOf(:B :C)) :D)",
+            "DisjointUnion(:U ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) :D)",
         ),
         options=OPTIONS,
     )
     right = pyowl_core.load_snapshot(
         functional(
             *declarations,
-            "DisjointUnion(:V ObjectIntersectionOf(:A "
-            "ObjectUnionOf(:B :C)) :E)",
+            "DisjointUnion(:V ObjectIntersectionOf(:A ObjectUnionOf(:B :C)) :E)",
         ),
         options=OPTIONS,
     )
@@ -7585,9 +7224,7 @@ def test_recursive_disjoint_unions_remap_composite_slices_exactly() -> None:
     assert manifest == _expected_manifest(composite, compiled_roots=2)
     generated = [
         value
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     ]
     assert len(generated) == 6
@@ -7716,8 +7353,7 @@ def test_composite_restriction_disjoint_unions_reuse_global_identity() -> None:
         "Declaration(DataProperty(:d))",
     )
     object_restriction = (
-        "ObjectExactCardinality(2 :p "
-        "ObjectIntersectionOf(:A ObjectSomeValuesFrom(:q :B)))"
+        "ObjectExactCardinality(2 :p ObjectIntersectionOf(:A ObjectSomeValuesFrom(:q :B)))"
     )
     data_restriction = (
         "DataExactCardinality(1 :d "
@@ -7760,9 +7396,7 @@ def test_composite_restriction_disjoint_unions_reuse_global_identity() -> None:
     data_namespace = f":data:{composite.logical_fingerprint.hex}:"
     assert all(
         class_namespace in str(value["display"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     )
     assert all(
@@ -7781,8 +7415,7 @@ def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
             "Declaration(Class(:B))",
             "Declaration(Class(:U))",
             "Declaration(ObjectProperty(:p))",
-            "DisjointUnion(:U ObjectIntersectionOf(:A :B) "
-            "ObjectMinCardinality(4294967296 :p :B))",
+            "DisjointUnion(:U ObjectIntersectionOf(:A :B) ObjectMinCardinality(4294967296 :p :B))",
         ),
         options=OPTIONS,
     )
@@ -7800,9 +7433,7 @@ def test_partial_generated_disjoint_union_defers_without_symbol_leaks() -> None:
                 "ObjectMinCardinality:",
             )
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -7826,9 +7457,7 @@ def test_reducible_disjoint_unions_remap_composite_slices_exactly() -> None:
     )
     composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
 
-    manifest = _native_slices_manifest(
-        *_composite_records(composite, (left, right))
-    )
+    manifest = _native_slices_manifest(*_composite_records(composite, (left, right)))
 
     assert manifest == _expected_manifest(composite, compiled_roots=2)
     assert manifest["deferred_roots"] == 0
@@ -7854,16 +7483,11 @@ def test_trivial_nominal_axioms_normalize_without_symbol_leaks(axiom: str) -> No
 
     assert manifest == _expected_manifest(snapshot, compiled_roots=1)
     assert all(
-        not str(value["display"]).startswith(
-            ("ObjectOneOf:", "ObjectComplementOf:")
-        )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        not str(value["display"]).startswith(("ObjectOneOf:", "ObjectComplementOf:"))
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
-        predicate["kind"]
-        not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
+        predicate["kind"] not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -7892,12 +7516,13 @@ def test_composite_atomic_complements_remap_local_class_domains_exactly() -> Non
 
     assert manifest == _expected_manifest(composite, compiled_roots=2)
     assert manifest["deferred_roots"] == 0
-    assert sum(
-        str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
+    assert (
+        sum(
+            str(value["display"]).startswith("ObjectComplementOf:")
+            for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         )
-    ) == 2
+        == 2
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -7953,9 +7578,7 @@ def test_composite_named_nominal_class_axioms_and_constraints_remap_exactly() ->
     )
     composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
 
-    manifest = _native_slices_manifest(
-        *_composite_records(composite, (left, right))
-    )
+    manifest = _native_slices_manifest(*_composite_records(composite, (left, right)))
 
     assert manifest == _expected_manifest(
         composite,
@@ -7976,7 +7599,7 @@ def test_composite_nested_complements_remap_normalized_literals_exactly() -> Non
             "SubClassOf(ObjectComplementOf(ObjectComplementOf("
             "ObjectComplementOf(:Z))) ObjectComplementOf("
             "ObjectComplementOf(ObjectOneOf(:z))))",
-            'DataPropertyRange(:zd DataComplementOf(DataComplementOf('
+            "DataPropertyRange(:zd DataComplementOf(DataComplementOf("
             'DataComplementOf(DataOneOf("z")))))',
         ),
         options=OPTIONS,
@@ -7996,9 +7619,7 @@ def test_composite_nested_complements_remap_normalized_literals_exactly() -> Non
     )
     composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
 
-    manifest = _native_slices_manifest(
-        *_composite_records(composite, (left, right))
-    )
+    manifest = _native_slices_manifest(*_composite_records(composite, (left, right)))
 
     assert manifest == _expected_manifest(
         composite,
@@ -8017,10 +7638,8 @@ def test_composite_reducible_booleans_remap_atomic_literals_exactly() -> None:
             "Declaration(Class(:Z))",
             "Declaration(Class(:Y))",
             "Declaration(DataProperty(:zd))",
-            "SubClassOf(ObjectIntersectionOf(:Z owl:Thing) "
-            "ObjectUnionOf(:Y owl:Nothing))",
-            'DataPropertyRange(:zd DataIntersectionOf(DataOneOf("z") '
-            "rdfs:Literal))",
+            "SubClassOf(ObjectIntersectionOf(:Z owl:Thing) ObjectUnionOf(:Y owl:Nothing))",
+            'DataPropertyRange(:zd DataIntersectionOf(DataOneOf("z") rdfs:Literal))',
         ),
         options=OPTIONS,
     )
@@ -8029,8 +7648,7 @@ def test_composite_reducible_booleans_remap_atomic_literals_exactly() -> None:
             "Declaration(NamedIndividual(:a))",
             "Declaration(ObjectProperty(:ap))",
             "Declaration(Datatype(:A))",
-            "ObjectPropertyDomain(:ap ObjectUnionOf(ObjectOneOf(:a) "
-            "owl:Nothing))",
+            "ObjectPropertyDomain(:ap ObjectUnionOf(ObjectOneOf(:a) owl:Nothing))",
             "DatatypeDefinition(:A DataUnionOf("
             "DatatypeRestriction(xsd:integer "
             'xsd:minInclusive "2"^^xsd:integer) '
@@ -8040,9 +7658,7 @@ def test_composite_reducible_booleans_remap_atomic_literals_exactly() -> None:
     )
     composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
 
-    manifest = _native_slices_manifest(
-        *_composite_records(composite, (left, right))
-    )
+    manifest = _native_slices_manifest(*_composite_records(composite, (left, right)))
 
     assert manifest == _expected_manifest(
         composite,
@@ -8174,8 +7790,7 @@ def test_restriction_bearing_object_property_ranges_match_scalar_exactly() -> No
             "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:d))",
             "Declaration(AnnotationProperty(:note))",
-            "ObjectPropertyRange(:p ObjectSomeValuesFrom(:q "
-            "ObjectIntersectionOf(:A :B)))",
+            "ObjectPropertyRange(:p ObjectSomeValuesFrom(:q ObjectIntersectionOf(:A :B)))",
             'ObjectPropertyRange(Annotation(:note "same range") :p '
             "ObjectSomeValuesFrom(:q ObjectIntersectionOf(:A :B)))",
             "ObjectPropertyRange(ObjectInverseOf(:p) "
@@ -8263,8 +7878,7 @@ def test_composite_restriction_object_ranges_reuse_global_identity() -> None:
         "Declaration(DataProperty(:d))",
     )
     object_restriction = (
-        "ObjectExactCardinality(2 :p "
-        "ObjectIntersectionOf(:A ObjectSomeValuesFrom(:q :B)))"
+        "ObjectExactCardinality(2 :p ObjectIntersectionOf(:A ObjectSomeValuesFrom(:q :B)))"
     )
     data_restriction = (
         "DataExactCardinality(1 :d "
@@ -8310,9 +7924,7 @@ def test_composite_restriction_object_ranges_reuse_global_identity() -> None:
     data_namespace = f":data:{composite.logical_fingerprint.hex}:"
     assert all(
         class_namespace in str(value["display"])
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
         if value["generated"]
     )
     assert all(
@@ -8351,9 +7963,7 @@ def test_partial_restriction_object_range_defers_without_symbol_leaks() -> None:
                 "ObjectMinCardinality:",
             )
         )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"]
@@ -8468,8 +8078,7 @@ def test_atomic_data_complement_ranges_and_definitions_match_scalar_exactly() ->
             "Declaration(Datatype(:E))",
             "Declaration(AnnotationProperty(:note))",
             "DataPropertyRange(:p DataComplementOf(xsd:string))",
-            'DataPropertyRange(Annotation(:note "duplicate") :p '
-            "DataComplementOf(xsd:string))",
+            'DataPropertyRange(Annotation(:note "duplicate") :p DataComplementOf(xsd:string))',
             "DataPropertyRange(:q DataComplementOf(xsd:integer))",
             "DatatypeDefinition(:D DataComplementOf(xsd:string))",
             "DatatypeDefinition(:E DataComplementOf(xsd:integer))",
@@ -8485,14 +8094,20 @@ def test_atomic_data_complement_ranges_and_definitions_match_scalar_exactly() ->
         include_data_ranges=True,
         include_datatype_definitions=True,
     )
-    assert sum(
-        str(value["display"]).startswith("DataComplementOf:")
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-    ) == 2
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
-    ) == 2
+    assert (
+        sum(
+            str(value["display"]).startswith("DataComplementOf:")
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        )
+        == 2
+    )
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 2
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -8505,8 +8120,7 @@ def test_enumerated_and_restricted_data_literals_match_scalar_exactly() -> None:
             "Declaration(Datatype(:E))",
             "Declaration(AnnotationProperty(:note))",
             'DataPropertyRange(:p DataOneOf("alpha" "beta"))',
-            'DataPropertyRange(Annotation(:note "duplicate") :p '
-            'DataOneOf("alpha" "beta"))',
+            'DataPropertyRange(Annotation(:note "duplicate") :p DataOneOf("alpha" "beta"))',
             "DataPropertyRange(:q DatatypeRestriction(xsd:integer "
             'xsd:minInclusive "1"^^xsd:integer '
             'xsd:maxInclusive "5"^^xsd:integer))',
@@ -8526,17 +8140,14 @@ def test_enumerated_and_restricted_data_literals_match_scalar_exactly() -> None:
         include_data_ranges=True,
         include_datatype_definitions=True,
     )
-    data_range_symbols = cast(
-        list[dict[str, object]], manifest["data_range_symbols"]
+    data_range_symbols = cast(list[dict[str, object]], manifest["data_range_symbols"])
+    assert sum(str(value["display"]).startswith("DataOneOf:") for value in data_range_symbols) == 1
+    assert (
+        sum(
+            str(value["display"]).startswith("DatatypeRestriction:") for value in data_range_symbols
+        )
+        == 1
     )
-    assert sum(
-        str(value["display"]).startswith("DataOneOf:")
-        for value in data_range_symbols
-    ) == 1
-    assert sum(
-        str(value["display"]).startswith("DatatypeRestriction:")
-        for value in data_range_symbols
-    ) == 1
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -8568,33 +8179,30 @@ def test_complemented_enumerated_restricted_and_bottom_ranges_match_scalar() -> 
         include_data_ranges=True,
         include_datatype_definitions=True,
     )
-    data_range_symbols = cast(
-        list[dict[str, object]], manifest["data_range_symbols"]
+    data_range_symbols = cast(list[dict[str, object]], manifest["data_range_symbols"])
+    assert (
+        sum(str(value["display"]).startswith("DataComplementOf:") for value in data_range_symbols)
+        == 3
     )
-    assert sum(
-        str(value["display"]).startswith("DataComplementOf:")
-        for value in data_range_symbols
-    ) == 3
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
-    ) == 3
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 3
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
 def test_nested_atomic_data_complements_reduce_by_parity_exactly() -> None:
-    double_enumeration = (
-        'DataComplementOf(DataComplementOf(DataOneOf("alpha" "beta")))'
-    )
+    double_enumeration = 'DataComplementOf(DataComplementOf(DataOneOf("alpha" "beta")))'
     triple_restriction = (
         "DataComplementOf(DataComplementOf(DataComplementOf("
         "DatatypeRestriction(xsd:integer "
         'xsd:minInclusive "1"^^xsd:integer))))'
     )
     double_string = "DataComplementOf(DataComplementOf(xsd:string))"
-    triple_enumeration = (
-        'DataComplementOf(DataComplementOf(DataComplementOf(DataOneOf("value"))))'
-    )
+    triple_enumeration = 'DataComplementOf(DataComplementOf(DataComplementOf(DataOneOf("value"))))'
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(DataProperty(:p))",
@@ -8617,17 +8225,18 @@ def test_nested_atomic_data_complements_reduce_by_parity_exactly() -> None:
         include_data_ranges=True,
         include_datatype_definitions=True,
     )
-    data_range_symbols = cast(
-        list[dict[str, object]], manifest["data_range_symbols"]
+    data_range_symbols = cast(list[dict[str, object]], manifest["data_range_symbols"])
+    assert (
+        sum(str(value["display"]).startswith("DataComplementOf:") for value in data_range_symbols)
+        == 2
     )
-    assert sum(
-        str(value["display"]).startswith("DataComplementOf:")
-        for value in data_range_symbols
-    ) == 2
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
-    ) == 2
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 2
+    )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
 
@@ -8643,16 +8252,14 @@ def test_reducible_data_booleans_collapse_to_atomic_ranges_exactly() -> None:
             "Declaration(Datatype(:F))",
             "Declaration(Datatype(:G))",
             "DataPropertyRange(:p DataIntersectionOf(xsd:string rdfs:Literal))",
-            'DataPropertyRange(:q DataUnionOf(DataOneOf("alpha") '
-            "DataComplementOf(rdfs:Literal)))",
+            'DataPropertyRange(:q DataUnionOf(DataOneOf("alpha") DataComplementOf(rdfs:Literal)))',
             "DatatypeDefinition(:D DataIntersectionOf("
             "DatatypeRestriction(xsd:integer "
             'xsd:minInclusive "1"^^xsd:integer) rdfs:Literal))',
             'DatatypeDefinition(:E DataUnionOf(DataComplementOf(DataOneOf("blocked")) '
             "DataComplementOf(rdfs:Literal)))",
             "DataPropertyRange(:r DataUnionOf(xsd:string rdfs:Literal))",
-            "DatatypeDefinition(:F DataIntersectionOf(xsd:string "
-            "DataComplementOf(rdfs:Literal)))",
+            "DatatypeDefinition(:F DataIntersectionOf(xsd:string DataComplementOf(rdfs:Literal)))",
             "DataPropertyRange(:s DataComplementOf(DataUnionOf("
             "DataComplementOf(xsd:string) DataComplementOf(rdfs:Literal))))",
             "DatatypeDefinition(:G DataIntersectionOf(xsd:string "
@@ -8975,10 +8582,7 @@ def test_integer_family_data_assertions_match_scalar_boundaries_exactly() -> Non
             'DataPropertyAssertion(:p :i "2147483647"^^xsd:int)',
             'NegativeDataPropertyAssertion(:q :i "-32768"^^xsd:short)',
             'DataPropertyAssertion(:p :i "127"^^xsd:byte)',
-            (
-                'NegativeDataPropertyAssertion(:q :i "18446744073709551615"'
-                "^^xsd:unsignedLong)"
-            ),
+            ('NegativeDataPropertyAssertion(:q :i "18446744073709551615"^^xsd:unsignedLong)'),
             'DataPropertyAssertion(:p :i "4294967295"^^xsd:unsignedInt)',
             'NegativeDataPropertyAssertion(:q :i "65535"^^xsd:unsignedShort)',
             'DataPropertyAssertion(:p :i "255"^^xsd:unsignedByte)',
@@ -9046,10 +8650,7 @@ def test_decimal_data_assertions_reduce_aliases_and_match_scalar_exactly() -> No
             'NegativeDataPropertyAssertion(:q :i "0.2500"^^xsd:decimal)',
             'DataPropertyAssertion(:p :i "-0.00"^^xsd:decimal)',
             'NegativeDataPropertyAssertion(:q :i "12."^^xsd:decimal)',
-            (
-                'DataPropertyAssertion(:p :i "999999999999999999999999.5"'
-                "^^xsd:decimal)"
-            ),
+            ('DataPropertyAssertion(:p :i "999999999999999999999999.5"^^xsd:decimal)'),
         ),
         options=OPTIONS,
     )
@@ -9112,10 +8713,7 @@ def test_rational_data_assertions_reduce_aliases_and_match_scalar_exactly() -> N
             'NegativeDataPropertyAssertion(:q :i "3/4"^^owl:rational)',
             'DataPropertyAssertion(:p :i "-0/7"^^owl:rational)',
             'NegativeDataPropertyAssertion(:q :i "+12/4"^^owl:rational)',
-            (
-                'DataPropertyAssertion(:p :i "999999999999999999999999/2"'
-                "^^owl:rational)"
-            ),
+            ('DataPropertyAssertion(:p :i "999999999999999999999999/2"^^owl:rational)'),
         ),
         options=OPTIONS,
     )
@@ -9180,10 +8778,7 @@ def test_ieee_data_assertions_match_scalar_bits_and_signed_zero_exactly() -> Non
             'NegativeDataPropertyAssertion(:q :i "1.50e0"^^xsd:float)',
             'DataPropertyAssertion(:p :i "NaN"^^xsd:float)',
             'NegativeDataPropertyAssertion(:q :i "INF"^^xsd:float)',
-            (
-                'DataPropertyAssertion(:p :i "1.401298464324817e-45"'
-                "^^xsd:float)"
-            ),
+            ('DataPropertyAssertion(:p :i "1.401298464324817e-45"^^xsd:float)'),
             'NegativeDataPropertyAssertion(:q :i "-INF"^^xsd:double)',
             'DataPropertyAssertion(:p :i "1.0"^^xsd:double)',
             'NegativeDataPropertyAssertion(:q :i "1e1000"^^xsd:double)',
@@ -9253,12 +8848,9 @@ def test_generated_ieee_rounding_matrix_matches_scalar_exactly() -> None:
         fraction = "".join(str(rng.randrange(10)) for _ in range(18))
         exponent_limit = 50 if datatype == "float" else 350
         exponent = rng.randint(-exponent_limit, exponent_limit)
-        constructor = (
-            "DataPropertyAssertion" if index % 3 else "NegativeDataPropertyAssertion"
-        )
+        constructor = "DataPropertyAssertion" if index % 3 else "NegativeDataPropertyAssertion"
         assertions.append(
-            f'{constructor}(:p :i "{sign}{index + 1}.{fraction}e{exponent:+d}"'
-            f"^^xsd:{datatype})"
+            f'{constructor}(:p :i "{sign}{index + 1}.{fraction}e{exponent:+d}"^^xsd:{datatype})'
         )
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -9448,28 +9040,16 @@ def test_date_time_data_assertions_normalize_aliases_and_match_scalar_exactly() 
             "Declaration(DataProperty(:q))",
             "Declaration(NamedIndividual(:i))",
             'DataPropertyAssertion(:p :i "1970-01-01T00:00:00Z"^^xsd:dateTime)',
-            (
-                'NegativeDataPropertyAssertion(:q :i "1970-01-01T00:00:00+00:00"'
-                "^^xsd:dateTime)"
-            ),
+            ('NegativeDataPropertyAssertion(:q :i "1970-01-01T00:00:00+00:00"^^xsd:dateTime)'),
             'DataPropertyAssertion(:p :i "1970-01-01T00:00:00"^^xsd:dateTime)',
-            (
-                'NegativeDataPropertyAssertion(:q :i "2000-02-29T24:00:00Z"'
-                "^^xsd:dateTime)"
-            ),
+            ('NegativeDataPropertyAssertion(:q :i "2000-02-29T24:00:00Z"^^xsd:dateTime)'),
             'DataPropertyAssertion(:p :i "2000-03-01T00:00:00Z"^^xsd:dateTime)',
             (
                 'NegativeDataPropertyAssertion(:q :i "-0001-01-01T00:00:00.2500-14:00"'
                 "^^xsd:dateTime)"
             ),
-            (
-                'DataPropertyAssertion(:p :i "2024-01-01T00:00:00+01:30"'
-                "^^xsd:dateTimeStamp)"
-            ),
-            (
-                'NegativeDataPropertyAssertion(:q :i "1970-01-01T00:00:00Z"'
-                "^^xsd:dateTimeStamp)"
-            ),
+            ('DataPropertyAssertion(:p :i "2024-01-01T00:00:00+01:30"^^xsd:dateTimeStamp)'),
+            ('NegativeDataPropertyAssertion(:q :i "1970-01-01T00:00:00Z"^^xsd:dateTimeStamp)'),
         ),
         options=OPTIONS,
     )
@@ -9531,16 +9111,10 @@ def test_xml_data_assertions_canonicalize_and_match_scalar_exactly() -> None:
             "Declaration(DataProperty(:p))",
             "Declaration(DataProperty(:q))",
             "Declaration(NamedIndividual(:i))",
+            ('DataPropertyAssertion(:p :i "<a y=\\"2\\" x=\\"1\\"/>"^^rdf:XMLLiteral)'),
+            ('NegativeDataPropertyAssertion(:q :i "<a x=\\"1\\" y=\\"2\\"></a>"^^rdf:XMLLiteral)'),
             (
-                'DataPropertyAssertion(:p :i "<a y=\\\"2\\\" x=\\\"1\\\"/>"'
-                "^^rdf:XMLLiteral)"
-            ),
-            (
-                'NegativeDataPropertyAssertion(:q :i "<a x=\\\"1\\\" y=\\\"2\\\"></a>"'
-                "^^rdf:XMLLiteral)"
-            ),
-            (
-                'DataPropertyAssertion(:p :i "<a xmlns:p=\\\"urn:x\\\"><p:b/><p:c/></a>"'
+                'DataPropertyAssertion(:p :i "<a xmlns:p=\\"urn:x\\"><p:b/><p:c/></a>"'
                 "^^rdf:XMLLiteral)"
             ),
             (
@@ -9571,10 +9145,7 @@ def test_composite_xml_spelling_remaps_one_canonical_identity_exactly() -> None:
         functional(
             "Declaration(DataProperty(:z))",
             "Declaration(NamedIndividual(:zSource))",
-            (
-                'DataPropertyAssertion(:z :zSource "<a y=\\\"2\\\" x=\\\"1\\\"/>"'
-                "^^rdf:XMLLiteral)"
-            ),
+            ('DataPropertyAssertion(:z :zSource "<a y=\\"2\\" x=\\"1\\"/>"^^rdf:XMLLiteral)'),
         ),
         options=OPTIONS,
     )
@@ -9583,7 +9154,7 @@ def test_composite_xml_spelling_remaps_one_canonical_identity_exactly() -> None:
             "Declaration(DataProperty(:a))",
             "Declaration(NamedIndividual(:aSource))",
             (
-                'NegativeDataPropertyAssertion(:a :aSource "<a x=\\\"1\\\" y=\\\"2\\\"></a>"'
+                'NegativeDataPropertyAssertion(:a :aSource "<a x=\\"1\\" y=\\"2\\"></a>"'
                 "^^rdf:XMLLiteral)"
             ),
         ),
@@ -10137,11 +9708,14 @@ def test_composite_generated_data_range_definitions_use_global_namespace() -> No
         include_generated_data_definitions=True,
     )
     namespace = f":data:{composite.logical_fingerprint.hex}:"
-    assert sum(
-        namespace in str(value["display"])
-        for value in cast(list[dict[str, object]], actual["data_range_symbols"])
-        if value["generated"]
-    ) == 2
+    assert (
+        sum(
+            namespace in str(value["display"])
+            for value in cast(list[dict[str, object]], actual["data_range_symbols"])
+            if value["generated"]
+        )
+        == 2
+    )
     assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -10270,8 +9844,7 @@ def test_composite_boolean_datatype_definitions_remap_exactly() -> None:
         include_datatype_definitions=True,
     )
     assert not any(
-        value["generated"]
-        for value in cast(list[dict[str, object]], actual["data_range_symbols"])
+        value["generated"] for value in cast(list[dict[str, object]], actual["data_range_symbols"])
     )
     assert actual["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -10439,8 +10012,7 @@ def test_generated_data_property_range_definitions_match_scalar_exactly() -> Non
             "DataPropertyRange(:p DataUnionOf(xsd:string xsd:integer))",
             'DataPropertyRange(Annotation(:note "same definition") :p '
             "DataUnionOf(xsd:string xsd:integer))",
-            "DataPropertyRange(:q DataIntersectionOf("
-            "DataComplementOf(xsd:string) xsd:integer))",
+            "DataPropertyRange(:q DataIntersectionOf(DataComplementOf(xsd:string) xsd:integer))",
             'DataPropertyRange(:r DataUnionOf(DataOneOf("alpha") '
             "DatatypeRestriction(xsd:integer "
             'xsd:minInclusive "1"^^xsd:integer)))',
@@ -10456,10 +10028,13 @@ def test_generated_data_property_range_definitions_match_scalar_exactly() -> Non
         include_data_ranges=True,
         include_generated_data_definitions=True,
     )
-    assert sum(
-        bool(value["generated"])
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-    ) == 3
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        )
+        == 3
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -10491,10 +10066,13 @@ def test_recursive_generated_data_range_definitions_match_scalar_exactly() -> No
         include_data_ranges=True,
         include_generated_data_definitions=True,
     )
-    assert sum(
-        bool(value["generated"])
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-    ) == 5
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        )
+        == 5
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -10506,13 +10084,11 @@ def test_nested_homogeneous_data_booleans_flatten_exactly() -> None:
             "Declaration(DataProperty(:q))",
             "Declaration(Datatype(:D))",
             "Declaration(Datatype(:E))",
-            "DataPropertyRange(:p DataUnionOf(xsd:string "
-            "DataUnionOf(xsd:integer xsd:boolean)))",
+            "DataPropertyRange(:p DataUnionOf(xsd:string DataUnionOf(xsd:integer xsd:boolean)))",
             "DataPropertyRange(:q DataIntersectionOf(xsd:string "
             "DataComplementOf(DataUnionOf(DataComplementOf(xsd:integer) "
             "DataComplementOf(xsd:boolean)))))",
-            "DatatypeDefinition(:D DataUnionOf(xsd:string "
-            "DataUnionOf(xsd:integer xsd:boolean)))",
+            "DatatypeDefinition(:D DataUnionOf(xsd:string DataUnionOf(xsd:integer xsd:boolean)))",
             "DatatypeDefinition(:E DataIntersectionOf(xsd:string "
             "DataIntersectionOf(xsd:integer xsd:boolean)))",
         ),
@@ -10528,10 +10104,13 @@ def test_nested_homogeneous_data_booleans_flatten_exactly() -> None:
         include_generated_data_definitions=True,
         include_datatype_definitions=True,
     )
-    assert sum(
-        bool(value["generated"])
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-    ) == 2
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        )
+        == 2
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -10562,14 +10141,20 @@ def test_data_boolean_complements_normalize_exactly() -> None:
         include_generated_data_definitions=True,
         include_datatype_definitions=True,
     )
-    assert sum(
-        bool(value["generated"])
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-    ) == 2
-    assert sum(
-        predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
-        for predicate in cast(list[dict[str, object]], manifest["predicates"])
-    ) == 2
+    assert (
+        sum(
+            bool(value["generated"])
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        )
+        == 2
+    )
+    assert (
+        sum(
+            predicate["kind"] == PredicateKind.NEGATED_DATA_RANGE.value
+            for predicate in cast(list[dict[str, object]], manifest["predicates"])
+        )
+        == 2
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -10592,10 +10177,13 @@ def test_mixed_nested_datatype_definition_matches_scalar_exactly() -> None:
         include_generated_data_definitions=True,
         include_datatype_definitions=True,
     )
-    assert sum(
-        value["generated"]
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-    ) == 2
+    assert (
+        sum(
+            value["generated"]
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        )
+        == 2
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -10619,10 +10207,13 @@ def test_deep_mixed_nested_datatype_definition_matches_scalar_exactly() -> None:
         include_generated_data_definitions=True,
         include_datatype_definitions=True,
     )
-    assert sum(
-        value["generated"]
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-    ) == 4
+    assert (
+        sum(
+            value["generated"]
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        )
+        == 4
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -10634,8 +10225,7 @@ def test_boolean_datatype_definitions_match_scalar_exactly() -> None:
             "Declaration(Datatype(:E))",
             "Declaration(Datatype(:F))",
             "DatatypeDefinition(:D DataUnionOf(xsd:string xsd:integer))",
-            "DatatypeDefinition(:E DataIntersectionOf("
-            "DataComplementOf(xsd:string) xsd:integer))",
+            "DatatypeDefinition(:E DataIntersectionOf(DataComplementOf(xsd:string) xsd:integer))",
             'DatatypeDefinition(:F DataUnionOf(DataOneOf("alpha") '
             "DatatypeRestriction(xsd:integer "
             'xsd:minInclusive "1"^^xsd:integer)))',
@@ -10676,10 +10266,13 @@ def test_recursive_boolean_datatype_definition_matches_scalar_exactly() -> None:
         include_generated_data_definitions=True,
         include_datatype_definitions=True,
     )
-    assert sum(
-        value["generated"]
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-    ) == 2
+    assert (
+        sum(
+            value["generated"]
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        )
+        == 2
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -10714,10 +10307,13 @@ def test_mixed_nested_datatype_definitions_reuse_polarized_dependencies() -> Non
         include_generated_data_definitions=True,
         include_datatype_definitions=True,
     )
-    assert sum(
-        value["generated"]
-        for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
-    ) == 2
+    assert (
+        sum(
+            value["generated"]
+            for value in cast(list[dict[str, object]], manifest["data_range_symbols"])
+        )
+        == 2
+    )
     assert manifest["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -10760,10 +10356,13 @@ def test_mixed_nested_datatype_definitions_compose_canonically() -> None:
     )
 
     assert forward == reverse == expected
-    assert sum(
-        value["generated"]
-        for value in cast(list[dict[str, object]], forward["data_range_symbols"])
-    ) == 2
+    assert (
+        sum(
+            value["generated"]
+            for value in cast(list[dict[str, object]], forward["data_range_symbols"])
+        )
+        == 2
+    )
     assert forward["deferred_roots"] == 0
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
 
@@ -10776,8 +10375,7 @@ def test_partially_unsupported_has_key_defers_without_generated_symbols() -> Non
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:d))",
-            "HasKey(ObjectIntersectionOf(:A "
-            "ObjectMinCardinality(4294967296 :q :B)) (:p) (:d))",
+            "HasKey(ObjectIntersectionOf(:A ObjectMinCardinality(4294967296 :q :B)) (:p) (:d))",
         ),
         options=OPTIONS,
     )
@@ -10788,9 +10386,7 @@ def test_partially_unsupported_has_key_defers_without_generated_symbols() -> Non
     assert manifest["deferred_roots"] == 1
     assert not any(
         value["generated"]
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"]
@@ -10860,8 +10456,7 @@ def test_unsupported_annotated_object_cardinality_assertion_defers() -> None:
             "Declaration(ObjectProperty(:p))",
             "Declaration(AnnotationProperty(:note))",
             "Declaration(NamedIndividual(:i))",
-            'ClassAssertion(Annotation(:note "source") '
-            "ObjectMinCardinality(4294967296 :p :A) :i)",
+            'ClassAssertion(Annotation(:note "source") ObjectMinCardinality(4294967296 :p :A) :i)',
         ),
         options=OPTIONS,
     )
@@ -10890,9 +10485,7 @@ def test_unsupported_object_cardinality_assertion_defers_without_partial_symbols
     assert manifest["deferred_roots"] == 1
     assert all(
         not str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
@@ -10921,16 +10514,11 @@ def test_unsupported_nominal_assertions_defer_without_partial_symbols() -> None:
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 2
     assert all(
-        not str(value["display"]).startswith(
-            ("ObjectOneOf:", "ObjectComplementOf:")
-        )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        not str(value["display"]).startswith(("ObjectOneOf:", "ObjectComplementOf:"))
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
-        predicate["kind"]
-        not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
+        predicate["kind"] not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -10943,12 +10531,9 @@ def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
             "Declaration(NamedIndividual(:a))",
             "Declaration(ObjectProperty(:p))",
             "Declaration(DataProperty(:data))",
-            "SubClassOf(ObjectOneOf(:a) "
-            "ObjectMinCardinality(4294967296 :p :A))",
-            "EquivalentClasses(ObjectOneOf(:a) "
-            "ObjectMinCardinality(4294967296 :p :A))",
-            "DisjointClasses(ObjectOneOf(:a) "
-            "ObjectMinCardinality(4294967296 :p :A))",
+            "SubClassOf(ObjectOneOf(:a) ObjectMinCardinality(4294967296 :p :A))",
+            "EquivalentClasses(ObjectOneOf(:a) ObjectMinCardinality(4294967296 :p :A))",
+            "DisjointClasses(ObjectOneOf(:a) ObjectMinCardinality(4294967296 :p :A))",
             "ObjectPropertyDomain(:p ObjectComplementOf("
             "ObjectComplementOf(ObjectMinCardinality(4294967296 :p :A))))",
             "DataPropertyDomain(:data ObjectComplementOf("
@@ -10963,16 +10548,11 @@ def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
     assert manifest["compiled_roots"] == 0
     assert manifest["deferred_roots"] == 6
     assert all(
-        not str(value["display"]).startswith(
-            ("ObjectOneOf:", "ObjectComplementOf:")
-        )
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        not str(value["display"]).startswith(("ObjectOneOf:", "ObjectComplementOf:"))
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
-        predicate["kind"]
-        not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
+        predicate["kind"] not in {PredicateKind.NOMINAL.value, PredicateKind.NEGATED_NOMINAL.value}
         for predicate in cast(list[dict[str, object]], manifest["predicates"])
     )
     assert ENCODED_NATIVE_FEATURE in native.FEATURES
@@ -10981,10 +10561,8 @@ def test_partial_nominal_class_axioms_defer_without_partial_symbols() -> None:
 @pytest.mark.parametrize(
     "axiom",
     [
-        "SubClassOf(ObjectComplementOf(:A) "
-        "ObjectMinCardinality(4294967296 :p :B))",
-        "SubClassOf(ObjectMinCardinality(4294967296 :p :A) "
-        "ObjectComplementOf(:B))",
+        "SubClassOf(ObjectComplementOf(:A) ObjectMinCardinality(4294967296 :p :B))",
+        "SubClassOf(ObjectMinCardinality(4294967296 :p :A) ObjectComplementOf(:B))",
     ],
 )
 def test_partial_atomic_complement_subclass_defers_without_leaking_symbols(
@@ -11006,9 +10584,7 @@ def test_partial_atomic_complement_subclass_defers_without_leaking_symbols(
     assert manifest["deferred_roots"] == 1
     assert all(
         not str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
@@ -11023,8 +10599,7 @@ def test_partial_atomic_complement_equivalence_defers_without_leaking_symbols() 
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
-            "EquivalentClasses(ObjectComplementOf(:A) "
-            "ObjectMinCardinality(4294967296 :p :B))",
+            "EquivalentClasses(ObjectComplementOf(:A) ObjectMinCardinality(4294967296 :p :B))",
         ),
         options=OPTIONS,
     )
@@ -11035,9 +10610,7 @@ def test_partial_atomic_complement_equivalence_defers_without_leaking_symbols() 
     assert manifest["deferred_roots"] == 1
     assert all(
         not str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
@@ -11052,8 +10625,7 @@ def test_partial_atomic_complement_disjoint_defers_without_leaking_symbols() -> 
             "Declaration(Class(:A))",
             "Declaration(Class(:B))",
             "Declaration(ObjectProperty(:p))",
-            "DisjointClasses(ObjectComplementOf(:A) "
-            "ObjectMinCardinality(4294967296 :p :B))",
+            "DisjointClasses(ObjectComplementOf(:A) ObjectMinCardinality(4294967296 :p :B))",
         ),
         options=OPTIONS,
     )
@@ -11064,9 +10636,7 @@ def test_partial_atomic_complement_disjoint_defers_without_leaking_symbols() -> 
     assert manifest["deferred_roots"] == 1
     assert all(
         not str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value
@@ -11082,10 +10652,8 @@ def test_unsupported_object_cardinality_constraints_defer_without_leaks() -> Non
             "Declaration(ObjectProperty(:p))",
             "Declaration(ObjectProperty(:q))",
             "Declaration(DataProperty(:d))",
-            "ObjectPropertyDomain(:p "
-            "ObjectMinCardinality(4294967296 :q :A))",
-            "DataPropertyDomain(:d "
-            "ObjectMinCardinality(4294967296 :q :A))",
+            "ObjectPropertyDomain(:p ObjectMinCardinality(4294967296 :q :A))",
+            "DataPropertyDomain(:d ObjectMinCardinality(4294967296 :q :A))",
             "HasKey(ObjectMinCardinality(4294967296 :q :A) (:p) (:d))",
         ),
         options=OPTIONS,
@@ -11097,9 +10665,7 @@ def test_unsupported_object_cardinality_constraints_defer_without_leaks() -> Non
     assert manifest["deferred_roots"] == 3
     assert all(
         not str(value["display"]).startswith("ObjectComplementOf:")
-        for value in cast(
-            list[dict[str, object]], manifest["class_expression_symbols"]
-        )
+        for value in cast(list[dict[str, object]], manifest["class_expression_symbols"])
     )
     assert all(
         predicate["kind"] != PredicateKind.NEGATED_CONCEPT.value

@@ -127,9 +127,7 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
         "ingestion_path",
         "ir_schema_version",
     }
-    expected_path = (
-        "scalar-python" if reasoner.backend.name == "python" else "encoded-native"
-    )
+    expected_path = "scalar-python" if reasoner.backend.name == "python" else "encoded-native"
     if reasoner.backend.name in {"native", "verify"}:
         expected_keys.add("native_abi_version")
         expected_keys.update(_ENCODED_FORBIDDEN_WORK_COUNTERS)
@@ -222,10 +220,7 @@ def test_public_encoded_native_handoff_has_complete_zero_forbidden_work_ledger()
     assert {
         name: diagnostics[name] for name in sorted(_ENCODED_FORBIDDEN_WORK_COUNTERS)
     } == dict.fromkeys(sorted(_ENCODED_FORBIDDEN_WORK_COUNTERS), 0)
-    assert all(
-        type(diagnostics[name]) is int
-        for name in _ENCODED_FORBIDDEN_WORK_COUNTERS
-    )
+    assert all(type(diagnostics[name]) is int for name in _ENCODED_FORBIDDEN_WORK_COUNTERS)
 
 
 def test_consumer_compile_seconds_measures_each_successful_compilation(

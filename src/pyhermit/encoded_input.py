@@ -255,10 +255,7 @@ def _encoded_slice_records(
             root_slice.root_ids,
             root_slice.member_tokens,
             root_slice.anonymous_scope_maps,
-            *(
-                root_slice.lease.buffers[name]
-                for name in _ENCODED_SLICE_COLUMN_ORDER
-            ),
+            *(root_slice.lease.buffers[name] for name in _ENCODED_SLICE_COLUMN_ORDER),
         )
         for root_slice in root_slices
     )

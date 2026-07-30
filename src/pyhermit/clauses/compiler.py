@@ -2475,9 +2475,7 @@ def _compile_object_at_most(
         generated_atoms += pair_count
     state.preflight_atoms(generated_atoms)
     first_fresh = _fresh_variable_index(body, head, root)
-    targets = tuple(
-        Variable(first_fresh + index, TermSort.OBJECT) for index in range(target_count)
-    )
+    targets = tuple(Variable(first_fresh + index, TermSort.OBJECT) for index in range(target_count))
     role_predicate = _object_role_predicate(state, role)
     filler_predicate = _class_predicate(state, filler)
     extra_body = tuple(
@@ -2520,9 +2518,7 @@ def _compile_data_at_most(
     pair_count = target_count * (target_count - 1) // 2
     state.preflight_atoms(2 * target_count + pair_count)
     first_fresh = _fresh_variable_index(body, head, root)
-    targets = tuple(
-        Variable(first_fresh + index, TermSort.DATA) for index in range(target_count)
-    )
+    targets = tuple(Variable(first_fresh + index, TermSort.DATA) for index in range(target_count))
     role_predicate = _data_role_predicate(state, property)
     filler_predicate = _data_predicate(state, filler)
     extra_body = tuple(

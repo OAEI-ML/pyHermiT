@@ -659,9 +659,7 @@ class NativeBackendFactory:
         if ENCODED_NATIVE_FEATURE not in self._info.complete_features:
             return None
         if not isinstance(captured, (CapturedOntology, DeferredCapturedOntology)):
-            raise TypeError(
-                "captured must be CapturedOntology or DeferredCapturedOntology"
-            )
+            raise TypeError("captured must be CapturedOntology or DeferredCapturedOntology")
         if not isinstance(config, ReasonerConfig):
             raise TypeError("config must be ReasonerConfig")
         if not isinstance(cancellation, CancellationToken):
@@ -811,11 +809,7 @@ class NativeBackendSession:
         self._observer_id = observer_id
         if expected_fingerprint is None:
             actual = native.ontology_fingerprint
-            if (
-                type(actual) is not str
-                or len(actual) != 64
-                or actual.lower() != actual
-            ):
+            if type(actual) is not str or len(actual) != 64 or actual.lower() != actual:
                 raise BackendMismatchError(
                     "native session returned an invalid ontology fingerprint",
                     context={"reason": "ontology_fingerprint_invalid"},

@@ -89,7 +89,7 @@ upstream_components = ["src/main/java/org/semanticweb/HermiT/tableau/Node.java",
 
 [[adapted_file]]
 path = "src/pyhermit/clauses/compiler.py"
-sha256 = "174e0be5adb6945848e60d4f65f222eed470a095e30b6e27b4123e55f5547f6b"
+sha256 = "e58b64a2131c7982241c5c99bf5c1929a2640aeeba7c3166a153739efd33b307"
 adaptation = "Deterministic Python clausification retaining pinned HermiT structural translation shapes"
 upstream_components = ["src/main/java/org/semanticweb/HermiT/structural/OWLClausification.java", "src/main/java/org/semanticweb/HermiT/structural/ReducedABoxOnlyClausification.java"]
 

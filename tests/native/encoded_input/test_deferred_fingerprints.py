@@ -53,9 +53,7 @@ def _functional(identifier: str, *body: str) -> bytes:
     return (
         "Prefix(:=<urn:test:deferred#>) "
         "Prefix(rdfs:=<http://www.w3.org/2000/01/rdf-schema#>) "
-        f"Ontology(<urn:test:deferred:{identifier}> "
-        + " ".join(body)
-        + ")"
+        f"Ontology(<urn:test:deferred:{identifier}> " + " ".join(body) + ")"
     ).encode()
 
 
@@ -78,9 +76,7 @@ def _native_factory() -> NativeBackendFactory:
     extension._create_encoded_session_v1 = native._create_encoded_session_v1
     extension._validate_encoded_columns_v1 = native._validate_encoded_columns_v1
     extension._validate_encoded_slices_v1 = native._validate_encoded_slices_v1
-    extension._encoded_profile_slices_manifest_v1 = (
-        native._encoded_profile_slices_manifest_v1
-    )
+    extension._encoded_profile_slices_manifest_v1 = native._encoded_profile_slices_manifest_v1
     return NativeBackendFactory(extension)
 
 
@@ -317,6 +313,7 @@ def test_reasoner_initialization_does_not_read_composite_fingerprints(
         "Declaration(Class(:C))",
     )
     composite = pyowl_core.compose_views(left, right, roles=("left", "right"))
+
     def forbidden(_self: object) -> object:
         raise AssertionError("Python composite semantic fingerprint traversal occurred")
 

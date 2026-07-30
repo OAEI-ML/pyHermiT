@@ -453,12 +453,8 @@ def _object_service_results(reasoner: Reasoner) -> dict[str, object]:
                 reasoner.entails(owl.ClassAssertion(expression, i)),
                 reasoner.entails(owl.SubClassOf(expression, b)),
                 reasoner.entails(owl.SubClassOf(b, expression)),
-                reasoner.entails(
-                    owl.EquivalentClasses(owl.CanonicalSet((expression, b)))
-                ),
-                reasoner.entails(
-                    owl.DisjointClasses(owl.CanonicalSet((expression, b)))
-                ),
+                reasoner.entails(owl.EquivalentClasses(owl.CanonicalSet((expression, b)))),
+                reasoner.entails(owl.DisjointClasses(owl.CanonicalSet((expression, b)))),
                 reasoner.has_type(i, expression),
                 reasoner.has_type(i, expression, direct=True),
                 reasoner.instances(expression),
@@ -496,8 +492,7 @@ def _data_query_snapshot() -> pyowl_core.OntologyView:
             "DataPropertyRange(:e <http://www.w3.org/2000/01/rdf-schema#Literal>)",
             "Declaration(NamedIndividual(:i))",
             "ClassAssertion(:A :i)",
-            "SubClassOf(:A DataSomeValuesFrom("
-            ":d <http://www.w3.org/2000/01/rdf-schema#Literal>))",
+            "SubClassOf(:A DataSomeValuesFrom(:d <http://www.w3.org/2000/01/rdf-schema#Literal>))",
         ),
         options=OPTIONS,
     )
@@ -506,9 +501,7 @@ def _data_query_snapshot() -> pyowl_core.OntologyView:
 def _data_service_results(reasoner: Reasoner) -> dict[str, object]:
     base = "urn:test:permanent#"
     a, b = (owl.Class(owl.IRI(f"{base}{local}")) for local in ("A", "B"))
-    d, e, f, g = (
-        owl.DataProperty(owl.IRI(f"{base}{local}")) for local in ("d", "e", "f", "g")
-    )
+    d, e, f, g = (owl.DataProperty(owl.IRI(f"{base}{local}")) for local in ("d", "e", "f", "g"))
     i = owl.NamedIndividual(owl.IRI(f"{base}i"))
     expressions = {
         "some": owl.DataSomeValuesFrom((d,), owl.RDFS_LITERAL),
@@ -542,12 +535,8 @@ def _data_service_results(reasoner: Reasoner) -> dict[str, object]:
                 reasoner.entails(owl.ClassAssertion(expression, i)),
                 reasoner.entails(owl.SubClassOf(expression, b)),
                 reasoner.entails(owl.SubClassOf(b, expression)),
-                reasoner.entails(
-                    owl.EquivalentClasses(owl.CanonicalSet((expression, b)))
-                ),
-                reasoner.entails(
-                    owl.DisjointClasses(owl.CanonicalSet((expression, b)))
-                ),
+                reasoner.entails(owl.EquivalentClasses(owl.CanonicalSet((expression, b)))),
+                reasoner.entails(owl.DisjointClasses(owl.CanonicalSet((expression, b)))),
                 reasoner.has_type(i, expression),
                 reasoner.has_type(i, expression, direct=True),
                 reasoner.instances(expression),
@@ -959,8 +948,7 @@ def test_xsd_string_literal_semantics_have_exact_program_and_session_parity() ->
         functional(
             "Declaration(DataProperty(:p))",
             "Declaration(NamedIndividual(:i))",
-            "DataPropertyAssertion(:p :i "
-            '"hello world"^^<http://www.w3.org/2001/XMLSchema#string>)',
+            'DataPropertyAssertion(:p :i "hello world"^^<http://www.w3.org/2001/XMLSchema#string>)',
         ),
         options=OPTIONS,
     )
@@ -986,18 +974,13 @@ def test_xsd_string_literal_semantics_have_exact_program_and_session_parity() ->
     "assertions",
     (
         (
-            "DataPropertyAssertion(:p :i "
-            '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>)',
-            "DataPropertyAssertion(:p :i "
-            '"1"^^<http://www.w3.org/2001/XMLSchema#boolean>)',
+            'DataPropertyAssertion(:p :i "true"^^<http://www.w3.org/2001/XMLSchema#boolean>)',
+            'DataPropertyAssertion(:p :i "1"^^<http://www.w3.org/2001/XMLSchema#boolean>)',
         ),
         (
-            "DataPropertyAssertion(:p :i "
-            '"+01"^^<http://www.w3.org/2001/XMLSchema#int>)',
-            "DataPropertyAssertion(:p :i "
-            '"1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>)',
-            "DataPropertyAssertion(:p :i "
-            '"1/1"^^<http://www.w3.org/2002/07/owl#rational>)',
+            'DataPropertyAssertion(:p :i "+01"^^<http://www.w3.org/2001/XMLSchema#int>)',
+            'DataPropertyAssertion(:p :i "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>)',
+            'DataPropertyAssertion(:p :i "1/1"^^<http://www.w3.org/2002/07/owl#rational>)',
         ),
     ),
     ids=("boolean-aliases", "cross-datatype-numeric-aliases"),
@@ -1108,8 +1091,7 @@ def test_complemented_named_datatype_ranges_have_program_and_runtime_parity() ->
             "<http://www.w3.org/2001/XMLSchema#decimal>)) :B)",
             "SubClassOf(:A DataExactCardinality(1 :e DataComplementOf("
             "<http://www.w3.org/2001/XMLSchema#integer>)))",
-            "DataPropertyRange(:e DataComplementOf("
-            "<http://www.w3.org/2001/XMLSchema#double>))",
+            "DataPropertyRange(:e DataComplementOf(<http://www.w3.org/2001/XMLSchema#double>))",
             "ClassAssertion(:A :i)",
         ),
         options=OPTIONS,
@@ -1450,8 +1432,7 @@ def test_custom_datatype_definition_graphs_have_program_and_runtime_parity() -> 
         "urn:test:permanent#topish",
     ]
     assert {
-        cast(dict[str, object], definition["data_range"])["kind"]
-        for definition in definitions
+        cast(dict[str, object], definition["data_range"])["kind"] for definition in definitions
     } == {"datatype", "union"}
 
     encoded = _direct_lifecycle_session(snapshot)
@@ -1579,16 +1560,11 @@ def test_ieee_literal_semantics_preserve_identity_ordering_and_runtime_parity() 
         functional(
             "Declaration(DataProperty(:p))",
             "Declaration(NamedIndividual(:i))",
-            "DataPropertyAssertion(:p :i "
-            '"-0"^^<http://www.w3.org/2001/XMLSchema#float>)',
-            "DataPropertyAssertion(:p :i "
-            '"+0"^^<http://www.w3.org/2001/XMLSchema#float>)',
-            "DataPropertyAssertion(:p :i "
-            '"NaN"^^<http://www.w3.org/2001/XMLSchema#float>)',
-            "DataPropertyAssertion(:p :i "
-            '"INF"^^<http://www.w3.org/2001/XMLSchema#float>)',
-            "DataPropertyAssertion(:p :i "
-            '"-INF"^^<http://www.w3.org/2001/XMLSchema#double>)',
+            'DataPropertyAssertion(:p :i "-0"^^<http://www.w3.org/2001/XMLSchema#float>)',
+            'DataPropertyAssertion(:p :i "+0"^^<http://www.w3.org/2001/XMLSchema#float>)',
+            'DataPropertyAssertion(:p :i "NaN"^^<http://www.w3.org/2001/XMLSchema#float>)',
+            'DataPropertyAssertion(:p :i "INF"^^<http://www.w3.org/2001/XMLSchema#float>)',
+            'DataPropertyAssertion(:p :i "-INF"^^<http://www.w3.org/2001/XMLSchema#double>)',
             "DataPropertyAssertion(:p :i "
             '"1.401298464324817e-45"^^<http://www.w3.org/2001/XMLSchema#float>)',
         ),
@@ -1640,25 +1616,17 @@ def test_ieee_literal_semantics_preserve_identity_ordering_and_runtime_parity() 
 
 def test_remaining_nonnumeric_literal_families_have_program_and_runtime_parity() -> None:
     assertions = (
-        'DataPropertyAssertion(:p :i "  alpha   beta  "^^'
-        "<http://www.w3.org/2001/XMLSchema#token>)",
-        'DataPropertyAssertion(:p :i "alpha beta"^^'
-        "<http://www.w3.org/2001/XMLSchema#string>)",
+        'DataPropertyAssertion(:p :i "  alpha   beta  "^^<http://www.w3.org/2001/XMLSchema#token>)',
+        'DataPropertyAssertion(:p :i "alpha beta"^^<http://www.w3.org/2001/XMLSchema#string>)',
         'DataPropertyAssertion(:p :i "alpha beta"^^'
         "<http://www.w3.org/2001/XMLSchema#normalizedString>)",
-        'DataPropertyAssertion(:p :i "en-US"^^'
-        "<http://www.w3.org/2001/XMLSchema#language>)",
-        'DataPropertyAssertion(:p :i "a:b"^^'
-        "<http://www.w3.org/2001/XMLSchema#Name>)",
-        'DataPropertyAssertion(:p :i "alpha"^^'
-        "<http://www.w3.org/2001/XMLSchema#NCName>)",
-        'DataPropertyAssertion(:p :i "a:b"^^'
-        "<http://www.w3.org/2001/XMLSchema#NMTOKEN>)",
+        'DataPropertyAssertion(:p :i "en-US"^^<http://www.w3.org/2001/XMLSchema#language>)',
+        'DataPropertyAssertion(:p :i "a:b"^^<http://www.w3.org/2001/XMLSchema#Name>)',
+        'DataPropertyAssertion(:p :i "alpha"^^<http://www.w3.org/2001/XMLSchema#NCName>)',
+        'DataPropertyAssertion(:p :i "a:b"^^<http://www.w3.org/2001/XMLSchema#NMTOKEN>)',
         'DataPropertyAssertion(:p :i "colour"@en-GB)',
-        'DataPropertyAssertion(:p :i "0aFF"^^'
-        "<http://www.w3.org/2001/XMLSchema#hexBinary>)",
-        'DataPropertyAssertion(:p :i " C v 8 = "^^'
-        "<http://www.w3.org/2001/XMLSchema#base64Binary>)",
+        'DataPropertyAssertion(:p :i "0aFF"^^<http://www.w3.org/2001/XMLSchema#hexBinary>)',
+        'DataPropertyAssertion(:p :i " C v 8 = "^^<http://www.w3.org/2001/XMLSchema#base64Binary>)',
         'DataPropertyAssertion(:p :i "../café?q=one two"^^'
         "<http://www.w3.org/2001/XMLSchema#anyURI>)",
         'DataPropertyAssertion(:p :i "<a y=\\"2\\" x=\\"1\\"/>"^^'
@@ -1691,9 +1659,7 @@ def test_remaining_nonnumeric_literal_families_have_program_and_runtime_parity()
         )
         for identity in identities
     ]
-    assert {
-        cast(list[object], payload["data_identity"])[0] for payload in payloads
-    }.issuperset(
+    assert {cast(list[object], payload["data_identity"])[0] for payload in payloads}.issuperset(
         {
             "plain-string-v1",
             "binary-identity-v1",
@@ -1980,10 +1946,7 @@ def test_profile_context_session_cancellation_is_transactional() -> None:
             cancel_at_checkpoint=1,
         )
 
-    assert (
-        interrupted.value.context["phase"]
-        == "profile-ontology-identity-context-preflight"
-    )
+    assert interrupted.value.context["phase"] == "profile-ontology-identity-context-preflight"
     retry = native._create_encoded_session_v1(**request)
     try:
         assert retry.check(None)
@@ -2152,9 +2115,7 @@ def test_direct_lifecycle_matches_scalar_constructor_cardinality_transform(
 ) -> None:
     restriction = f"{constructor}(4294967296 {property} {filler})"
     statement = (
-        f"SubClassOf({restriction} :A)"
-        if side == "antecedent"
-        else f"SubClassOf(:A {restriction})"
+        f"SubClassOf({restriction} :A)" if side == "antecedent" else f"SubClassOf(:A {restriction})"
     )
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -2264,13 +2225,9 @@ def test_direct_lifecycle_matches_scalar_negated_cardinality_transform(
     side: str,
     observed: int,
 ) -> None:
-    restriction = (
-        f"ObjectComplementOf({constructor}(10000000000 {property} {filler}))"
-    )
+    restriction = f"ObjectComplementOf({constructor}(10000000000 {property} {filler}))"
     statement = (
-        f"SubClassOf({restriction} :A)"
-        if side == "antecedent"
-        else f"SubClassOf(:A {restriction})"
+        f"SubClassOf({restriction} :A)" if side == "antecedent" else f"SubClassOf(:A {restriction})"
     )
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -2307,13 +2264,9 @@ def test_negated_object_decrement_at_u32_successor_keeps_overflowing_target(
     constructor: str,
     side: str,
 ) -> None:
-    restriction = (
-        f"ObjectComplementOf({constructor}(4294967296 :p :B))"
-    )
+    restriction = f"ObjectComplementOf({constructor}(4294967296 :p :B))"
     statement = (
-        f"SubClassOf({restriction} :A)"
-        if side == "antecedent"
-        else f"SubClassOf(:A {restriction})"
+        f"SubClassOf({restriction} :A)" if side == "antecedent" else f"SubClassOf(:A {restriction})"
     )
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -2356,9 +2309,7 @@ def test_direct_lifecycle_matches_scalar_u32_boundary_successor(
 ) -> None:
     restriction = f"{constructor}(4294967295 {property} {filler})"
     statement = (
-        f"SubClassOf({restriction} :A)"
-        if side == "antecedent"
-        else f"SubClassOf(:A {restriction})"
+        f"SubClassOf({restriction} :A)" if side == "antecedent" else f"SubClassOf(:A {restriction})"
     )
     snapshot = pyowl_core.load_snapshot(
         functional(
@@ -2590,8 +2541,7 @@ def test_encoded_service_context_is_compact_strict_cancel_safe_and_close_safe() 
     }.intersection(payload)
     assert payload["schema_version"] == 3
     assert {
-        cast(dict[str, object], domain)["kind"]
-        for domain in cast(list[object], payload["domains"])
+        cast(dict[str, object], domain)["kind"] for domain in cast(list[object], payload["domains"])
     } == {
         "class",
         "data_property",
@@ -3194,9 +3144,7 @@ def test_verify_facade_pairs_direct_native_compiler_with_scalar_shadow(
 ) -> None:
     snapshot = _direct_snapshot()
     config = ReasonerConfig(backend="verify")
-    expected_digest = facade_module._canonical_compiler_digest(
-        _compiled(snapshot, config=config)
-    )
+    expected_digest = facade_module._canonical_compiler_digest(_compiled(snapshot, config=config))
     native_candidates: list[Any] = []
     native_compiles = 0
     scalar_compiles = 0

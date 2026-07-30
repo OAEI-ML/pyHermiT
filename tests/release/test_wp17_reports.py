@@ -169,8 +169,7 @@ def test_release_report_binds_the_exact_universal_pypi_publication() -> None:
     }
     assert observed == PUBLISHED_ARTIFACTS
     assert all(
-        artifact["source_revision"] == PUBLISHED_REVISION
-        for artifact in report["artifacts"]
+        artifact["source_revision"] == PUBLISHED_REVISION for artifact in report["artifacts"]
     )
     assert all(artifact["evidence"] == PUBLICATION_RECORD for artifact in report["artifacts"])
     assert all(artifact["kind"] != "native-wheel" for artifact in report["artifacts"])

@@ -288,10 +288,7 @@ def _deferred_capture_eligible(view: OntologyView) -> bool:
             base = base.base
         return isinstance(base, OntologySnapshot)
     if isinstance(view, OntologyComposite):
-        return all(
-            isinstance(member.view, OntologySnapshot)
-            for member in view.provenance_tree
-        )
+        return all(isinstance(member.view, OntologySnapshot) for member in view.provenance_tree)
     return False
 
 

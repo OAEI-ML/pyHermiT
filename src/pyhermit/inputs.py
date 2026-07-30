@@ -49,9 +49,7 @@ class _CapturedOntologyInput:
             self.captured,
             (CapturedOntology, DeferredCapturedOntology),
         ):
-            raise TypeError(
-                "captured must be CapturedOntology or DeferredCapturedOntology"
-            )
+            raise TypeError("captured must be CapturedOntology or DeferredCapturedOntology")
         if not isinstance(self.identity, OntologyIdentityIndex):
             raise TypeError("identity must be OntologyIdentityIndex")
 
@@ -154,10 +152,14 @@ def _capture_ontology_input(
         cancellation_token=cancellation_token,
     )
     captured: CapturedOntology | DeferredCapturedOntology
-    if defer_fingerprints and isinstance(
-        view,
-        (pyowl_core.OntologyOverlay, pyowl_core.OntologyComposite),
-    ) and _deferred_capture_eligible(view):
+    if (
+        defer_fingerprints
+        and isinstance(
+            view,
+            (pyowl_core.OntologyOverlay, pyowl_core.OntologyComposite),
+        )
+        and _deferred_capture_eligible(view)
+    ):
         captured = capture_compatible_view_deferred(view)
     else:
         captured = capture_compatible_view(view)

@@ -300,9 +300,7 @@ def test_profile_side_contexts_are_canonical_and_union_composite_origins(
     assert origin_version == 1
     assert origin_rows == tuple(sorted(origin_rows))
     assert len(origin_rows) == 3
-    assert {digest for digest, _document_keys in origin_rows} == set(
-        composite.origin_index.entries
-    )
+    assert {digest for digest, _document_keys in origin_rows} == set(composite.origin_index.entries)
     assert all(len(provenance) == 32 for provenance, _document_keys in origin_rows)
     assert all(
         document_keys == tuple(sorted(document_keys)) and len(document_keys) == 2
@@ -312,8 +310,7 @@ def test_profile_side_contexts_are_canonical_and_union_composite_origins(
 
 def test_native_slice_records_share_one_exact_column_ledger() -> None:
     buffers = {
-        name: memoryview(bytes((index,)))
-        for index, name in enumerate(ENCODED_BUFFER_WIDTHS)
+        name: memoryview(bytes((index,))) for index, name in enumerate(ENCODED_BUFFER_WIDTHS)
     }
     root_ids = memoryview(b"\x01\x00\x00\x00")
     member_token = b"m" * 32
