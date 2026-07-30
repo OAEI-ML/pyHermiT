@@ -45,7 +45,10 @@ dev = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/OAEI-ML/pyHermiT"
+Documentation = "https://github.com/OAEI-ML/pyHermiT/tree/main/docs"
 Repository = "https://github.com/OAEI-ML/pyHermiT"
+Issues = "https://github.com/OAEI-ML/pyHermiT/issues"
 Specifications = "https://github.com/OAEI-ML/pyHermiT/tree/main/specs"
 
 [tool.pyhermit]

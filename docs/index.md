@@ -5,6 +5,10 @@ optional Rust backend. It consumes the immutable ontology views defined by
 `pyowl-core`; an existing snapshot, overlay, composite, or provider is retained rather
 than parsed into a second public model.
 
+```bash
+python -m pip install pyHermiT
+```
+
 - [User guide](user-guide.md): installation, backend selection, shared views, services,
   updates, errors, timeouts, and concurrency.
 - [API reference](api-reference.md): the stable facade members, result shapes, and
@@ -15,7 +19,15 @@ than parsed into a second public model.
 - [Local release report](../reports/release-report-local.json) and
   [coverage matrix](../reports/coverage-matrix.json): machine-readable WP17 state.
 
-The package is still `0.1.0.dev0`. A locally passing backend or artifact check is not a
-1.0 release claim. The external W3C-body, live-reference, hosted-platform,
-dedicated-performance, and `LIC-001` legal/provenance gates remain fail-closed in the
-release report.
+## Recommended first steps
+
+1. Install pyHermiT in a fresh virtual environment.
+2. Follow [Load once or reuse a shared view](user-guide.md#load-once-or-reuse-a-shared-view).
+3. Use a `Reasoner` context manager and configure time and memory limits for
+   untrusted or large inputs.
+4. Record `backend_info()` and `reasoner.diagnostics()` with reproducible results.
+
+The source tree currently identifies as `0.1.0.dev0`. A locally passing backend
+or artifact check is not a 1.0 release claim. The external W3C-body,
+live-reference, hosted-platform, dedicated-performance, and `LIC-001`
+legal/provenance gates remain fail-closed in the release report.

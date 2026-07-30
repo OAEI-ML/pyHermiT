@@ -1,5 +1,9 @@
 # pyHermiT
 
+[![PyPI](https://img.shields.io/pypi/v/pyHermiT)](https://pypi.org/project/pyHermiT/)
+[![Python](https://img.shields.io/pypi/pyversions/pyHermiT)](https://pypi.org/project/pyHermiT/)
+[![License](https://img.shields.io/badge/license-LGPL--3.0--or--later-blue)](LICENSE)
+
 pyHermiT is specified as a Java-free Python and Rust reimplementation of the core
 HermiT OWL 2 DL reasoner, with a complete pure-Python fallback. It targets Python 3.10+
 and uses the Java-free `pyowl-core` package for shared ontology parsing, immutable views,
@@ -11,6 +15,43 @@ compatibility rules, backend completeness requirements, and verification plan be
 [`specs/README.md`](specs/README.md). Built runtime artifacts contain no Java, JVM
 launcher, Java bridge, or reference implementation.
 
+## Installation
+
+```shell
+python -m pip install pyHermiT
+```
+
+A supported native wheel enables Rust acceleration automatically. The universal
+wheel provides the complete compiler-free Python backend. Neither installation
+contains, downloads, or starts Java.
+
+## Quick start
+
+```python
+from pyowl_core import ImportPolicy, LoadOptions, load_snapshot
+from pyhermit import Reasoner
+
+ontology = (
+    b"Prefix(:=<urn:example#>) Ontology(<urn:example> "
+    b"Declaration(Class(:A)) Declaration(Class(:B)) SubClassOf(:A :B))"
+)
+view = load_snapshot(
+    ontology,
+    options=LoadOptions(imports=ImportPolicy.RESOLVE_STRICT),
+)
+
+with Reasoner(view) as reasoner:
+    assert reasoner.ontology is view
+    assert reasoner.is_consistent()
+    taxonomy = reasoner.classify_classes()
+```
+
+See the [user guide](docs/user-guide.md) for backend selection, import
+resolution, classification and realization queries, timeouts, updates, and
+error handling.
+
+## Release and licensing status
+
 The owner has selected the source-guided implementation mode and
 `LGPL-3.0-or-later`, matching the pinned upstream declaration. `LICENSE` contains the
 LGPL text, `COPYING` the GPL text it incorporates, and `NOTICE.md` the initial upstream
@@ -20,7 +61,7 @@ required by [`specs/deviations.md`](specs/deviations.md). The local audits are u
 [`reports/licensing/`](reports/licensing/) and
 [`reports/release/artifact-audit.md`](reports/release/artifact-audit.md).
 
-## Documentation and release state
+## Documentation
 
 Start with the [user guide](docs/user-guide.md) for backend selection, standalone and
 shared-view loading, every service family, updates, concurrency, and errors. The
@@ -29,7 +70,7 @@ shared-view loading, every service family, updates, concurrency, and errors. The
 private IR and Python/Rust engines. The [documentation index](docs/index.md) links the
 normative specifications and machine-readable evidence.
 
-WP17 local state is recorded in the [release report](reports/release-report-local.json),
+Release-candidate state is recorded in the [release report](reports/release-report-local.json),
 [coverage matrix](reports/coverage-matrix.json), and
 [benchmark audit](benchmarks/evidence/WP17-local-audit.md). They intentionally report
 `blocked` until the licensed W3C bodies, larger live-reference sample, hosted platform
