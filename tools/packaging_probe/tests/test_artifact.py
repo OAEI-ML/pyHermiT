@@ -19,6 +19,7 @@ from tools.packaging_probe.check_artifact import (
     _contains_absolute_path,
     _license_hashes,
     _runtime_version,
+    _stat_identity,
     _wheel_tags,
     external_audit,
     inspect_artifact,
@@ -26,6 +27,29 @@ from tools.packaging_probe.check_artifact import (
 
 
 class ArtifactCheckerTests(unittest.TestCase):
+    def test_windows_snapshot_identity_uses_shared_birthtime_semantics(self) -> None:
+        path_stat = mock.Mock(
+            st_mode=0o100644,
+            st_dev=1,
+            st_ino=2,
+            st_size=3,
+            st_mtime_ns=4,
+            st_ctime_ns=5,
+            st_birthtime_ns=6,
+        )
+        descriptor_stat = mock.Mock(
+            st_mode=0o100644,
+            st_dev=1,
+            st_ino=2,
+            st_size=3,
+            st_mtime_ns=4,
+            st_ctime_ns=7,
+            st_birthtime_ns=6,
+        )
+
+        with mock.patch("tools.packaging_probe.check_artifact.os.name", "nt"):
+            self.assertEqual(_stat_identity(path_stat), _stat_identity(descriptor_stat))
+
     def test_license_payloads_are_content_checked(self) -> None:
         root = Path(__file__).parents[3]
         prefix = "pyhermit-0.dist-info/licenses"

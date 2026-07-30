@@ -88,13 +88,21 @@ class ArtifactReport:
 
 
 def _stat_identity(value: os.stat_result) -> _FileIdentity:
+    # CPython 3.12+ reports Windows path-stat ``st_ctime`` as creation time,
+    # while descriptor fstat retains the underlying metadata-change time.
+    # ``st_birthtime_ns`` is the stable creation field shared by both calls.
+    change_guard = (
+        getattr(value, "st_birthtime_ns", value.st_ctime_ns)
+        if os.name == "nt"
+        else value.st_ctime_ns
+    )
     return (
         value.st_mode,
         value.st_dev,
         value.st_ino,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
+        change_guard,
     )
 
 
