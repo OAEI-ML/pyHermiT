@@ -48,7 +48,7 @@ _PATH_BOUNDARY_BYTES = frozenset(b"\x00\t\n\r \"'=(:,[{")
 _LICENSE_PAYLOAD_SHA256 = {
     "COPYING": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
     "LICENSE": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
-    "NOTICE.md": "cc870e2162df6a26938fbed059df2f53274d4e5f2fcf5af85fbd9ed0ff0c1da0",
+    "NOTICE.md": "8f90d4d6452f108406bda0da5d9ab7382eed37f071e6dba2be656b6f8d827f3a",
 }
 
 
