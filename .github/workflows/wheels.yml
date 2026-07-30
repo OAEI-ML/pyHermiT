@@ -307,21 +307,27 @@ jobs:
           - id: linux-x86_64
             runner: ubuntu-24.04
             pattern: "*manylinux*x86_64.whl"
+            core_backend: native
           - id: linux-aarch64
             runner: ubuntu-24.04-arm
             pattern: "*manylinux*aarch64.whl"
+            core_backend: native
           - id: macos-x86_64
             runner: macos-15-intel
             pattern: "*macosx*x86_64.whl"
+            core_backend: native
           - id: macos-arm64
             runner: macos-14
             pattern: "*macosx*arm64.whl"
+            core_backend: native
           - id: windows-amd64
             runner: windows-latest
             pattern: "*win_amd64.whl"
+            core_backend: native
           - id: windows-arm64
             runner: windows-11-arm
             pattern: "*win_arm64.whl"
+            core_backend: python
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -350,11 +356,12 @@ jobs:
       - name: Exercise ABI3 wheel and semantic suite
         shell: bash
         env:
+          EXPECTED_CORE_BACKEND: ${{ matrix.core_backend }}
           WHEEL_PATTERN: ${{ matrix.pattern }}
         run: |
           wheel="$(find native -name "$WHEEL_PATTERN" -print -quit)"
           test -n "$wheel"
-          python tests/packaging/install_artifact.py "$wheel" --python "$(command -v python)" --wheelhouse wheelhouse --expected-backend native --expected-core-backend native --semantic-suite
+          python tests/packaging/install_artifact.py "$wheel" --python "$(command -v python)" --wheelhouse wheelhouse --expected-backend native --expected-core-backend "$EXPECTED_CORE_BACKEND" --semantic-suite
           python tests/packaging/install_artifact.py "$wheel" --python "$(command -v python)" --wheelhouse pure-core-wheelhouse --expected-backend native --expected-core-backend python
 
   musllinux-python312:

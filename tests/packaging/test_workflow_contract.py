@@ -37,6 +37,21 @@ def test_wheel_workflow_has_all_tier_one_targets_and_no_publish_action() -> None
     assert "gh-action-pypi-publish" not in workflow
 
 
+def test_abi3_matrix_matches_the_approved_pyowl_core_native_platforms() -> None:
+    workflow = (ROOT / ".github/workflows/wheels.yml").read_text(encoding="utf-8")
+    abi3 = workflow.split("  abi3-python312:\n", 1)[1].split("  musllinux-python312:\n", 1)[0]
+
+    assert abi3.count("core_backend: native") == 5
+    assert abi3.count("core_backend: python") == 1
+    assert (
+        "- id: windows-arm64\n"
+        "            runner: windows-11-arm\n"
+        '            pattern: "*win_arm64.whl"\n'
+        "            core_backend: python"
+    ) in abi3
+    assert '--expected-core-backend "$EXPECTED_CORE_BACKEND"' in abi3
+
+
 def test_native_wheel_runs_bounded_wp18_encoded_public_dispatch_contract() -> None:
     command = (
         "python -m pytest -q -p no:cacheprovider "
