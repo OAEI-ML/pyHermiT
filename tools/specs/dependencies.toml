@@ -123,7 +123,7 @@ audit_owner = "WP00,WP17"
 
 [[dependency]]
 name = "ruff"
-requirement = "ruff>=0.5,<1"
+requirement = "ruff==0.15.22"
 scope = "development"
 license = "MIT"
 source = "https://pypi.org/project/ruff/"
