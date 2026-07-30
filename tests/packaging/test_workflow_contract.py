@@ -81,6 +81,7 @@ def test_setup_preserves_musl_and_macos_linker_requirements() -> None:
 
     assert 'host_gnu_type.endswith("-linux-musl")' in setup
     assert 'rust_flags.append("-Ctarget-feature=-crt-static")' in setup
+    assert 'rust_flags.append("-Clink-arg=/Brepro")' in setup
     assert "normalize_macho_binary" in setup
     assert "org.oaeiml.pyhermit._native" in (ROOT / "pyhermit_build.py").read_text(encoding="utf-8")
     assert "no_uuid" not in setup

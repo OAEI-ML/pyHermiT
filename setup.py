@@ -132,6 +132,9 @@ if mode != "0" and manifest.is_file() and (mode == "1" or _cargo_available()):
         # CARGO_ENCODED_RUSTFLAGS takes precedence over the dynamic-CRT
         # RUSTFLAGS that setuptools-rust injects for musl cdylibs.
         rust_flags.append("-Ctarget-feature=-crt-static")
+    if sys.platform == "win32":
+        # MSVC otherwise records volatile linker identity in the PE image.
+        rust_flags.append("-Clink-arg=/Brepro")
     rust_environment = os.environ.copy()
     rust_environment["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(rust_flags)
     rust_extensions.append(
