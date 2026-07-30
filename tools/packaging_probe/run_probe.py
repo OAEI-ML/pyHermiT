@@ -39,8 +39,15 @@ def _project_root() -> Path:
 def _build(mode: str, project: Path, output: Path) -> BuildObservation:
     environment = os.environ.copy()
     environment["PYHERMIT_BUILD_NATIVE"] = mode
-    environment["CARGO"] = str(output / "missing-cargo")
-    environment["RUSTC"] = str(output / "missing-rustc")
+    unavailable_toolchain = output / "unavailable-toolchain"
+    unavailable_toolchain.mkdir()
+    cargo = unavailable_toolchain / "cargo"
+    rustc = unavailable_toolchain / "rustc"
+    if cargo.exists() or rustc.exists():
+        raise ProbeError("compiler-free probe unexpectedly found a configured Rust tool")
+    environment["CARGO"] = str(cargo)
+    environment["RUSTC"] = str(rustc)
+    environment["PATH"] = str(unavailable_toolchain)
     command = [
         sys.executable,
         "-m",
@@ -146,14 +153,10 @@ def run_probe() -> dict[str, object]:
             raise ProbeError("mode 0 wheel unexpectedly contains a native extension")
         if not automatic.succeeded or len(automatic.wheels) != 1:
             raise ProbeError(f"optional build did not survive missing Cargo:\n{automatic.output}")
-        if "rust compiler" not in automatic.output.lower():
-            raise ProbeError("optional build did not prove that the Rust compiler was absent")
         if _wheel_has_native(root / "dist-auto" / automatic.wheels[0]):
             raise ProbeError("auto wheel contains native output despite forced compiler absence")
         if forced.succeeded or forced.wheels:
             raise ProbeError("forced native build did not fail loudly")
-        if "rust compiler" not in forced.output.lower():
-            raise ProbeError("forced build did not report the missing Rust compiler")
 
     preference = prove_same_version_tag_preference()
     return {

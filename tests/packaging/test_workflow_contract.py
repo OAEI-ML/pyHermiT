@@ -53,6 +53,21 @@ def test_native_wheel_runs_bounded_wp18_encoded_public_dispatch_contract() -> No
     assert '"tests/differential/encoded_compiler/test_permanent_program_assembly.py"' in provenance
 
 
+def test_pure_ci_excludes_native_only_test_trees() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "--ignore=tests/differential/encoded_compiler" in workflow
+    assert "--ignore-glob='tests/native/**'" in workflow
+
+
+def test_native_wheel_test_dependencies_are_shell_safe() -> None:
+    metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    test_requirements = metadata.split("test-requires = [", 1)[1].split("]", 1)[0]
+
+    assert '"tomli>=2.0,<3"' in test_requirements
+    assert "python_version" not in test_requirements
+
+
 def test_release_requires_the_machine_readable_licensing_gate() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     gate = "python -m tools.specs.check_release_gate --require-publishable"

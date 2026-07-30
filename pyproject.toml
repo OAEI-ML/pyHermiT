@@ -86,7 +86,7 @@ test-requires = [
   "hypothesis>=6.100,<7",
   "packaging>=24,<27",
   "pytest>=8.2,<10",
-  "tomli>=2.0,<3; python_version < '3.11'",
+  "tomli>=2.0,<3",
 ]
 test-command = [
   "python {project}/tests/packaging/installed_smoke.py --expected-backend native",

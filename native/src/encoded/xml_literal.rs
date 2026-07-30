@@ -123,6 +123,10 @@ pub(super) fn canonicalize(lexical: &str, budget: &mut PhaseBudget) -> EncodedRe
                 let value = decode_xml_value(text.as_ref(), false, canonicalizer.budget)?;
                 canonicalizer.text(&value)?;
             }
+            Event::GeneralRef(reference) => {
+                let value = decode_xml_reference(reference.as_ref(), canonicalizer.budget)?;
+                canonicalizer.text(&value)?;
+            }
             Event::CData(data) => {
                 let value = normalize_markup_data(data.as_ref(), canonicalizer.budget)?;
                 canonicalizer.text(&value)?;
@@ -724,6 +728,20 @@ fn decode_xml_value(
             .ok_or_else(|| EncodedValidationError::resource("XML value index overflowed"))?;
     }
     Ok(decoded)
+}
+
+fn decode_xml_reference(raw: &[u8], budget: &mut PhaseBudget) -> EncodedResult<String> {
+    let raw = str::from_utf8(raw).map_err(|_| invalid_xml_error())?;
+    budget.claim_work(
+        raw.len()
+            .checked_add(2)
+            .ok_or_else(|| EncodedValidationError::resource("XML reference length overflowed"))?,
+    )?;
+    let character = decode_reference(raw)?;
+    let mut encoded = [0_u8; 4];
+    let decoded = character.encode_utf8(&mut encoded);
+    budget.claim_owned(decoded.len())?;
+    Ok(decoded.to_owned())
 }
 
 fn normalize_markup_data(raw: &[u8], budget: &mut PhaseBudget) -> EncodedResult<String> {

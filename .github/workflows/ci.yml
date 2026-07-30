@@ -41,7 +41,10 @@ jobs:
           PYHERMIT_BUILD_NATIVE=0 python -m pip install --no-build-isolation -e .
 
       - name: Test
-        run: python -m pytest
+        run: >-
+          python -m pytest
+          --ignore=tests/differential/encoded_compiler
+          --ignore-glob='tests/native/**'
 
       - name: Validate specifications, metadata, dependencies, and release authorization
         run: |
