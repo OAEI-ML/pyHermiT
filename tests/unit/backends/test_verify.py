@@ -90,7 +90,7 @@ class _Factory:
         self.config: ReasonerConfig | None = None
         self._info = BackendInfo(
             name=name,  # type: ignore[arg-type]
-            package_version="0.1.0",
+            package_version="0.1.1",
             ir_schema_version=1,
             implementation_version=f"{name}-test",
             core_package_version="0.1.0",

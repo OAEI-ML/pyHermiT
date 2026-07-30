@@ -85,9 +85,9 @@ code and explicit provenance inventories. `LICENSE`, `COPYING`, `NOTICE.md`,
 the audit surface. Runtime artifacts exclude
 Java sources, JARs/classes, the oracle, reference downloads, and test-only goldens.
 
-For `0.1.0`, the owner accepted the remaining 350-check licensed W3C execution, larger
+For `0.1.1`, the owner accepted the remaining 350-check licensed W3C execution, larger
 live-reference sample, hosted platform/sanitizer matrix, and controlled performance
 calibration as post-release follow-up. `LIC-001` is waived as-is without claiming legal
 review. The exact scope is recorded in
-[the owner release override](../reports/release/0.1.0-owner-release-override.md), and the
+[the owner release override](../reports/release/0.1.1-owner-release-override.md), and the
 fail-closed checker permits publication only while that record remains valid.

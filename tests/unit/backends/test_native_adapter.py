@@ -440,7 +440,7 @@ def test_factory_rejects_an_incomplete_encoded_compiler_handshake(
 
 def test_factory_rejects_a_package_version_mismatch() -> None:
     extension, _handles, _sessions = _extension()
-    extension.__version__ = "0.1.0.other"
+    extension.__version__ = "0.1.1.other"
     with pytest.raises(BackendVersionError) as caught:
         NativeBackendFactory(extension)
     assert caught.value.context["reason"] == "package_version_mismatch"

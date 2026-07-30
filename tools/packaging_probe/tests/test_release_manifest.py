@@ -24,7 +24,7 @@ from tools.packaging_probe.release_manifest import (
 )
 
 _REVISION = "a" * 40
-_VERSION = "0.1.0"
+_VERSION = "0.1.1"
 _NATIVE_PLATFORMS = (
     "manylinux_2_17_x86_64",
     "manylinux_2_17_aarch64",

@@ -86,7 +86,8 @@ included in wheels.
 
 Status: **decision recorded (owner, 2026-07-17); repository-owned implementation and
 artifact audits completed 2026-07-18; the owner explicitly waived the remaining
-owner/legal-review signoff as-is for `0.1.0` on 2026-07-30. This is a release override,
+owner/legal-review signoff as-is for `0.1.0` and the documentation-only `0.1.1`
+patch on 2026-07-30. This is a release override,
 not legal advice and not a representation that legal review occurred.**
 
 Recorded decision (owner, 2026-07-17):
@@ -114,9 +115,10 @@ Recorded decision (owner, 2026-07-17):
 - Still recommended as post-release follow-up: owner/legal review of the inventory
   boundary, aggregate notice layout (the pinned source contains more than one
   copyright-header variant), source-distribution strategy, and artifact policy. The
-  `0.1.0` release proceeds under
-  `reports/release/0.1.0-owner-release-override.md`, which does not substitute for that
-  review.
+  The `0.1.0` release proceeded under
+  `reports/release/0.1.0-owner-release-override.md`; `0.1.1` proceeds under
+  `reports/release/0.1.1-owner-release-override.md`. Neither record substitutes for
+  that review.
 
 Historical context: the repository previously contained the GNU GPL version 3 text as
 `LICENSE`, while pinned HermiT declares `LGPL-3.0-or-later`. Merely placing a license
@@ -146,7 +148,7 @@ selected above):
    artifact policy must be reviewed as a whole.
 
 LIC-001 remains fail-closed unless every repository requirement is completed or explicitly
-waived with repository evidence. For `0.1.0`, the owner waiver closes the machine gate
+waived with repository evidence. For `0.1.1`, the owner waiver closes the machine gate
 without marking the legal-review requirement complete. The decision, license texts,
 metadata, adapted-file/header inventory, package-source policy, local artifact audit, and
 release override are all part of the release record.

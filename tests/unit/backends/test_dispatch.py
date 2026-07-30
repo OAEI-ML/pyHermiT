@@ -107,7 +107,7 @@ def test_probe_validates_schema_features_and_self_test(
 def test_probe_rejects_native_package_version_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = native_module(version="0.1.0.other")
+    module = native_module(version="0.1.1.other")
     monkeypatch.setattr(importlib, "import_module", lambda _name: module)
 
     availability = _probe_native().availability

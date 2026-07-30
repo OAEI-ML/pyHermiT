@@ -2,6 +2,11 @@
 
 All notable user-visible changes are recorded here.
 
+## 0.1.1 — 2026-07-30
+
+- Corrected the README quick start to call the public `Reasoner.class_hierarchy()`
+  method and added an executable release regression test for the documented example.
+
 ## 0.1.0 — 2026-07-30
 
 - Added a Java-free OWL 2 DL facade over immutable `pyowl-core` snapshots, overlays,

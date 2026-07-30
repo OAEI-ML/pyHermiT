@@ -82,7 +82,7 @@ class ArtifactCheckerTests(unittest.TestCase):
         )
 
     def test_runtime_version_source_is_parsed_without_importing_package(self) -> None:
-        self.assertEqual(_runtime_version(b'__version__ = "0.1.0"\n'), "0.1.0")
+        self.assertEqual(_runtime_version(b'__version__ = "0.1.1"\n'), "0.1.1")
 
     def test_runtime_dependency_range_must_be_exact(self) -> None:
         with self.assertRaisesRegex(ArtifactError, "exactly"):
@@ -102,8 +102,8 @@ class ArtifactCheckerTests(unittest.TestCase):
     def test_wheel_filename_version_must_match_metadata(self) -> None:
         content = ArchiveContent(
             {
-                "pyhermit-0.1.0.dist-info/METADATA": b"",
-                "pyhermit-0.1.0.dist-info/WHEEL": b"Tag: py3-none-any\n",
+                "pyhermit-0.1.1.dist-info/METADATA": b"",
+                "pyhermit-0.1.1.dist-info/WHEEL": b"Tag: py3-none-any\n",
             }
         )
         with self.assertRaisesRegex(ArtifactError, "versions differ"):
@@ -111,7 +111,7 @@ class ArtifactCheckerTests(unittest.TestCase):
                 Path("pyhermit-9.0-py3-none-any.whl"),
                 content,
                 metadata_name="pyHermiT",
-                metadata_version="0.1.0",
+                metadata_version="0.1.1",
             )
 
     def test_java_member_is_rejected_before_metadata_trust(self) -> None:
@@ -216,7 +216,7 @@ class ArtifactCheckerTests(unittest.TestCase):
                 artifact=wheel.name,
                 kind="pure-wheel",
                 name="pyHermiT",
-                version="0.1.0",
+                version="0.1.1",
                 requires_python=">=3.10",
                 tags=("py3-none-any",),
                 native_members=(),
@@ -261,7 +261,7 @@ class ArtifactCheckerTests(unittest.TestCase):
                 artifact=wheel.name,
                 kind="native-wheel",
                 name="pyHermiT",
-                version="0.1.0",
+                version="0.1.1",
                 requires_python=">=3.10",
                 tags=("cp310-abi3-manylinux_2_17_x86_64",),
                 native_members=("pyhermit/_native.abi3.so",),

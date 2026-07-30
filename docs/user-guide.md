@@ -183,4 +183,4 @@ reasoning, classification, realization, updates, and peak RSS; see
 
 Local wheels and semantic suites are verified. The machine-readable
 [release report](../reports/release-report-local.json) records the owner's acceptance of
-the remaining external WP17 runs as post-release follow-up for `0.1.0`.
+the remaining external WP17 runs as post-release follow-up for `0.1.1`.

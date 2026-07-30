@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
@@ -35,7 +36,7 @@ _REQUIRED_REQUIREMENTS = frozenset(
     }
 )
 
-_REQUIRED_EVIDENCE = {
+_BASE_REQUIRED_EVIDENCE = {
     "owner-license-decision": frozenset({"specs/deviations.md"}),
     "license-texts": frozenset({"LICENSE", "COPYING"}),
     "initial-upstream-notice": frozenset({"NOTICE.md"}),
@@ -48,8 +49,22 @@ _REQUIRED_EVIDENCE = {
         {"reports/licensing/package-license-audit.md"}
     ),
     "artifact-audit": frozenset({"reports/release/artifact-audit.md"}),
-    "owner-legal-review-signoff": frozenset({"reports/release/0.1.0-owner-release-override.md"}),
 }
+
+_VERSION_PATTERN = re.compile(r'^__version__ = "([^"]+)"$', re.MULTILINE)
+
+
+def _required_evidence(root: Path) -> dict[str, frozenset[str]]:
+    version_source = root / "src" / "pyhermit" / "_version.py"
+    match = _VERSION_PATTERN.search(version_source.read_text(encoding="utf-8"))
+    if match is None:
+        raise ReleaseGateError("runtime release version is missing or malformed")
+    version = match.group(1)
+    evidence = dict(_BASE_REQUIRED_EVIDENCE)
+    evidence["owner-legal-review-signoff"] = frozenset(
+        {f"reports/release/{version}-owner-release-override.md"}
+    )
+    return evidence
 
 
 def _safe_evidence_name(value: str, requirement_id: str) -> str:
@@ -91,6 +106,7 @@ def _evidence_paths(value: str, requirement_id: str, root: Path) -> tuple[str, .
 
 def _release_status(path: Path, evidence_root: Path) -> tuple[bool, tuple[str, ...]]:
     data = load_toml(path)
+    required_evidence_by_id = _required_evidence(evidence_root)
     if require_int(data.get("schema"), "release gate schema") != 1:
         raise ReleaseGateError("release gate schema must be 1")
     if require_str(data.get("gate_id"), "gate_id") != "LIC-001":
@@ -133,7 +149,7 @@ def _release_status(path: Path, evidence_root: Path) -> tuple[bool, tuple[str, .
         )
         if len(set(declared_evidence)) != len(declared_evidence):
             raise ReleaseGateError(f"expected evidence for {requirement_id} contains duplicates")
-        expected_evidence = _REQUIRED_EVIDENCE.get(requirement_id)
+        expected_evidence = required_evidence_by_id.get(requirement_id)
         if expected_evidence is None or frozenset(declared_evidence) != expected_evidence:
             raise ReleaseGateError(f"expected evidence identity drift for {requirement_id}")
         if status in {"complete", "waived"}:

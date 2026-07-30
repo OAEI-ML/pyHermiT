@@ -68,6 +68,19 @@ status = "pending"
             with self.assertRaisesRegex(ReleaseGateError, "identity drift"):
                 release_status(path, evidence_root=repository_root())
 
+    def test_owner_waiver_must_match_the_runtime_release_version(self) -> None:
+        source = repository_root() / "tools/specs/licensing.toml"
+        content = source.read_text(encoding="utf-8").replace(
+            "reports/release/0.1.1-owner-release-override.md",
+            "reports/release/0.1.0-owner-release-override.md",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "licensing.toml"
+            path.write_text(content, encoding="utf-8")
+
+            with self.assertRaisesRegex(ReleaseGateError, "identity drift"):
+                release_status(path, evidence_root=repository_root())
+
 
 if __name__ == "__main__":
     unittest.main()

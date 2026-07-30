@@ -1,13 +1,20 @@
-# LIC-001 local artifact audit
+# Historical LIC-001 local artifact audit (`0.1.0.dev0`)
 
 Audit date: 2026-07-18
 
-Status: **local repository-owned artifact audit complete; owner/legal and hosted release gates
-pending**.
+Status at capture: **local repository-owned artifact audit complete; owner/legal
+and hosted release gates pending**.
+
+This document preserves the 2026-07-18 development-artifact evidence and its
+original gate state. It is not a hash record for the later production
+artifacts. The release owner subsequently waived the remaining legal-review
+signoff as-is without claiming that legal review occurred; the current
+version-scoped authorization is
+[`0.1.1-owner-release-override.md`](0.1.1-owner-release-override.md).
 
 ## Audited artifact set
 
-The artifacts were built from the current tree on macOS 14 x86-64 with CPython 3.12,
+The artifacts were built from the then-current tree on macOS 14 x86-64 with CPython 3.12,
 `SOURCE_DATE_EPOCH=946684800`, and the repository's locked Rust dependencies. This is a local
 engineering audit, not legal advice or permission to publish.
 
@@ -43,14 +50,16 @@ The source-archive digest is not embedded inside its own archive. A final immuta
 must publish that digest through the external provenance attestation described in
 `reports/README.md`.
 
-## Exclusions and release status
+## Exclusions and release status at capture
 
 This local audit does not claim results for the eight hosted platform/architecture targets,
 sanitizers, registry trusted publishing, signatures, external attestation, or legal review.
-No upload action or package-index permission is enabled while LIC-001 is open. The only LIC-001
-requirement remaining after these repository-owned audits is
-`owner-legal-review-signoff`; consequently `gate_status` remains `open` and
-`publish_allowed` remains `false`.
+At capture time, no upload action or package-index permission was enabled while
+LIC-001 was open. The only LIC-001 requirement remaining after these
+repository-owned audits was `owner-legal-review-signoff`; consequently the
+historical `gate_status` was `open` and `publish_allowed` was `false`. The
+version-scoped owner override closes that machine gate for 0.1.1 while retaining
+this historical evidence unchanged.
 
 ## Reproduction
 

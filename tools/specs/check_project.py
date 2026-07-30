@@ -82,8 +82,8 @@ def _validate_project_metadata(root: Path, pyproject: dict[str, Any]) -> dict[st
         raise ProjectCheckError("setuptools must read pyhermit._version.__version__")
     version_source = (root / "src/pyhermit/_version.py").read_text(encoding="utf-8")
     match = re.search(r'^__version__ = "([^"]+)"$', version_source, flags=re.MULTILINE)
-    if match is None or match.group(1) != "0.1.0":
-        raise ProjectCheckError("runtime version source must be 0.1.0")
+    if match is None or match.group(1) != "0.1.1":
+        raise ProjectCheckError("runtime version source must be 0.1.1")
     if require_str(project.get("requires-python"), "project.requires-python") != ">=3.10":
         raise ProjectCheckError("project requires-python must be >=3.10")
     if require_str(project.get("license"), "project.license") != "LGPL-3.0-or-later":

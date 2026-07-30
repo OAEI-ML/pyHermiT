@@ -39,7 +39,7 @@ jobs:
           --bundle artifacts --source-revision "${GITHUB_SHA}"
           --source-date-epoch 946684800 --verify
 
-      # Package-index upload is performed locally for 0.1.0 because coordinated
+      # Package-index upload is performed locally for 0.1.1 because coordinated
       # consumers require pyowl-core to exist on PyPI before their CI can resolve it.
 
   attest-candidate:

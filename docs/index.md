@@ -27,7 +27,9 @@ python -m pip install pyHermiT
    untrusted or large inputs.
 4. Record `backend_info()` and `reasoner.diagnostics()` with reproducible results.
 
-The source tree identifies as production release `0.1.0`. The owner accepted the
+The source tree identifies as production release `0.1.1`. The owner accepted the
 remaining external W3C-body, live-reference, hosted-platform, and dedicated-performance
 runs as post-release follow-up and waived `LIC-001` as-is without claiming legal review.
-See the release report and owner override for the exact qualification boundary.
+See the release report and
+[`0.1.1` owner override](../reports/release/0.1.1-owner-release-override.md)
+for the exact qualification boundary.

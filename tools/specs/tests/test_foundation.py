@@ -28,7 +28,7 @@ for forbidden in (
     assert forbidden not in added, (forbidden, added)
 assert 'Reasoner' in pyhermit.__all__
 assert 'backend_info' in pyhermit.__all__
-assert pyhermit.__version__ == '0.1.0'
+assert pyhermit.__version__ == '0.1.1'
 print(json.dumps(added))
 """
         # Isolated mode prevents editable-install state from hiding import side effects.
