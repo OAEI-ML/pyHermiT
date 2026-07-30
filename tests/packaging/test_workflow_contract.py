@@ -41,6 +41,8 @@ def test_abi3_matrix_matches_the_approved_pyowl_core_native_platforms() -> None:
     workflow = (ROOT / ".github/workflows/wheels.yml").read_text(encoding="utf-8")
     abi3 = workflow.split("  abi3-python312:\n", 1)[1].split("  musllinux-python312:\n", 1)[0]
 
+    assert workflow.count('"pyowl-core==0.1.1"') == 4
+    assert '"pyowl-core>=0.1,<0.2"' not in workflow
     assert abi3.count("core_backend: native") == 5
     assert abi3.count("core_backend: python") == 1
     assert (
@@ -104,8 +106,10 @@ def test_setup_preserves_musl_and_macos_linker_requirements() -> None:
 
 def test_installed_suite_loads_runtime_before_repository_test_support() -> None:
     runner = (ROOT / "tests/packaging/run_installed_suite.py").read_text(encoding="utf-8")
+    smoke = (ROOT / "tests/packaging/installed_smoke.py").read_text(encoding="utf-8")
 
     assert runner.index("import pyhermit") < runner.index("sys.path.insert(0, {str(root)!r})")
+    assert 'assert owl.__version__ == "0.1.1"' in smoke
 
 
 def test_release_requires_gates_attestation_and_atomic_trusted_publication() -> None:

@@ -300,15 +300,16 @@ class ReleaseManifestTests(unittest.TestCase):
             "tests/differential/encoded_compiler/test_permanent_program_assembly.py",
             _MATERIAL_FILES,
         )
+        self.assertIn("tests/packaging/installed_smoke.py", _MATERIAL_FILES)
         self.assertIn("release/core-compatibility.json", _MATERIAL_FILES)
         self.assertEqual(
             provenance["tested_runtime"],
             {
                 "pyowl_core": {
-                    "commit": "d3e7893b0609fcd7df390375267a00356f09cb22",
+                    "commit": "989a95e38cc74e659282c37ed55ba787ff13f12c",
                     "repository": "https://github.com/OAEI-ML/pyOWLCore",
-                    "tree": "32cc4cbf9c99f1b45785cb29f4f059ec0f86a691",
-                    "version": "0.1.0",
+                    "tree": "28dff7644baeff03ea72472c13b6c7b321b4873e",
+                    "version": "0.1.1",
                 }
             },
         )
@@ -388,11 +389,41 @@ class ReleaseManifestTests(unittest.TestCase):
         ):
             _build_provenance(self.root)
 
+    def test_release_workflow_cannot_float_the_provenance_bound_core_version(self) -> None:
+        workflow = (self.root / ".github/workflows/wheels.yml").read_bytes()
+        mutated = workflow.replace(
+            b'"pyowl-core==0.1.1"',
+            b'"pyowl-core>=0.1,<0.2"',
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+
+        def material_payload(
+            root: Path,
+            _snapshots: object,
+            relative: str,
+        ) -> bytes:
+            if relative == ".github/workflows/wheels.yml":
+                return mutated
+            return (root / relative).read_bytes()
+
+        with (
+            patch(
+                "tools.packaging_probe.release_manifest._material_payload",
+                side_effect=material_payload,
+            ),
+            self.assertRaisesRegex(
+                ReleaseManifestError,
+                "exact provenance-bound pyowl-core release",
+            ),
+        ):
+            _build_provenance(self.root)
+
     def test_unbound_core_implementation_is_rejected(self) -> None:
         compatibility = (self.root / "release/core-compatibility.json").read_bytes()
         mutated = compatibility.replace(
-            b"d3e7893b0609fcd7df390375267a00356f09cb22",
-            b"e3e7893b0609fcd7df390375267a00356f09cb22",
+            b"989a95e38cc74e659282c37ed55ba787ff13f12c",
+            b"889a95e38cc74e659282c37ed55ba787ff13f12c",
         )
         self.assertNotEqual(mutated, compatibility)
 
@@ -418,8 +449,8 @@ class ReleaseManifestTests(unittest.TestCase):
         compatibility = (self.root / "release/core-compatibility.json").read_bytes()
         mutations = (
             (
-                b"32cc4cbf9c99f1b45785cb29f4f059ec0f86a691",
-                b"42cc4cbf9c99f1b45785cb29f4f059ec0f86a691",
+                b"28dff7644baeff03ea72472c13b6c7b321b4873e",
+                b"38dff7644baeff03ea72472c13b6c7b321b4873e",
             ),
             (
                 b"9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5",

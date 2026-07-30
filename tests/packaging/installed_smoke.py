@@ -38,6 +38,7 @@ def main() -> int:
 
     import pyhermit
 
+    assert owl.__version__ == "0.1.1", owl.__version__
     added = set(sys.modules) - before
     assert not added.intersection({"jpype", "jnius", "javabridge", "owlready2"})
     source_root = Path(__file__).resolve().parents[2]
@@ -87,7 +88,7 @@ def main() -> int:
     assert outcomes[0] == outcomes[1] == outcomes[2]
     print(
         f"installed smoke passed: backend={args.expected_backend} "
-        f"python={sys.version_info.major}.{sys.version_info.minor}"
+        f"core={owl.__version__} python={sys.version_info.major}.{sys.version_info.minor}"
     )
     return 0
 

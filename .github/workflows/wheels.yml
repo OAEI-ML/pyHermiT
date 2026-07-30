@@ -159,7 +159,7 @@ jobs:
             setuptools-rust==1.13.0 "tomli>=2.0,<3" wheel==0.46.3
           python -m pip download --dest wheelhouse --only-binary=:all: \
             --platform any --implementation py --python-version 310 --abi none \
-            "pyowl-core>=0.1,<0.2"
+            "pyowl-core==0.1.1"
 
       - name: Install fallback wheel without compilers or Java and run semantic suite
         run: >-
@@ -346,12 +346,12 @@ jobs:
         shell: bash
         run: |
           python -m pip download --dest wheelhouse --only-binary=:all: \
-            "pyowl-core>=0.1,<0.2" hypothesis packaging pytest tomli
+            "pyowl-core==0.1.1" hypothesis packaging pytest tomli
           python -m pip download --dest pure-core-wheelhouse --only-binary=:all: \
             hypothesis packaging pytest tomli
           python -m pip download --dest pure-core-wheelhouse --only-binary=:all: \
             --platform any --implementation py --python-version 310 --abi none \
-            "pyowl-core>=0.1,<0.2"
+            "pyowl-core==0.1.1"
 
       - name: Exercise ABI3 wheel and semantic suite
         shell: bash
@@ -397,7 +397,7 @@ jobs:
         run: >-
           python -m pip download --dest wheelhouse --only-binary=:all:
           --platform any --implementation py --python-version 310 --abi none
-          "pyowl-core>=0.1,<0.2"
+          "pyowl-core==0.1.1"
 
       - name: Exercise musllinux wheel on native hardware
         env:

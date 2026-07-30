@@ -50,9 +50,10 @@ _INSTALLED_WP18_CONTRACT = (
 )
 _INSTALLED_WP18_FEATURE = "encoded-structural-compiler-v1"
 _CORE_REQUIREMENT = "pyowl-core>=0.1,<0.2"
+_TESTED_CORE_REQUIREMENT = "pyowl-core==0.1.1"
 _CORE_COMPATIBILITY_SCHEMA = "pyhermit.core-compatibility/2"
-_TESTED_CORE_COMMIT = "d3e7893b0609fcd7df390375267a00356f09cb22"
-_TESTED_CORE_TREE = "32cc4cbf9c99f1b45785cb29f4f059ec0f86a691"
+_TESTED_CORE_COMMIT = "989a95e38cc74e659282c37ed55ba787ff13f12c"
+_TESTED_CORE_TREE = "28dff7644baeff03ea72472c13b6c7b321b4873e"
 _ENCODED_INGESTION_CONTRACT = {
     "schema_name": "pyowl-core/structural-columns",
     "schema_version": 1,
@@ -80,6 +81,7 @@ _MATERIAL_FILES = (
     "setup.py",
     "src/pyhermit/_version.py",
     "tests/differential/encoded_compiler/test_permanent_program_assembly.py",
+    "tests/packaging/installed_smoke.py",
     "tools/packaging_probe/README.md",
     "tools/packaging_probe/check_artifact.py",
     "tools/packaging_probe/create_sbom.py",
@@ -464,7 +466,7 @@ def _build_provenance(
         or compatibility.get("dependency_constraint") != _CORE_REQUIREMENT
         or not isinstance(tested_core, dict)
         or tested_core.get("repository") != "https://github.com/OAEI-ML/pyOWLCore"
-        or tested_core.get("version") != "0.1.0"
+        or tested_core.get("version") != "0.1.1"
         or tested_core.get("commit") != _TESTED_CORE_COMMIT
         or tested_core.get("tree") != _TESTED_CORE_TREE
         or not isinstance(redesign, dict)
@@ -500,6 +502,13 @@ def _build_provenance(
     if missing_tools:
         raise ReleaseManifestError(
             f"release workflow omits pinned build/audit tools: {sorted(missing_tools)}"
+        )
+    if (
+        workflow_text.count(f'"{_TESTED_CORE_REQUIREMENT}"') != 4
+        or f'"{_CORE_REQUIREMENT}"' in workflow_text
+    ):
+        raise ReleaseManifestError(
+            "release workflow must exercise the exact provenance-bound pyowl-core release"
         )
 
     tool = require_mapping(pyproject.get("tool"), "pyproject tool")

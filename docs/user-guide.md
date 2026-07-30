@@ -22,7 +22,7 @@ PYHERMIT_BUILD_NATIVE=0 python -m pip install --no-deps -e /path/to/pyHermiT
 ```
 
 `--no-deps` is intentional only for coordinated development checkouts where the
-compatible `pyowl-core 0.1.0` checkout is already installed.
+compatible `pyowl-core 0.1.1` checkout is already installed.
 
 Source builds use `PYHERMIT_BUILD_NATIVE=auto|0|1`: `auto` tries Rust and otherwise
 builds a truthful pure wheel, `0` always builds the fallback, and `1` fails if the
