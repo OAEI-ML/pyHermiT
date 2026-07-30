@@ -211,7 +211,6 @@ def verify_cargo_metadata(root: Path) -> int:
         "--manifest-path",
         str(root / "native/Cargo.toml"),
         "--locked",
-        "--offline",
         "--format-version",
         "1",
     ]
@@ -219,15 +218,12 @@ def verify_cargo_metadata(root: Path) -> int:
         command,
         cwd=root,
         check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        capture_output=True,
         text=True,
     )
     if completed.returncode != 0:
-        raise ValueError(
-            "Cargo metadata could not verify the Rust production closure: "
-            f"{completed.stdout.strip()}"
-        )
+        details = completed.stderr.strip() or completed.stdout.strip()
+        raise ValueError(f"Cargo metadata could not verify the Rust production closure: {details}")
     try:
         metadata = require_mapping(json.loads(completed.stdout), "Cargo metadata")
     except json.JSONDecodeError as error:
@@ -395,7 +391,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--verify-cargo-metadata",
         action="store_true",
-        help="independently compare the audited closure with locked offline Cargo metadata",
+        help="independently compare the audited closure with locked Cargo metadata",
     )
     args = parser.parse_args(argv)
     try:

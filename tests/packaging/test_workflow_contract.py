@@ -60,12 +60,29 @@ def test_pure_ci_excludes_native_only_test_trees() -> None:
     assert "--ignore-glob='tests/native/**'" in workflow
 
 
-def test_native_wheel_test_dependencies_are_shell_safe() -> None:
+def test_native_wheel_test_dependencies_use_python_module_launcher() -> None:
     metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    test_requirements = metadata.split("test-requires = [", 1)[1].split("]", 1)[0]
+    requirements = (ROOT / "tests/packaging/wheel-requirements.txt").read_text(encoding="utf-8")
 
-    assert '"tomli>=2.0,<3"' in test_requirements
-    assert "python_version" not in test_requirements
+    assert "test-requires" not in metadata
+    assert "python -m pip install -r {project}/tests/packaging/wheel-requirements.txt" in metadata
+    assert "tomli>=2.0,<3" in requirements
+    assert "python_version" not in requirements
+
+
+def test_setup_preserves_musl_and_macos_linker_requirements() -> None:
+    setup = (ROOT / "setup.py").read_text(encoding="utf-8")
+
+    assert 'host_gnu_type.endswith("-linux-musl")' in setup
+    assert 'rust_flags.append("-Ctarget-feature=-crt-static")' in setup
+    assert "normalize_macho_uuid" in setup
+    assert "no_uuid" not in setup
+
+
+def test_installed_suite_loads_runtime_before_repository_test_support() -> None:
+    runner = (ROOT / "tests/packaging/run_installed_suite.py").read_text(encoding="utf-8")
+
+    assert runner.index("import pyhermit") < runner.index("sys.path.insert(0, {str(root)!r})")
 
 
 def test_release_requires_the_machine_readable_licensing_gate() -> None:

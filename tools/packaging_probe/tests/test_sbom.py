@@ -66,7 +66,7 @@ class SbomTests(unittest.TestCase):
                 r"^[0-9a-f]{64}$",
             )
 
-    def test_audited_closure_matches_locked_offline_cargo_metadata(self) -> None:
+    def test_audited_closure_matches_locked_cargo_metadata(self) -> None:
         self.assertEqual(verify_cargo_metadata(self.root), 35)
 
     def test_release_sbom_describes_only_the_exact_distribution_closure(self) -> None:

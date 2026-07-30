@@ -8,6 +8,7 @@ include deny.toml
 include pyproject.toml
 include setup.cfg
 include setup.py
+include pyhermit_build.py
 include Cargo.toml
 include native/Cargo.toml
 include native/Cargo.lock

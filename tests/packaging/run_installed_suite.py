@@ -24,12 +24,17 @@ def main() -> int:
         f"assert Path({str(root)!r}) not in Path(pyhermit.__file__).resolve().parents"
     )
     subprocess.run([sys.executable, "-c", code], check=True, cwd=root, env=env)
-    pytest_code = """
+    pytest_code = f"""
 import sys
+import pyhermit
+
+# Load pyHermiT from the installed wheel before exposing repository-only test
+# support modules such as ``tools.reference`` to collection.
+sys.path.insert(0, {str(root)!r})
 
 def deny_network(event, _arguments):
-    if event in {"socket.connect", "socket.getaddrinfo", "socket.gethostbyname"}:
-        raise RuntimeError(f"installed suite attempted forbidden network access: {event}")
+    if event in {{"socket.connect", "socket.getaddrinfo", "socket.gethostbyname"}}:
+        raise RuntimeError(f"installed suite attempted forbidden network access: {{event}}")
 
 sys.addaudithook(deny_network)
 import pytest

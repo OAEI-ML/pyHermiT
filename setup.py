@@ -6,11 +6,19 @@ import gzip
 import os
 import shlex
 import shutil
+import sys
+import sysconfig
 import tarfile
 from pathlib import Path
+from typing import Any
 
 from setuptools import setup
 from setuptools.command.sdist import sdist as _sdist
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from pyhermit_build import normalize_macho_uuid  # noqa: E402
 
 _VALID_MODES = frozenset({"auto", "0", "1"})
 
@@ -81,17 +89,37 @@ class ReproducibleSdist(_sdist):
 mode = _native_mode()
 manifest = Path("native/Cargo.toml")
 rust_extensions = []
+command_classes: dict[str, type[Any]] = {"sdist": ReproducibleSdist}
 
 if mode != "0" and manifest.is_file() and (mode == "1" or _cargo_available()):
     from setuptools_rust import Binding, RustExtension
+    from setuptools_rust.build import build_rust as _build_rust
 
+    class ReproducibleBuildRust(_build_rust):
+        """Canonicalize the copied Mach-O UUID after linking and stripping."""
+
+        def install_extension(
+            self,
+            ext: RustExtension,
+            dylib_paths: list[Any],
+            build_artifact_dir: Path | None,
+        ) -> None:
+            super().install_extension(ext, dylib_paths, build_artifact_dir)
+            if sys.platform != "darwin":
+                return
+            for module_name, dylib_path in dylib_paths:
+                if not module_name:
+                    module_name = Path(dylib_path).name.removeprefix("lib").split(".", 1)[0]
+                normalize_macho_uuid(Path(self.get_dylib_ext_path(ext, module_name)))
+
+    command_classes["build_rust"] = ReproducibleBuildRust
     encoded_flags = os.environ.get("CARGO_ENCODED_RUSTFLAGS")
     rust_flags = (
         encoded_flags.split("\x1f")
         if encoded_flags
         else shlex.split(os.environ.get("RUSTFLAGS", ""))
     )
-    root = Path(__file__).resolve().parent
+    root = ROOT
     cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo")).resolve()
     rust_flags.extend(
         (
@@ -99,6 +127,11 @@ if mode != "0" and manifest.is_file() and (mode == "1" or _cargo_available()):
             f"--remap-path-prefix={cargo_home}=cargo-home",
         )
     )
+    host_gnu_type = str(sysconfig.get_config_var("HOST_GNU_TYPE") or "")
+    if host_gnu_type.endswith("-linux-musl"):
+        # CARGO_ENCODED_RUSTFLAGS takes precedence over the dynamic-CRT
+        # RUSTFLAGS that setuptools-rust injects for musl cdylibs.
+        rust_flags.append("-Ctarget-feature=-crt-static")
     rust_environment = os.environ.copy()
     rust_environment["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(rust_flags)
     rust_extensions.append(
@@ -114,4 +147,8 @@ if mode != "0" and manifest.is_file() and (mode == "1" or _cargo_available()):
 elif mode == "1" and not manifest.is_file():
     raise RuntimeError("native build required but native/Cargo.toml is missing")
 
-setup(cmdclass={"sdist": ReproducibleSdist}, rust_extensions=rust_extensions, zip_safe=False)
+setup(
+    cmdclass=command_classes,
+    rust_extensions=rust_extensions,
+    zip_safe=False,
+)
