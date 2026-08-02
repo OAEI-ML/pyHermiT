@@ -31,8 +31,8 @@ class _View:
     def __init__(self, *, features: frozenset[str] | None = None) -> None:
         self.capabilities = pyowl_core.CoreCapabilities(
             adapter_protocol=1,
-            model_schema=1,
-            wire_format=(1, 0),
+            model_schema=2,
+            wire_format=(1, 2),
             features=features
             or frozenset(
                 {
@@ -44,9 +44,9 @@ class _View:
                 }
             ),
         )
-        self.structural_fingerprint = pyowl_core.Fingerprint("sha256", 1, b"s" * 32)
-        self.logical_fingerprint = pyowl_core.Fingerprint("sha256", 1, b"l" * 32)
-        self.signature_fingerprint = pyowl_core.Fingerprint("sha256", 1, b"g" * 32)
+        self.structural_fingerprint = pyowl_core.Fingerprint("sha256", 2, b"s" * 32)
+        self.logical_fingerprint = pyowl_core.Fingerprint("sha256", 2, b"l" * 32)
+        self.signature_fingerprint = pyowl_core.Fingerprint("sha256", 2, b"g" * 32)
         self.report = object()
         self.origin_index = pyowl_core.OriginIndex()
         self.is_complete = True
@@ -131,15 +131,15 @@ def test_capture_retains_exact_view_identity_and_fingerprints() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("package_version", "0.2.0"),
-        ("api_version", (0, 2)),
-        ("model_schema_version", 2),
+        ("package_version", "0.1.1"),
+        ("api_version", (0, 1)),
+        ("model_schema_version", 1),
         ("wire_format_version", (2, 0)),
         ("adapter_protocol_version", 2),
     ],
 )
 def test_version_mismatch_fails_with_exact_core_error(field: str, value: object) -> None:
-    baseline = CoreVersionInfo("0.1.0", (0, 1), 1, (1, 0), 1)
+    baseline = CoreVersionInfo("0.2.0", (0, 2), 2, (1, 2), 1)
     incompatible = dataclasses.replace(baseline, **{field: value})
     with pytest.raises(pyowl_core.AdapterCompatibilityError) as caught:
         require_core_compatibility(incompatible)
@@ -158,7 +158,7 @@ def test_compiler_key_uses_logical_signature_not_structural_fingerprint() -> Non
     first = compiler_cache_key(captured, ReasonerConfig())
     changed_structural = CapturedOntology(
         view=captured.view,
-        structural_fingerprint=pyowl_core.Fingerprint("sha256", 1, b"z" * 32),
+        structural_fingerprint=pyowl_core.Fingerprint("sha256", 2, b"z" * 32),
         logical_fingerprint=captured.logical_fingerprint,
         signature_fingerprint=captured.signature_fingerprint,
         core_package_version=captured.core_package_version,
@@ -187,7 +187,7 @@ def test_dense_id_capacity_checks_boundary_without_allocating() -> None:
 
 
 def test_generated_names_bind_polarity_and_query_scope() -> None:
-    fingerprint = pyowl_core.Fingerprint("sha256", 1, b"l" * 32)
+    fingerprint = pyowl_core.Fingerprint("sha256", 2, b"l" * 32)
     positive = generated_symbol_iri(fingerprint, b"expression", "positive")
     assert positive == generated_symbol_iri(fingerprint, b"expression", "positive")
     assert positive != generated_symbol_iri(fingerprint, b"expression", "negative")

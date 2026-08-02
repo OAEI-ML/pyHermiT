@@ -11,7 +11,7 @@ from typing import cast
 import pyowl_core
 import pyowl_core.model as owl
 import pytest
-from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.backends.native_views import produce_encoded_structural_view_v2
 
 import pyhermit._native as native
 from pyhermit import ReasonerConfig
@@ -97,7 +97,7 @@ def test_encoded_root_and_entity_seed_manifest_matches_scalar_compiler_exactly()
         validated.captured,
         ReasonerConfig(),
     )
-    encoded = produce_encoded_structural_view_v1(snapshot)
+    encoded = produce_encoded_structural_view_v2(snapshot)
     buffers = encoded.buffers
     raw_manifest = native._encoded_symbol_manifest_v1(
         root_kinds=buffers["root_kinds"],
@@ -146,7 +146,7 @@ def test_private_selection_preflight_accepts_source_local_exclusion() -> None:
         functional("Declaration(Class(:A))", "Declaration(Class(:B))"),
         options=OPTIONS,
     )
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    buffers = produce_encoded_structural_view_v2(snapshot).buffers
 
     assert (
         native._validate_encoded_selection_v1(
@@ -174,7 +174,7 @@ def test_private_preflight_rejects_a_hostile_entity_iri_before_scalar_compilatio
         functional("Declaration(Class(<urn:C>))"),
         options=OPTIONS,
     )
-    encoded = produce_encoded_structural_view_v1(snapshot)
+    encoded = produce_encoded_structural_view_v2(snapshot)
     buffers = dict(encoded.buffers)
     scalar_bytes = bytes(buffers["scalar_bytes"])
     assert b"urn:C" in scalar_bytes

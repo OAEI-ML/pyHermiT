@@ -13,7 +13,7 @@ from types import ModuleType, SimpleNamespace
 
 import pyowl_core
 import pytest
-from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.backends.native_views import produce_encoded_structural_view_v2
 
 from pyhermit import __version__
 from pyhermit.backends.native import NativeBackendFactory
@@ -41,7 +41,7 @@ from pyhermit.profile import OWL2DLReport, validate_owl2_dl_view
 class _Fingerprint:
     digest: bytes
     algorithm: str = "sha256"
-    schema: int = 1
+    schema: int = 2
 
     @property
     def hex(self) -> str:
@@ -158,10 +158,10 @@ def _compiled() -> CompiledOntology:
         source_structural_fingerprint=fingerprint,
         source_logical_fingerprint=fingerprint,
         source_signature_fingerprint=fingerprint,
-        core_package_version="0.1.0",
-        core_api_version=(0, 1),
-        core_model_schema_version=1,
-        core_wire_format_version=(1, 0),
+        core_package_version="0.2.0",
+        core_api_version=(0, 2),
+        core_model_schema_version=2,
+        core_wire_format_version=(1, 2),
         core_adapter_protocol_version=1,
         symbols=ir,
         clauses=(),
@@ -250,7 +250,7 @@ def _profile_result(report: OWL2DLReport) -> bytes:
 
 
 def _profile_lease(snapshot: pyowl_core.OntologyView) -> _EncodedLease:
-    published = produce_encoded_structural_view_v1(snapshot)
+    published = produce_encoded_structural_view_v2(snapshot)
     lease = _EncodedLease(dict(published.buffers))
     lease._root_slices = (
         SimpleNamespace(

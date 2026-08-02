@@ -53,16 +53,16 @@ def test_private_abi_handshake_claims_only_completed_versioned_features() -> Non
         "abi3-py310",
         "cancellable-mock-work",
         "classification",
-        "encoded-structural-compiler-v1",
+        "encoded-structural-compiler-v2",
         "full_reasoner",
         "incremental_updates",
         "realization",
         "state-trace-v1",
         "wire-v1",
     )
-    assert API_VERSION == (0, 1)
-    assert MODEL_SCHEMA_VERSION == 1
-    assert WIRE_FORMAT_VERSION == (1, 1)
+    assert API_VERSION == (0, 2)
+    assert MODEL_SCHEMA_VERSION == 2
+    assert WIRE_FORMAT_VERSION == (1, 2)
     assert ADAPTER_PROTOCOL_VERSION == 1
 
 

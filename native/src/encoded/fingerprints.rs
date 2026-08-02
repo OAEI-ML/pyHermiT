@@ -21,14 +21,14 @@ use super::symbols::DispatchedRoot;
 use super::{ByteSource, EncodedResult, EncodedValidationError};
 
 const SOURCE_POLL_STRIDE: usize = 1_024;
-const FINGERPRINT_SCHEMA: u32 = 1;
+const FINGERPRINT_SCHEMA: u32 = 2;
 const ENTITY_KEY_HEADER_BYTES: usize = size_of::<Vec<u8>>();
-const LOGICAL_DOMAIN: &[u8] = b"pyowl-core:snapshot-logical:v1\x00";
+const LOGICAL_DOMAIN: &[u8] = b"pyowl-core:snapshot-logical:v2\x00";
 const DATATYPE_POLICY: &[u8] = b"datatype-policy:owl2-v1\x00";
-const SIGNATURE_DOMAIN: &[u8] = b"pyowl-core:snapshot-signature:v1\x00";
-const OVERLAY_STRUCTURAL_DOMAIN: &[u8] = b"pyowl-core:overlay-structural:v1\x00";
-const COMPOSITE_STRUCTURAL_DOMAIN: &[u8] = b"pyowl-core:composite-structural:v1\x00";
-const CONTEXT_DOMAIN: &[u8] = b"pyowl-core:view-structure-context:v1\x00";
+const SIGNATURE_DOMAIN: &[u8] = b"pyowl-core:snapshot-signature:v2\x00";
+const OVERLAY_STRUCTURAL_DOMAIN: &[u8] = b"pyowl-core:overlay-structural:v2\x00";
+const COMPOSITE_STRUCTURAL_DOMAIN: &[u8] = b"pyowl-core:composite-structural:v2\x00";
+const CONTEXT_DOMAIN: &[u8] = b"pyowl-core:view-structure-context:v2\x00";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StructuralContextKind {
@@ -369,7 +369,7 @@ where
     })
 }
 
-/// Merge source contributions and hash the exact pyowl-core v1 preimages.
+/// Merge source contributions and hash the exact pyowl-core v2 preimages.
 pub fn merge_view_fingerprints_controlled<E>(
     phases: Vec<FingerprintContributions>,
     context: &StructuralContextEvidence,
@@ -685,7 +685,7 @@ fn validate_context_bytes(expected_kind: StructuralContextKind, bytes: &[u8]) ->
             || fingerprint.len().saturating_sub(fingerprint_cursor) != 32
         {
             return Err(EncodedValidationError::protocol(
-                "deferred structural context fingerprint is not schema-1 SHA-256",
+                "deferred structural context fingerprint is not schema-2 SHA-256",
             ));
         }
         fingerprint_cursor += 32;
@@ -787,7 +787,7 @@ mod tests {
 
     fn fingerprint(value: u8) -> Vec<u8> {
         let mut encoded = frame(b"sha256");
-        encoded.push(1);
+        encoded.push(2);
         encoded.extend_from_slice(&[value; 32]);
         encoded
     }

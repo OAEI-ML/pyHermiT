@@ -11,7 +11,7 @@ from typing import TypeVar, cast
 import pyowl_core as owl
 import pytest
 from pyowl_core.backends.native_views import (
-    produce_encoded_structural_view_v1,
+    produce_encoded_structural_view_v2,
 )
 
 import pyhermit.encoded_input as encoded_input
@@ -38,7 +38,7 @@ _FEATURES = frozenset(
 
 class _EncodedStructuralView:
     def __init__(self, owner: _View) -> None:
-        published = produce_encoded_structural_view_v1(_as_view(owner))
+        published = produce_encoded_structural_view_v2(_as_view(owner))
         self.schema_name = published.schema_name
         self.schema_version = published.schema_version
         self.model_schema = published.model_schema
@@ -56,14 +56,14 @@ class _View:
     def __init__(self, *, advertise: bool = True) -> None:
         self.capabilities = owl.CoreCapabilities(
             adapter_protocol=1,
-            model_schema=1,
-            wire_format=(1, 0),
+            model_schema=2,
+            wire_format=(1, 2),
             features=_FEATURES,
-            encoded_view_schemas=({ENCODED_SCHEMA_NAME: 1} if advertise else {}),
+            encoded_view_schemas=({ENCODED_SCHEMA_NAME: 2} if advertise else {}),
         )
-        self.structural_fingerprint = owl.Fingerprint("sha256", 1, b"s" * 32)
-        self.logical_fingerprint = owl.Fingerprint("sha256", 1, b"l" * 32)
-        self.signature_fingerprint = owl.Fingerprint("sha256", 1, b"g" * 32)
+        self.structural_fingerprint = owl.Fingerprint("sha256", 2, b"s" * 32)
+        self.logical_fingerprint = owl.Fingerprint("sha256", 2, b"l" * 32)
+        self.signature_fingerprint = owl.Fingerprint("sha256", 2, b"g" * 32)
         self.report = object()
         self.origin_index = owl.OriginIndex()
         self.is_complete = True
@@ -226,7 +226,7 @@ def test_scalar_only_core_is_a_compatible_fallback(
     monkeypatch.delattr(owl, "EncodedStructuralView", raising=False)
     view = _View(advertise=False)
 
-    result = negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
+    result = negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 2})
 
     assert not result.available
     assert result.core_schema_version is None
@@ -239,7 +239,7 @@ def test_valid_handoff_retains_owner_and_read_only_buffers(
     monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
     view = _View()
 
-    result = negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
+    result = negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 2})
 
     assert result.available
     lease = result.lease
@@ -256,7 +256,7 @@ def test_valid_handoff_retains_owner_and_read_only_buffers(
     assert view.requests == [
         (
             _EncodedStructuralView,
-            {"schema_version": 1, "scope": owl.AxiomScope.CLOSURE},
+            {"schema_version": 2, "scope": owl.AxiomScope.CLOSURE},
         )
     ]
 
@@ -352,7 +352,7 @@ def test_lease_retains_closeable_buffer_owner_until_the_handoff_is_released(
     mapping = _move_local_buffers_to_mmap(owner)
     owner_reference = weakref.ref(owner)
 
-    result = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1})
+    result = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 2})
     lease = result.lease
     assert lease is not None
     del owner
@@ -374,7 +374,7 @@ def test_overlay_segment_graph_retains_and_orders_each_local_column_owner(
 ) -> None:
     monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
     source_owner = _View()
-    source_result = negotiate_encoded_input(_as_view(source_owner), {ENCODED_SCHEMA_NAME: 1})
+    source_result = negotiate_encoded_input(_as_view(source_owner), {ENCODED_SCHEMA_NAME: 2})
     source_lease = source_result.lease
     assert source_lease is not None
     owner = _View()
@@ -400,7 +400,7 @@ def test_overlay_segment_graph_retains_and_orders_each_local_column_owner(
         owner.encoded.descriptor,
     )
 
-    result = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1})
+    result = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 2})
 
     lease = result.lease
     assert lease is not None
@@ -430,7 +430,7 @@ def test_overlay_exclusion_selects_only_immediate_source_roots_without_column_co
     monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
     source_owner = _View()
     _set_local_root_count(source_owner, 2)
-    source_result = negotiate_encoded_input(_as_view(source_owner), {ENCODED_SCHEMA_NAME: 1})
+    source_result = negotiate_encoded_input(_as_view(source_owner), {ENCODED_SCHEMA_NAME: 2})
     source_lease = source_result.lease
     assert source_lease is not None
     owner = _View()
@@ -458,7 +458,7 @@ def test_overlay_exclusion_selects_only_immediate_source_roots_without_column_co
         owner.encoded.descriptor,
     )
 
-    result = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1})
+    result = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 2})
 
     lease = result.lease
     assert lease is not None
@@ -486,7 +486,7 @@ def test_nested_overlay_exclusions_remain_source_local(
     monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
     base_owner = _View()
     _set_local_root_count(base_owner, 2)
-    base_lease = negotiate_encoded_input(_as_view(base_owner), {ENCODED_SCHEMA_NAME: 1}).lease
+    base_lease = negotiate_encoded_input(_as_view(base_owner), {ENCODED_SCHEMA_NAME: 2}).lease
     assert base_lease is not None
     inner_owner = _View()
     _set_local_root_count(inner_owner, 2)
@@ -526,7 +526,7 @@ def test_nested_overlay_exclusions_remain_source_local(
         inner_segments,
         inner_owner.encoded.descriptor,
     )
-    inner_lease = negotiate_encoded_input(_as_view(inner_owner), {ENCODED_SCHEMA_NAME: 1}).lease
+    inner_lease = negotiate_encoded_input(_as_view(inner_owner), {ENCODED_SCHEMA_NAME: 2}).lease
     assert inner_lease is not None
     outer_owner = _View()
     raw_outer_base = _segment(
@@ -553,7 +553,7 @@ def test_nested_overlay_exclusions_remain_source_local(
         outer_owner.encoded.descriptor,
     )
 
-    lease = negotiate_encoded_input(_as_view(outer_owner), {ENCODED_SCHEMA_NAME: 1}).lease
+    lease = negotiate_encoded_input(_as_view(outer_owner), {ENCODED_SCHEMA_NAME: 2}).lease
 
     assert lease is not None
     root_slices = lease.overlay_root_slices()
@@ -581,7 +581,7 @@ def test_composite_include_exclude_tokens_and_scope_maps_compose_exactly(
     monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
     base_owner = _View()
     _set_local_root_count(base_owner, 2)
-    base_lease = negotiate_encoded_input(_as_view(base_owner), {ENCODED_SCHEMA_NAME: 1}).lease
+    base_lease = negotiate_encoded_input(_as_view(base_owner), {ENCODED_SCHEMA_NAME: 2}).lease
     assert base_lease is not None
 
     inner_owner = _View()
@@ -624,7 +624,7 @@ def test_composite_include_exclude_tokens_and_scope_maps_compose_exactly(
         inner_segments,
         inner_owner.encoded.descriptor,
     )
-    inner_lease = negotiate_encoded_input(_as_view(inner_owner), {ENCODED_SCHEMA_NAME: 1}).lease
+    inner_lease = negotiate_encoded_input(_as_view(inner_owner), {ENCODED_SCHEMA_NAME: 2}).lease
     assert inner_lease is not None
 
     owner = _View()
@@ -679,7 +679,7 @@ def test_composite_include_exclude_tokens_and_scope_maps_compose_exactly(
         owner.encoded.descriptor,
     )
 
-    lease = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1}).lease
+    lease = negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 2}).lease
 
     assert lease is not None
     root_slices = lease.root_slices()
@@ -749,7 +749,7 @@ def test_hostile_segment_graphs_fail_closed(
     owner.encoded.segments = (segment,)
 
     with pytest.raises(owl.BackendProtocolError, match="encoded"):
-        negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1})
+        negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 2})
 
 
 def test_encoded_publication_fingerprint_is_recomputed_fail_closed(
@@ -757,10 +757,10 @@ def test_encoded_publication_fingerprint_is_recomputed_fail_closed(
 ) -> None:
     monkeypatch.setattr(owl, "EncodedStructuralView", _EncodedStructuralView, raising=False)
     owner = _View()
-    owner.encoded.structural_fingerprint = owl.Fingerprint("sha256", 1, b"x" * 32)
+    owner.encoded.structural_fingerprint = owl.Fingerprint("sha256", 2, b"x" * 32)
 
     with pytest.raises(owl.BackendProtocolError, match="fingerprint"):
-        negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 1})
+        negotiate_encoded_input(_as_view(owner), {ENCODED_SCHEMA_NAME: 2})
 
 
 def test_descriptor_digest_is_derived_when_core_uses_the_minimal_public_surface(
@@ -770,7 +770,7 @@ def test_descriptor_digest_is_derived_when_core_uses_the_minimal_public_surface(
     view = _View()
     del view.encoded.descriptor_digest
 
-    result = negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
+    result = negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 2})
 
     assert result.lease is not None
     assert result.lease.descriptor_digest == hashlib.sha256(view.encoded.descriptor).digest()
@@ -785,7 +785,7 @@ def test_self_consistent_descriptor_drift_fails_closed(
     view.encoded.descriptor_digest = hashlib.sha256(view.encoded.descriptor).digest()
 
     with pytest.raises(owl.BackendProtocolError, match="frozen"):
-        negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
+        negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 2})
 
 
 @pytest.mark.parametrize(
@@ -811,15 +811,15 @@ def test_buffer_ledger_and_scalar_widths_fail_closed(
     view.encoded.buffers = buffers
 
     with pytest.raises(owl.BackendProtocolError, match="buffer"):
-        negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
+        negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 2})
 
 
 @pytest.mark.parametrize(
     ("field", "invalid"),
     [
         ("schema_name", "wrong/schema"),
-        ("schema_version", 2),
-        ("model_schema", 2),
+        ("schema_version", 1),
+        ("model_schema", 1),
         ("descriptor", b""),
         ("descriptor_digest", b"x" * 32),
         ("structural_fingerprint", object()),
@@ -839,7 +839,7 @@ def test_malformed_advertised_envelope_fails_closed(
     setattr(view.encoded, field, invalid)
 
     with pytest.raises(owl.BackendProtocolError):
-        negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
+        negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 2})
 
 
 def test_false_advertising_requires_public_core_type(
@@ -849,5 +849,5 @@ def test_false_advertising_requires_public_core_type(
     view = _View()
 
     with pytest.raises(owl.AdapterCompatibilityError, match="exports no"):
-        negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 1})
+        negotiate_encoded_input(_as_view(view), {ENCODED_SCHEMA_NAME: 2})
     assert view.requests == []

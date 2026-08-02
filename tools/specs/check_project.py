@@ -82,8 +82,8 @@ def _validate_project_metadata(root: Path, pyproject: dict[str, Any]) -> dict[st
         raise ProjectCheckError("setuptools must read pyhermit._version.__version__")
     version_source = (root / "src/pyhermit/_version.py").read_text(encoding="utf-8")
     match = re.search(r'^__version__ = "([^"]+)"$', version_source, flags=re.MULTILINE)
-    if match is None or match.group(1) != "0.1.2":
-        raise ProjectCheckError("runtime version source must be 0.1.2")
+    if match is None or match.group(1) != "0.2.0":
+        raise ProjectCheckError("runtime version source must be 0.2.0")
     if require_str(project.get("requires-python"), "project.requires-python") != ">=3.10":
         raise ProjectCheckError("project requires-python must be >=3.10")
     if require_str(project.get("license"), "project.license") != "LGPL-3.0-or-later":
@@ -101,8 +101,8 @@ def _validate_project_metadata(root: Path, pyproject: dict[str, Any]) -> dict[st
         require_str(item, "project.dependencies item")
         for item in require_list(project.get("dependencies"), "project.dependencies")
     ]
-    if dependencies != ["pyowl-core>=0.1,<0.2"]:
-        raise ProjectCheckError("pyowl-core>=0.1,<0.2 must be the sole runtime dependency")
+    if dependencies != ["pyowl-core>=0.2,<0.3"]:
+        raise ProjectCheckError("pyowl-core>=0.2,<0.3 must be the sole runtime dependency")
     return project
 
 

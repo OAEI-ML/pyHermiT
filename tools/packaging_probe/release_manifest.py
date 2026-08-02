@@ -48,16 +48,16 @@ _INSTALLED_WP18_CONTRACT = (
     "{project}/tests/differential/encoded_compiler/test_permanent_program_assembly.py"
     "::test_facade_constructs_encoded_services_without_scalar_service_context"
 )
-_INSTALLED_WP18_FEATURE = "encoded-structural-compiler-v1"
-_CORE_REQUIREMENT = "pyowl-core>=0.1,<0.2"
-_TESTED_CORE_REQUIREMENT = "pyowl-core==0.1.1"
+_INSTALLED_WP18_FEATURE = "encoded-structural-compiler-v2"
+_CORE_REQUIREMENT = "pyowl-core>=0.2,<0.3"
+_TESTED_CORE_REQUIREMENT = "pyowl-core==0.2.0"
 _CORE_COMPATIBILITY_SCHEMA = "pyhermit.core-compatibility/2"
-_TESTED_CORE_COMMIT = "b0d8fd27537b2f177cfe9a5e0fd41f33b9f18f19"
-_TESTED_CORE_TREE = "e72fc93248cd363a5c67dac9efffb367a71c2b1d"
+_TESTED_CORE_COMMIT = "a0d6d4df6ce8bc56cfa4542709f02efa1e58a57f"
+_TESTED_CORE_TREE = "16258fc9775b1a19ba59d27585278b7e9210c2a1"
 _ENCODED_INGESTION_CONTRACT = {
     "schema_name": "pyowl-core/structural-columns",
-    "schema_version": 1,
-    "descriptor_sha256": "9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5",
+    "schema_version": 2,
+    "descriptor_sha256": "c51d0eb7ecf6f29ad3495fe7c40a2ea6741cf03a7cf194d51417bb810df90f51",
     "capability_state": "advertised",
     "required_ingestion_path": "encoded-native",
     "parity_contract": "wp18-encoded-public-dispatch-short",
@@ -77,6 +77,7 @@ _MATERIAL_FILES = (
     "pyproject.toml",
     _CORE_COMPATIBILITY_PATH,
     "reports/licensing/adapted-files.toml",
+    "reports/release/0.2.0-owner-release-override.md",
     "setup.cfg",
     "setup.py",
     "src/pyhermit/_version.py",
@@ -466,14 +467,15 @@ def _build_provenance(
         or compatibility.get("dependency_constraint") != _CORE_REQUIREMENT
         or not isinstance(tested_core, dict)
         or tested_core.get("repository") != "https://github.com/OAEI-ML/pyOWLCore"
-        or tested_core.get("version") != "0.1.1"
+        or tested_core.get("version") != "0.2.0"
         or tested_core.get("commit") != _TESTED_CORE_COMMIT
         or tested_core.get("tree") != _TESTED_CORE_TREE
         or not isinstance(redesign, dict)
         or redesign.get("commit") != tested_core["commit"]
         or redesign.get("tree") != tested_core["tree"]
         or redesign.get("classification") != "behavior-preserving-native-ontology-redesign"
-        or redesign.get("workpackages") != ["WP14", "WP15", "WP16", "WP17", "WP18"]
+        or redesign.get("workpackages")
+        != ["WP14", "WP15", "WP16", "WP17", "WP18", "WP19", "WP20", "WP21", "WP22", "WP23"]
         or encoded_ingestion != _ENCODED_INGESTION_CONTRACT
     ):
         raise ReleaseManifestError("core compatibility pin is invalid")

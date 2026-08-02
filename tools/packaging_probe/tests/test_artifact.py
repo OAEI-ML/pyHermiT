@@ -99,7 +99,7 @@ class ArtifactCheckerTests(unittest.TestCase):
                 (
                     "Requires-Python: >=3.10",
                     "License-Expression: LGPL-3.0-or-later",
-                    "Requires-Dist: pyowl-core<0.2,>=0.1",
+                    "Requires-Dist: pyowl-core<0.3,>=0.2",
                     "",
                 )
             )
@@ -115,12 +115,12 @@ class ArtifactCheckerTests(unittest.TestCase):
     def test_unexpected_runtime_dependency_is_rejected(self) -> None:
         with self.assertRaisesRegex(ArtifactError, "outside pyowl-core"):
             _check_runtime_dependencies(
-                "Requires-Dist: pyowl-core>=0.1,<0.2\nRequires-Dist: requests>=2\n"
+                "Requires-Dist: pyowl-core>=0.2,<0.3\nRequires-Dist: requests>=2\n"
             )
 
     def test_dev_extra_dependency_is_not_treated_as_runtime(self) -> None:
         _check_runtime_dependencies(
-            'Requires-Dist: pyowl-core>=0.1,<0.2\nRequires-Dist: pytest; extra == "dev"\n'
+            'Requires-Dist: pyowl-core>=0.2,<0.3\nRequires-Dist: pytest; extra == "dev"\n'
         )
 
     def test_wheel_filename_version_must_match_metadata(self) -> None:

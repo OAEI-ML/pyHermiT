@@ -290,7 +290,7 @@ license/notice metadata, and no native/Rust build artifacts. Native wheels add e
 one private extension and required permitted runtime libraries. Wheels contain no
 tests, benchmarks, Java/reference files, `.jar`/`.class`, JVM/JNI/JPype launcher or
 dependency, Cargo target tree, or source checkout. Every artifact declares
-`pyowl-core>=0.1,<0.2` and Python `>=3.10`.
+`pyowl-core>=0.2,<0.3` and Python `>=3.10`.
 
 The sdist contains Python/Rust sources, `Cargo.lock`, specs needed by contributors,
 licenses/notices, and build config. It contains no compiled objects or downloaded

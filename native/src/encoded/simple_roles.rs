@@ -635,7 +635,7 @@ fn role_expression<B: ByteSource>(
     } else if node.tag() == OBJECT_INVERSE_OF_TAG {
         if node.field_count() != 1 {
             return Err(EncodedValidationError::invariant(
-                "object-inverse expression no longer has schema-1 shape",
+                "object-inverse expression no longer has schema-2 shape",
             ));
         }
         let property = role_expression(
@@ -666,7 +666,7 @@ fn require_root<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != tag || node.field_count() != fields {
         Err(EncodedValidationError::invariant(format!(
-            "{name} root no longer has schema-1 shape"
+            "{name} root no longer has schema-2 shape"
         )))
     } else {
         Ok(node)

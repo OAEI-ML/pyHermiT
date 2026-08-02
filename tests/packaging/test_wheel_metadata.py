@@ -18,11 +18,11 @@ def _record_row(name: str, payload: bytes) -> list[str]:
 
 
 def test_normalize_wheel_metadata_rewrites_crlf_and_record_once(tmp_path: Path) -> None:
-    wheel = tmp_path / "pyhermit-0.1.2-py3-none-any.whl"
-    metadata_name = "pyhermit-0.1.2.dist-info/METADATA"
-    record_name = "pyhermit-0.1.2.dist-info/RECORD"
+    wheel = tmp_path / "pyhermit-0.2.0-py3-none-any.whl"
+    metadata_name = "pyhermit-0.2.0.dist-info/METADATA"
+    record_name = "pyhermit-0.2.0.dist-info/RECORD"
     module_name = "pyhermit/__init__.py"
-    metadata = b"Metadata-Version: 2.4\r\nName: pyHermiT\r\nVersion: 0.1.2\r\n"
+    metadata = b"Metadata-Version: 2.4\r\nName: pyHermiT\r\nVersion: 0.2.0\r\n"
     module = b'"""Runtime payload."""\n'
     record_buffer = io.StringIO(newline="")
     csv.writer(record_buffer, lineterminator="\r\n").writerows(

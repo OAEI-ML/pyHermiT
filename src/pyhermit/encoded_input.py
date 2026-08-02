@@ -20,8 +20,8 @@ from pyowl_core.index import OntologyIdentityIndex
 from .exceptions import ResourceLimitError
 
 ENCODED_SCHEMA_NAME = "pyowl-core/structural-columns"
-ENCODED_SCHEMA_VERSION = 1
-ENCODED_NATIVE_FEATURE = "encoded-structural-compiler-v1"
+ENCODED_SCHEMA_VERSION = 2
+ENCODED_NATIVE_FEATURE = "encoded-structural-compiler-v2"
 _ENCODED_FORBIDDEN_WORK_COUNTERS = (
     "base_flattening_bytes",
     "materialized_scalar_rows",
@@ -35,7 +35,7 @@ _ENCODED_FORBIDDEN_WORK_COUNTERS = (
     "wire_encoder_calls",
 )
 ENCODED_DESCRIPTOR_SHA256 = bytes.fromhex(
-    "9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5"
+    "c51d0eb7ecf6f29ad3495fe7c40a2ea6741cf03a7cf194d51417bb810df90f51"
 )
 ENCODED_BUFFER_WIDTHS: Mapping[str, int] = MappingProxyType(
     {
@@ -206,7 +206,7 @@ class _EncodedProfileContexts:
 
 
 def _encoded_profile_contexts(view: owl.OntologyView) -> _EncodedProfileContexts:
-    """Build the canonical side contexts omitted from structural-columns v1."""
+    """Build the canonical side contexts omitted from structural-columns v2."""
 
     identity = view.view(OntologyIdentityIndex)
     ontology_identity_context: _OntologyIdentityContext = (
@@ -416,13 +416,13 @@ def _validate_encoded_view(
         raise _protocol_error("encoded descriptor digest does not match its bytes")
     if authoritative_digest != ENCODED_DESCRIPTOR_SHA256:
         raise _protocol_error(
-            "encoded descriptor does not match the frozen pyowl-core structural-columns v1 ledger"
+            "encoded descriptor does not match the frozen pyowl-core structural-columns v2 ledger"
         )
 
     fingerprint = _required_attribute(encoded, "structural_fingerprint")
     if type(fingerprint) is not owl.Fingerprint:
         raise _protocol_error("encoded structural fingerprint must be an exact Fingerprint")
-    if fingerprint.schema != 1:
+    if fingerprint.schema != 2:
         raise _protocol_error("encoded structural fingerprint schema is incompatible")
     encoded_scope = _required_attribute(encoded, "scope")
     if encoded_scope is not scope:
@@ -444,7 +444,7 @@ def _validate_encoded_view(
         missing = sorted(set(ENCODED_BUFFER_WIDTHS) - set(buffers))
         extra = sorted(set(buffers) - set(ENCODED_BUFFER_WIDTHS))
         raise _protocol_error(
-            f"encoded schema 1 buffer set differs (missing={missing!r}, extra={extra!r})"
+            f"encoded schema 2 buffer set differs (missing={missing!r}, extra={extra!r})"
         )
     for name, width in ENCODED_BUFFER_WIDTHS.items():
         if buffers[name].nbytes % width:
@@ -883,7 +883,7 @@ def _encoded_fingerprint(
     descriptor: bytes,
 ) -> owl.Fingerprint:
     hasher = hashlib.sha256()
-    hasher.update(b"pyowl-core:encoded-structural-view:v1\x00")
+    hasher.update(b"pyowl-core:encoded-structural-view:v2\x00")
     hasher.update(_frame(descriptor))
     for name in _ENCODED_SLICE_COLUMN_ORDER:
         hasher.update(_frame(name.encode("ascii")))
@@ -908,7 +908,7 @@ def _encoded_fingerprint(
         hasher.update(segment.root_ids)
         hasher.update(segment.anonymous_scope_map.nbytes.to_bytes(8, "little"))
         hasher.update(segment.anonymous_scope_map)
-    return owl.Fingerprint("sha256", 1, hasher.digest())
+    return owl.Fingerprint("sha256", 2, hasher.digest())
 
 
 def _frame(value: bytes) -> bytes:

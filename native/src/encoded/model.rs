@@ -1,4 +1,4 @@
-//! Typed, zero-copy access to columns that have passed schema-1 validation.
+//! Typed, zero-copy access to columns that have passed schema-2 validation.
 //!
 //! The accessor deliberately retains the caller's [`ByteSource`] rather than
 //! materializing Rust collections. It is private compiler substrate: creating
@@ -18,7 +18,7 @@ use super::{
     COMPONENT_SET, COMPONENT_TEXT, ROOT_AXIOM, ROOT_EXTENSION, ROOT_ONTOLOGY_ANNOTATION,
 };
 
-/// The semantic category assigned to a schema-1 root row.
+/// The semantic category assigned to a schema-2 root row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RootKind {
     OntologyAnnotation,
@@ -39,7 +39,7 @@ impl RootKind {
     }
 }
 
-/// The representation category assigned to a schema-1 field or item row.
+/// The representation category assigned to a schema-2 field or item row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComponentKind {
     None,
@@ -70,7 +70,7 @@ impl ComponentKind {
     }
 }
 
-/// A one-based dense node identifier from encoded structural schema 1.
+/// A one-based dense node identifier from encoded structural schema 2.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NodeId(u32);
 

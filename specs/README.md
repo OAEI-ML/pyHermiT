@@ -68,5 +68,5 @@ Agents MUST:
 - Specification-layout precedent:
   [`city-artificial-intelligence/PyLogMap@3f938103`](https://github.com/city-artificial-intelligence/PyLogMap/tree/3f938103b7a2e7dfbfe7bbfb6596b9604ba3c421/specs)
 
-The shared structural dependency is `pyowl-core>=0.1,<0.2` (import `pyowl_core`). Public OWL
+The shared structural dependency is `pyowl-core>=0.2,<0.3` (import `pyowl_core`). Public OWL
 values must be exact core types; reasoner clauses/tableau remain private.

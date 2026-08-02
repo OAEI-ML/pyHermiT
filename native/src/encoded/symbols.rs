@@ -120,7 +120,7 @@ impl EntityKind {
     }
 }
 
-/// Exact semantic destination for every schema-1 root constructor.
+/// Exact semantic destination for every schema-2 root constructor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RootHandler {
     OntologyAnnotation,
@@ -1450,7 +1450,7 @@ fn declaration_entity_node<B: ByteSource>(
     let node = model.node(declaration)?;
     if node.tag() != DECLARATION_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "declaration root no longer has schema-1 shape",
+            "declaration root no longer has schema-2 shape",
         ));
     }
     let field = required_component(model.field(node.fields().start)?, "declaration entity")?;
@@ -1484,7 +1484,7 @@ fn extract_entity<B: ByteSource>(
     let node = model.node(identifier)?;
     if node.tag() != ENTITY_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "entity node no longer has schema-1 shape",
+            "entity node no longer has schema-2 shape",
         ));
     }
     let fields = node.fields();
@@ -1508,7 +1508,7 @@ fn extract_entity<B: ByteSource>(
     let iri_node = model.node(iri_id)?;
     if iri_node.tag() != IRI_TAG || iri_node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "entity IRI node no longer has schema-1 shape",
+            "entity IRI node no longer has schema-2 shape",
         ));
     }
     let iri_component =

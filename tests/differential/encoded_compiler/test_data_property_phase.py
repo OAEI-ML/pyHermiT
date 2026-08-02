@@ -12,7 +12,7 @@ from typing import cast
 import pyowl_core
 import pyowl_core.model as owl
 import pytest
-from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.backends.native_views import produce_encoded_structural_view_v2
 
 import pyhermit._native as native
 from pyhermit import ReasonerConfig
@@ -44,7 +44,7 @@ def _slice_record(
     postings: memoryview | None = None,
     member_tokens: tuple[bytes, ...] = (),
 ) -> tuple[object, ...]:
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    buffers = produce_encoded_structural_view_v2(snapshot).buffers
     return (
         posting_mode,
         memoryview(b"") if postings is None else postings,
@@ -90,7 +90,7 @@ def _expected_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
 
 
 def _native_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    buffers = produce_encoded_structural_view_v2(snapshot).buffers
     return cast(
         dict[str, object],
         json.loads(native._encoded_data_property_manifest_v1(**buffers)),
@@ -226,7 +226,7 @@ def test_hostile_data_property_kind_rolls_back_to_byte_exact_retry() -> None:
         ),
         options=OPTIONS,
     )
-    encoded = produce_encoded_structural_view_v1(snapshot)
+    encoded = produce_encoded_structural_view_v2(snapshot)
     buffers = dict(encoded.buffers)
     baseline = native._encoded_data_property_manifest_v1(**buffers)
     scalar_bytes = bytes(buffers["scalar_bytes"])

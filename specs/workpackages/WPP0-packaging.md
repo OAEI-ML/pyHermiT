@@ -16,7 +16,7 @@ every other supported environment has a compiler-free pure-Python fallback.
 ## Deliverables
 
 - Final `pyproject.toml`, minimal conditional `setup.py`, manifests, version single
-  source, Python `>=3.10`, `pyowl-core>=0.1,<0.2`, locked Rust build, provisional/final
+  source, Python `>=3.10`, `pyowl-core>=0.2,<0.3`, locked Rust build, provisional/final
   license/notice/package-data/type metadata governed by LIC-001.
 - `PYHERMIT_BUILD_NATIVE=auto|0|1` behavior: optional sdist/direct default, reproducible
   universal wheel, forced native release failure on any compiler/extension error.

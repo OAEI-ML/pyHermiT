@@ -2,6 +2,18 @@
 
 All notable user-visible changes are recorded here.
 
+## 0.2.0 — 2026-08-02
+
+- Migrated the shared ontology contract to `pyowl-core>=0.2,<0.3`, API 0.2,
+  model schema 2, and wire format 1.2.
+- Added native compilation from encoded structural-view schema 2 for snapshots,
+  overlays, and composites while retaining the complete scalar Python and native-wire
+  compatibility paths.
+- Made encoded descriptor, fingerprint, and producer-version checks fail closed, with
+  deterministic diagnostics and exact scalar/encoded compiler parity coverage.
+- Invalidated pyowl-core 0.1 model, encoded-view, and persisted-cache identities. Users
+  must regenerate persisted snapshot bytes and consumer caches before using 0.2.0.
+
 ## 0.1.2 — 2026-07-30
 
 - Completed the fail-closed eight-platform native wheel matrix while retaining the

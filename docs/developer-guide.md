@@ -45,6 +45,12 @@ native reasoning. The handshake checks package version, core API/model/wire vers
 native ABI, IR schema, capabilities, and a self-test. `auto` selects once; an explicitly
 requested native backend never silently falls back after a semantic failure.
 
+With pyowl-core 0.2, a compatible extension can instead consume encoded structural-view
+schema 2 and construct the permanent session directly. The public capability name is
+`encoded-structural-compiler-v2`; private extension function suffixes independently version
+the pyHermiT call surface and do not identify the core schema. Descriptor, model-schema,
+fingerprint, segment, and producer-version mismatches fail before session publication.
+
 Unsafe Rust is forbidden by the crate policy. Resource accounting uses deterministic
 saturating counters, while timeout/interrupt observation is cooperative. Backend IDs,
 branch order, witness identities, and allocation details never cross the public facade.
@@ -85,9 +91,9 @@ code and explicit provenance inventories. `LICENSE`, `COPYING`, `NOTICE.md`,
 the audit surface. Runtime artifacts exclude
 Java sources, JARs/classes, the oracle, reference downloads, and test-only goldens.
 
-For `0.1.2`, the owner accepted the remaining 350-check licensed W3C execution, larger
+For `0.2.0`, the owner accepted the remaining 350-check licensed W3C execution, larger
 live-reference sample, and controlled performance calibration as post-release follow-up.
 The release workflow still requires the complete hosted native-wheel matrix. `LIC-001`
 is waived as-is without claiming legal review. The exact scope is recorded in
-[the owner release override](../reports/release/0.1.2-owner-release-override.md), and the
+[the owner release override](../reports/release/0.2.0-owner-release-override.md), and the
 fail-closed checker permits publication only while that record remains valid.

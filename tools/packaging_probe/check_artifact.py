@@ -26,7 +26,7 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
 _PROJECT_NAME = "pyhermit"
-_CORE_SPECIFIERS = frozenset({">=0.1", "<0.2"})
+_CORE_SPECIFIERS = frozenset({">=0.2", "<0.3"})
 _JAVA_SUFFIXES = (".class", ".jar", ".java", ".jmod", ".war", ".ear")
 _NATIVE_SUFFIXES = (".so", ".pyd", ".dll", ".dylib")
 _PYTHON_SUFFIXES = (".py", ".pyi")
@@ -48,7 +48,7 @@ _PATH_BOUNDARY_BYTES = frozenset(b"\x00\t\n\r \"'=(:,[{")
 _LICENSE_PAYLOAD_SHA256 = {
     "COPYING": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
     "LICENSE": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
-    "NOTICE.md": "9c1ec89877a688ad519ce7000d4ea4f64ade65f330f2ffd03a66232d5d15d30f",
+    "NOTICE.md": "a3b254dbe779ab7cb39cb05fd8653f505e4fbe9aae6d0920d942a74bcbb18d98",
 }
 
 
@@ -357,7 +357,7 @@ def _check_runtime_dependencies(metadata: Message | str) -> None:
         raise ArtifactError("metadata must contain exactly one runtime pyowl-core requirement")
     actual_specifiers = frozenset(str(specifier) for specifier in core_requirements[0].specifier)
     if actual_specifiers != _CORE_SPECIFIERS:
-        raise ArtifactError("pyowl-core requirement must be exactly pyowl-core>=0.1,<0.2")
+        raise ArtifactError("pyowl-core requirement must be exactly pyowl-core>=0.2,<0.3")
 
 
 def _check_names_and_payloads(content: ArchiveContent) -> tuple[str, ...]:
@@ -567,6 +567,7 @@ def _inspect_sdist(
         "reports/licensing/adapted-files.toml",
         "reports/licensing/package-license-audit.md",
         "reports/release/artifact-audit.md",
+        f"reports/release/{version}-owner-release-override.md",
         "setup.cfg",
         "setup.py",
         "specs/SPEC.md",

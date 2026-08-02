@@ -220,16 +220,16 @@ def test_compile_captured_preserves_the_exact_view_boundary_and_dense_rule_order
     normalized = normalize_axioms(_logical_axioms()[:4], logical_fingerprint=FINGERPRINT)
     program = compile_normalized(normalized)
     view_marker = object()
-    fingerprint = pyowl_core.Fingerprint("sha256", 1, b"v" * 32)
+    fingerprint = pyowl_core.Fingerprint("sha256", 2, b"v" * 32)
     captured = CapturedOntology(
         view=view_marker,  # type: ignore[arg-type]
         structural_fingerprint=fingerprint,
         logical_fingerprint=fingerprint,
         signature_fingerprint=fingerprint,
-        core_package_version="0.1.0",
-        core_api_version=(0, 1),
-        core_model_schema_version=1,
-        core_wire_format_version=(1, 0),
+        core_package_version="0.2.0",
+        core_api_version=(0, 2),
+        core_model_schema_version=2,
+        core_wire_format_version=(1, 2),
         core_adapter_protocol_version=1,
     )
     observed: list[object] = []
@@ -252,16 +252,16 @@ def test_compile_captured_bundle_normalizes_and_compiles_exactly_once(
     normalized = normalize_axioms(_logical_axioms()[:4], logical_fingerprint=FINGERPRINT)
     program = compile_normalized(normalized)
     view_marker = object()
-    fingerprint = pyowl_core.Fingerprint("sha256", 1, b"b" * 32)
+    fingerprint = pyowl_core.Fingerprint("sha256", 2, b"b" * 32)
     captured = CapturedOntology(
         view=view_marker,  # type: ignore[arg-type]
         structural_fingerprint=fingerprint,
         logical_fingerprint=fingerprint,
         signature_fingerprint=fingerprint,
-        core_package_version="0.1.0",
-        core_api_version=(0, 1),
-        core_model_schema_version=1,
-        core_wire_format_version=(1, 0),
+        core_package_version="0.2.0",
+        core_api_version=(0, 2),
+        core_model_schema_version=2,
+        core_wire_format_version=(1, 2),
         core_adapter_protocol_version=1,
     )
     normalized_calls: list[object] = []

@@ -21,7 +21,7 @@ from pyowl_core import (
     OntologyDocument,
     OntologyID,
 )
-from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.backends.native_views import produce_encoded_structural_view_v2
 from pyowl_core.extensions import swrl
 from pyowl_core.index import OntologyIdentityIndex
 
@@ -129,7 +129,7 @@ def functional(*body: str, ontology_iri: str = "urn:test:profile") -> bytes:
 
 
 def _buffers(snapshot: pyowl_core.OntologyView) -> dict[str, memoryview]:
-    return dict(produce_encoded_structural_view_v1(snapshot).buffers)
+    return dict(produce_encoded_structural_view_v2(snapshot).buffers)
 
 
 def _ontology_identity_context(

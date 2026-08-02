@@ -2,7 +2,7 @@
 
 ## Install and select a backend
 
-pyHermiT supports CPython 3.10 and 3.12 and requires `pyowl-core>=0.1,<0.2`.
+pyHermiT supports CPython 3.10 and 3.12 and requires `pyowl-core>=0.2,<0.3`.
 A compatible native wheel contains one `abi3` Rust extension; the universal wheel is
 the compiler-free Python fallback. Neither artifact contains or starts Java.
 
@@ -22,7 +22,7 @@ PYHERMIT_BUILD_NATIVE=0 python -m pip install --no-deps -e /path/to/pyHermiT
 ```
 
 `--no-deps` is intentional only for coordinated development checkouts where the
-compatible `pyowl-core 0.1.1` checkout is already installed.
+compatible `pyowl-core 0.2.x` checkout is already installed.
 
 Source builds use `PYHERMIT_BUILD_NATIVE=auto|0|1`: `auto` tries Rust and otherwise
 builds a truthful pure wheel, `0` always builds the fallback, and `1` fails if the
@@ -170,11 +170,12 @@ view; input acquisition, parsing, and profile validation are outside that interv
 `COMPILER_CACHE_SCHEMA_VERSION`, `COMPILED_IR_SCHEMA_VERSION`, and `NATIVE_ABI_VERSION`
 constants support import-light cache partitioning.
 
-Until the encoded-native session path is enabled, the eleven `encoded_*` fields are exact
-zero/false accounting for the permanent-session compiler boundary. They are not estimates or
-unimplemented placeholders: a native validation-only encoded preflight is deliberately excluded,
-and the selected session still consumes the scalar private wire. Do
-not compare a warm shared view to a cold file load as if they were the same workload.
+When a compatible native extension and pyowl-core encoded structural-view schema 2 are
+available, `ingestion_path` is `encoded-native` and the eleven `encoded_*` fields report
+the measured permanent-session compiler boundary. Scalar Python and scalar native-wire
+compatibility paths report exact zero/false values; a validation-only encoded preflight is
+deliberately excluded from those counters. Do not compare a warm shared view to a cold file
+load as if they were the same workload.
 General parser, core-wire, scalar-materialization, and public-model-copy deltas are not inferred
 from an input shape and are omitted until their owning boundary exposes an authoritative counter.
 The required methodology separates load, validation, compilation, first/repeated
@@ -183,5 +184,9 @@ reasoning, classification, realization, updates, and peak RSS; see
 
 Local wheels and semantic suites are verified. The historical `0.1.1`
 [release report](../reports/release-report-local.json) records the prior universal
-publication, while the `0.1.2` workflow requires the complete hosted wheel set. The owner
+publication, while the `0.2.0` workflow requires the complete hosted wheel set. The owner
 accepted only the remaining external WP17 runs as post-release follow-up.
+
+pyHermiT 0.2.0 rejects the pyowl-core 0.1 API/model contract. Persisted pyowl-core 0.1
+snapshot bytes, encoded descriptors, and consumer cache keys must be regenerated with
+pyowl-core 0.2 before use.

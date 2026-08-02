@@ -24,7 +24,7 @@ from tools.packaging_probe.release_manifest import (
 )
 
 _REVISION = "a" * 40
-_VERSION = "0.1.2"
+_VERSION = "0.2.0"
 _NATIVE_PLATFORMS = (
     "manylinux_2_17_x86_64",
     "manylinux_2_17_aarch64",
@@ -288,7 +288,7 @@ class ReleaseManifestTests(unittest.TestCase):
             provenance["installed_native_contracts"],
             [
                 {
-                    "capability": "encoded-structural-compiler-v1",
+                    "capability": "encoded-structural-compiler-v2",
                     "capability_state": "advertised",
                     "command": _INSTALLED_WP18_CONTRACT,
                     "id": "wp18-encoded-public-dispatch-short",
@@ -302,14 +302,15 @@ class ReleaseManifestTests(unittest.TestCase):
         )
         self.assertIn("tests/packaging/installed_smoke.py", _MATERIAL_FILES)
         self.assertIn("release/core-compatibility.json", _MATERIAL_FILES)
+        self.assertIn("reports/release/0.2.0-owner-release-override.md", _MATERIAL_FILES)
         self.assertEqual(
             provenance["tested_runtime"],
             {
                 "pyowl_core": {
-                    "commit": "b0d8fd27537b2f177cfe9a5e0fd41f33b9f18f19",
+                    "commit": "a0d6d4df6ce8bc56cfa4542709f02efa1e58a57f",
                     "repository": "https://github.com/OAEI-ML/pyOWLCore",
-                    "tree": "e72fc93248cd363a5c67dac9efffb367a71c2b1d",
-                    "version": "0.1.1",
+                    "tree": "16258fc9775b1a19ba59d27585278b7e9210c2a1",
+                    "version": "0.2.0",
                 }
             },
         )
@@ -318,12 +319,12 @@ class ReleaseManifestTests(unittest.TestCase):
             {
                 "capability_state": "advertised",
                 "descriptor_sha256": (
-                    "9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5"
+                    "c51d0eb7ecf6f29ad3495fe7c40a2ea6741cf03a7cf194d51417bb810df90f51"
                 ),
                 "parity_contract": "wp18-encoded-public-dispatch-short",
                 "required_ingestion_path": "encoded-native",
                 "schema_name": "pyowl-core/structural-columns",
-                "schema_version": 1,
+                "schema_version": 2,
             },
         )
         self.assertEqual(
@@ -392,8 +393,8 @@ class ReleaseManifestTests(unittest.TestCase):
     def test_release_workflow_cannot_float_the_provenance_bound_core_version(self) -> None:
         workflow = (self.root / ".github/workflows/wheels.yml").read_bytes()
         mutated = workflow.replace(
-            b'"pyowl-core==0.1.1"',
-            b'"pyowl-core>=0.1,<0.2"',
+            b'"pyowl-core==0.2.0"',
+            b'"pyowl-core>=0.2,<0.3"',
             1,
         )
         self.assertNotEqual(mutated, workflow)
@@ -422,8 +423,8 @@ class ReleaseManifestTests(unittest.TestCase):
     def test_unbound_core_implementation_is_rejected(self) -> None:
         compatibility = (self.root / "release/core-compatibility.json").read_bytes()
         mutated = compatibility.replace(
-            b"b0d8fd27537b2f177cfe9a5e0fd41f33b9f18f19",
-            b"a0d8fd27537b2f177cfe9a5e0fd41f33b9f18f19",
+            b"a0d6d4df6ce8bc56cfa4542709f02efa1e58a57f",
+            b"7a9f69d5617da81c031ad61ff2fb7d9e571ed4a0",
         )
         self.assertNotEqual(mutated, compatibility)
 
@@ -449,12 +450,12 @@ class ReleaseManifestTests(unittest.TestCase):
         compatibility = (self.root / "release/core-compatibility.json").read_bytes()
         mutations = (
             (
-                b"e72fc93248cd363a5c67dac9efffb367a71c2b1d",
-                b"f72fc93248cd363a5c67dac9efffb367a71c2b1d",
+                b"16258fc9775b1a19ba59d27585278b7e9210c2a1",
+                b"9ec8e46a3b1444bbc6603e09083eabc4369b1372",
             ),
             (
-                b"9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5",
-                b"8ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5",
+                b"c51d0eb7ecf6f29ad3495fe7c40a2ea6741cf03a7cf194d51417bb810df90f51",
+                b"d51d0eb7ecf6f29ad3495fe7c40a2ea6741cf03a7cf194d51417bb810df90f51",
             ),
             (b"encoded-native", b"scalar-wire"),
         )

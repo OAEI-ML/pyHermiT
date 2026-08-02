@@ -50,10 +50,10 @@ from pyowl_core import (
 from .config import ReasonerConfig
 from .exceptions import ResourceLimitError
 
-EXPECTED_API_VERSION = (0, 1)
-EXPECTED_MODEL_SCHEMA_VERSION = 1
+EXPECTED_API_VERSION = (0, 2)
+EXPECTED_MODEL_SCHEMA_VERSION = 2
 EXPECTED_WIRE_MAJOR = 1
-MINIMUM_WIRE_MINOR = 0
+MINIMUM_WIRE_MINOR = 2
 EXPECTED_ADAPTER_PROTOCOL_VERSION = 1
 COMPILER_CACHE_SCHEMA_VERSION = 1
 HERMIT_COMPATIBILITY_ID = "hermit-37ec30a-v1"
@@ -131,11 +131,11 @@ def require_core_compatibility(
     match = _SEMVER.fullmatch(versions.package_version)
     if match is None:
         raise _compatibility_error(
-            "package_version", ">=0.1,<0.2 semantic version", versions.package_version
+            "package_version", ">=0.2,<0.3 semantic version", versions.package_version
         )
     major, minor, _patch = (int(value) for value in match.groups())
-    if (major, minor) != (0, 1):
-        raise _compatibility_error("package_version", ">=0.1,<0.2", versions.package_version)
+    if (major, minor) != (0, 2):
+        raise _compatibility_error("package_version", ">=0.2,<0.3", versions.package_version)
     if versions.api_version != EXPECTED_API_VERSION:
         raise _compatibility_error(
             "API_VERSION", str(EXPECTED_API_VERSION), str(versions.api_version)

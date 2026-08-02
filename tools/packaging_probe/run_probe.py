@@ -17,7 +17,7 @@ from pathlib import Path
 from packaging.tags import Tag, sys_tags
 from packaging.utils import parse_wheel_filename
 
-PROBE_VERSION = "0.1.2"
+PROBE_VERSION = "0.2.0"
 
 
 class ProbeError(RuntimeError):

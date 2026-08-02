@@ -962,7 +962,7 @@ def encode_deferred_encoded_session_metadata(
     ):
         raise ValueError("overlay-anchor-alias requires an overlay structural context")
     zero = bytes(32)
-    placeholder = cast(FingerprintLike, Fingerprint("sha256", 1, zero))
+    placeholder = cast(FingerprintLike, Fingerprint("sha256", 2, zero))
     metadata = _metadata_payload(
         ontology_fingerprint="0" * 64,
         structural_fingerprint=placeholder,

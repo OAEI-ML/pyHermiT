@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pyowl_core
 import pytest
-from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.backends.native_views import produce_encoded_structural_view_v2
 from pyowl_core.exceptions import SnapshotInUseError
 
 import pyhermit._native as native
@@ -54,7 +54,7 @@ def _direct_columns() -> tuple[object, dict[str, memoryview]]:
         b"SubObjectPropertyOf(:p :q) TransitiveObjectProperty(:q))",
         options=_OPTIONS,
     )
-    encoded = produce_encoded_structural_view_v1(snapshot)
+    encoded = produce_encoded_structural_view_v2(snapshot)
     return encoded, dict(encoded.buffers)
 
 
@@ -68,7 +68,7 @@ def _wide_declaration_columns(
         b"Ontology(<urn:lifecycle:poll> " + declarations + b")",
         options=_OPTIONS,
     )
-    encoded = produce_encoded_structural_view_v1(snapshot)
+    encoded = produce_encoded_structural_view_v2(snapshot)
     return encoded, dict(encoded.buffers)
 
 
@@ -152,7 +152,7 @@ def test_mmap_direct_session_owns_program_after_handoff_release(tmp_path: Path) 
     mapped = pyowl_core.open_snapshot(path, mmap=True, verify=True)
     config = ReasonerConfig()
     captured = capture_compatible_view(mapped)
-    encoded = produce_encoded_structural_view_v1(mapped)
+    encoded = produce_encoded_structural_view_v2(mapped)
     columns = dict(encoded.buffers)
     slices = (_slice_record(columns),)
 

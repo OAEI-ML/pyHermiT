@@ -128,7 +128,7 @@ def test_lic_001_records_owner_waiver_without_claiming_legal_signoff() -> None:
     allowed, pending = release_status(ROOT / "tools" / "specs" / "licensing.toml")
     assert allowed
     assert pending == ()
-    override = (ROOT / "reports/release/0.1.2-owner-release-override.md").read_text(
+    override = (ROOT / "reports/release/0.2.0-owner-release-override.md").read_text(
         encoding="utf-8"
     )
     assert "not an owner/legal-review signoff" in override

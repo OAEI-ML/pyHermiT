@@ -15,6 +15,8 @@ python -m pip install pyHermiT
   supporting public types.
 - [Developer guide](developer-guide.md): architecture, private IR, calculus, native
   boundary, verification, provenance, and release evidence.
+- [0.2 migration guide](migration-0.2.md): coordinated core upgrade, persisted-data
+  invalidation, and native encoded-view compatibility.
 - [Specifications](../specs/README.md): normative behavior and work-package contracts.
 - [Local release report](../reports/release-report-local.json) and
   [coverage matrix](../reports/coverage-matrix.json): machine-readable WP17 state.
@@ -27,10 +29,10 @@ python -m pip install pyHermiT
    untrusted or large inputs.
 4. Record `backend_info()` and `reasoner.diagnostics()` with reproducible results.
 
-The source tree identifies as production release `0.1.2`. The owner accepted the
+The source tree identifies as production release `0.2.0`. The owner accepted the
 remaining external W3C-body, live-reference, and dedicated-performance runs as
 post-release follow-up and waived `LIC-001` as-is without claiming legal review.
 The trusted publication workflow still requires every configured native target.
 See the historical `0.1.1` release report and
-[`0.1.2` owner override](../reports/release/0.1.2-owner-release-override.md)
+[`0.2.0` owner override](../reports/release/0.2.0-owner-release-override.md)
 for the exact qualification boundary.

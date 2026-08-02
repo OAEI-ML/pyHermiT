@@ -1,4 +1,4 @@
-//! Borrowed validation for pyowl-core encoded structural columns schema 1.
+//! Borrowed validation for pyowl-core encoded structural columns schema 2.
 //!
 //! This module is intentionally Python-free and does not advertise the encoded
 //! compiler capability. It validates the frozen eleven-column shape, exact
@@ -202,7 +202,7 @@ macro_rules! constructor_role_ledger {
     };
 }
 
-// Generated from the frozen pyowl-core model-schema-1 constructor ledger and
+// Generated from the frozen pyowl-core model-schema-2 constructor ledger and
 // structural-columns descriptor. Every tag retains its exact ordered roles.
 constructor_role_ledger! {
     1 => [TEXT],
@@ -303,7 +303,7 @@ impl ByteSource for &[u8] {
     }
 }
 
-/// The exact eleven borrowed columns in encoded structural schema 1.
+/// The exact eleven borrowed columns in encoded structural schema 2.
 #[derive(Clone, Copy, Debug)]
 pub struct EncodedColumns<B: ByteSource> {
     pub root_kinds: B,
@@ -397,7 +397,7 @@ impl DfsFrame {
     }
 }
 
-/// Validate schema-v1 shape, scalar widths, root categories, tags, arity, and
+/// Validate schema-v2 shape, scalar widths, root categories, tags, arity, and
 /// exact field roles without copying an input column.
 pub fn validate_columns<B: ByteSource>(
     columns: EncodedColumns<B>,
@@ -591,7 +591,7 @@ pub fn validate_columns<B: ByteSource>(
     }
 
     // Dense-node validation below proves that one-based IDs are ranks in
-    // canonical-model-v1 byte order, so this tuple comparison is equivalent
+    // canonical-model-v2 byte order, so this tuple comparison is equivalent
     // to the descriptor's `(root kind, canonical bytes)` ordering rule.
     let mut previous_root = None;
     for root in 0..root_count {
@@ -831,7 +831,7 @@ fn entity_kind_scalar<B: ByteSource>(
         }
     }
     Err(EncodedValidationError::protocol(
-        "encoded entity kind is not a model-schema-1 value",
+        "encoded entity kind is not a model-schema-2 value",
     ))
 }
 
@@ -959,7 +959,7 @@ fn validate_leaf_component<B: ByteSource>(
         }
         COMPONENT_SET | COMPONENT_SEQUENCE => {
             return Err(EncodedValidationError::protocol(
-                "encoded nested collection item is not supported by schema 1",
+                "encoded nested collection item is not supported by schema 2",
             ));
         }
         _ => {
@@ -2381,7 +2381,7 @@ mod tests {
 
         let mut malformed = declaration();
         malformed.scalar_bytes[5..10].copy_from_slice(b"other");
-        assert_protocol_contains(&malformed, "model-schema-1");
+        assert_protocol_contains(&malformed, "model-schema-2");
     }
 
     #[test]
@@ -2538,7 +2538,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_nodes_and_roots_follow_canonical_model_v1_bytes() {
+    fn dense_nodes_and_roots_follow_canonical_model_v2_bytes() {
         for columns in [
             equivalent_classes(),
             two_declarations(),

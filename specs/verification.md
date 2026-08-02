@@ -287,7 +287,7 @@ Clean isolated environments verify:
 - explicit require-native build fails clearly when native compilation is impossible;
 - installed files contain no `.java`, `.class`, `.jar`, JNI launcher, upstream checkout,
   JVM/JPype dependency, or runtime downloader;
-- metadata requires Python `>=3.10` and `pyowl-core>=0.1,<0.2`; CPython 3.10 and 3.12 test
+- metadata requires Python `>=3.10` and `pyowl-core>=0.2,<0.3`; CPython 3.10 and 3.12 test
   standalone and snapshot/overlay/composite/provider inputs with compatible core pure/native
   variants where wheels exist;
 - package data, type marker/stubs, licenses, notices, and resource hashes are present;

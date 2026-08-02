@@ -694,9 +694,9 @@ mod tests {
             structural_fingerprint: [2; 32],
             logical_fingerprint: [3; 32],
             signature_fingerprint: [4; 32],
-            core_api_version: (0, 1),
-            core_model_schema_version: 1,
-            core_wire_format_version: (1, 0),
+            core_api_version: (0, 2),
+            core_model_schema_version: 2,
+            core_wire_format_version: (1, 2),
             core_adapter_protocol_version: 1,
         }
     }

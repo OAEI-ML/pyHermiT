@@ -10,7 +10,7 @@ original gate state. It is not a hash record for the later production
 artifacts. The release owner subsequently waived the remaining legal-review
 signoff as-is without claiming that legal review occurred; the current
 version-scoped authorization is
-[`0.1.2-owner-release-override.md`](0.1.2-owner-release-override.md).
+[`0.2.0-owner-release-override.md`](0.2.0-owner-release-override.md).
 
 ## Audited artifact set
 
@@ -58,7 +58,7 @@ At capture time, no upload action or package-index permission was enabled while
 LIC-001 was open. The only LIC-001 requirement remaining after these
 repository-owned audits was `owner-legal-review-signoff`; consequently the
 historical `gate_status` was `open` and `publish_allowed` was `false`. The
-version-scoped owner override closes that machine gate for 0.1.2 while retaining
+version-scoped owner override closes that machine gate for 0.2.0 while retaining
 this historical evidence unchanged.
 
 ## Reproduction

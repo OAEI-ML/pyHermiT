@@ -38,7 +38,7 @@ def main() -> int:
 
     import pyhermit
 
-    assert owl.__version__ == "0.1.1", owl.__version__
+    assert owl.__version__ == "0.2.0", owl.__version__
     added = set(sys.modules) - before
     assert not added.intersection({"jpype", "jnius", "javabridge", "owlready2"})
     source_root = Path(__file__).resolve().parents[2]

@@ -5433,13 +5433,13 @@ fn validate_deferred_metadata(metadata: &input_wire::OntologyMetadata) -> Native
         .chain(&metadata.signature_fingerprint.digest)
         .all(|byte| *byte == 0);
     if !placeholders_are_zero
-        || metadata.structural_fingerprint.schema != 1
-        || metadata.logical_fingerprint.schema != 1
-        || metadata.signature_fingerprint.schema != 1
+        || metadata.structural_fingerprint.schema != 2
+        || metadata.logical_fingerprint.schema != 2
+        || metadata.signature_fingerprint.schema != 2
         || metadata.program_sha256.iter().any(|byte| *byte != 0)
     {
         return Err(encoded_slice_invalid(
-            "versioned deferred metadata does not contain canonical schema-1 placeholders",
+            "versioned deferred metadata does not contain canonical schema-2 placeholders",
         ));
     }
     Ok(())
@@ -6252,7 +6252,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
             "abi3-py310",
             "cancellable-mock-work",
             "classification",
-            "encoded-structural-compiler-v1",
+            "encoded-structural-compiler-v2",
             "full_reasoner",
             "incremental_updates",
             "realization",
@@ -6397,7 +6397,7 @@ mod tests {
 
     #[test]
     fn native_version_comes_from_the_python_distribution_source() {
-        assert_eq!(python_package_version(), Some("0.1.2"));
+        assert_eq!(python_package_version(), Some("0.2.0"));
     }
 
     #[test]
@@ -6535,7 +6535,7 @@ mod tests {
     #[test]
     fn production_session_input_owns_current_core_wire_records() -> NativeResult<()> {
         let (ontology, config) = decoded_session_input()?;
-        assert_eq!(ontology.metadata.core_wire_format_version, (1, 1));
+        assert_eq!(ontology.metadata.core_wire_format_version, (1, 2));
         assert_eq!(ontology.metadata.core_api_version, CORE_API_VERSION);
         assert_eq!(config.backend, input_wire::BackendChoice::Auto);
         assert_eq!(

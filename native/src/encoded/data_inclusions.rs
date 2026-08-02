@@ -505,7 +505,7 @@ fn require_root<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != tag || node.field_count() != fields {
         Err(EncodedValidationError::invariant(format!(
-            "{name} root no longer has schema-1 shape"
+            "{name} root no longer has schema-2 shape"
         )))
     } else {
         Ok(node)

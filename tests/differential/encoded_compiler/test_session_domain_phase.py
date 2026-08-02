@@ -11,7 +11,7 @@ from typing import cast
 import pyowl_core
 import pyowl_core.model as owl
 import pytest
-from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.backends.native_views import produce_encoded_structural_view_v2
 from tests.differential.encoded_compiler.test_named_class_phase import (
     OPTIONS,
     _slice_record,
@@ -59,7 +59,7 @@ def _native_manifest(
 def _source_declared_entity_ids(
     view: pyowl_core.OntologyView,
 ) -> dict[tuple[str, str], int]:
-    buffers = produce_encoded_structural_view_v1(view).buffers
+    buffers = produce_encoded_structural_view_v2(view).buffers
     manifest = cast(
         dict[str, object],
         json.loads(
@@ -101,7 +101,7 @@ def _root_ordinal(
 ) -> int:
     axioms = tuple(view.iter_axioms())
     ordinal = axioms.index(target) + 1
-    buffers = produce_encoded_structural_view_v1(view).buffers
+    buffers = produce_encoded_structural_view_v2(view).buffers
     root_ids = memoryview(buffers["root_ids"]).cast("I")
     node_tags = memoryview(buffers["node_tags"]).cast("H")
     assert node_tags[root_ids[ordinal - 1] - 1] == 60

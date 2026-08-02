@@ -17,7 +17,7 @@ Java implementation to generate and compare fixtures. Oracle tools and upstream 
 artifacts MUST NOT be included in wheels or imported by production code.
 
 The canonical public OWL structural/parsing/communication layer is the separate distribution
-`pyowl-core` / import `pyowl_core`. pyHermiT 0.1.x requires `pyowl-core>=0.1,<0.2`, re-exports
+`pyowl-core` / import `pyowl_core`. pyHermiT 0.2.x requires `pyowl-core>=0.2,<0.3`, re-exports
 its OWL types by identity, accepts its ontology views/providers without reparsing, and
 keeps all normalized clauses/tableau state private.
 
@@ -378,7 +378,7 @@ Packaging tests cover:
 - packaged type information, licenses/notices, and pyowl-core compatibility metadata; no
   duplicate parser resources.
 
-Every artifact declares `pyowl-core>=0.1,<0.2`. No artifact contains or depends on a JAR,
+Every artifact declares `pyowl-core>=0.2,<0.3`. No artifact contains or depends on a JAR,
 class file, JVM launcher, JNI/JPype bridge, Java package, or downloaded Java resource.
 
 The final matrix and build mechanism are normative in `native-backend.md`.

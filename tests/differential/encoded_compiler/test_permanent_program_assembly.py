@@ -22,7 +22,7 @@ from pyowl_core import (
     OntologyDocument,
     OntologyID,
 )
-from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.backends.native_views import produce_encoded_structural_view_v2
 from pyowl_core.extensions import swrl
 
 import pyhermit._native as native
@@ -96,7 +96,7 @@ def _slice_record(
     member_tokens: tuple[bytes, ...] = (),
     anonymous_scope_maps: tuple[memoryview, ...] = (),
 ) -> tuple[object, ...]:
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    buffers = produce_encoded_structural_view_v2(snapshot).buffers
     return (
         posting_mode,
         memoryview(b"") if postings is None else postings,
@@ -117,7 +117,7 @@ def _slice_record(
 
 
 def _encoded_negotiation(view: pyowl_core.OntologyView) -> object:
-    encoded = produce_encoded_structural_view_v1(view)
+    encoded = produce_encoded_structural_view_v2(view)
     lease = _validate_encoded_view(
         view,
         encoded,
@@ -760,7 +760,7 @@ def test_shared_union_dag_has_exact_scalar_program_without_ground_disjunctions()
         ),
         options=OPTIONS,
     )
-    node_tags = memoryview(produce_encoded_structural_view_v1(snapshot).buffers["node_tags"]).cast(
+    node_tags = memoryview(produce_encoded_structural_view_v2(snapshot).buffers["node_tags"]).cast(
         "H"
     )
     assert list(node_tags).count(31) == 1

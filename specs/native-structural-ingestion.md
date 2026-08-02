@@ -31,6 +31,14 @@ After identity-preserving core coercion, pyHermiT inspects
 model schema, scope, descriptor digest, structural fingerprint, little-endian fields, offsets,
 counts, tags, segment graph, and owner lifetime before native compilation.
 
+The pyHermiT 0.2 contract accepts only `pyowl-core/structural-columns` schema 2 with core
+model schema 2 and descriptor SHA-256
+`c51d0eb7ecf6f29ad3495fe7c40a2ea6741cf03a7cf194d51417bb810df90f51`. The advertised
+native capability is `encoded-structural-compiler-v2`. Schema 1 views, descriptors,
+fingerprints, and persisted producer bytes fail closed; callers must regenerate them with
+pyowl-core 0.2. A scalar-only provider remains supported as described below, but an object
+that advertises an incompatible encoded schema is never decoded as schema 2.
+
 Three paths remain explicit:
 
 - `scalar-python`: existing scalar profile validation, normalization, clausification, and Python

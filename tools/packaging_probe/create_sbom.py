@@ -315,7 +315,7 @@ def create_sbom(root: Path, namespace: str) -> dict[str, object]:
         raise ValueError("SBOM namespace must be a whitespace-free HTTPS URL")
     version = _runtime_version((root / "src/pyhermit/_version.py").read_bytes())
     root_id = _spdx_id("pyHermiT", version)
-    core_id = _spdx_id("pyowl-core", ">=0.1,<0.2")
+    core_id = _spdx_id("pyowl-core", ">=0.2,<0.3")
     packages: list[dict[str, object]] = [
         {
             "SPDXID": root_id,
@@ -338,7 +338,7 @@ def create_sbom(root: Path, namespace: str) -> dict[str, object]:
         {
             "SPDXID": core_id,
             "name": "pyowl-core",
-            "versionInfo": ">=0.1,<0.2",
+            "versionInfo": ">=0.2,<0.3",
             "downloadLocation": "https://github.com/OAEI-ML/pyOWLCore",
             "copyrightText": "NOASSERTION",
             "filesAnalyzed": False,

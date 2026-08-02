@@ -61,5 +61,5 @@ expected_evidence = ["reports/release/artifact-audit.md"]
 [[requirement]]
 id = "owner-legal-review-signoff"
 status = "waived"
-evidence = "reports/release/0.1.2-owner-release-override.md"
-expected_evidence = ["reports/release/0.1.2-owner-release-override.md"]
+evidence = "reports/release/0.2.0-owner-release-override.md"
+expected_evidence = ["reports/release/0.2.0-owner-release-override.md"]

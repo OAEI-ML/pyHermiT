@@ -3517,7 +3517,7 @@ fn data_boolean_definitions<B: ByteSource>(
         let node = model.node(root.node)?;
         if node.tag() != DATA_PROPERTY_RANGE_TAG || node.field_count() != 3 {
             return Err(EncodedValidationError::invariant(
-                "data-property range root no longer has schema-1 shape",
+                "data-property range root no longer has schema-2 shape",
             ));
         }
         let property = node_field(model, node, 0, "data-property range role")?;
@@ -3644,7 +3644,7 @@ fn flat_data_boolean_expression<B: ByteSource>(
         }
         if node.field_count() != 1 {
             return Err(EncodedValidationError::invariant(
-                "data complement no longer has schema-1 shape",
+                "data complement no longer has schema-2 shape",
             ));
         }
         depth = depth.checked_add(1).ok_or_else(|| {
@@ -3661,7 +3661,7 @@ fn flat_data_boolean_expression<B: ByteSource>(
     }
     if node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "data Boolean expression no longer has schema-1 shape",
+            "data Boolean expression no longer has schema-2 shape",
         ));
     }
     let component = required_component(model.field(node.fields().start)?, "data Boolean operands")?;
@@ -3815,7 +3815,7 @@ fn collect_flat_data_boolean_operand<B: ByteSource>(
         }
         if node.field_count() != 1 {
             return Err(EncodedValidationError::invariant(
-                "nested data complement no longer has schema-1 shape",
+                "nested data complement no longer has schema-2 shape",
             ));
         }
         depth = child_expression_depth(depth, "data-range depth overflowed")?;
@@ -3828,7 +3828,7 @@ fn collect_flat_data_boolean_operand<B: ByteSource>(
     if matches!(node.tag(), DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG) {
         if node.field_count() != 1 {
             return Err(EncodedValidationError::invariant(
-                "nested data Boolean expression no longer has schema-1 shape",
+                "nested data Boolean expression no longer has schema-2 shape",
             ));
         }
         let nested_intersection = (node.tag() == DATA_INTERSECTION_OF_TAG) != complemented;
@@ -3921,7 +3921,7 @@ fn normalized_data_term<B: ByteSource>(
         }
         if node.field_count() != 1 {
             return Err(EncodedValidationError::invariant(
-                "recursive data complement no longer has schema-1 shape",
+                "recursive data complement no longer has schema-2 shape",
             ));
         }
         depth = child_expression_depth(depth, "data-range depth overflowed")?;
@@ -3966,7 +3966,7 @@ fn normalized_data_term<B: ByteSource>(
     }
     if node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "recursive data Boolean expression no longer has schema-1 shape",
+            "recursive data Boolean expression no longer has schema-2 shape",
         ));
     }
     let component = required_component(
@@ -4365,7 +4365,7 @@ fn datatype_boolean_definitions<B: ByteSource>(
         let node = model.node(root.node)?;
         if node.tag() != DATATYPE_DEFINITION_TAG || node.field_count() != 3 {
             return Err(EncodedValidationError::invariant(
-                "datatype-definition root no longer has schema-1 shape",
+                "datatype-definition root no longer has schema-2 shape",
             ));
         }
         let expression = node_field(model, node, 1, "datatype defining range")?;
@@ -4703,7 +4703,7 @@ fn retain_subclass_boolean_definitions<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != SUBCLASS_TAG || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "subclass root no longer has schema-1 shape",
+            "subclass root no longer has schema-2 shape",
         ));
     }
     let sub_class = node_field(model, node, 0, "subclass antecedent")?;
@@ -4773,7 +4773,7 @@ fn retain_class_assertion_boolean_definition<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != CLASS_ASSERTION_TAG || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "class-assertion root no longer has schema-1 shape",
+            "class-assertion root no longer has schema-2 shape",
         ));
     }
     let expression = node_field(model, node, 0, "class-assertion class expression")?;
@@ -4850,7 +4850,7 @@ fn retain_class_constraint_boolean_definition<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != tag || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(format!(
-            "{name} root no longer has schema-1 shape"
+            "{name} root no longer has schema-2 shape"
         )));
     }
     let property = node_field(model, node, 0, "class constraint property")?;
@@ -4913,7 +4913,7 @@ fn retain_key_boolean_definition<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != HAS_KEY_TAG || node.field_count() != 4 {
         return Err(EncodedValidationError::invariant(
-            "has-key root no longer has schema-1 shape",
+            "has-key root no longer has schema-2 shape",
         ));
     }
     let object_component = required_component(
@@ -5010,7 +5010,7 @@ fn retain_disjoint_boolean_definitions<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != DISJOINT_CLASSES_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "disjoint-classes root no longer has schema-1 shape",
+            "disjoint-classes root no longer has schema-2 shape",
         ));
     }
     let expressions_component = required_component(
@@ -5088,7 +5088,7 @@ fn retain_disjoint_union_boolean_definition<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != DISJOINT_UNION_TAG || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "disjoint-union root no longer has schema-1 shape",
+            "disjoint-union root no longer has schema-2 shape",
         ));
     }
     let defined = node_field(model, node, 0, "disjoint-union defined class")?;
@@ -5245,7 +5245,7 @@ fn retain_equivalent_boolean_definitions<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != EQUIVALENT_CLASSES_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "equivalent-classes root no longer has schema-1 shape",
+            "equivalent-classes root no longer has schema-2 shape",
         ));
     }
     let expressions_component = required_component(
@@ -5390,7 +5390,7 @@ fn normalized_class_term<B: ByteSource>(
         }
         if node.field_count() != 1 {
             return Err(EncodedValidationError::invariant(
-                "recursive class complement no longer has schema-1 shape",
+                "recursive class complement no longer has schema-2 shape",
             ));
         }
         depth = child_expression_depth(depth, "class-expression depth overflowed")?;
@@ -5410,7 +5410,7 @@ fn normalized_class_term<B: ByteSource>(
         if selection.is_none() && node.tag() == OBJECT_HAS_SELF_TAG {
             if node.field_count() != 1 {
                 return Err(EncodedValidationError::invariant(
-                    "object-self definition no longer has schema-1 shape",
+                    "object-self definition no longer has schema-2 shape",
                 ));
             }
             let Some(object_roles) = object_roles else {
@@ -5438,7 +5438,7 @@ fn normalized_class_term<B: ByteSource>(
         if selection.is_none() && node.tag() == OBJECT_HAS_VALUE_TAG {
             if node.field_count() != 2 {
                 return Err(EncodedValidationError::invariant(
-                    "object-has-value definition no longer has schema-1 shape",
+                    "object-has-value definition no longer has schema-2 shape",
                 ));
             }
             let Some(object_roles) = object_roles else {
@@ -5538,7 +5538,7 @@ fn normalized_class_term<B: ByteSource>(
         if selection.is_none() && node.tag() == DATA_HAS_VALUE_TAG {
             if node.field_count() != 2 {
                 return Err(EncodedValidationError::invariant(
-                    "data-has-value definition no longer has schema-1 shape",
+                    "data-has-value definition no longer has schema-2 shape",
                 ));
             }
             let Some(data_roles) = data_roles else {
@@ -5610,7 +5610,7 @@ fn normalized_class_term<B: ByteSource>(
         {
             if node.field_count() != 2 {
                 return Err(EncodedValidationError::invariant(
-                    "object-quantifier definition no longer has schema-1 shape",
+                    "object-quantifier definition no longer has schema-2 shape",
                 ));
             }
             let Some(object_roles) = object_roles else {
@@ -5680,7 +5680,7 @@ fn normalized_class_term<B: ByteSource>(
         {
             if node.field_count() != 2 {
                 return Err(EncodedValidationError::invariant(
-                    "data-quantifier definition no longer has schema-1 shape",
+                    "data-quantifier definition no longer has schema-2 shape",
                 ));
             }
             let Some(data_roles) = data_roles else {
@@ -5761,7 +5761,7 @@ fn normalized_class_term<B: ByteSource>(
         if selection.is_none() && node.tag() == DATA_EXACT_CARDINALITY_TAG {
             if node.field_count() != 3 {
                 return Err(EncodedValidationError::invariant(
-                    "data-exact-cardinality definition no longer has schema-1 shape",
+                    "data-exact-cardinality definition no longer has schema-2 shape",
                 ));
             }
             let Some(data_roles) = data_roles else {
@@ -5925,7 +5925,7 @@ fn normalized_class_term<B: ByteSource>(
         {
             if node.field_count() != 3 {
                 return Err(EncodedValidationError::invariant(
-                    "data-cardinality definition no longer has schema-1 shape",
+                    "data-cardinality definition no longer has schema-2 shape",
                 ));
             }
             let Some(data_roles) = data_roles else {
@@ -6132,7 +6132,7 @@ fn normalized_class_term<B: ByteSource>(
         if selection.is_none() && node.tag() == OBJECT_EXACT_CARDINALITY_TAG {
             if node.field_count() != 3 {
                 return Err(EncodedValidationError::invariant(
-                    "object-exact-cardinality definition no longer has schema-1 shape",
+                    "object-exact-cardinality definition no longer has schema-2 shape",
                 ));
             }
             let Some(object_roles) = object_roles else {
@@ -6302,7 +6302,7 @@ fn normalized_class_term<B: ByteSource>(
         {
             if node.field_count() != 3 {
                 return Err(EncodedValidationError::invariant(
-                    "object-cardinality definition no longer has schema-1 shape",
+                    "object-cardinality definition no longer has schema-2 shape",
                 ));
             }
             let Some(object_roles) = object_roles else {
@@ -6586,7 +6586,7 @@ fn normalized_class_term<B: ByteSource>(
 
     if node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "recursive class Boolean expression no longer has schema-1 shape",
+            "recursive class Boolean expression no longer has schema-2 shape",
         ));
     }
     let component = required_component(
@@ -9056,7 +9056,7 @@ fn class_signature<B: ByteSource>(
             RootHandler::DisjointUnion => {
                 if root_node.field_count() != 3 {
                     return Err(EncodedValidationError::invariant(
-                        "disjoint-union root no longer has schema-1 shape",
+                        "disjoint-union root no longer has schema-2 shape",
                     ));
                 }
                 let defined = node_field(model, root_node, 0, "disjoint-union defined class")?;
@@ -9574,7 +9574,7 @@ fn is_named_nominal<B: ByteSource>(
     }
     if node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "object nominal no longer has schema-1 shape",
+            "object nominal no longer has schema-2 shape",
         ));
     }
     let component = required_component(
@@ -9625,7 +9625,7 @@ fn named_nominal_entity_ids<B: ByteSource>(
     let node = model.node(identifier)?;
     if node.tag() != OBJECT_ONE_OF_TAG || node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "selected object nominal no longer has schema-1 shape",
+            "selected object nominal no longer has schema-2 shape",
         ));
     }
     let component = required_component(
@@ -9747,7 +9747,7 @@ fn atomic_class_projection_at_depth<B: ByteSource>(
         }
         if node.field_count() != 1 {
             return Err(EncodedValidationError::invariant(
-                "class complement no longer has schema-1 shape",
+                "class complement no longer has schema-2 shape",
             ));
         }
         depth = depth
@@ -9881,7 +9881,7 @@ fn positive_atomic_class_projection<B: ByteSource>(
     }
     if node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "class Boolean expression no longer has schema-1 shape",
+            "class Boolean expression no longer has schema-2 shape",
         ));
     }
     let component =
@@ -10015,7 +10015,7 @@ fn reducible_object_quantifier_projection<B: ByteSource>(
         })?;
     if node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "object quantifier no longer has schema-1 shape",
+            "object quantifier no longer has schema-2 shape",
         ));
     }
     if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
@@ -10060,7 +10060,7 @@ fn reducible_object_value_projection<B: ByteSource>(
         })?;
     if node.field_count() != rule.field_count {
         return Err(EncodedValidationError::invariant(
-            "object value restriction no longer has schema-1 shape",
+            "object value restriction no longer has schema-2 shape",
         ));
     }
     if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
@@ -10102,7 +10102,7 @@ fn reducible_cardinality_projection<B: ByteSource>(
         })?;
     if node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "cardinality restriction no longer has schema-1 shape",
+            "cardinality restriction no longer has schema-2 shape",
         ));
     }
     if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
@@ -10192,7 +10192,7 @@ fn reducible_data_quantifier_projection<B: ByteSource>(
         })?;
     if node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "data quantifier no longer has schema-1 shape",
+            "data quantifier no longer has schema-2 shape",
         ));
     }
     if !reduction_inputs_are_retained(model, symbols, node.id(), depth, budget)? {
@@ -10246,7 +10246,7 @@ fn reducible_data_value_projection<B: ByteSource>(
         })?;
     if node.field_count() != rule.field_count {
         return Err(EncodedValidationError::invariant(
-            "data has-value restriction no longer has schema-1 shape",
+            "data has-value restriction no longer has schema-2 shape",
         ));
     }
     let property = node_field(model, node, 0, "data has-value property")?;
@@ -10422,7 +10422,7 @@ fn object_property_has_iri<B: ByteSource>(
     let named = if node.tag() == OBJECT_INVERSE_OF_TAG {
         if node.field_count() != 1 {
             return Err(EncodedValidationError::invariant(
-                "inverse object property no longer has schema-1 shape",
+                "inverse object property no longer has schema-2 shape",
             ));
         }
         node_field(model, node, 0, "inverse object-property operand")?
@@ -11448,7 +11448,7 @@ fn atomic_data_range_projection_at_depth<B: ByteSource>(
         }
         if node.field_count() != 1 {
             return Err(EncodedValidationError::invariant(
-                "data complement no longer has schema-1 shape",
+                "data complement no longer has schema-2 shape",
             ));
         }
         depth = depth
@@ -11522,7 +11522,7 @@ fn positive_atomic_data_range_projection<B: ByteSource>(
         DATATYPE_RESTRICTION_TAG if node.field_count() == 2 => true,
         DATA_ONE_OF_TAG | DATATYPE_RESTRICTION_TAG => {
             return Err(EncodedValidationError::invariant(
-                "atomic data-range expression no longer has schema-1 shape",
+                "atomic data-range expression no longer has schema-2 shape",
             ));
         }
         _ => false,
@@ -11550,7 +11550,7 @@ fn positive_atomic_data_range_projection<B: ByteSource>(
         })?;
     if node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "data Boolean expression no longer has schema-1 shape",
+            "data Boolean expression no longer has schema-2 shape",
         ));
     }
     let component = required_component(model.field(node.fields().start)?, "data Boolean operands")?;
@@ -11955,7 +11955,7 @@ fn extract_literal<B: ByteSource>(
 ) -> EncodedResult<ExtractedLiteral> {
     if literal.tag() != LITERAL_TAG || literal.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "literal node no longer has schema-1 shape",
+            "literal node no longer has schema-2 shape",
         ));
     }
     let fields = literal.fields();
@@ -13924,7 +13924,7 @@ fn anonymous_individual_display<B: ByteSource>(
     const SCOPE_BYTES: usize = 32;
     if node.tag() != ANONYMOUS_INDIVIDUAL_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "anonymous individual no longer has schema-1 shape",
+            "anonymous individual no longer has schema-2 shape",
         ));
     }
     let scope_component = required_component(
@@ -14047,7 +14047,7 @@ fn named_subclass<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != SUBCLASS_TAG || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "subclass root no longer has schema-1 shape",
+            "subclass root no longer has schema-2 shape",
         ));
     }
     let sub_class_node = node_field(model, node, 0, "subclass antecedent")?;
@@ -14139,7 +14139,7 @@ fn named_equivalent_classes<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != EQUIVALENT_CLASSES_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "equivalent-classes root no longer has schema-1 shape",
+            "equivalent-classes root no longer has schema-2 shape",
         ));
     }
     let expressions_component = required_component(
@@ -14264,7 +14264,7 @@ fn named_disjoint_classes<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != DISJOINT_CLASSES_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "disjoint-classes root no longer has schema-1 shape",
+            "disjoint-classes root no longer has schema-2 shape",
         ));
     }
     let expressions_component = required_component(
@@ -14547,7 +14547,7 @@ fn named_disjoint_union<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != DISJOINT_UNION_TAG || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "disjoint-union root no longer has schema-1 shape",
+            "disjoint-union root no longer has schema-2 shape",
         ));
     }
     let defined = node_field(model, node, 0, "disjoint-union defined class")?;
@@ -14740,7 +14740,7 @@ fn named_object_constraint<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != tag || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(format!(
-            "{name} root no longer has schema-1 shape"
+            "{name} root no longer has schema-2 shape"
         )));
     }
     let property = node_field(model, node, 0, "object-property constraint role")?;
@@ -14807,7 +14807,7 @@ fn named_object_characteristic<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != tag || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(format!(
-            "{name} root no longer has schema-1 shape"
+            "{name} root no longer has schema-2 shape"
         )));
     }
     let property = node_field(model, node, 0, "object-property characteristic role")?;
@@ -14835,7 +14835,7 @@ fn named_data_domain<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != DATA_PROPERTY_DOMAIN_TAG || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "data-property domain root no longer has schema-1 shape",
+            "data-property domain root no longer has schema-2 shape",
         ));
     }
     let property = node_field(model, node, 0, "data-property domain role")?;
@@ -14877,7 +14877,7 @@ fn named_data_range<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != DATA_PROPERTY_RANGE_TAG || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "data-property range root no longer has schema-1 shape",
+            "data-property range root no longer has schema-2 shape",
         ));
     }
     let property = node_field(model, node, 0, "data-property range role")?;
@@ -15086,7 +15086,7 @@ fn source_datatype_definition_pairs<B: ByteSource>(
         let node = model.node(root.node)?;
         if node.tag() != DATATYPE_DEFINITION_TAG || node.field_count() != 3 {
             return Err(EncodedValidationError::invariant(
-                "datatype-definition root no longer has schema-1 shape",
+                "datatype-definition root no longer has schema-2 shape",
             ));
         }
         let datatype = node_field(model, node, 0, "defined datatype")?;
@@ -15168,7 +15168,7 @@ fn named_datatype_definition<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != DATATYPE_DEFINITION_TAG || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "datatype-definition root no longer has schema-1 shape",
+            "datatype-definition root no longer has schema-2 shape",
         ));
     }
     let datatype = node_field(model, node, 0, "defined datatype")?;
@@ -15218,7 +15218,7 @@ fn emit_datatype_boolean_definition<B: ByteSource>(
     let node = model.node(definition.root)?;
     if node.tag() != DATATYPE_DEFINITION_TAG || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "datatype Boolean definition no longer has schema-1 shape",
+            "datatype Boolean definition no longer has schema-2 shape",
         ));
     }
     let datatype = node_field(model, node, 0, "defined datatype")?;
@@ -15428,7 +15428,7 @@ fn named_key<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != HAS_KEY_TAG || node.field_count() != 4 {
         return Err(EncodedValidationError::invariant(
-            "has-key root no longer has schema-1 shape",
+            "has-key root no longer has schema-2 shape",
         ));
     }
     let expression = node_field(model, node, 0, "has-key class expression")?;
@@ -15550,7 +15550,7 @@ fn named_data_functionality<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != FUNCTIONAL_DATA_PROPERTY_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "functional-data-property root no longer has schema-1 shape",
+            "functional-data-property root no longer has schema-2 shape",
         ));
     }
     let property = node_field(model, node, 0, "functional data-property role")?;
@@ -15710,7 +15710,7 @@ fn named_same_individuals<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != SAME_INDIVIDUAL_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "same-individual root no longer has schema-1 shape",
+            "same-individual root no longer has schema-2 shape",
         ));
     }
     let individuals_component = required_component(
@@ -15799,7 +15799,7 @@ fn named_different_individuals<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != DIFFERENT_INDIVIDUALS_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "different-individuals root no longer has schema-1 shape",
+            "different-individuals root no longer has schema-2 shape",
         ));
     }
     let individuals_component = required_component(
@@ -15916,7 +15916,7 @@ fn named_class_assertion<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != CLASS_ASSERTION_TAG || node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "class-assertion root no longer has schema-1 shape",
+            "class-assertion root no longer has schema-2 shape",
         ));
     }
     let Some((class_id, negative)) = class_assertion_literal(
@@ -16098,7 +16098,7 @@ fn named_object_assertion<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != expected_tag || node.field_count() != 4 {
         return Err(EncodedValidationError::invariant(
-            "object-property assertion root no longer has schema-1 shape",
+            "object-property assertion root no longer has schema-2 shape",
         ));
     }
     let property = node_field(model, node, 0, "object-property assertion role")?;
@@ -16160,7 +16160,7 @@ fn named_data_assertion<B: ByteSource>(
     let node = model.node(root)?;
     if node.tag() != expected_tag || node.field_count() != 4 {
         return Err(EncodedValidationError::invariant(
-            "data-property assertion root no longer has schema-1 shape",
+            "data-property assertion root no longer has schema-2 shape",
         ));
     }
     let property = node_field(model, node, 0, "data-property assertion role")?;

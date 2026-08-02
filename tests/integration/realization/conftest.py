@@ -27,7 +27,7 @@ from pyhermit.services.realization import RealizationService
 class _Fingerprint:
     digest: bytes
     algorithm: str = "sha256"
-    schema: int = 1
+    schema: int = 2
 
     @property
     def hex(self) -> str:
@@ -47,10 +47,10 @@ def _compiled(program: ClauseProgram) -> CompiledOntology:
         source_structural_fingerprint=fingerprint,
         source_logical_fingerprint=fingerprint,
         source_signature_fingerprint=fingerprint,
-        core_package_version="0.1.0",
-        core_api_version=(0, 1),
-        core_model_schema_version=1,
-        core_wire_format_version=(1, 0),
+        core_package_version="0.2.0",
+        core_api_version=(0, 2),
+        core_model_schema_version=2,
+        core_wire_format_version=(1, 2),
         core_adapter_protocol_version=1,
         symbols=program.symbols,
         clauses=program.clauses,

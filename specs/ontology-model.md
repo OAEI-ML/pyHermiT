@@ -2,8 +2,8 @@
 
 pyHermiT does not implement a second OWL object model, document parser, RDF-to-OWL mapper,
 canonical OWL writer, import resolver, or general ontology store. The canonical Java-free
-structural layer is distribution `pyowl-core`, import `pyowl_core`. pyHermiT 0.1.x requires
-`pyowl-core>=0.1,<0.2` and Python 3.10 or later.
+structural layer is distribution `pyowl-core`, import `pyowl_core`. pyHermiT 0.2.x requires
+`pyowl-core>=0.2,<0.3` and Python 3.10 or later.
 
 The shared structural language follows the OWL 2 Structural Specification. pyHermiT remains
 responsible for OWL 2 DL profile/global-restriction validation and Direct Semantics
@@ -294,15 +294,18 @@ duplicating the general OWL structural layer.
 
 ## 10. Version and adapter compatibility
 
-- Packaging requires `pyowl-core>=0.1,<0.2`; the initial public contract line is 0.1.x.
+- Packaging requires `pyowl-core>=0.2,<0.3`; the current public contract line is 0.2.x.
+- Runtime compatibility requires core `API_VERSION=(0, 2)`, `MODEL_SCHEMA_VERSION=2`,
+  `WIRE_FORMAT_VERSION=(1, 2)`, and adapter protocol version 1. Older model and encoded-view
+  schemas fail before profile validation; they are never interpreted optimistically.
 - Compatibility reads `API_VERSION` and parses package SemVer; it never compares
   `__version__` strings lexically.
 - Providers/adapters declare `ADAPTER_PROTOCOL_VERSION` and compatible model/API versions.
   Mismatch fails before profile validation with expected/actual diagnostics.
 - Core persistence uses only `encode_snapshot`, `decode_snapshot`, and
   `open_snapshot(path, mmap=True, verify=True)`. Its magic is `PYOCORE\0` and its independent
-  `WIRE_FORMAT_VERSION=(major, minor)` hard-fails on major mismatch; unknown optional
-  same-major sections may be skipped.
+  `WIRE_FORMAT_VERSION=(major, minor)` hard-fails on major mismatch and requires minor 2 or
+  later within major 1; unknown optional same-major sections may be skipped.
 - Persistent caches bind package/API SemVer, `MODEL_SCHEMA_VERSION`,
   `WIRE_FORMAT_VERSION`, `ADAPTER_PROTOCOL_VERSION`, all required fingerprints, and the
   consumer compiler schema. Incompatible/corrupt caches are discarded and rebuilt, never

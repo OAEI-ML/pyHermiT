@@ -4,9 +4,10 @@
 HermiT session, eliminating ontology-sized Python validation/normalization/clausification and the
 private input-wire round trip on the optimized path.
 
-**Status:** specified, not implemented. **Depends on:** WP17, WPR4, and a frozen candidate from
-pyowl-core WP17. The pyELK and projector successor packages may run in parallel because each owns
-its private consumer IR.
+**Status:** implemented for pyHermiT 0.2; repository acceptance complete, with hosted release
+jobs still required. **Depends on:** WP17, WPR4, and the exact pyowl-core 0.2 source recorded in
+`../../release/core-compatibility.json`. The pyELK and projector successor packages may run in
+parallel because each owns its private consumer IR.
 
 ## Read first
 

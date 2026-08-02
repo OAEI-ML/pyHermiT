@@ -1,6 +1,6 @@
 schema = 2
 reference = "hermit-master-37ec30a"
-shared_ontology_distribution = "pyowl-core>=0.1,<0.2"
+shared_ontology_distribution = "pyowl-core>=0.2,<0.3"
 shared_ontology_import = "pyowl_core"
 python_requires = ">=3.10"
 

@@ -1,22 +1,22 @@
 {
   "schema": "pyhermit.core-compatibility/2",
-  "dependency_constraint": "pyowl-core>=0.1,<0.2",
+  "dependency_constraint": "pyowl-core>=0.2,<0.3",
   "tested_source": {
     "repository": "https://github.com/OAEI-ML/pyOWLCore",
-    "commit": "b0d8fd27537b2f177cfe9a5e0fd41f33b9f18f19",
-    "tree": "e72fc93248cd363a5c67dac9efffb367a71c2b1d",
-    "version": "0.1.1"
+    "commit": "a0d6d4df6ce8bc56cfa4542709f02efa1e58a57f",
+    "tree": "16258fc9775b1a19ba59d27585278b7e9210c2a1",
+    "version": "0.2.0"
   },
   "native_ontology_redesign": {
-    "commit": "b0d8fd27537b2f177cfe9a5e0fd41f33b9f18f19",
-    "tree": "e72fc93248cd363a5c67dac9efffb367a71c2b1d",
+    "commit": "a0d6d4df6ce8bc56cfa4542709f02efa1e58a57f",
+    "tree": "16258fc9775b1a19ba59d27585278b7e9210c2a1",
     "classification": "behavior-preserving-native-ontology-redesign",
-    "workpackages": ["WP14", "WP15", "WP16", "WP17", "WP18"]
+    "workpackages": ["WP14", "WP15", "WP16", "WP17", "WP18", "WP19", "WP20", "WP21", "WP22", "WP23"]
   },
   "encoded_ingestion": {
     "schema_name": "pyowl-core/structural-columns",
-    "schema_version": 1,
-    "descriptor_sha256": "9ad29db6a7e616f65cea2957bc5ba8d1f9b99ef0eb1fe1432c09be25786267b5",
+    "schema_version": 2,
+    "descriptor_sha256": "c51d0eb7ecf6f29ad3495fe7c40a2ea6741cf03a7cf194d51417bb810df90f51",
     "capability_state": "advertised",
     "required_ingestion_path": "encoded-native",
     "parity_contract": "wp18-encoded-public-dispatch-short"

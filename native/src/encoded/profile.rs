@@ -5,7 +5,7 @@
 //! This private phase owns exact data-arity, top-data-property, local
 //! anonymous-placement, global entity/declaration, datatype, object-role, and
 //! extension projections. A separate versioned identity context supplies
-//! ontology/version IRIs without changing structural-columns schema 1. That schema
+//! ontology/version IRIs without changing structural-columns schema 2. That schema
 //! does not carry origin rows, so the manifest exposes canonical root provenance
 //! without inventing `ProfileIssue.document_keys`. Anonymous graph, entity,
 //! declaration, and role facts remain private until all selected slices can be
@@ -38,7 +38,7 @@ use super::symbols::RootHandler;
 use super::{u32_at, ByteSource, EncodedResult, EncodedValidationError};
 
 const PROFILE_PHASE_SCHEMA_VERSION: u16 = 1;
-const CORE_STRUCTURAL_DIGEST_PREFIX: &[u8] = b"pyowl-core:structural-value:v1\x00\x01";
+const CORE_STRUCTURAL_DIGEST_PREFIX: &[u8] = b"pyowl-core:structural-value:v1\x00\x02";
 const POSTINGS_ALL: u8 = 0;
 const POSTINGS_INCLUDE: u8 = 1;
 const POSTINGS_EXCLUDE: u8 = 2;
@@ -308,7 +308,7 @@ impl Default for ProfilePhaseLimits {
     }
 }
 
-/// Exact scalar-compatible issue fields available in structural-columns v1.
+/// Exact scalar-compatible issue fields available in structural-columns v2.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProfileIssue {
     pub rule_id: &'static str,
@@ -2881,7 +2881,7 @@ fn declaration_entity<B: ByteSource>(
     let node = model.node(identifier)?;
     if node.tag() != DECLARATION_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "validated declaration lost its schema-1 shape",
+            "validated declaration lost its schema-2 shape",
         ));
     }
     let entity = required_node(model, node.fields().start, "profile declared entity")?;
@@ -2984,7 +2984,7 @@ fn classify_profile_literal<B: ByteSource, E>(
     let literal = model.node(identifier)?;
     if literal.tag() != LITERAL_TAG || literal.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "validated profile literal lost its schema-1 shape",
+            "validated profile literal lost its schema-2 shape",
         )
         .into());
     }
@@ -3063,7 +3063,7 @@ fn retain_profile_datatype_definition<B: ByteSource, E>(
     let definition = model.node(identifier)?;
     if definition.tag() != DATATYPE_DEFINITION_TAG || definition.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "validated datatype definition lost its schema-1 shape",
+            "validated datatype definition lost its schema-2 shape",
         )
         .into());
     }
@@ -3162,7 +3162,7 @@ fn collect_profile_datatype_references<B: ByteSource, E>(
             DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG => {
                 if node.field_count() != 1 {
                     return Err(EncodedValidationError::invariant(
-                        "validated datatype Boolean lost its schema-1 shape",
+                        "validated datatype Boolean lost its schema-2 shape",
                     )
                     .into());
                 }
@@ -3207,7 +3207,7 @@ fn collect_profile_datatype_references<B: ByteSource, E>(
             DATA_COMPLEMENT_OF_TAG => {
                 if node.field_count() != 1 {
                     return Err(EncodedValidationError::invariant(
-                        "validated datatype complement lost its schema-1 shape",
+                        "validated datatype complement lost its schema-2 shape",
                     )
                     .into());
                 }
@@ -3227,7 +3227,7 @@ fn collect_profile_datatype_references<B: ByteSource, E>(
             DATA_ONE_OF_TAG => {
                 if node.field_count() != 1 {
                     return Err(EncodedValidationError::invariant(
-                        "validated data enumeration lost its schema-1 shape",
+                        "validated data enumeration lost its schema-2 shape",
                     )
                     .into());
                 }
@@ -3235,7 +3235,7 @@ fn collect_profile_datatype_references<B: ByteSource, E>(
             DATATYPE_RESTRICTION_TAG => {
                 if node.field_count() != 2 {
                     return Err(EncodedValidationError::invariant(
-                        "validated datatype restriction lost its schema-1 shape",
+                        "validated datatype restriction lost its schema-2 shape",
                     )
                     .into());
                 }
@@ -3393,7 +3393,7 @@ fn profile_data_range_failure<B: ByteSource, E>(
         DATA_INTERSECTION_OF_TAG | DATA_UNION_OF_TAG => {
             if node.field_count() != 1 {
                 return Err(EncodedValidationError::invariant(
-                    "validated datatype Boolean lost its schema-1 shape",
+                    "validated datatype Boolean lost its schema-2 shape",
                 )
                 .into());
             }
@@ -3424,7 +3424,7 @@ fn profile_data_range_failure<B: ByteSource, E>(
         DATA_COMPLEMENT_OF_TAG => {
             if node.field_count() != 1 {
                 return Err(EncodedValidationError::invariant(
-                    "validated datatype complement lost its schema-1 shape",
+                    "validated datatype complement lost its schema-2 shape",
                 )
                 .into());
             }
@@ -3438,7 +3438,7 @@ fn profile_data_range_failure<B: ByteSource, E>(
         DATA_ONE_OF_TAG => {
             if node.field_count() != 1 {
                 return Err(EncodedValidationError::invariant(
-                    "validated data enumeration lost its schema-1 shape",
+                    "validated data enumeration lost its schema-2 shape",
                 )
                 .into());
             }
@@ -3485,7 +3485,7 @@ fn profile_datatype_restriction_failure<B: ByteSource, E>(
 ) -> ControlledResult<Option<ProfileDatatypeFailure>, E> {
     if restriction.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "validated datatype restriction lost its schema-1 shape",
+            "validated datatype restriction lost its schema-2 shape",
         )
         .into());
     }
@@ -3542,7 +3542,7 @@ fn profile_datatype_restriction_failure<B: ByteSource, E>(
         let facet_node = model.node(facet)?;
         if facet_node.tag() != FACET_RESTRICTION_TAG || facet_node.field_count() != 2 {
             return Err(EncodedValidationError::invariant(
-                "validated facet restriction lost its schema-1 shape",
+                "validated facet restriction lost its schema-2 shape",
             )
             .into());
         }
@@ -3818,7 +3818,7 @@ fn profile_entity_identity<B: ByteSource>(
     let entity = model.node(identifier)?;
     if entity.tag() != ENTITY_TAG || entity.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "validated profile entity lost its schema-1 shape",
+            "validated profile entity lost its schema-2 shape",
         ));
     }
     let fields = entity.fields();
@@ -3838,7 +3838,7 @@ fn profile_entity_identity<B: ByteSource>(
     let iri_node = model.node(iri_identifier)?;
     if iri_node.tag() != IRI_TAG || iri_node.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "validated profile entity IRI lost its schema-1 shape",
+            "validated profile entity IRI lost its schema-2 shape",
         ));
     }
     let iri_component = required_component(
@@ -3919,7 +3919,7 @@ fn profile_iri_text<B: ByteSource>(
     let iri = model.node(identifier)?;
     if iri.tag() != IRI_TAG || iri.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "validated profile IRI lost its schema-1 shape",
+            "validated profile IRI lost its schema-2 shape",
         ));
     }
     profile_text_field(model, iri.fields().start, "profile IRI text", budget)
@@ -3979,7 +3979,7 @@ fn profile_object_role<B: ByteSource>(
         )
     } else {
         return Err(EncodedValidationError::invariant(
-            "validated profile object role lost its schema-1 shape",
+            "validated profile object role lost its schema-2 shape",
         ));
     };
     let identity = profile_entity_identity(model, entity, budget)?;
@@ -4273,7 +4273,7 @@ fn retain_profile_role_axiom_facts<B: ByteSource, E>(
         SUB_OBJECT_PROPERTY_TAG => {
             if node.field_count() != 3 {
                 return Err(EncodedValidationError::invariant(
-                    "validated sub-object-property axiom lost its schema-1 shape",
+                    "validated sub-object-property axiom lost its schema-2 shape",
                 )
                 .into());
             }
@@ -4291,7 +4291,7 @@ fn retain_profile_role_axiom_facts<B: ByteSource, E>(
             if sub_node.tag() == OBJECT_PROPERTY_CHAIN_TAG {
                 if sub_node.field_count() != 1 {
                     return Err(EncodedValidationError::invariant(
-                        "validated object-property chain lost its schema-1 shape",
+                        "validated object-property chain lost its schema-2 shape",
                     )
                     .into());
                 }
@@ -4345,7 +4345,7 @@ fn retain_profile_role_axiom_facts<B: ByteSource, E>(
         EQUIVALENT_OBJECT_PROPERTIES_TAG => {
             if node.field_count() != 2 {
                 return Err(EncodedValidationError::invariant(
-                    "validated equivalent-object-properties axiom lost its schema-1 shape",
+                    "validated equivalent-object-properties axiom lost its schema-2 shape",
                 )
                 .into());
             }
@@ -4385,7 +4385,7 @@ fn retain_profile_role_axiom_facts<B: ByteSource, E>(
         INVERSE_OBJECT_PROPERTIES_TAG => {
             if node.field_count() != 3 {
                 return Err(EncodedValidationError::invariant(
-                    "validated inverse-object-properties axiom lost its schema-1 shape",
+                    "validated inverse-object-properties axiom lost its schema-2 shape",
                 )
                 .into());
             }
@@ -4410,7 +4410,7 @@ fn retain_profile_role_axiom_facts<B: ByteSource, E>(
         SYMMETRIC_OBJECT_PROPERTY_TAG => {
             if node.field_count() != 2 {
                 return Err(EncodedValidationError::invariant(
-                    "validated symmetric-object-property axiom lost its schema-1 shape",
+                    "validated symmetric-object-property axiom lost its schema-2 shape",
                 )
                 .into());
             }
@@ -4428,7 +4428,7 @@ fn retain_profile_role_axiom_facts<B: ByteSource, E>(
         TRANSITIVE_OBJECT_PROPERTY_TAG => {
             if node.field_count() != 2 {
                 return Err(EncodedValidationError::invariant(
-                    "validated transitive-object-property axiom lost its schema-1 shape",
+                    "validated transitive-object-property axiom lost its schema-2 shape",
                 )
                 .into());
             }
@@ -4504,7 +4504,7 @@ fn retain_simple_role_requirements_for_node<B: ByteSource, E>(
         | ASYMMETRIC_OBJECT_PROPERTY_TAG => {
             if node.field_count() != 2 {
                 return Err(EncodedValidationError::invariant(
-                    "validated simple-required object characteristic lost its schema-1 shape",
+                    "validated simple-required object characteristic lost its schema-2 shape",
                 )
                 .into());
             }
@@ -4520,7 +4520,7 @@ fn retain_simple_role_requirements_for_node<B: ByteSource, E>(
         DISJOINT_OBJECT_PROPERTIES_TAG => {
             if node.field_count() != 2 {
                 return Err(EncodedValidationError::invariant(
-                    "validated disjoint-object-properties axiom lost its schema-1 shape",
+                    "validated disjoint-object-properties axiom lost its schema-2 shape",
                 )
                 .into());
             }
@@ -4547,7 +4547,7 @@ fn retain_simple_role_requirements_for_node<B: ByteSource, E>(
         OBJECT_HAS_SELF_TAG => {
             if node.field_count() != 1 {
                 return Err(EncodedValidationError::invariant(
-                    "validated object-self restriction lost its schema-1 shape",
+                    "validated object-self restriction lost its schema-2 shape",
                 )
                 .into());
             }
@@ -4563,7 +4563,7 @@ fn retain_simple_role_requirements_for_node<B: ByteSource, E>(
         OBJECT_MIN_CARDINALITY_TAG | OBJECT_MAX_CARDINALITY_TAG | OBJECT_EXACT_CARDINALITY_TAG => {
             if node.field_count() != 3 {
                 return Err(EncodedValidationError::invariant(
-                    "validated object cardinality lost its schema-1 shape",
+                    "validated object cardinality lost its schema-2 shape",
                 )
                 .into());
             }
@@ -6352,7 +6352,7 @@ fn anonymous_assertion_endpoints<B: ByteSource>(
     let node = model.node(identifier)?;
     if node.tag() != OBJECT_PROPERTY_ASSERTION_TAG || node.field_count() != 4 {
         return Err(EncodedValidationError::invariant(
-            "validated object-property assertion lost its schema-1 shape",
+            "validated object-property assertion lost its schema-2 shape",
         ));
     }
     let fields = node.fields();
@@ -6396,7 +6396,7 @@ fn anonymous_key<B: ByteSource>(
     let node = model.node(identifier)?;
     if node.tag() != ANONYMOUS_INDIVIDUAL_TAG || node.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "validated anonymous individual lost its schema-1 shape",
+            "validated anonymous individual lost its schema-2 shape",
         ));
     }
     canonical::canonical_node_key(model, identifier, scope_maps, budget)
@@ -6748,7 +6748,7 @@ fn forbidden_anonymous_expression<B: ByteSource>(
         OBJECT_ONE_OF_TAG => {
             if node.field_count() != 1 {
                 return Err(EncodedValidationError::invariant(
-                    "validated ObjectOneOf lost its schema-1 shape",
+                    "validated ObjectOneOf lost its schema-2 shape",
                 ));
             }
             let component =
@@ -6781,7 +6781,7 @@ fn forbidden_anonymous_expression<B: ByteSource>(
         OBJECT_HAS_VALUE_TAG => {
             if node.field_count() != 2 {
                 return Err(EncodedValidationError::invariant(
-                    "validated ObjectHasValue lost its schema-1 shape",
+                    "validated ObjectHasValue lost its schema-2 shape",
                 ));
             }
             let value_field = node.fields().start.checked_add(1).ok_or_else(|| {
@@ -6812,7 +6812,7 @@ fn allows_top_data_property<B: ByteSource>(
     }
     if node.field_count() != 3 {
         return Err(EncodedValidationError::invariant(
-            "validated data subproperty axiom lost its schema-1 shape",
+            "validated data subproperty axiom lost its schema-2 shape",
         ));
     }
     let fields = node.fields();
@@ -6838,7 +6838,7 @@ fn is_top_data_property<B: ByteSource>(
     let entity = model.node(identifier)?;
     if entity.tag() != ENTITY_TAG || entity.field_count() != 2 {
         return Err(EncodedValidationError::invariant(
-            "validated profile entity lost its schema-1 shape",
+            "validated profile entity lost its schema-2 shape",
         ));
     }
     let fields = entity.fields();
@@ -6864,7 +6864,7 @@ fn is_top_data_property<B: ByteSource>(
     let iri = model.node(iri_identifier)?;
     if iri.tag() != IRI_TAG || iri.field_count() != 1 {
         return Err(EncodedValidationError::invariant(
-            "validated profile entity IRI lost its schema-1 shape",
+            "validated profile entity IRI lost its schema-2 shape",
         ));
     }
     let text_component =
@@ -8440,7 +8440,7 @@ mod tests {
         );
         assert_eq!(
             crate::model::hex(&structural),
-            "9954a3e3ad4ca47cfd0e8a589bc39ecc9e7bb317c1d29e24827dfa5031f02d59"
+            "0223d87f7104107cbab043b35256a4fcac354ed60afa0dcd2da28d199aa36ab3"
         );
         let structural_origins = vec![ProfileOrigin {
             root_digest_sha256: structural,

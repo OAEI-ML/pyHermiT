@@ -12,7 +12,7 @@ from typing import Any, cast
 import pyowl_core
 import pyowl_core.model as owl
 import pytest
-from pyowl_core.backends.native_views import produce_encoded_structural_view_v1
+from pyowl_core.backends.native_views import produce_encoded_structural_view_v2
 
 import pyhermit._native as native
 from pyhermit import ReasonerConfig
@@ -50,7 +50,7 @@ def functional(*body: str) -> bytes:
 
 
 def _native_manifest(snapshot: pyowl_core.OntologyView) -> dict[str, object]:
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    buffers = produce_encoded_structural_view_v2(snapshot).buffers
     encoded = native._encoded_named_class_manifest_v1(
         logical_fingerprint=memoryview(snapshot.logical_fingerprint.digest),
         root_kinds=buffers["root_kinds"],
@@ -76,7 +76,7 @@ def _slice_record(
     member_tokens: tuple[bytes, ...] = (),
     anonymous_scope_maps: tuple[memoryview, ...] = (),
 ) -> tuple[object, ...]:
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    buffers = produce_encoded_structural_view_v2(snapshot).buffers
     return (
         posting_mode,
         memoryview(b"") if postings is None else postings,
@@ -1313,7 +1313,7 @@ def test_source_literal_symbols_follow_source_local_root_selection() -> None:
         ),
         options=OPTIONS,
     )
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    buffers = produce_encoded_structural_view_v2(snapshot).buffers
     root_ids = memoryview(buffers["root_ids"]).cast("I")
     node_tags = memoryview(buffers["node_tags"]).cast("H")
     assertion_rows = [
@@ -1624,7 +1624,7 @@ def test_source_local_selection_retains_generated_restriction_dependencies(
         ),
         options=OPTIONS,
     )
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    buffers = produce_encoded_structural_view_v2(snapshot).buffers
     root_ids = memoryview(buffers["root_ids"]).cast("I")
     node_tags = memoryview(buffers["node_tags"]).cast("H")
     range_roots = tuple(
@@ -1692,7 +1692,7 @@ def test_source_local_selection_excludes_unsupported_restriction_without_leaks()
         ),
         options=OPTIONS,
     )
-    buffers = produce_encoded_structural_view_v1(snapshot).buffers
+    buffers = produce_encoded_structural_view_v2(snapshot).buffers
     root_ids = memoryview(buffers["root_ids"]).cast("I")
     node_tags = memoryview(buffers["node_tags"]).cast("H")
     range_roots = tuple(
@@ -1764,7 +1764,7 @@ def test_composite_selection_retains_cross_slice_restriction_declarations(
         logical,
         roles=("declarations", "logical"),
     )
-    declaration_buffers = produce_encoded_structural_view_v1(declarations).buffers
+    declaration_buffers = produce_encoded_structural_view_v2(declarations).buffers
     declaration_count = len(memoryview(declaration_buffers["root_ids"]).cast("I"))
     declaration_postings = memoryview(
         b"".join(struct.pack("<I", root_id) for root_id in range(1, declaration_count + 1))
@@ -1836,12 +1836,12 @@ def test_composite_selection_excludes_unreachable_declaration_proof_without_leak
         logical,
         roles=("declarations", "logical"),
     )
-    declaration_buffers = produce_encoded_structural_view_v1(declarations).buffers
+    declaration_buffers = produce_encoded_structural_view_v2(declarations).buffers
     declaration_count = len(memoryview(declaration_buffers["root_ids"]).cast("I"))
     declaration_postings = memoryview(
         b"".join(struct.pack("<I", root_id) for root_id in range(1, declaration_count + 1))
     )
-    logical_buffers = produce_encoded_structural_view_v1(logical).buffers
+    logical_buffers = produce_encoded_structural_view_v2(logical).buffers
     root_ids = memoryview(logical_buffers["root_ids"]).cast("I")
     node_tags = memoryview(logical_buffers["node_tags"]).cast("H")
     range_root = next(
@@ -10713,7 +10713,7 @@ def test_hostile_class_kind_rolls_back_and_valid_retry_is_byte_exact() -> None:
         ),
         options=OPTIONS,
     )
-    encoded = produce_encoded_structural_view_v1(snapshot)
+    encoded = produce_encoded_structural_view_v2(snapshot)
     buffers = dict(encoded.buffers)
     buffers["logical_fingerprint"] = memoryview(snapshot.logical_fingerprint.digest)
     baseline = native._encoded_named_class_manifest_v1(**buffers)
@@ -10741,7 +10741,7 @@ def test_generated_definition_namespace_rejects_malformed_fingerprints() -> None
         ),
         options=OPTIONS,
     )
-    buffers = dict(produce_encoded_structural_view_v1(snapshot).buffers)
+    buffers = dict(produce_encoded_structural_view_v2(snapshot).buffers)
     valid = {
         **buffers,
         "logical_fingerprint": memoryview(snapshot.logical_fingerprint.digest),
@@ -10774,7 +10774,7 @@ def test_hostile_individual_kind_rolls_back_and_valid_retry_is_byte_exact() -> N
         ),
         options=OPTIONS,
     )
-    encoded = produce_encoded_structural_view_v1(snapshot)
+    encoded = produce_encoded_structural_view_v2(snapshot)
     buffers = dict(encoded.buffers)
     buffers["logical_fingerprint"] = memoryview(snapshot.logical_fingerprint.digest)
     baseline = native._encoded_named_class_manifest_v1(**buffers)

@@ -12,11 +12,11 @@ pub const IR_SCHEMA_VERSION: u16 = 1;
 /// Stable private extension ABI version.
 pub const ABI_VERSION: u32 = 1;
 /// Exact `pyowl-core` API version compiled into the native handshake.
-pub const CORE_API_VERSION: (u16, u16) = (0, 1);
+pub const CORE_API_VERSION: (u16, u16) = (0, 2);
 /// Exact `pyowl-core` model schema accepted by this native crate.
-pub const CORE_MODEL_SCHEMA_VERSION: u32 = 1;
+pub const CORE_MODEL_SCHEMA_VERSION: u32 = 2;
 /// Exact `pyowl-core` flat-wire version accepted by this native crate.
-pub const CORE_WIRE_FORMAT_VERSION: (u16, u16) = (1, 1);
+pub const CORE_WIRE_FORMAT_VERSION: (u16, u16) = (1, 2);
 /// Exact `pyowl-core` adapter protocol accepted by this native crate.
 pub const CORE_ADAPTER_PROTOCOL_VERSION: u32 = 1;
 

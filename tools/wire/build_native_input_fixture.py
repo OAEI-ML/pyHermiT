@@ -123,17 +123,17 @@ def _build_program() -> ClauseProgram:
 
 def build_fixture_document() -> bytes:
     program = _build_program()
-    fingerprint = _Fingerprint("sha256", 1, b"f" * 32)
+    fingerprint = _Fingerprint("sha256", 2, b"f" * 32)
     ontology = CompiledOntology(
         schema_version=1,
         ontology_fingerprint=hashlib.sha256(b"ontology").hexdigest(),
         source_structural_fingerprint=fingerprint,
         source_logical_fingerprint=fingerprint,
         source_signature_fingerprint=fingerprint,
-        core_package_version="0.1.0",
-        core_api_version=(0, 1),
-        core_model_schema_version=1,
-        core_wire_format_version=(1, 1),
+        core_package_version="0.2.0",
+        core_api_version=(0, 2),
+        core_model_schema_version=2,
+        core_wire_format_version=(1, 2),
         core_adapter_protocol_version=1,
         symbols=program.symbols,
         clauses=program.clauses,
@@ -196,17 +196,17 @@ def build_fixture_documents() -> dict[str, bytes]:
             logical_fingerprint="64" * 32,
         )
     )
-    fingerprint = _Fingerprint("sha256", 1, b"d" * 32)
+    fingerprint = _Fingerprint("sha256", 2, b"d" * 32)
     datatype_ontology = CompiledOntology(
         schema_version=1,
         ontology_fingerprint=hashlib.sha256(b"datatype ontology").hexdigest(),
         source_structural_fingerprint=fingerprint,
         source_logical_fingerprint=fingerprint,
         source_signature_fingerprint=fingerprint,
-        core_package_version="0.1.0",
-        core_api_version=(0, 1),
-        core_model_schema_version=1,
-        core_wire_format_version=(1, 1),
+        core_package_version="0.2.0",
+        core_api_version=(0, 2),
+        core_model_schema_version=2,
+        core_wire_format_version=(1, 2),
         core_adapter_protocol_version=1,
         symbols=datatype_program.symbols,
         clauses=datatype_program.clauses,

@@ -4,7 +4,7 @@ This document defines values that cross module or backend boundaries. Concrete P
 tableau objects and Rust structs are private and are not part of this contract.
 
 Public OWL structural values and ontology documents/views (snapshot/overlay/composite) are not defined here:
-they are the exact `pyowl_core` 0.1 classes. The contracts below begin at pyHermiT's
+they are the exact `pyowl_core` 0.2 classes. The contracts below begin at pyHermiT's
 configuration, compiled-reasoner, backend, and result boundaries.
 
 Upstream reference points:

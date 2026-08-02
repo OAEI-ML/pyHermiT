@@ -2,10 +2,10 @@ schema = 1
 
 [[dependency]]
 name = "pyowl-core"
-requirement = "pyowl-core>=0.1,<0.2"
+requirement = "pyowl-core>=0.2,<0.3"
 scope = "runtime"
 license = "Apache-2.0"
-source = "https://github.com/OAEI-ML/pyowl-core"
+source = "https://github.com/OAEI-ML/pyOWLCore"
 purpose = "shared OWL structural model, parsers, immutable views, and adapters"
 shipped = false
 linkage = "python-import"

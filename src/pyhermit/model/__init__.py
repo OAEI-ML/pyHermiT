@@ -3,7 +3,7 @@
 SPDX-License-Identifier: LGPL-3.0-or-later
 
 This module intentionally defines no classes.  Dynamic population keeps the identity
-surface exhaustive as compatible pyowl-core 0.1 patch releases add constructors.
+surface exhaustive as compatible pyowl-core 0.2 patch releases add constructors.
 """
 
 from __future__ import annotations
