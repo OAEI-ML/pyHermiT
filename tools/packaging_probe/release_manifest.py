@@ -52,8 +52,8 @@ _INSTALLED_WP18_FEATURE = "encoded-structural-compiler-v2"
 _CORE_REQUIREMENT = "pyowl-core>=0.2,<0.3"
 _TESTED_CORE_REQUIREMENT = "pyowl-core==0.2.0"
 _CORE_COMPATIBILITY_SCHEMA = "pyhermit.core-compatibility/2"
-_TESTED_CORE_COMMIT = "422a63363e0b67857eebfca6dd67595ebaad7a09"
-_TESTED_CORE_TREE = "56dc47d73870a786a1248d89bf10a89155fcffff"
+_TESTED_CORE_COMMIT = "85415249251b84474735a3581b94bb1d881bb902"
+_TESTED_CORE_TREE = "724396db74844daa7a3453ea28449b076bc7aacf"
 _ENCODED_INGESTION_CONTRACT = {
     "schema_name": "pyowl-core/structural-columns",
     "schema_version": 2,
