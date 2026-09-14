@@ -248,6 +248,7 @@ class EncodedQueryExecutor:
         "_mapper",
         "_object_hierarchy",
         "_realization",
+        "_require_native_pipeline",
         "_session",
         "_temporary_check",
     )
@@ -260,6 +261,7 @@ class EncodedQueryExecutor:
         temporary_check: TemporaryQueryChecker,
         cancelled: Callable[[], bool] | None = None,
         cache_size: int = _DEFAULT_QUERY_CACHE_SIZE,
+        require_native_pipeline: bool = False,
     ) -> None:
         if not isinstance(context, NativeServiceContext):
             raise TypeError("context must be NativeServiceContext")
@@ -272,6 +274,9 @@ class EncodedQueryExecutor:
             raise TypeError("cancelled must be callable or None")
         if isinstance(cache_size, bool) or not isinstance(cache_size, int) or cache_size < 0:
             raise ValueError("cache_size must be a nonnegative integer")
+        if not isinstance(require_native_pipeline, bool):
+            raise TypeError("require_native_pipeline must be bool")
+        self._require_native_pipeline = require_native_pipeline
         self._context = context
         self._mapper = context.result_mapper()
         self._session = session
@@ -461,6 +466,11 @@ class EncodedQueryExecutor:
         return retained
 
     def _realized(self) -> MappedRealization:
+        if self._require_native_pipeline:
+            raise FeatureNotImplementedError(
+                "strict native realization publication is not supported",
+                feature_id="native_realization_index_unavailable",
+            )
         retained = self._realization
         if retained is None:
             retained = self._mapper.realization(
@@ -532,6 +542,10 @@ QueryExecutor = CompiledQueryExecutor | EncodedQueryExecutor
 
 
 def _hierarchy_node(hierarchy: Hierarchy[_T], value: _T) -> int | None:
+    if hierarchy._native_owner is not None:
+        from pyhermit.backends.native_results import hierarchy_index
+
+        return hierarchy_index(hierarchy).by_member.get(value)
     return next(
         (node_id for node_id, members in enumerate(hierarchy.nodes) if value in members),
         None,
@@ -543,6 +557,10 @@ def _hierarchy_shortcut(hierarchy: Hierarchy[_T], child: _T, parent: _T) -> bool
     parent_node = _hierarchy_node(hierarchy, parent)
     if child_node is None or parent_node is None:
         return None
+    if hierarchy._native_owner is not None:
+        from pyhermit.backends.native_results import hierarchy_reaches
+
+        return hierarchy_reaches(hierarchy, child_node, parent_node)
     return child_node == parent_node or parent_node in hierarchy.ancestors(child_node)
 
 

@@ -154,3 +154,8 @@ def hierarchy_index(value: Hierarchy[_T]) -> HierarchyIndex[_T]:
     object.__setattr__(result, "hierarchy", value)
     object.__setattr__(result, "by_member", _NativeHierarchyMembers(value))
     return result
+
+
+def hierarchy_reaches(value: Hierarchy[_T], child: int, parent: int) -> bool:
+    owner = _owner(value._native_owner, "_NativeHierarchyResult")
+    return cast(bool, owner.reaches(child, parent))

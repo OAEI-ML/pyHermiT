@@ -64,6 +64,22 @@ The completed repository audits are under
 [`reports/licensing/`](reports/licensing/) and
 [`reports/release/artifact-audit.md`](reports/release/artifact-audit.md).
 
+## Strict native pipeline
+
+`require_native_pipeline_support()` checks the native HermiT and pyowl-core receipt
+capabilities before loading an ontology. Opt in with
+`ReasonerConfig(require_native_pipeline=True)` to require native structural validation,
+metadata, compilation and hierarchy processing. Defaults retain their existing behavior.
+Strict mode currently supports consistency and class/object/data-property hierarchies on
+core-validated native snapshot/segment owners. It rejects unsupported owners, Python or
+verification backends, and Python byte-indexing fallback explicitly. Generic query overlays,
+realization publication and committed updates are not yet admitted in strict mode.
+
+`Reasoner.diagnostics()` reports the actual core receipt, metadata validation and domain
+copies. `native_result_validation` becomes true after a successful native hierarchy result;
+`native_result_publications` counts these publications. A positive capability probe does not
+replace owner validation or admit an unsupported operation.
+
 ## Documentation
 
 Start with the [user guide](docs/user-guide.md) for backend selection, standalone and

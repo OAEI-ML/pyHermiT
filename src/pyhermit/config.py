@@ -84,6 +84,7 @@ class ReasonerConfig:
     """Complete immutable configuration captured when a reasoner is constructed."""
 
     backend: BackendName = BackendName.AUTO
+    require_native_pipeline: bool = False
     timeout: float | None = None
     buffer_changes: bool = True
     fresh_entities: FreshEntityPolicy = FreshEntityPolicy.ALLOW
@@ -132,6 +133,7 @@ class ReasonerConfig:
                 raise ValueError("max_memory_bytes must be a positive integer or None")
 
         for name in (
+            "require_native_pipeline",
             "buffer_changes",
             "disjunction_learning",
             "force_quasi_order_classification",
@@ -150,7 +152,7 @@ class ReasonerConfig:
         Callbacks are observability hooks and intentionally do not partition caches.
         """
 
-        return (
+        values: tuple[tuple[str, ConfigScalar], ...] = (
             ("backend", self.backend.value),
             ("blocking", self.blocking.value),
             ("buffer_changes", self.buffer_changes),
@@ -164,6 +166,11 @@ class ReasonerConfig:
             ("timeout", self.timeout),
             ("unsupported_datatypes", self.unsupported_datatypes.value),
             ("workers", self.workers),
+        )
+
+        # Preserve default cache identities; strict admission partitions opted-in sessions.
+        return (
+            (*values, ("require_native_pipeline", True)) if self.require_native_pipeline else values
         )
 
     def as_dict(self) -> dict[str, ConfigScalar]:

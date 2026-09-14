@@ -9,6 +9,7 @@ __version__: Final[str]
 ABI_VERSION: Final[int]
 IR_SCHEMA_VERSION: Final[int]
 STATE_TRACE_VERSION: Final[int]
+NATIVE_PIPELINE_API_VERSION: Final[int]
 FEATURES: Final[tuple[str, ...]]
 
 class CancellationHandle:
@@ -75,6 +76,7 @@ class _NativeHierarchyResult:
     def rows(self) -> tuple[list[list[int]], list[tuple[int, int]], int, int]: ...
     def matches(self, symbols: _NativeServiceSymbols, domain: str) -> bool: ...
     def member_node(self, member: int) -> int | None: ...
+    def reaches(self, child: int, parent: int) -> bool: ...
     def related(self, node: int, upward: bool, direct: bool) -> list[int]: ...
 
 class _NativeRealizationResult:
@@ -439,6 +441,7 @@ def _create_encoded_session_v1(
     cancellation: CancellationHandle,
     validate_profile: bool = True,
     profile_summary_only: bool = False,
+    require_native_pipeline: bool = False,
     deferred_fingerprints: tuple[int, str, str, bytes, bytes] | None = None,
     ontology_identity_context: (
         tuple[int, tuple[tuple[str, str | None, str | None], ...]] | None

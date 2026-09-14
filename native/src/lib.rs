@@ -6039,6 +6039,7 @@ fn finish_encoded_session_construction(
     cancellation,
     validate_profile=true,
     profile_summary_only=false,
+    require_native_pipeline=false,
     deferred_fingerprints=None,
     ontology_identity_context=None,
     origin_context=None,
@@ -6054,6 +6055,7 @@ fn create_encoded_session_v1(
     cancellation: PyRef<'_, CancellationHandle>,
     validate_profile: bool,
     profile_summary_only: bool,
+    require_native_pipeline: bool,
     deferred_fingerprints: Option<&Bound<'_, PyAny>>,
     ontology_identity_context: Option<&Bound<'_, PyAny>>,
     origin_context: Option<&Bound<'_, PyAny>>,
@@ -6157,6 +6159,11 @@ fn create_encoded_session_v1(
                     true,
                 )
             });
+        }
+        if require_native_pipeline {
+            return Err(NativeError::new(ErrorKind::Feature, "FEATURE_NOT_IMPLEMENTED",
+                "strict native input requires retained byte buffers; Python byte indexing is disabled")
+                .with_context("feature_id", "native_retained_buffers_required"));
         }
         let borrowed_inputs = borrowed_encoded_slice_inputs(&borrowed_leases)?;
         let (phases, fingerprints) = compile_encoded_session_phases(
@@ -6420,6 +6427,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("ABI_VERSION", ABI_VERSION)?;
     module.add("IR_SCHEMA_VERSION", IR_SCHEMA_VERSION)?;
     module.add("STATE_TRACE_VERSION", STATE_TRACE_VERSION)?;
+    module.add("NATIVE_PIPELINE_API_VERSION", 1)?;
     module.add(
         "FEATURES",
         (
@@ -6433,6 +6441,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
             "native-result-owner-v1",
             "realization",
             "state-trace-v1",
+            "strict-native-input-v1",
             "wire-v1",
         ),
     )?;

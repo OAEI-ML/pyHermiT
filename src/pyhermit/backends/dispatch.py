@@ -70,12 +70,59 @@ def backend_info() -> BackendStatus:
     )
 
 
+def require_native_pipeline_support() -> None:
+    """Check strict native construction/classification capabilities without loading input.
+
+    This probe does not admit an owner or an unsupported operation. Strict sessions
+    still verify core's owner-bound column receipt and reject unready optional paths.
+    """
+
+    probe = _probe_native()
+    if not probe.availability.available:
+        _raise_native_unavailable(probe.availability)
+    module = probe.module
+    required = {
+        "encoded-structural-compiler-v2",
+        "native-profile-summary-v1",
+        "native-result-owner-v1",
+        "strict-native-input-v1",
+    }
+    session = getattr(module, "NativeSession", None)
+    if (
+        getattr(module, "NATIVE_PIPELINE_API_VERSION", None) != 1
+        or not required.issubset(getattr(module, "FEATURES", ()))
+        or not all(
+            callable(getattr(session, name, None))
+            for name in ("_encoded_service_symbols_v1", "_hierarchy_result_v1")
+        )
+    ):
+        raise NativeBackendUnavailableError(
+            "native backend lacks the strict pipeline contract",
+            context={"reason": "native_pipeline_unavailable"},
+        )
+    core = importlib.import_module("pyowl_core")
+    available = getattr(core, "native_validation_available", None)
+    if not callable(available) or available() is not True:
+        raise NativeBackendUnavailableError(
+            "pyowl-core lacks native-issued structural validation receipts",
+            context={"reason": "native_core_validation_unavailable"},
+        )
+
+
 def select_backend_factory(config: ReasonerConfig) -> BackendFactory:
     """Select exactly once, with an explicit constructor choice over the environment."""
 
     if not isinstance(config, ReasonerConfig):
         raise TypeError("config must be ReasonerConfig")
     selected = _effective_backend(config)
+    if config.require_native_pipeline:
+        if selected in (BackendName.PYTHON, BackendName.VERIFY):
+            raise NativeBackendUnavailableError(
+                "require_native_pipeline is incompatible with Python or verification backends",
+                context={"reason": "native_pipeline_backend_mismatch"},
+            )
+        require_native_pipeline_support()
+        selected = BackendName.NATIVE
     if selected is BackendName.PYTHON:
         from pyhermit.backends.python import PythonBackendFactory
 

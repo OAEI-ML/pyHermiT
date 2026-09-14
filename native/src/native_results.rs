@@ -130,6 +130,37 @@ impl NativeHierarchyResult {
             .map_err(|error| error.into_pyerr(py))
     }
 
+    fn reaches(&self, py: Python<'_>, child: usize, parent: u32) -> PyResult<bool> {
+        self.control
+            .run(|_| {
+                py.detach(|| {
+                    if child >= self.parents.len()
+                        || usize::try_from(parent).map_or(true, |n| n >= self.parents.len())
+                    {
+                        return Err(NativeError::wire("hierarchy node out of range"));
+                    }
+                    if u32::try_from(child).ok() == Some(parent) {
+                        return Ok(true);
+                    }
+                    let mut visited = BTreeSet::new();
+                    let mut pending = self.parents[child].clone();
+                    while let Some(node) = pending.pop() {
+                        self.control.cancellation.poll()?;
+                        if node == parent {
+                            return Ok(true);
+                        }
+                        if visited.insert(node) {
+                            let index = usize::try_from(node)
+                                .map_err(|_| NativeError::wire("hierarchy node overflow"))?;
+                            pending.extend_from_slice(&self.parents[index]);
+                        }
+                    }
+                    Ok(false)
+                })
+            })
+            .map_err(|error| error.into_pyerr(py))
+    }
+
     fn rows(&self, py: Python<'_>) -> PyResult<HierarchyRows> {
         // Materialize only the requested public result, never a permanent program.
         self.control

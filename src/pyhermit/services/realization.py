@@ -517,6 +517,13 @@ class RealizationService:
         return selected
 
     def _ensure_coarse(self) -> None:
+        if self._config.require_native_pipeline:
+            from pyhermit.exceptions import FeatureNotImplementedError
+
+            raise FeatureNotImplementedError(
+                "strict native realization publication is not supported",
+                feature_id="native_realization_index_unavailable",
+            )
         provider = self._coarse_provider
         if provider is None or self._coarse_loaded:
             return

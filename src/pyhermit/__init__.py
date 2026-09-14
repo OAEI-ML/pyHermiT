@@ -18,7 +18,7 @@ from pyowl_core import (
 )
 
 from ._version import __version__
-from .backends.dispatch import NATIVE_ABI_VERSION
+from .backends.dispatch import NATIVE_ABI_VERSION, require_native_pipeline_support
 from .backends.protocol import (
     COMPILED_IR_SCHEMA_VERSION,
     BackendInfo,
@@ -113,4 +113,5 @@ __all__ = [
     "backend_info",
     "compose_views",
     "load_snapshot",
+    "require_native_pipeline_support",
 ]

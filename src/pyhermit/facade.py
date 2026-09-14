@@ -8,7 +8,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from time import perf_counter
 from types import MappingProxyType
@@ -58,6 +58,7 @@ from pyhermit.exceptions import (
     BackendVersionError,
     ConcurrentMutationError,
     DisposedReasonerError,
+    FeatureNotImplementedError,
 )
 from pyhermit.inputs import (
     ValidatedOntology,
@@ -92,6 +93,12 @@ _ENCODED_DIAGNOSTIC_DEFAULTS: Mapping[str, bool | int] = MappingProxyType(
         "encoded_segment_count": 0,
         "encoded_staging_copy_bytes": 0,
         "encoded_zero_copy_buffers": 0,
+        "native_pipeline_required": False,
+        "native_core_receipt_validated": False,
+        "native_metadata_validation": False,
+        "native_result_validation": False,
+        "native_result_publications": 0,
+        "native_metadata_domain_copies": 0,
         "native_symbol_index": False,
         "native_symbol_index_bytes": 0,
         "python_symbol_validation_rows": 0,
@@ -183,6 +190,26 @@ class Reasoner:
             max_memory_bytes=selected_config.max_memory_bytes,
         )
         self._factory = select_backend_factory(selected_config)
+        if selected_config.require_native_pipeline:
+            from pyhermit.encoded_input import ENCODED_SCHEMA_NAME, negotiate_encoded_input
+
+            if isinstance(ontology, OntologyView):
+                # Fail known unsupported owner families before capture/fingerprint work.
+                negotiate_encoded_input(
+                    ontology, {ENCODED_SCHEMA_NAME: 2}, require_native_validation=True
+                )
+            else:
+                if load_options is not None and not isinstance(load_options, LoadOptions):
+                    raise TypeError("load_options must be LoadOptions or None")
+                selected_options = LoadOptions() if load_options is None else load_options
+                if selected_options.backend is pyowl_core.BackendPreference.PYTHON:
+                    raise FeatureNotImplementedError(
+                        "strict native construction cannot use the Python ontology loader",
+                        feature_id="native_loader_required",
+                    )
+                load_options = replace(
+                    selected_options, backend=pyowl_core.BackendPreference.NATIVE
+                )
         captured_input = _capture_ontology_input(
             ontology,
             document_iri=document_iri,
@@ -223,6 +250,8 @@ class Reasoner:
             consumer_compile_seconds = self._runtime.consumer_compile_seconds
             ingestion_diagnostics = self._runtime.ingestion_diagnostics
             encoded_native = self._runtime.program is None
+            if encoded_native:
+                ingestion_diagnostics = _encoded_session_diagnostics(self._runtime.session)
             backend = self._factory.info
         values: dict[str, bool | int | float | str] = {
             "compiler_cache_schema_version": COMPILER_CACHE_SCHEMA_VERSION,
@@ -625,6 +654,11 @@ class Reasoner:
                     session,
                     compile_started=compile_started,
                 )
+            if self._config.require_native_pipeline:
+                raise FeatureNotImplementedError(
+                    "strict native construction has no validated encoded handoff",
+                    feature_id="native_encoded_handoff_unavailable",
+                )
             if native_first:
                 if not isinstance(validated, _CapturedOntologyInput):
                     raise RuntimeError("native-first input lost its captured state")
@@ -789,6 +823,7 @@ class Reasoner:
             session,
             temporary_check=self._temporary_encoded_check,
             cancelled=self._cancelled,
+            require_native_pipeline=self._config.require_native_pipeline,
         )
         entailment = EntailmentService(
             executor,
@@ -931,6 +966,11 @@ class Reasoner:
         self,
         axioms: tuple[owl.AxiomNode, ...],
     ) -> CheckResult:
+        if self._config.require_native_pipeline:
+            raise FeatureNotImplementedError(
+                "strict native generic queries require the native query-delta capability",
+                feature_id="native_query_delta_unavailable",
+            )
         overlay = pyowl_core.apply_delta(
             self._validated.view,
             pyowl_core.OntologyDelta(add_axioms=owl.CanonicalSet(axioms)),
@@ -961,6 +1001,11 @@ class Reasoner:
     def _flush_locked(self) -> None:
         if not self._pending_additions and not self._pending_removals:
             return
+        if self._config.require_native_pipeline:
+            raise FeatureNotImplementedError(
+                "strict native committed updates require a validated native update owner",
+                feature_id="native_incremental_update_unavailable",
+            )
         additions = frozenset(self._pending_additions)
         removals = frozenset(self._pending_removals)
         proposed = pyowl_core.apply_delta(

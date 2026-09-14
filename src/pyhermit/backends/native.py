@@ -136,6 +136,12 @@ def _encoded_ingestion_counters(lease: object) -> Mapping[str, bool | int]:
             "encoded_segment_count": len(segments),
             "encoded_staging_copy_bytes": staging_copy_bytes,
             "encoded_zero_copy_buffers": buffer_count,
+            "native_pipeline_required": False,
+            "native_core_receipt_validated": getattr(lease, "native_validated", False),
+            "native_metadata_validation": False,
+            "native_result_validation": False,
+            "native_result_publications": 0,
+            "native_metadata_domain_copies": 0,
             "native_symbol_index": False,
             "native_symbol_index_bytes": 0,
             "python_symbol_validation_rows": 0,
@@ -560,6 +566,8 @@ class NativeBackendFactory:
     def _encoded_session_request(
         self,
         view: OntologyView,
+        *,
+        require_native_pipeline: bool = False,
     ) -> (
         tuple[
             Callable[..., object],
@@ -571,6 +579,8 @@ class NativeBackendFactory:
     ):
         """Resolve one negotiated direct-session request without consuming it."""
 
+        if require_native_pipeline and "strict-native-input-v1" not in self._info.complete_features:
+            raise BackendVersionError("native backend lacks strict encoded input support")
         if ENCODED_NATIVE_FEATURE not in self._info.complete_features:
             return None
         constructor = self._create_encoded_session
@@ -584,6 +594,7 @@ class NativeBackendFactory:
         negotiation = negotiate_encoded_input(
             view,
             {ENCODED_SCHEMA_NAME: ENCODED_SCHEMA_VERSION},
+            require_native_validation=require_native_pipeline,
         )
         lease = negotiation.lease
         if lease is None:
@@ -622,7 +633,9 @@ class NativeBackendFactory:
         if not isinstance(cancellation, CancellationToken):
             raise TypeError("cancellation must be CancellationToken")
         cancellation.check()
-        request = self._encoded_session_request(view)
+        request = self._encoded_session_request(
+            view, require_native_pipeline=config.require_native_pipeline
+        )
         if request is None:
             return None
         constructor, slices, ingestion_counters, _lease = request
@@ -656,6 +669,7 @@ class NativeBackendFactory:
                 ontology_identity_context=contexts.ontology_identity_context,
                 origin_context=contexts.origin_context,
                 **({"profile_summary_only": True} if summary_only else {}),
+                **({"require_native_pipeline": True} if config.require_native_pipeline else {}),
             ),
             ingestion_counters=ingestion_counters,
         )
@@ -681,7 +695,9 @@ class NativeBackendFactory:
         if not isinstance(validate_profile, bool):
             raise TypeError("validate_profile must be bool")
         cancellation.check()
-        request = self._encoded_session_request(captured.view)
+        request = self._encoded_session_request(
+            captured.view, require_native_pipeline=config.require_native_pipeline
+        )
         if request is None:
             return None
         constructor, slices, ingestion_counters, lease = request
@@ -741,6 +757,7 @@ class NativeBackendFactory:
                 ),
                 origin_context=None if contexts is None else contexts.origin_context,
                 **({"profile_summary_only": True} if summary_only else {}),
+                **({"require_native_pipeline": True} if config.require_native_pipeline else {}),
             ),
             ingestion_counters=ingestion_counters,
         )
@@ -777,6 +794,11 @@ class NativeBackendFactory:
                         "native encoded session returned an invalid compiler ownership receipt",
                         context={"reason": "session_surface_invalid"},
                     )
+                if config.require_native_pipeline and not gil_released:
+                    raise BackendVersionError(
+                        "strict native constructor did not retain its byte buffers"
+                    )
+                counters["native_pipeline_required"] = config.require_native_pipeline
                 counters["encoded_compiler_gil_released"] = gil_released
                 if not gil_released:
                     counters["encoded_detached_buffer_count"] = 0
@@ -950,6 +972,10 @@ class NativeBackendSession:
                 {
                     **self._ingestion_counters,
                     "native_symbol_index": context.native_signature_bytes is not None,
+                    "native_metadata_validation": context.native_signature_bytes is not None,
+                    "native_metadata_domain_copies": 0
+                    if context.native_signature_bytes is not None
+                    else 6,
                     "native_symbol_index_bytes": context.native_index_bytes,
                     "python_symbol_validation_rows": context.python_symbol_validation_rows,
                 }
@@ -1000,7 +1026,9 @@ class NativeBackendSession:
 
         call = getattr(self._native, "_hierarchy_result_v1", None)
         if getattr(self._native, "compiler_digest", None) is not None and callable(call):
-            return self._invoke(hierarchy_ids, lambda: call(domain))
+            result = self._invoke(hierarchy_ids, lambda: call(domain))
+            self._record_native_result()
+            return result
         return self._invoke(decode_hierarchy, legacy)
 
     def realize(self) -> RealizationIds:
@@ -1008,8 +1036,22 @@ class NativeBackendSession:
 
         call = getattr(self._native, "_realization_result_v1", None)
         if getattr(self._native, "compiler_digest", None) is not None and callable(call):
-            return self._invoke(realization_ids, call)
+            result = self._invoke(realization_ids, call)
+            self._record_native_result()
+            return result
         return self._invoke(decode_realization, self._native.realize)
+
+    def _record_native_result(self) -> None:
+        self._ingestion_counters = MappingProxyType(
+            {
+                **self._ingestion_counters,
+                "native_result_validation": True,
+                "native_result_publications": int(
+                    self._ingestion_counters.get("native_result_publications", 0)
+                )
+                + 1,
+            }
+        )
 
     def apply_delta(self, delta: CompiledDelta) -> DeltaOutcome:
         self._begin_call()
