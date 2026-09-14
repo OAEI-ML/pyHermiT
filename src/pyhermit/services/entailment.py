@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 from collections import defaultdict, deque
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Container, Iterable, Sequence, Set
 from dataclasses import dataclass
 from typing import TypeAlias, cast
 
@@ -125,7 +125,7 @@ class EntailmentService:
         if isinstance(executor, EncodedQueryExecutor):
             context = executor.service_context
             normalized: NormalizedOntology | None = None
-            signature = set(context.source_signature) | _BUILTIN_ENTITIES
+            signature = context.source_signature
             source_literals = context.source_literals
             asserted: frozenset[bytes] = frozenset()
             datatype_definitions: frozenset[bytes] = frozenset()
@@ -153,9 +153,17 @@ class EntailmentService:
         self._normalization_digest = normalization_digest
         self._program_is_deterministic = deterministic_program
         self._semantic_equality_possible = semantic_equality_possible
-        self._signature = frozenset(signature)
-        self._signature_bytes = frozenset(value.canonical_bytes() for value in signature)
-        self._source_literals = tuple(source_literals)
+        if (
+            isinstance(executor, EncodedQueryExecutor)
+            and context.native_signature_bytes is not None
+        ):
+            self._signature: Set[owl.Entity] = signature
+            self._signature_bytes: Container[bytes] = context.native_signature_bytes
+            self._source_literals: Sequence[owl.Literal] = source_literals
+        else:
+            self._signature = frozenset(signature)
+            self._signature_bytes = frozenset(value.canonical_bytes() for value in signature)
+            self._source_literals = tuple(source_literals)
         self._asserted = asserted
         self._datatype_definitions = datatype_definitions
 
@@ -169,13 +177,13 @@ class EntailmentService:
         return normalized
 
     @property
-    def source_signature(self) -> frozenset[owl.Entity]:
+    def source_signature(self) -> Set[owl.Entity]:
         """Source-visible entities plus the required OWL/RDF built-ins."""
 
         return self._signature
 
     @property
-    def source_literals(self) -> tuple[owl.Literal, ...]:
+    def source_literals(self) -> Sequence[owl.Literal]:
         return self._source_literals
 
     @property
@@ -833,7 +841,7 @@ class _WitnessFactory:
     permanent_digest: str
     source: bytes
     purpose: str
-    reserved: frozenset[bytes]
+    reserved: Container[bytes]
 
     def __post_init__(self) -> None:
         digest = hashlib.sha256(b"pyhermit:entailment-witness:v1\x00")

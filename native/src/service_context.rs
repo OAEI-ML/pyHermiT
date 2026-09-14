@@ -8,7 +8,8 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -150,4 +151,139 @@ fn service_domain(
         kind: label,
         values,
     })
+}
+
+/// One bounded, native-owned lookup index. Keys are validated once by the compiled
+/// program and by this constructor; Python only asks for selected public objects.
+pub(crate) struct ServiceSymbolIndex {
+    ontology: Arc<DecodedOntology>,
+    domains: BTreeMap<&'static str, SymbolDomainIndex>,
+    pub(crate) estimated_bytes: u64,
+}
+
+struct SymbolDomainIndex {
+    kind: SymbolKind,
+    ids: Vec<u32>,
+    by_key: BTreeMap<Vec<u8>, u32>,
+}
+
+impl ServiceSymbolIndex {
+    pub(crate) fn new(
+        ontology: Arc<DecodedOntology>,
+        control: &crate::CancellationState,
+    ) -> NativeResult<Self> {
+        let named: BTreeSet<_> = ontology.named_individuals.iter().copied().collect();
+        let mut domains = BTreeMap::new();
+        let mut estimated_bytes = 0_u64;
+        for (label, kind) in [
+            ("entity", SymbolKind::Entity),
+            ("class", SymbolKind::ClassExpression),
+            ("object_property", SymbolKind::ObjectRole),
+            ("data_property", SymbolKind::DataProperty),
+            ("individual", SymbolKind::Individual),
+            ("source_literal", SymbolKind::SourceLiteral),
+        ] {
+            let domain = ontology
+                .program
+                .domain(kind)
+                .ok_or_else(|| NativeError::wire("service symbol domain is absent"))?;
+            let mut ids = Vec::new();
+            let mut by_key = BTreeMap::new();
+            for value in &domain.values {
+                control.poll()?;
+                if value.generated
+                    || value.query_local
+                    || !match label {
+                        "class" => value.display.starts_with("class:"),
+                        "object_property" => {
+                            value.display.starts_with("object_property:")
+                                || value.display.starts_with("inverse_object_property:")
+                        }
+                        "data_property" => value.display.starts_with("data_property:"),
+                        "individual" => named.contains(&value.identifier),
+                        _ => true,
+                    }
+                {
+                    continue;
+                }
+                estimated_bytes = estimated_bytes
+                    .checked_add(
+                        u64::try_from(value.key.len())
+                            .unwrap_or(u64::MAX)
+                            .saturating_add(128),
+                    )
+                    .ok_or_else(|| NativeError::invariant("native symbol index size overflow"))?;
+                if estimated_bytes > MAX_SERVICE_CONTEXT_BYTES as u64 {
+                    return Err(NativeError::new(
+                        ErrorKind::Resource,
+                        "RESOURCE_LIMIT",
+                        "native symbol index exceeds its byte limit",
+                    )
+                    .with_context("limit", "native_symbol_index_bytes")
+                    .with_context("observed", estimated_bytes.to_string())
+                    .with_context("allowed", MAX_SERVICE_CONTEXT_BYTES.to_string()));
+                }
+                control.observe_memory(estimated_bytes);
+                control.poll()?;
+                if by_key.insert(value.key.clone(), value.identifier).is_some()
+                    || ids
+                        .last()
+                        .is_some_and(|previous| *previous >= value.identifier)
+                {
+                    return Err(NativeError::wire(
+                        "native service symbols are not canonical",
+                    ));
+                }
+                ids.push(value.identifier);
+            }
+            domains.insert(label, SymbolDomainIndex { kind, ids, by_key });
+        }
+        Ok(Self {
+            ontology,
+            domains,
+            estimated_bytes,
+        })
+    }
+
+    fn domain(&self, label: &str) -> NativeResult<&SymbolDomainIndex> {
+        self.domains
+            .get(label)
+            .ok_or_else(|| NativeError::wire("unknown native symbol domain"))
+    }
+
+    pub(crate) fn count(&self, label: &str) -> NativeResult<usize> {
+        Ok(self.domain(label)?.ids.len())
+    }
+
+    pub(crate) fn ids(&self, label: &str) -> NativeResult<Vec<u32>> {
+        Ok(self.domain(label)?.ids.clone())
+    }
+
+    pub(crate) fn id_at(&self, label: &str, offset: usize) -> NativeResult<Option<u32>> {
+        Ok(self.domain(label)?.ids.get(offset).copied())
+    }
+
+    pub(crate) fn find(&self, label: &str, key: &[u8]) -> NativeResult<Option<u32>> {
+        Ok(self.domain(label)?.by_key.get(key).copied())
+    }
+
+    pub(crate) fn key(&self, label: &str, id: u32) -> NativeResult<Option<&[u8]>> {
+        let selected = self.domain(label)?;
+        if selected.ids.binary_search(&id).is_err() {
+            return Ok(None);
+        }
+        let domain = self
+            .ontology
+            .program
+            .domain(selected.kind)
+            .ok_or_else(|| NativeError::invariant("native symbol domain disappeared"))?;
+        let value = domain
+            .values
+            .get(
+                usize::try_from(id)
+                    .map_err(|_| NativeError::wire("symbol ID exceeds platform size"))?,
+            )
+            .ok_or_else(|| NativeError::invariant("native symbol ID is dangling"))?;
+        Ok(Some(&value.key))
+    }
 }

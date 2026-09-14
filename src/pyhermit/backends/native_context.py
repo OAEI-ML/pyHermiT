@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Container, Iterable, Iterator, Mapping, Sequence, Set
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import NoReturn, TypeVar, cast
+from typing import Generic, NoReturn, Protocol, TypeVar, cast, overload
 
 import pyowl_core.model as owl
 
@@ -55,8 +55,8 @@ class NativeServiceContext:
     query_scope_digest: str
     compiler_digest: str
     permanent_program_sha256: str
-    source_signature: frozenset[owl.Entity]
-    source_literals: tuple[owl.Literal, ...]
+    source_signature: Set[owl.Entity]
+    source_literals: Sequence[owl.Literal]
     deterministic_program: bool
     semantic_equality_possible: bool
     class_ids: Mapping[int, owl.Class]
@@ -64,9 +64,17 @@ class NativeServiceContext:
     data_property_ids: Mapping[int, owl.DataProperty]
     individual_ids: Mapping[int, owl.NamedIndividual]
     source_literal_ids: Mapping[int, owl.Literal]
+    native_signature_bytes: Container[bytes] | None = None
+    native_index_bytes: int = 0
+    python_symbol_validation_rows: int = 0
 
     def result_mapper(self) -> CompiledResultMapper:
-        return CompiledResultMapper.from_domain_mappings(
+        factory = (
+            CompiledResultMapper._from_native_domain_mappings
+            if self.native_signature_bytes is not None
+            else CompiledResultMapper.from_domain_mappings
+        )
+        return factory(
             classes=self.class_ids,
             object_properties=self.object_property_ids,
             data_properties=self.data_property_ids,
@@ -216,6 +224,7 @@ def decode_service_context(
         data_properties,
         individuals,
         source_literals,
+        python_symbol_validation_rows=sum(len(rows) for rows in domains.values()),
     )
 
 
@@ -354,3 +363,139 @@ def _fail(message: str, reason: str) -> NoReturn:
 
 
 __all__ = ["NativeServiceContext", "decode_service_context"]
+
+
+class _NativeSymbols(Protocol):
+    def metadata(self) -> tuple[str, str, bool, bool, int]: ...
+    def count(self, domain: str) -> int: ...
+    def ids(self, domain: str) -> list[int]: ...
+    def id_at(self, domain: str, offset: int) -> int | None: ...
+    def find(self, domain: str, key: bytes) -> int | None: ...
+    def key(self, domain: str, identifier: int) -> bytes | None: ...
+
+
+class _NativeDomainMapping(Mapping[int, _T], Generic[_T]):
+    """Read-only domain backed by an opaque native owner, without a Python mirror."""
+
+    __slots__ = ("_domain", "_owner")
+
+    def __init__(self, owner: _NativeSymbols, domain: str) -> None:
+        self._owner = owner
+        self._domain = domain
+
+    def __len__(self) -> int:
+        return self._owner.count(self._domain)
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._owner.ids(self._domain))
+
+    def __getitem__(self, identifier: int) -> _T:
+        if (
+            isinstance(identifier, bool)
+            or not isinstance(identifier, int)
+            or not 0 <= identifier <= 0xFFFFFFFF
+        ):
+            raise KeyError(identifier)
+        key = self._owner.key(self._domain, identifier)
+        if key is None:
+            raise KeyError(identifier)
+        # The native constructor validates identities. This creates the requested
+        # public result object and does not scan or revalidate the source domain.
+        return cast(_T, owl.decode_canonical(key))
+
+    def native_id(self, value: owl.StructuralNode) -> int:
+        identifier = self._owner.find(self._domain, value.canonical_bytes())
+        if identifier is None:
+            raise ValueError(f"{self._domain} is not retained by this compiled runtime")
+        return identifier
+
+
+class _NativeSignature(Set[owl.Entity]):
+    __slots__ = ("_entities", "_owner")
+
+    def __init__(self, owner: _NativeSymbols) -> None:
+        self._owner = owner
+        self._entities = _NativeDomainMapping[owl.Entity](owner, "entity")
+
+    def __contains__(self, value: object) -> bool:
+        return isinstance(value, owl.Entity) and (
+            value in _BUILTIN_ENTITIES
+            or self._owner.find("entity", value.canonical_bytes()) is not None
+        )
+
+    def __iter__(self) -> Iterator[owl.Entity]:
+        yield from self._entities.values()
+        for value in _BUILTIN_ENTITIES:
+            if self._owner.find("entity", value.canonical_bytes()) is None:
+                yield value
+
+    def __len__(self) -> int:
+        return len(self._entities) + sum(
+            self._owner.find("entity", value.canonical_bytes()) is None
+            for value in _BUILTIN_ENTITIES
+        )
+
+
+class _NativeSignatureBytes(Container[bytes]):
+    def __init__(self, owner: _NativeSymbols) -> None:
+        self._owner = owner
+        self._builtins = frozenset(value.canonical_bytes() for value in _BUILTIN_ENTITIES)
+
+    def __contains__(self, value: object) -> bool:
+        return isinstance(value, bytes) and (
+            value in self._builtins or self._owner.find("entity", value) is not None
+        )
+
+
+class _NativeLiterals(Sequence[owl.Literal]):
+    def __init__(self, values: _NativeDomainMapping[owl.Literal]) -> None:
+        self._values = values
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    @overload
+    def __getitem__(self, index: int) -> owl.Literal: ...
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[owl.Literal]: ...
+    def __getitem__(self, index: int | slice) -> owl.Literal | Sequence[owl.Literal]:
+        if isinstance(index, slice):
+            return tuple(self[offset] for offset in range(*index.indices(len(self))))
+        if index < 0:
+            index += len(self)
+        if index < 0:
+            raise IndexError(index)
+        identifier = self._values._owner.id_at("source_literal", index)
+        if identifier is None:
+            raise IndexError(index)
+        return self._values[identifier]
+
+    def __iter__(self) -> Iterator[owl.Literal]:
+        return iter(self._values.values())
+
+
+def native_service_context(owner: object, *, query_scope_digest: str) -> NativeServiceContext:
+    """Accept only an unforgeable extension object that owns validated symbol indexes."""
+    from pyhermit import _native
+
+    if type(owner) is not getattr(_native, "_NativeServiceSymbols", None):
+        raise _mismatch("native symbol owner has the wrong type", "encoded_service_context_invalid")
+    symbols = cast(_NativeSymbols, owner)
+    compiler, program, deterministic, equality, _bytes = symbols.metadata()
+    literals = _NativeDomainMapping[owl.Literal](symbols, "source_literal")
+    return NativeServiceContext(
+        query_scope_digest,
+        compiler,
+        program,
+        _NativeSignature(symbols),
+        _NativeLiterals(literals),
+        deterministic,
+        equality,
+        _NativeDomainMapping[owl.Class](symbols, "class"),
+        _NativeDomainMapping[owl.ObjectPropertyExpression](symbols, "object_property"),
+        _NativeDomainMapping[owl.DataProperty](symbols, "data_property"),
+        _NativeDomainMapping[owl.NamedIndividual](symbols, "individual"),
+        literals,
+        _NativeSignatureBytes(symbols),
+        _bytes,
+    )

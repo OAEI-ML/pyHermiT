@@ -68,7 +68,7 @@ class RealizationService:
         "_entailment_tests",
         "_group_by_member",
         "_instance_groups",
-        "_named",
+        "_named_cache",
         "_object_targets",
         "_operation_sequence",
         "_same_groups",
@@ -100,16 +100,7 @@ class RealizationService:
         self._coarse_loaded = False
         self._config = selected_config
         self._cancelled = cancelled
-        self._named = tuple(
-            sorted(
-                (
-                    value
-                    for value in service.source_signature
-                    if isinstance(value, owl.NamedIndividual)
-                ),
-                key=lambda value: value.canonical_bytes(),
-            )
-        )
+        self._named_cache: tuple[owl.NamedIndividual, ...] | None = None
         self._source_literals = _source_literals(service)
         self._same_groups: tuple[frozenset[owl.NamedIndividual], ...] | None = None
         self._group_by_member: Mapping[owl.NamedIndividual, int] | None = None
@@ -125,6 +116,21 @@ class RealizationService:
         self._batches = 0
         self._cache_hits = 0
         self._operation_sequence = 0
+
+    @property
+    def _named(self) -> tuple[owl.NamedIndividual, ...]:
+        if self._named_cache is None:
+            self._named_cache = tuple(
+                sorted(
+                    (
+                        value
+                        for value in self._service.source_signature
+                        if isinstance(value, owl.NamedIndividual)
+                    ),
+                    key=lambda value: value.canonical_bytes(),
+                )
+            )
+        return self._named_cache
 
     def _install_coarse_provider(
         self,
@@ -719,7 +725,7 @@ class RealizationService:
         )
 
 
-def _source_literals(service: EntailmentService) -> tuple[owl.Literal, ...]:
+def _source_literals(service: EntailmentService) -> Sequence[owl.Literal]:
     return service.source_literals
 
 

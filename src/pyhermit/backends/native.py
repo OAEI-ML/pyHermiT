@@ -21,7 +21,11 @@ from typing import NoReturn, Protocol, TypeVar, cast
 from pyowl_core import OntologyView
 
 from pyhermit._version import __version__
-from pyhermit.backends.native_context import NativeServiceContext, decode_service_context
+from pyhermit.backends.native_context import (
+    NativeServiceContext,
+    decode_service_context,
+    native_service_context,
+)
 from pyhermit.backends.native_events import NativeSessionEvent, decode_events
 from pyhermit.backends.native_wire import (
     decode_check,
@@ -131,6 +135,9 @@ def _encoded_ingestion_counters(lease: object) -> Mapping[str, bool | int]:
             "encoded_segment_count": len(segments),
             "encoded_staging_copy_bytes": staging_copy_bytes,
             "encoded_zero_copy_buffers": buffer_count,
+            "native_symbol_index": False,
+            "native_symbol_index_bytes": 0,
+            "python_symbol_validation_rows": 0,
         }
     )
 
@@ -902,12 +909,17 @@ class NativeBackendSession:
                 context={"reason": "session_surface_invalid"},
             )
         try:
-            encoded = exporter()
-            _require_bytes(encoded, "encoded service context")
-            context = decode_service_context(
-                encoded,
-                query_scope_digest=self.ontology_fingerprint,
-            )
+            native_symbols = getattr(self._native, "_encoded_service_symbols_v1", None)
+            if callable(native_symbols):
+                context = native_service_context(
+                    native_symbols(), query_scope_digest=self.ontology_fingerprint
+                )
+            else:
+                encoded = exporter()
+                _require_bytes(encoded, "encoded service context")
+                context = decode_service_context(
+                    encoded, query_scope_digest=self.ontology_fingerprint
+                )
             if context.permanent_program_sha256 != self.permanent_program_sha256:
                 raise BackendMismatchError(
                     "native service context is bound to a different permanent program",
@@ -919,6 +931,14 @@ class NativeBackendSession:
                     context={"reason": "compiler_digest_mismatch"},
                 )
             self._cancellation.check()
+            self._ingestion_counters = MappingProxyType(
+                {
+                    **self._ingestion_counters,
+                    "native_symbol_index": context.native_signature_bytes is not None,
+                    "native_symbol_index_bytes": context.native_index_bytes,
+                    "python_symbol_validation_rows": context.python_symbol_validation_rows,
+                }
+            )
             return context
         except (BackendMismatchError, TypeError, ValueError):
             self._poisoned = True

@@ -183,6 +183,71 @@ struct EncodedSliceInput<B: encoded::ByteSource> {
     columns: encoded::EncodedColumns<B>,
 }
 
+/// Opaque native-issued symbol owner. There is deliberately no Python constructor.
+#[pyclass(module = "pyhermit._native", name = "_NativeServiceSymbols", frozen)]
+struct NativeServiceSymbols {
+    control: Arc<SessionControl>,
+    index: Arc<service_context::ServiceSymbolIndex>,
+    compiler_digest: [u8; 32],
+}
+
+#[pymethods]
+impl NativeServiceSymbols {
+    fn metadata(&self, py: Python<'_>) -> PyResult<(String, String, bool, bool, u64)> {
+        self.control
+            .run(|owned| {
+                let flags = owned.ontology.program.expressivity;
+                Ok((
+                    hex_digest(&self.compiler_digest),
+                    hex_digest(&owned.ontology.metadata.program_sha256),
+                    !flags.non_horn,
+                    flags.nominals || flags.number_restrictions || flags.keys,
+                    self.index.estimated_bytes,
+                ))
+            })
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    fn count(&self, py: Python<'_>, domain: &str) -> PyResult<usize> {
+        self.control
+            .run(|_| self.index.count(domain))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    fn ids(&self, py: Python<'_>, domain: &str) -> PyResult<Vec<u32>> {
+        self.control
+            .run(|_| self.index.ids(domain))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    fn id_at(&self, py: Python<'_>, domain: &str, offset: usize) -> PyResult<Option<u32>> {
+        self.control
+            .run(|_| self.index.id_at(domain, offset))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    fn find(
+        &self,
+        py: Python<'_>,
+        domain: &str,
+        key: &Bound<'_, PyBytes>,
+    ) -> PyResult<Option<u32>> {
+        self.control
+            .run(|_| self.index.find(domain, key.as_bytes()))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    fn key(&self, py: Python<'_>, domain: &str, identifier: u32) -> PyResult<Option<Py<PyBytes>>> {
+        self.control
+            .run(|_| {
+                self.index
+                    .key(domain, identifier)
+                    .map(|value| value.map(|bytes| PyBytes::new(py, bytes).unbind()))
+            })
+            .map_err(|error| error.into_pyerr(py))
+    }
+}
+
 struct SessionOwned {
     ontology: Arc<DecodedOntology>,
     // Retained beside the ontology so all effective native configuration is owned
@@ -192,6 +257,7 @@ struct SessionOwned {
     classification: ClassificationCache,
     realization: RealizationCache,
     events: VecDeque<(String, u64)>,
+    service_symbols: Option<Arc<service_context::ServiceSymbolIndex>>,
 }
 
 struct SessionControl {
@@ -356,6 +422,33 @@ impl NativeSession {
                 })
             })
             .map_err(|error| error.into_pyerr(py))
+    }
+
+    fn _encoded_service_symbols_v1(&self, py: Python<'_>) -> PyResult<NativeServiceSymbols> {
+        let compiler_digest = self
+            .compiler_digest
+            .ok_or_else(|| NativeError::feature("encoded_service_symbols").into_pyerr(py))?;
+        let control = Arc::clone(&self.control);
+        let index = control
+            .run(|owned| {
+                if let Some(index) = &owned.service_symbols {
+                    return Ok(Arc::clone(index));
+                }
+                let index = Arc::new(py.detach(|| {
+                    service_context::ServiceSymbolIndex::new(
+                        Arc::clone(&owned.ontology),
+                        control.cancellation.as_ref(),
+                    )
+                })?);
+                owned.service_symbols = Some(Arc::clone(&index));
+                Ok(index)
+            })
+            .map_err(|error| error.into_pyerr(py))?;
+        Ok(NativeServiceSymbols {
+            control,
+            index,
+            compiler_digest,
+        })
     }
 
     #[getter]
@@ -6113,6 +6206,7 @@ fn construct_native_session(
                 classification: ClassificationCache::new(),
                 realization: RealizationCache::new(),
                 events: VecDeque::with_capacity(EVENT_CAPACITY),
+                service_symbols: None,
             })),
         }),
     })
@@ -6262,6 +6356,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     module.add_class::<CancellationHandle>()?;
     module.add_class::<NativeSession>()?;
+    module.add_class::<NativeServiceSymbols>()?;
     module.add_function(wrap_pyfunction!(validate_encoded_columns_v1, module)?)?;
     module.add_function(wrap_pyfunction!(validate_encoded_selection_v1, module)?)?;
     module.add_function(wrap_pyfunction!(validate_encoded_slices_v1, module)?)?;
@@ -6515,6 +6610,52 @@ mod tests {
             config.existentials,
             config.blocking,
         )
+    }
+
+    #[test]
+    fn native_symbol_index_matches_legacy_context_and_is_bounded() -> NativeResult<()> {
+        let (ontology, _) = decoded_session_input()?;
+        let ontology = Arc::new(ontology);
+        let control = CancellationHandle::from_options(None, None)?.state();
+        let index = service_context::ServiceSymbolIndex::new(Arc::clone(&ontology), &control)?;
+        let legacy: serde_json::Value = serde_json::from_slice(
+            &service_context::encode_service_context(&ontology, &[7; 32])?,
+        )
+        .map_err(|_| NativeError::invariant("legacy context JSON invalid"))?;
+        let domains = legacy["domains"]
+            .as_array()
+            .ok_or_else(|| NativeError::invariant("legacy domains missing"))?;
+        for domain in domains {
+            let name = domain["kind"]
+                .as_str()
+                .ok_or_else(|| NativeError::invariant("legacy domain kind missing"))?;
+            let values = domain["values"]
+                .as_array()
+                .ok_or_else(|| NativeError::invariant("legacy domain values missing"))?;
+            assert_eq!(index.count(name)?, values.len());
+            let ids = index.ids(name)?;
+            for (id, value) in ids.into_iter().zip(values) {
+                assert_eq!(Some(u64::from(id)), value["identifier"].as_u64());
+                let key = decode_hex(
+                    value["key_hex"]
+                        .as_str()
+                        .ok_or_else(|| NativeError::invariant("legacy symbol key missing"))?,
+                );
+                assert_eq!(index.key(name, id)?, Some(key.as_slice()));
+                assert_eq!(index.find(name, &key)?, Some(id));
+            }
+            assert_eq!(index.key(name, u32::MAX)?, None);
+            assert_eq!(index.find(name, b"not a symbol")?, None);
+        }
+        assert!(index.count("foreign").is_err());
+        assert!(index.estimated_bytes > 0);
+        let limited = CancellationHandle::from_options(None, Some(1))?.state();
+        let error = service_context::ServiceSymbolIndex::new(Arc::clone(&ontology), &limited)
+            .err()
+            .ok_or_else(|| NativeError::invariant("symbol budget did not reject"))?;
+        assert_eq!(error.kind, ErrorKind::Resource);
+        assert_eq!(Arc::strong_count(&ontology), 2);
+        Ok(())
     }
 
     #[test]

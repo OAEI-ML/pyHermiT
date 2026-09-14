@@ -92,6 +92,9 @@ _ENCODED_DIAGNOSTIC_DEFAULTS: Mapping[str, bool | int] = MappingProxyType(
         "encoded_segment_count": 0,
         "encoded_staging_copy_bytes": 0,
         "encoded_zero_copy_buffers": 0,
+        "native_symbol_index": False,
+        "native_symbol_index_bytes": 0,
+        "python_symbol_validation_rows": 0,
     }
 )
 _ENCODED_SESSION_DIAGNOSTIC_DEFAULTS: Mapping[str, bool | int] = MappingProxyType(

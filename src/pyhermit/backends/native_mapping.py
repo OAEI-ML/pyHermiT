@@ -142,6 +142,31 @@ class CompiledResultMapper:
         mapper._source_literals = MappingProxyType(dict(source_literals))
         return mapper
 
+    @classmethod
+    def _from_native_domain_mappings(
+        cls,
+        *,
+        classes: Mapping[int, owl.Class],
+        object_properties: Mapping[int, owl.ObjectPropertyExpression],
+        data_properties: Mapping[int, owl.DataProperty],
+        individuals: Mapping[int, owl.NamedIndividual],
+        source_literals: Mapping[int, owl.Literal],
+    ) -> CompiledResultMapper:
+        from .native_context import _NativeDomainMapping
+
+        if not all(
+            type(value) is _NativeDomainMapping
+            for value in (classes, object_properties, data_properties, individuals, source_literals)
+        ):
+            raise TypeError("trusted native result domains require native mappings")
+        mapper = object.__new__(cls)
+        mapper._classes = classes
+        mapper._object_properties = object_properties
+        mapper._data_properties = data_properties
+        mapper._individuals = individuals
+        mapper._source_literals = source_literals
+        return mapper
+
     @property
     def class_ids(self) -> Mapping[int, owl.Class]:
         return self._classes
@@ -345,6 +370,10 @@ def _domain_lookup(
 
 
 def _reverse_id(values: Mapping[int, _T], value: _T, label: str) -> int:
+    from .native_context import _NativeDomainMapping
+
+    if isinstance(values, _NativeDomainMapping):
+        return values.native_id(value)
     for identifier, candidate in values.items():
         if candidate == value:
             return identifier
