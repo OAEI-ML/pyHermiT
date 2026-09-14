@@ -15,6 +15,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::{
     BlockValidator, BlockingControl, BlockingError, BlockingProjection, BlockingSignature,
@@ -211,56 +212,62 @@ impl<'a, C: BlockingControl> Budget<'a, C> {
     }
 }
 
-/// Exact native validator over one immutable compiled rule program.
-pub(crate) struct CompiledClauseBlockingValidator<'a> {
-    program: &'a RuleProgram,
-    #[allow(dead_code)]
-    core_mode: CoreBlockingMode,
-    limits: ValidationLimits,
+/// Source shape tables are immutable; a query retains them and compiles only local rows.
+pub(crate) struct CompiledBlockingShapes {
+    program: RuleProgram,
+    base: Option<Arc<Self>>,
     concept_predicates: BTreeSet<u32>,
     object_roles_by_role_id: BTreeMap<u32, Vec<u32>>,
     shapes: Vec<ClauseShape>,
     unsupported_clause_ids: Vec<u32>,
-    prepared_snapshot: Option<Snapshot>,
 }
 
-impl<'a> CompiledClauseBlockingValidator<'a> {
-    pub(crate) fn new(
-        program: &'a RuleProgram,
-        core_mode: CoreBlockingMode,
-    ) -> Result<Self, BlockingError> {
-        if core_mode == CoreBlockingMode::None {
+impl CompiledBlockingShapes {
+    pub(crate) fn new(program: &RuleProgram) -> Result<Self, BlockingError> {
+        Self::build(program, None)
+    }
+
+    pub(crate) fn extend(base: Arc<Self>, program: &RuleProgram) -> Result<Self, BlockingError> {
+        if !program.extends_storage(&base.program) {
             return Err(BlockingError::invalid(
-                "compiled blocking validation requires a core mode",
+                "blocking shapes require the retained immediate rule-program parent",
             ));
         }
-        let concept_predicates = program
-            .predicates()
-            .iter()
-            .filter(|predicate| is_concept_kind(predicate.kind))
-            .map(|predicate| predicate.predicate_id)
-            .collect();
+        // RuleProgram checks that sparse overrides only add reciprocal opposite links
+        // or union clause provenance. Neither changes a shape or predicate category.
+        Self::build(program, Some(base))
+    }
+
+    fn build(program: &RuleProgram, base: Option<Arc<Self>>) -> Result<Self, BlockingError> {
+        let mut concept_predicates = BTreeSet::new();
         let mut object_roles_by_role_id: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-        for predicate in program
-            .predicates()
-            .iter()
-            .filter(|predicate| predicate.kind == PredicateKind::ObjectRole)
-        {
-            let role_id = predicate
-                .role_id
-                .ok_or_else(|| BlockingError::invariant("object-role predicate has no role ID"))?;
-            object_roles_by_role_id
-                .entry(role_id)
-                .or_default()
-                .push(predicate.predicate_id);
+        let predicate_start = base
+            .as_ref()
+            .map_or(0, |base| base.program.predicates().len());
+        for index in predicate_start..program.predicates().len() {
+            let predicate = &program.predicates()[index];
+            if is_concept_kind(predicate.kind) {
+                concept_predicates.insert(predicate.predicate_id);
+            }
+            if predicate.kind == PredicateKind::ObjectRole {
+                let role_id = predicate.role_id.ok_or_else(|| {
+                    BlockingError::invariant("object-role predicate has no role ID")
+                })?;
+                object_roles_by_role_id
+                    .entry(role_id)
+                    .or_default()
+                    .push(predicate.predicate_id);
+            }
         }
         for predicates in object_roles_by_role_id.values_mut() {
             predicates.sort_unstable();
             predicates.dedup();
         }
+        let clause_start = base.as_ref().map_or(0, |base| base.program.clauses().len());
         let mut shapes = Vec::new();
         let mut unsupported_clause_ids = Vec::new();
-        for (clause_index, clause) in program.clauses().iter().enumerate() {
+        for clause_index in clause_start..program.clauses().len() {
+            let clause = &program.clauses()[clause_index];
             match shape(program, clause_index, clause)? {
                 ShapeOutcome::Irrelevant => {}
                 ShapeOutcome::Unsupported => unsupported_clause_ids.push(clause.clause_id),
@@ -269,13 +276,104 @@ impl<'a> CompiledClauseBlockingValidator<'a> {
         }
         unsupported_clause_ids.sort_unstable();
         Ok(Self {
-            program,
-            core_mode,
-            limits: ValidationLimits::default(),
+            program: program.clone(),
+            base,
             concept_predicates,
             object_roles_by_role_id,
             shapes,
             unsupported_clause_ids,
+        })
+    }
+
+    fn segments(&self) -> Vec<&Self> {
+        let mut segments = Vec::new();
+        let mut current = Some(self);
+        while let Some(segment) = current {
+            segments.push(segment);
+            current = segment.base.as_deref();
+        }
+        segments.reverse();
+        segments
+    }
+
+    fn shapes(&self) -> impl Iterator<Item = &ClauseShape> {
+        self.segments()
+            .into_iter()
+            .flat_map(|segment| segment.shapes.iter())
+    }
+
+    fn contains_concept(&self, predicate_id: u32) -> bool {
+        let mut current = Some(self);
+        while let Some(segment) = current {
+            if segment.concept_predicates.contains(&predicate_id) {
+                return true;
+            }
+            current = segment.base.as_deref();
+        }
+        false
+    }
+
+    fn role_predicates(&self, role_id: u32) -> impl Iterator<Item = &u32> {
+        self.segments().into_iter().flat_map(move |segment| {
+            segment
+                .object_roles_by_role_id
+                .get(&role_id)
+                .into_iter()
+                .flatten()
+        })
+    }
+
+    fn first_unsupported(&self) -> Option<u32> {
+        self.segments()
+            .into_iter()
+            .filter_map(|segment| segment.unsupported_clause_ids.first().copied())
+            .min()
+    }
+}
+
+/// Exact validator over retained shapes and one fresh active-state snapshot.
+pub(crate) struct CompiledClauseBlockingValidator<'a> {
+    program: &'a RuleProgram,
+    #[allow(dead_code)]
+    core_mode: CoreBlockingMode,
+    limits: ValidationLimits,
+    compiled: Arc<CompiledBlockingShapes>,
+    prepared_snapshot: Option<Snapshot>,
+}
+
+impl<'a> CompiledClauseBlockingValidator<'a> {
+    #[cfg(test)]
+    pub(crate) fn new(
+        program: &'a RuleProgram,
+        core_mode: CoreBlockingMode,
+    ) -> Result<Self, BlockingError> {
+        Self::from_shapes(
+            program,
+            Arc::new(CompiledBlockingShapes::new(program)?),
+            core_mode,
+        )
+    }
+
+    pub(crate) fn from_shapes(
+        program: &'a RuleProgram,
+        compiled: Arc<CompiledBlockingShapes>,
+        core_mode: CoreBlockingMode,
+    ) -> Result<Self, BlockingError> {
+        if core_mode == CoreBlockingMode::None {
+            return Err(BlockingError::invalid(
+                "compiled blocking validation requires a core mode",
+            ));
+        }
+        if !program.shares_storage(&compiled.program) {
+            return Err(BlockingError::invalid(
+                "blocking shapes belong to a different rule program",
+            ));
+        }
+        Ok(Self {
+            program,
+            core_mode,
+            limits: ValidationLimits::default(),
+            compiled,
             prepared_snapshot: None,
         })
     }
@@ -307,7 +405,7 @@ impl<'a> CompiledClauseBlockingValidator<'a> {
         {
             return Ok(Some(violation));
         }
-        for shape in &self.shapes {
+        for shape in self.compiled.shapes() {
             if self.parent_clause_invalidates(snapshot, shape, parent, blocked, budget)? {
                 return Ok(Some(self.clause(shape).clause_id));
             }
@@ -324,7 +422,7 @@ impl<'a> CompiledClauseBlockingValidator<'a> {
                 return Ok(Some(violation));
             }
         }
-        for shape in &self.shapes {
+        for shape in self.compiled.shapes() {
             if self.blocked_clause_violation(
                 snapshot,
                 shape,
@@ -759,12 +857,7 @@ impl<'a> CompiledClauseBlockingValidator<'a> {
             .role_id
             .ok_or_else(|| BlockingError::invariant("at-least predicate has no role ID"))?;
         let mut values = BTreeSet::new();
-        for predicate_id in self
-            .object_roles_by_role_id
-            .get(&role_id)
-            .into_iter()
-            .flatten()
-        {
+        for predicate_id in self.compiled.role_predicates(role_id) {
             for row_index in snapshot
                 .by_predicate
                 .get(predicate_id)
@@ -827,7 +920,7 @@ impl<'a> CompiledClauseBlockingValidator<'a> {
             .iter()
             .filter(|row| {
                 row.arguments.as_slice() == [node]
-                    && self.concept_predicates.contains(&row.predicate_id)
+                    && self.compiled.contains_concept(row.predicate_id)
             })
             .map(|row| row.predicate_id)
             .collect()
@@ -885,7 +978,7 @@ impl BlockValidator<TableauKernel> for CompiledClauseBlockingValidator<'_> {
         let mut budget = Budget::new(self.limits, control);
         let mut violation = self.first_violation(snapshot, blocked, blocker, &mut budget)?;
         if violation.is_none() {
-            violation = self.unsupported_clause_ids.first().copied();
+            violation = self.compiled.first_unsupported();
         }
         let Some(violation) = violation else {
             return Ok(ValidationDecision::valid());
@@ -1133,6 +1226,275 @@ mod tests {
                 .collect(),
         )
         .map_err(|error| BlockingError::invariant(error.message))
+    }
+
+    struct Cancelled;
+
+    impl BlockingControl for Cancelled {
+        fn poll(&self) -> Result<(), BlockingError> {
+            Err(BlockingError::cancelled("test cancellation"))
+        }
+    }
+
+    fn shape_program(unrelated: u32) -> Result<RuleProgram, BlockingError> {
+        let mut predicates = vec![
+            predicate(0, PredicateKind::Concept, vec![TermSort::Object])?,
+            predicate(
+                1,
+                PredicateKind::ObjectRole,
+                vec![TermSort::Object, TermSort::Object],
+            )?
+            .with_role_id(4),
+            predicate(2, PredicateKind::Concept, vec![TermSort::Object])?,
+        ];
+        let mut clauses = Vec::new();
+        for id in 0..unrelated {
+            predicates.push(predicate(
+                id + 3,
+                PredicateKind::Concept,
+                vec![TermSort::Object],
+            )?);
+            clauses.push(clause(
+                id,
+                vec![atom(id + 3, &[0])?],
+                vec![atom(2, &[0])?],
+                vec![0],
+            )?);
+        }
+        RuleProgram::new(predicates, clauses)
+            .map_err(|error| BlockingError::invariant(error.message))
+    }
+
+    fn edge_clause(id: u32) -> Result<RuleClause, BlockingError> {
+        clause(
+            id,
+            vec![atom(1, &[0, 1])?, atom(0, &[0])?],
+            vec![atom(2, &[1])?],
+            vec![1, 0],
+        )
+    }
+
+    #[test]
+    fn retained_shapes_only_compile_query_rows_with_unrelated_source_clauses(
+    ) -> Result<(), BlockingError> {
+        for unrelated in [0, 1_000] {
+            let source = shape_program(unrelated)?;
+            let base = Arc::new(CompiledBlockingShapes::new(&source)?);
+            let query = RuleProgram::extend(
+                &source,
+                Vec::new(),
+                Vec::new(),
+                vec![edge_clause(unrelated)?],
+            )
+            .map_err(|error| BlockingError::invariant(error.message))?;
+            let derived = CompiledBlockingShapes::extend(Arc::clone(&base), &query)?;
+            assert!(derived
+                .base
+                .as_ref()
+                .is_some_and(|parent| Arc::ptr_eq(parent, &base)));
+            assert_eq!(derived.shapes.len(), 1);
+            assert!(derived.concept_predicates.is_empty());
+            assert!(derived.object_roles_by_role_id.is_empty());
+            assert!(derived.unsupported_clause_ids.is_empty());
+            assert_eq!(
+                derived.shapes().collect::<Vec<_>>(),
+                CompiledBlockingShapes::new(&query)?
+                    .shapes()
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                derived.role_predicates(4).copied().collect::<Vec<_>>(),
+                vec![1]
+            );
+            assert!(derived.contains_concept(0));
+            assert!(!derived.contains_concept(1));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_same_semantics_overrides_reuse_shapes_and_preserve_current_rows(
+    ) -> Result<(), BlockingError> {
+        let source = RuleProgram::extend(
+            &shape_program(0)?,
+            Vec::new(),
+            Vec::new(),
+            vec![edge_clause(0)?],
+        )
+        .map_err(|error| BlockingError::invariant(error.message))?;
+        let base = Arc::new(CompiledBlockingShapes::new(&source)?);
+        let negative = predicate(3, PredicateKind::NegatedConcept, vec![TermSort::Object])?
+            .with_symbol_id(0)
+            .with_opposite(0);
+        let opposite = source
+            .predicate(0)
+            .map_err(|error| BlockingError::invariant(error.message))?
+            .clone()
+            .with_opposite(3);
+        let mut duplicate = edge_clause(1)?;
+        duplicate.provenance_ids = vec![9];
+        let query = RuleProgram::extend(&source, vec![negative], vec![opposite], vec![duplicate])
+            .map_err(|error| BlockingError::invariant(error.message))?;
+        let derived = Arc::new(CompiledBlockingShapes::extend(Arc::clone(&base), &query)?);
+        assert!(derived.shapes.is_empty());
+        assert_eq!(derived.concept_predicates, BTreeSet::from([3]));
+        assert_eq!(
+            derived.shapes().collect::<Vec<_>>(),
+            CompiledBlockingShapes::new(&query)?
+                .shapes()
+                .collect::<Vec<_>>()
+        );
+        let validator = CompiledClauseBlockingValidator::from_shapes(
+            &query,
+            Arc::clone(&derived),
+            CoreBlockingMode::Simple,
+        )?;
+        let first = derived
+            .shapes()
+            .next()
+            .ok_or_else(|| BlockingError::invariant("missing retained shape"))?;
+        assert_eq!(validator.clause(first).provenance_ids, vec![0, 9]);
+        assert_eq!(source.clauses()[0].provenance_ids, vec![0]);
+        assert_eq!(source.predicates()[0].opposite_predicate_id, None);
+        assert!(derived.contains_concept(3));
+        assert!(!base.contains_concept(3));
+        assert!(validator.prepared_snapshot.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn shape_handoff_rejects_equal_but_independently_owned_programs() -> Result<(), BlockingError> {
+        let source = shape_program(0)?;
+        let identical = shape_program(0)?;
+        let base = Arc::new(CompiledBlockingShapes::new(&source)?);
+        assert!(CompiledClauseBlockingValidator::from_shapes(
+            &identical,
+            Arc::clone(&base),
+            CoreBlockingMode::Simple
+        )
+        .is_err());
+        let query = RuleProgram::extend(&identical, Vec::new(), Vec::new(), vec![edge_clause(0)?])
+            .map_err(|error| BlockingError::invariant(error.message))?;
+        assert!(CompiledBlockingShapes::extend(Arc::clone(&base), &query).is_err());
+        assert!(CompiledClauseBlockingValidator::from_shapes(
+            &source,
+            Arc::clone(&base),
+            CoreBlockingMode::None
+        )
+        .is_err());
+        let cloned = source.clone();
+        let validator =
+            CompiledClauseBlockingValidator::from_shapes(&cloned, base, CoreBlockingMode::Simple)?;
+        assert!(validator.prepared_snapshot.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_source_shapes_remain_conservative_after_query_extension(
+    ) -> Result<(), BlockingError> {
+        let initial = shape_program(0)?;
+        let body = RuleAtom::new(0, vec![Term::individual(0)])
+            .map_err(|error| BlockingError::invariant(error.message))?;
+        let head = RuleAtom::new(2, vec![Term::individual(0)])
+            .map_err(|error| BlockingError::invariant(error.message))?;
+        let source = RuleProgram::extend(
+            &initial,
+            Vec::new(),
+            Vec::new(),
+            vec![clause(0, vec![body], vec![head], vec![0])?],
+        )
+        .map_err(|error| BlockingError::invariant(error.message))?;
+        let base = Arc::new(CompiledBlockingShapes::new(&source)?);
+        let query = RuleProgram::extend(&source, Vec::new(), Vec::new(), vec![edge_clause(1)?])
+            .map_err(|error| BlockingError::invariant(error.message))?;
+        let derived = CompiledBlockingShapes::extend(base, &query)?;
+        assert_eq!(derived.first_unsupported(), Some(0));
+        assert_eq!(
+            derived.first_unsupported(),
+            CompiledBlockingShapes::new(&query)?.first_unsupported()
+        );
+        assert!(derived.unsupported_clause_ids.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn retained_query_shapes_match_fresh_validation_and_capture_new_fact_state(
+    ) -> Result<(), BlockingError> {
+        let source = shape_program(0)?;
+        let base = Arc::new(CompiledBlockingShapes::new(&source)?);
+        let query = RuleProgram::extend(&source, Vec::new(), Vec::new(), vec![edge_clause(0)?])
+            .map_err(|error| BlockingError::invariant(error.message))?;
+        let derived = Arc::new(CompiledBlockingShapes::extend(base, &query)?);
+        let mut kernel = TableauKernel::new();
+        let blocker_parent = node(&mut kernel, StoreNodeKind::Ni, None)?;
+        let blocker = node(&mut kernel, StoreNodeKind::Tree, Some(blocker_parent))?;
+        let blocked_parent = node(&mut kernel, StoreNodeKind::Ni, None)?;
+        let blocked = node(&mut kernel, StoreNodeKind::Tree, Some(blocked_parent))?;
+        kernel
+            .set_blocked(blocked, Some(blocker), true)
+            .map_err(|error| BlockingError::invariant(error.message))?;
+        fact(&mut kernel, 0, vec![blocker], true)?;
+        fact(&mut kernel, 0, vec![blocked], true)?;
+        fact(&mut kernel, 1, vec![blocker, blocker_parent], false)?;
+        fact(&mut kernel, 2, vec![blocker_parent], false)?;
+        fact(&mut kernel, 1, vec![blocked, blocked_parent], false)?;
+        let vocabulary = BlockingVocabulary::new([0, 2], [1])?;
+        let projection = BlockingProjection::from_state(
+            &kernel,
+            &vocabulary,
+            super::super::BlockingLimits::default(),
+            &NeverCancel,
+        )?;
+        let mut retained = CompiledClauseBlockingValidator::from_shapes(
+            &query,
+            Arc::clone(&derived),
+            CoreBlockingMode::Simple,
+        )?;
+        let mut fresh = CompiledClauseBlockingValidator::new(&query, CoreBlockingMode::Simple)?;
+        assert!(retained
+            .begin_pass(&kernel, &projection, &Cancelled)
+            .is_err());
+        assert!(retained.prepared_snapshot.is_none());
+        retained.begin_pass(&kernel, &projection, &NeverCancel)?;
+        let decision = retained.validate_block(
+            &kernel,
+            &projection,
+            blocked,
+            blocker,
+            &validated_signature()?,
+            &NeverCancel,
+        )?;
+        let expected = fresh.validate_block(
+            &kernel,
+            &projection,
+            blocked,
+            blocker,
+            &validated_signature()?,
+            &NeverCancel,
+        )?;
+        assert_eq!(decision, expected);
+        assert_eq!(decision.violation_ids, vec![0]);
+        retained.end_pass();
+        fact(&mut kernel, 2, vec![blocked_parent], false)?;
+        retained.begin_pass(&kernel, &projection, &NeverCancel)?;
+        let repaired = retained.validate_block(
+            &kernel,
+            &projection,
+            blocked,
+            blocker,
+            &validated_signature()?,
+            &NeverCancel,
+        )?;
+        assert!(repaired.valid);
+        let second = CompiledClauseBlockingValidator::from_shapes(
+            &query,
+            Arc::clone(&derived),
+            CoreBlockingMode::Simple,
+        )?;
+        assert!(Arc::ptr_eq(&retained.compiled, &second.compiled));
+        assert!(retained.prepared_snapshot.is_some());
+        assert!(second.prepared_snapshot.is_none());
+        Ok(())
     }
 
     #[test]
