@@ -391,3 +391,119 @@ fn output_is_canonical_when_top_and_bottom_ids_are_not_extrema() -> NativeResult
     assert_eq!(result.hierarchy.edges, vec![(0, 1), (2, 0)]);
     Ok(())
 }
+
+#[test]
+fn indexed_adjacency_matches_complete_relation_oracle_under_relabeling() -> NativeResult<()> {
+    let size = 12_u32;
+    let fixtures = [
+        (1..size - 2).map(|id| (id, id + 1)).collect::<Vec<_>>(),
+        (2..size - 1).map(|id| (1, id)).collect(),
+        vec![(1, 2), (1, 3), (2, 4), (3, 4), (4, 5), (2, 6)],
+        vec![(1, 2), (2, 1), (2, 3), (3, 4), (5, 6), (6, 5)],
+        Vec::new(),
+    ];
+    let elements = (0..size).collect::<Vec<_>>();
+    for edges in fixtures {
+        for reverse in [false, true] {
+            let remap = |id: u32| if reverse { size - 1 - id } else { id };
+            let mut closure = vec![vec![false; size as usize]; size as usize];
+            for (id, row) in closure.iter_mut().enumerate() {
+                row[id] = true;
+                row[size as usize - 1] = true;
+            }
+            closure[0].fill(true);
+            for &(child, parent) in &edges {
+                closure[remap(child) as usize][remap(parent) as usize] = true;
+            }
+            for middle in 0..size as usize {
+                for child in 0..size as usize {
+                    for parent in 0..size as usize {
+                        closure[child][parent] |= closure[child][middle] && closure[middle][parent];
+                    }
+                }
+            }
+            let mut known = Vec::new();
+            for (child, parents) in closure.iter().enumerate() {
+                for (parent, entailed) in parents.iter().enumerate() {
+                    if *entailed {
+                        known.push((
+                            u32::try_from(child)
+                                .map_err(|_| NativeError::invariant("test child exceeds u32"))?,
+                            u32::try_from(parent)
+                                .map_err(|_| NativeError::invariant("test parent exceeds u32"))?,
+                        ));
+                    }
+                }
+            }
+            let expected = classify_ids(
+                ClassificationProblem {
+                    elements: &elements,
+                    top: size - 1,
+                    bottom: 0,
+                    known: &known,
+                    known_complete: true,
+                    mode: ClassificationMode::Deterministic,
+                    limits: ClassificationLimits::default(),
+                },
+                &crate::session::NeverAbort,
+                |_queries, _control| {
+                    Err(NativeError::invariant("complete relation must not query"))
+                },
+            )?;
+            for mode in [
+                ClassificationMode::Deterministic,
+                ClassificationMode::QuasiOrder,
+            ] {
+                let actual = classify_ids(
+                    ClassificationProblem {
+                        elements: &elements,
+                        top: size - 1,
+                        bottom: 0,
+                        known: &[],
+                        known_complete: false,
+                        mode,
+                        limits: ClassificationLimits::default(),
+                    },
+                    &crate::session::NeverAbort,
+                    |queries, _control| {
+                        Ok(queries
+                            .iter()
+                            .map(|&(child, parent)| closure[child as usize][parent as usize])
+                            .collect())
+                    },
+                )?;
+                assert_eq!(actual.hierarchy, expected.hierarchy);
+                assert!(actual.statistics.hierarchy_neighbor_visits > 0);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn unrelated_classes_enumerate_adjacency_not_all_edges_per_node() -> NativeResult<()> {
+    let size = 64_u32;
+    let elements = (0..size).collect::<Vec<_>>();
+    let result = classify_ids(
+        ClassificationProblem {
+            elements: &elements,
+            top: size - 1,
+            bottom: 0,
+            known: &[],
+            known_complete: false,
+            mode: ClassificationMode::Deterministic,
+            limits: ClassificationLimits::default(),
+        },
+        &crate::session::NeverAbort,
+        |queries, _control| {
+            Ok(queries
+                .iter()
+                .map(|&(child, parent)| child == 0 || parent == size - 1 || child == parent)
+                .collect())
+        },
+    )?;
+    assert_eq!(result.hierarchy.nodes.len(), size as usize);
+    assert_eq!(result.hierarchy.edges.len(), 2 * (size as usize - 2));
+    assert!(result.statistics.hierarchy_neighbor_visits <= 4 * u64::from(size).pow(2));
+    Ok(())
+}

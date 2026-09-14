@@ -182,6 +182,8 @@ pub struct ClassificationStatistics {
     pub cache_hits: u64,
     pub known_subsumptions: u64,
     pub possible_subsumptions: u64,
+    /// Adjacency entries enumerated by hierarchy boundary searches.
+    pub hierarchy_neighbor_visits: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -247,6 +249,7 @@ where
                 cache_hits: 0,
                 known_subsumptions: usize_to_u64(problem.known.len()),
                 possible_subsumptions: 0,
+                hierarchy_neighbor_visits: 0,
             },
         });
     }
@@ -277,6 +280,7 @@ where
         (known_counts.get(value).copied().unwrap_or_default(), *value)
     });
 
+    oracle.reserve_adjacency(2, 1)?;
     let mut hierarchy = MutableHierarchy::new(problem.top, problem.bottom);
     for (offset, element) in ordered.into_iter().enumerate() {
         if offset % 1_024 == 0 {
@@ -284,6 +288,8 @@ where
         }
         hierarchy.insert(element, &mut oracle)?;
     }
+    hierarchy.validate_adjacency(control)?;
+    let hierarchy_neighbor_visits = hierarchy.neighbor_visits;
     let frozen = hierarchy.freeze()?;
     frozen.validate()?;
     let statistics = ClassificationStatistics {
@@ -294,6 +300,7 @@ where
         cache_hits: oracle.cache_hits,
         known_subsumptions: usize_to_u64(oracle.known.len()),
         possible_subsumptions: usize_to_u64(oracle.possible.len()),
+        hierarchy_neighbor_visits,
     };
     Ok(ClassificationResult {
         hierarchy: frozen,
@@ -634,6 +641,7 @@ struct Oracle<'a, F> {
     semantic_tests: u64,
     batches: u64,
     cache_hits: u64,
+    adjacency_bytes: u64,
 }
 
 impl<'a, F> Oracle<'a, F>
@@ -672,7 +680,26 @@ where
             semantic_tests: 0,
             batches: 0,
             cache_hits: 0,
+            adjacency_bytes: 0,
         })
+    }
+
+    fn reserve_adjacency(&mut self, nodes: usize, edges: usize) -> NativeResult<()> {
+        // Two vector-backed adjacency tables and two B-tree entries per edge.
+        // Include spare vector capacity and conservative per-entry allocator overhead.
+        let bytes = usize_to_u64(nodes)
+            .saturating_mul(usize_to_u64(4 * size_of::<BTreeSet<usize>>()))
+            .saturating_add(usize_to_u64(edges).saturating_mul(512));
+        self.control.poll()?;
+        let total = bytes.saturating_add(estimate_oracle_memory(
+            self.known.len(),
+            self.cache.len(),
+            self.possible.len(),
+        ));
+        check_count("max_memory_bytes", total, self.limits.max_memory_bytes)?;
+        self.control.observe_memory(total)?;
+        self.adjacency_bytes = bytes;
+        Ok(())
     }
 
     fn child_counts(&self) -> BTreeMap<u32, u64> {
@@ -735,7 +762,8 @@ where
                 }
             }
             let memory =
-                estimate_oracle_memory(self.known.len(), self.cache.len(), self.possible.len());
+                estimate_oracle_memory(self.known.len(), self.cache.len(), self.possible.len())
+                    .saturating_add(self.adjacency_bytes);
             check_count("max_memory_bytes", memory, self.limits.max_memory_bytes)?;
             self.control.observe_memory(memory)?;
             self.control.poll()?;
@@ -800,6 +828,9 @@ struct MutableHierarchy {
     bottom_node: usize,
     members: Vec<BTreeSet<u32>>,
     edges: BTreeSet<(usize, usize)>,
+    parents: Vec<BTreeSet<usize>>,
+    children: Vec<BTreeSet<usize>>,
+    neighbor_visits: u64,
 }
 
 impl MutableHierarchy {
@@ -809,6 +840,9 @@ impl MutableHierarchy {
             bottom_node: 1,
             members: vec![BTreeSet::from([top]), BTreeSet::from([bottom])],
             edges: BTreeSet::from([(1, 0)]),
+            parents: vec![BTreeSet::new(), BTreeSet::from([0])],
+            children: vec![BTreeSet::from([1]), BTreeSet::new()],
+            neighbor_visits: 0,
         }
     }
 
@@ -832,21 +866,111 @@ impl MutableHierarchy {
             return Ok(());
         }
         let node = self.members.len();
+        oracle.reserve_adjacency(
+            node.saturating_add(1),
+            self.edges
+                .len()
+                .saturating_add(children.len())
+                .saturating_add(parents.len()),
+        )?;
+        self.parents.try_reserve(1).map_err(|_| {
+            NativeError::new(
+                ErrorKind::Resource,
+                "RESOURCE_LIMIT",
+                "classification parent adjacency allocation failed",
+            )
+        })?;
+        self.children.try_reserve(1).map_err(|_| {
+            NativeError::new(
+                ErrorKind::Resource,
+                "RESOURCE_LIMIT",
+                "classification child adjacency allocation failed",
+            )
+        })?;
         self.members.push(BTreeSet::from([element]));
+        self.parents.push(BTreeSet::new());
+        self.children.push(BTreeSet::new());
         for &child in &children {
             for &parent in &parents {
-                self.edges.remove(&(child, parent));
+                self.update_edge(child, parent, false)?;
             }
         }
-        self.edges
-            .extend(children.iter().map(|child| (*child, node)));
-        self.edges
-            .extend(parents.iter().map(|parent| (node, *parent)));
+        for &child in &children {
+            self.update_edge(child, node, true)?;
+        }
+        for &parent in &parents {
+            self.update_edge(node, parent, true)?;
+        }
+        Ok(())
+    }
+
+    fn update_edge(&mut self, child: usize, parent: usize, insert: bool) -> NativeResult<()> {
+        let parents = self
+            .parents
+            .get_mut(child)
+            .ok_or_else(|| NativeError::invariant("classification adjacency child disappeared"))?;
+        let children = self
+            .children
+            .get_mut(parent)
+            .ok_or_else(|| NativeError::invariant("classification adjacency parent disappeared"))?;
+        let changed = if insert {
+            (
+                self.edges.insert((child, parent)),
+                parents.insert(parent),
+                children.insert(child),
+            )
+        } else {
+            (
+                self.edges.remove(&(child, parent)),
+                parents.remove(&parent),
+                children.remove(&child),
+            )
+        };
+        if changed.0 != changed.1 || changed.0 != changed.2 {
+            return Err(NativeError::invariant(
+                "classification adjacency diverged from edges",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_adjacency(&self, control: &dyn OperationControl) -> NativeResult<()> {
+        if self.parents.len() != self.members.len() || self.children.len() != self.members.len() {
+            return Err(NativeError::invariant(
+                "classification adjacency node count diverged",
+            ));
+        }
+        let mut parent_edges = 0_usize;
+        let mut child_edges = 0_usize;
+        for (child, parents) in self.parents.iter().enumerate() {
+            control.poll()?;
+            parent_edges = parent_edges.saturating_add(parents.len());
+            for &parent in parents {
+                if !self.edges.contains(&(child, parent))
+                    || !self
+                        .children
+                        .get(parent)
+                        .is_some_and(|values| values.contains(&child))
+                {
+                    return Err(NativeError::invariant(
+                        "classification adjacency edge diverged",
+                    ));
+                }
+            }
+        }
+        for children in &self.children {
+            child_edges = child_edges.saturating_add(children.len());
+        }
+        if parent_edges != self.edges.len() || child_edges != self.edges.len() {
+            return Err(NativeError::invariant(
+                "classification adjacency edge count diverged",
+            ));
+        }
         Ok(())
     }
 
     fn boundary<F>(
-        &self,
+        &mut self,
         start: usize,
         upward: bool,
         element: u32,
@@ -862,25 +986,21 @@ impl MutableHierarchy {
         while !frontier.is_empty() {
             oracle.control.poll()?;
             let ordered_frontier = frontier.iter().copied().collect::<Vec<_>>();
-            let candidates_by_node = ordered_frontier
-                .iter()
-                .map(|node| {
-                    let candidates = self
-                        .edges
-                        .iter()
-                        .filter_map(|&(child, parent)| {
-                            if upward && child == *node {
-                                Some(parent)
-                            } else if !upward && parent == *node {
-                                Some(child)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<BTreeSet<_>>();
-                    (*node, candidates)
-                })
-                .collect::<Vec<_>>();
+            let adjacency = if upward {
+                &self.parents
+            } else {
+                &self.children
+            };
+            let mut candidates_by_node = Vec::with_capacity(ordered_frontier.len());
+            for node in &ordered_frontier {
+                let neighbors = adjacency.get(*node).ok_or_else(|| {
+                    NativeError::invariant("classification adjacency node disappeared")
+                })?;
+                self.neighbor_visits = self
+                    .neighbor_visits
+                    .saturating_add(usize_to_u64(neighbors.len()));
+                candidates_by_node.push((*node, neighbors));
+            }
             let candidates = candidates_by_node
                 .iter()
                 .flat_map(|(_, values)| values.iter().copied())
@@ -989,4 +1109,42 @@ fn check_count(limit: &'static str, observed: u64, allowed: u64) -> NativeResult
         .with_context("allowed", allowed.to_string()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod adjacency_tests {
+    use super::*;
+
+    #[test]
+    fn detects_inconsistent_adjacency_without_publishing_a_hierarchy() {
+        let mut hierarchy = MutableHierarchy::new(1, 0);
+        hierarchy.children[0].clear();
+        assert!(hierarchy
+            .validate_adjacency(&crate::session::NeverAbort)
+            .is_err());
+    }
+
+    #[test]
+    fn adjacency_storage_is_charged_before_growth() -> NativeResult<()> {
+        let elements = [0, 1];
+        let mut tester = |_queries: &[(u32, u32)], _control: &dyn OperationControl| Ok(vec![]);
+        let mut oracle = Oracle::new(
+            &elements,
+            BTreeSet::new(),
+            ClassificationMode::Deterministic,
+            ClassificationLimits {
+                max_memory_bytes: 1024,
+                ..ClassificationLimits::default()
+            },
+            &crate::session::NeverAbort,
+            &mut tester,
+        )?;
+        let error = oracle
+            .reserve_adjacency(2, 10)
+            .err()
+            .ok_or_else(|| NativeError::invariant("ten edges must exceed the budget"))?;
+        assert_eq!(error.kind, ErrorKind::Resource);
+        assert_eq!(oracle.adjacency_bytes, 0);
+        Ok(())
+    }
 }
