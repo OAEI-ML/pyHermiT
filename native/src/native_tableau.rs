@@ -44,7 +44,9 @@ pub struct ProductionTableau {
     query: Option<LoadedRuleState>,
 }
 
-pub struct ProductionCheckpoint {
+pub struct ProductionCheckpoint(Option<PermanentCheckpoint>);
+
+struct PermanentCheckpoint {
     kernel: TableauKernel,
     engine: RuleEngineCheckpoint,
     nominals: NominalIntroductionManager,
@@ -80,9 +82,9 @@ impl ProductionTableau {
 
     fn restore_permanent_checkpoint(
         &mut self,
-        checkpoint: ProductionCheckpoint,
+        checkpoint: PermanentCheckpoint,
     ) -> NativeResult<()> {
-        let ProductionCheckpoint {
+        let PermanentCheckpoint {
             kernel,
             engine,
             nominals,
@@ -135,13 +137,28 @@ impl NativeTableau for ProductionTableau {
         let datatype_signature = self.permanent.datatypes.signature_checkpoint();
         let engine = self.permanent.engine.checkpoint(control)?;
         control.poll()?;
-        Ok(ProductionCheckpoint {
+        Ok(ProductionCheckpoint(Some(PermanentCheckpoint {
             kernel,
             engine,
             nominals,
             blocking,
             datatype_signature,
-        })
+        })))
+    }
+
+    fn query_checkpoint(
+        &mut self,
+        control: &dyn OperationControl,
+    ) -> NativeResult<Self::OperationCheckpoint> {
+        if self.query.is_some() {
+            return Err(NativeError::invariant(
+                "query state survived into a new native operation",
+            ));
+        }
+        control.poll()?;
+        // install_query owns a distinct LoadedRuleState. All tableau mutation goes
+        // through active_mut(), leaving permanent state untouched even on failure.
+        Ok(ProductionCheckpoint(None))
     }
 
     fn install_query(
@@ -181,6 +198,14 @@ impl NativeTableau for ProductionTableau {
         disposition: OperationDisposition,
     ) -> NativeResult<()> {
         let had_query = self.query.take().is_some();
+        let Some(checkpoint) = checkpoint.0 else {
+            if disposition != OperationDisposition::RollbackQuery {
+                return Err(NativeError::invariant(
+                    "an isolated query cannot commit permanent state",
+                ));
+            }
+            return self.reset_to_permanent();
+        };
         if had_query && disposition == OperationDisposition::CommitPermanent {
             return Err(NativeError::invariant(
                 "query tableau cannot be committed as the permanent root",
@@ -816,6 +841,95 @@ mod tests {
             .and_then(|document| document.get("hex"))
             .and_then(serde_json::Value::as_str)
             .map_or_else(Vec::new, decode_hex)
+    }
+
+    fn golden_tableau_and_query() -> NativeResult<(ProductionTableau, SessionQuery<DecodedQuery>)> {
+        let limits = DecodeLimits::default();
+        let ontology = Arc::new(
+            decode_ontology(golden_document("ontology"), &limits)
+                .map_err(|error| NativeError::wire(error.message))?,
+        );
+        let config = decode_config(golden_document("config"), &limits)
+            .map_err(|error| NativeError::wire(error.message))?;
+        let cancellation = CancellationHandle::from_options(None, None)?.state();
+        let loaded = load_permanent_rule_state(
+            &ontology,
+            Arc::clone(&cancellation),
+            config.disjunction_learning,
+            config.existentials,
+            config.blocking,
+        )?;
+        let query = crate::input_wire::decode_query(golden_document("query"), &limits)
+            .map_err(|error| NativeError::wire(error.message))?;
+        Ok((
+            ProductionTableau::new(ontology, config, cancellation, loaded)?,
+            SessionQuery::new(crate::session::QueryKey::new(query.query_hash), query),
+        ))
+    }
+
+    #[test]
+    fn isolated_queries_do_not_copy_or_mutate_permanent_checkpoints() -> NativeResult<()> {
+        let (mut tableau, query) = golden_tableau_and_query()?;
+        let before = tableau.permanent.kernel.canonical_snapshot()?;
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            let checkpoint = tableau.query_checkpoint(&NeverAbort)?;
+            assert_eq!(tableau.permanent.engine.checkpoint_count(), 0);
+            assert_eq!(tableau.permanent.engine.checkpoint_bytes(), 0);
+            tableau.install_query(&query, &NeverAbort)?;
+            let result = crate::session::drive_tableau(
+                &mut tableau,
+                &NeverAbort,
+                SessionLimits::default().max_scheduler_steps,
+            )?;
+            results.push(result.satisfiable);
+            tableau.finish_operation(checkpoint, OperationDisposition::RollbackQuery)?;
+            assert_eq!(tableau.permanent.kernel.canonical_snapshot()?, before);
+            assert_eq!(tableau.permanent.engine.checkpoint_count(), 0);
+            tableau.check_invariants()?;
+        }
+        let (fresh, _) = golden_tableau_and_query()?;
+        let session = SessionScheduler::new(fresh, SessionLimits::default())?;
+        let expected = session.check_query(&query, &NeverAbort)?.satisfiable;
+        assert_eq!(results, vec![expected, expected]);
+        Ok(())
+    }
+
+    #[test]
+    fn isolated_query_failure_preserves_permanent_state_and_later_answers() -> NativeResult<()> {
+        struct Cancelled;
+        impl OperationControl for Cancelled {
+            fn poll(&self) -> NativeResult<()> {
+                Err(NativeError::new(
+                    crate::error::ErrorKind::Cancelled,
+                    "CANCELLED",
+                    "test cancellation",
+                ))
+            }
+            fn observe_memory(&self, _bytes: u64) -> NativeResult<()> {
+                self.poll()
+            }
+        }
+        let (mut tableau, query) = golden_tableau_and_query()?;
+        let before = tableau.permanent.kernel.canonical_snapshot()?;
+        let checkpoint = tableau.query_checkpoint(&NeverAbort)?;
+        tableau.install_query(&query, &NeverAbort)?;
+        assert!(crate::session::drive_tableau(&mut tableau, &Cancelled, 100).is_err());
+        tableau.finish_operation(checkpoint, OperationDisposition::RollbackQuery)?;
+        assert_eq!(tableau.permanent.kernel.canonical_snapshot()?, before);
+        let checkpoint = tableau.query_checkpoint(&NeverAbort)?;
+        let mut bad = query.payload().clone();
+        bad.permanent_program_sha256 = [42; 32];
+        let bad = SessionQuery::new(crate::session::QueryKey::new(bad.query_hash), bad);
+        assert!(tableau.install_query(&bad, &NeverAbort).is_err());
+        tableau.finish_operation(checkpoint, OperationDisposition::RollbackQuery)?;
+        assert_eq!(tableau.permanent.kernel.canonical_snapshot()?, before);
+        let session = SessionScheduler::new(tableau, SessionLimits::default())?;
+        let first = session.check_query(&query, &NeverAbort)?.satisfiable;
+        let (fresh, _) = golden_tableau_and_query()?;
+        let fresh = SessionScheduler::new(fresh, SessionLimits::default())?;
+        assert_eq!(first, fresh.check_query(&query, &NeverAbort)?.satisfiable);
+        Ok(())
     }
 
     #[test]

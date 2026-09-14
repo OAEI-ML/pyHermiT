@@ -244,6 +244,15 @@ pub trait NativeTableau: Send {
         control: &dyn OperationControl,
     ) -> NativeResult<Self::OperationCheckpoint>;
 
+    /// Query-isolated kernels may avoid copying permanent state that cannot be mutated.
+    /// Other implementations retain the ordinary complete rollback checkpoint.
+    fn query_checkpoint(
+        &mut self,
+        control: &dyn OperationControl,
+    ) -> NativeResult<Self::OperationCheckpoint> {
+        self.operation_checkpoint(control)
+    }
+
     fn install_query(
         &mut self,
         query: &SessionQuery<Self::Query>,
@@ -1198,7 +1207,11 @@ fn run_transaction<K: NativeTableau>(
         }
     };
     controlled_observe(control, memory_bytes, poisoned)?;
-    let checkpoint = match kernel.operation_checkpoint(control) {
+    let checkpoint = match if query.is_some() {
+        kernel.query_checkpoint(control)
+    } else {
+        kernel.operation_checkpoint(control)
+    } {
         Ok(value) => value,
         Err(error) => {
             poison_on_invariant(poisoned, &error);
