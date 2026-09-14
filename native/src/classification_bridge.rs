@@ -381,12 +381,14 @@ fn test_subsumptions(
     control: &dyn OperationControl,
 ) -> NativeResult<Vec<bool>> {
     control.poll()?;
-    let queries = pairs
-        .iter()
-        .copied()
-        .map(|(child, parent)| build_counterexample_query(ontology, domain, child, parent))
-        .collect::<NativeResult<Vec<_>>>()?;
-    let results = scheduler.check_many(&queries, control)?;
+    let results = scheduler.check_generated(
+        pairs.len(),
+        |index| {
+            let (child, parent) = pairs[index];
+            build_counterexample_query(ontology, domain, child, parent)
+        },
+        control,
+    )?;
     if results.len() != pairs.len() {
         return Err(NativeError::invariant(
             "classification check batch returned the wrong result count",

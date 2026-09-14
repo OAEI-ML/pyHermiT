@@ -507,6 +507,84 @@ fn permanent_cache_and_query_batches_preserve_one_committed_root() -> NativeResu
 }
 
 #[test]
+fn generated_batch_is_lazy_and_matches_eager_events_and_results() -> NativeResult<()> {
+    let (kernel, shared) = FakeTableau::new(10);
+    let generated = SessionScheduler::new(kernel, SessionLimits::default())?;
+    let deltas = [5, -30, 0];
+    let results = generated.check_generated(
+        deltas.len(),
+        |index| {
+            // The previous query has already completed and restored its permanent root.
+            assert_eq!(shared.runs.load(Ordering::Acquire), index);
+            assert_eq!(shared.logical_value.load(Ordering::Acquire), 10);
+            let id = u8::try_from(index).map_err(|_| NativeError::wire("test ID overflow"))?;
+            Ok(query(id, deltas[index]))
+        },
+        &NeverAbort,
+    )?;
+    let (kernel, _) = FakeTableau::new(10);
+    let eager = SessionScheduler::new(kernel, SessionLimits::default())?;
+    assert_eq!(
+        results,
+        eager.check_many(&[query(0, 5), query(1, -30), query(2, 0)], &NeverAbort)?
+    );
+    assert_eq!(
+        generated.snapshot()?.statistics,
+        eager.snapshot()?.statistics
+    );
+    assert_eq!(generated.drain_events()?, eager.drain_events()?);
+    Ok(())
+}
+
+#[test]
+fn generated_batch_checks_limits_before_production_and_aborts_without_prefix() -> NativeResult<()> {
+    let (kernel, shared) = FakeTableau::new(10);
+    let session = SessionScheduler::new(
+        kernel,
+        SessionLimits {
+            max_batch_queries: 2,
+            ..SessionLimits::default()
+        },
+    )?;
+    let mut produced = 0;
+    let error = session
+        .check_generated(
+            3,
+            |_| {
+                produced += 1;
+                Ok(query(1, 0))
+            },
+            &NeverAbort,
+        )
+        .err()
+        .ok_or_else(|| NativeError::invariant("limit did not reject"))?;
+    assert_eq!(error.kind, ErrorKind::Resource);
+    assert_eq!(produced, 0);
+    session.drain_events()?;
+    let error = session
+        .check_generated(
+            2,
+            |index| {
+                if index == 1 {
+                    return Err(NativeError::wire("query producer failed"));
+                }
+                Ok(query(1, 5))
+            },
+            &NeverAbort,
+        )
+        .err()
+        .ok_or_else(|| NativeError::invariant("producer did not fail"))?;
+    assert_eq!(error.kind, ErrorKind::Wire);
+    assert_eq!(shared.logical_value.load(Ordering::Acquire), 10);
+    assert_eq!(session.snapshot()?.statistics.query_checks, 0);
+    let events = session.drain_events()?;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].kind, SessionEventKind::OperationAborted);
+    assert!(session.check_generated(1, |_| Ok(query(2, 1)), &NeverAbort)?[0].satisfiable);
+    Ok(())
+}
+
+#[test]
 fn cancellation_at_every_coordinator_poll_restores_query_state() -> NativeResult<()> {
     let (kernel, _shared) = FakeTableau::new(10);
     let session = SessionScheduler::new(kernel, SessionLimits::default())?;

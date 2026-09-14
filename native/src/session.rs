@@ -1,6 +1,7 @@
 //! Transactional lifecycle and exact phase scheduler for one native reasoner session.
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
+use std::borrow::Borrow;
 use std::collections::VecDeque;
 use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -926,7 +927,45 @@ impl<K: NativeTableau> SessionScheduler<K> {
         self.run_locked(|owned| {
             let total = u32::try_from(queries.len()).unwrap_or(u32::MAX);
             let context = owned.start_operation(SessionOperationKind::BatchCheck, total)?;
-            let attempt = run_batch(owned, queries, operation_control, limits, poisoned);
+            let attempt = run_batch(
+                owned,
+                queries.len(),
+                queries.iter().map(Ok),
+                operation_control,
+                limits,
+                poisoned,
+            );
+            match attempt {
+                Ok((results, checks, record)) => {
+                    owned.complete_operation(context, record, &checks, limits.max_event_queue)?;
+                    Ok(results)
+                }
+                Err(error) => abort(owned, context, error, limits.max_event_queue),
+            }
+        })
+    }
+
+    /// Build one native query at a time; all result/event publication remains atomic.
+    /// The item and result-byte bounds are checked before invoking the producer.
+    pub(crate) fn check_generated(
+        &self,
+        count: usize,
+        mut make_query: impl FnMut(usize) -> NativeResult<SessionQuery<K::Query>>,
+        operation_control: &dyn OperationControl,
+    ) -> NativeResult<Vec<SessionCheckResult>> {
+        let poisoned = &self.control.poisoned;
+        let limits = self.control.limits;
+        self.run_locked(|owned| {
+            let total = u32::try_from(count).unwrap_or(u32::MAX);
+            let context = owned.start_operation(SessionOperationKind::BatchCheck, total)?;
+            let attempt = run_batch(
+                owned,
+                count,
+                (0..count).map(&mut make_query),
+                operation_control,
+                limits,
+                poisoned,
+            );
             match attempt {
                 Ok((results, checks, record)) => {
                     owned.complete_operation(context, record, &checks, limits.max_event_queue)?;
@@ -1090,9 +1129,10 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
-fn run_batch<K: NativeTableau>(
+fn run_batch<K: NativeTableau, Q: Borrow<SessionQuery<K::Query>>>(
     owned: &mut SessionOwned<K>,
-    queries: &[SessionQuery<K::Query>],
+    count: usize,
+    queries: impl IntoIterator<Item = NativeResult<Q>>,
     control: &dyn OperationControl,
     limits: SessionLimits,
     poisoned: &AtomicBool,
@@ -1101,7 +1141,7 @@ fn run_batch<K: NativeTableau>(
     Vec<CompletedCheck>,
     OperationRecord,
 )> {
-    let observed = u64::try_from(queries.len()).unwrap_or(u64::MAX);
+    let observed = u64::try_from(count).unwrap_or(u64::MAX);
     if observed > u64::from(limits.max_batch_queries) {
         return Err(resource_limit(
             "native query batch exceeds the configured item limit",
@@ -1135,7 +1175,7 @@ fn run_batch<K: NativeTableau>(
     controlled_poll(control, poisoned)?;
 
     let mut results = Vec::new();
-    results.try_reserve_exact(queries.len()).map_err(|_| {
+    results.try_reserve_exact(count).map_err(|_| {
         resource_limit(
             "native query result allocation failed",
             "max_batch_result_bytes",
@@ -1144,7 +1184,7 @@ fn run_batch<K: NativeTableau>(
         )
     })?;
     let mut checks = Vec::new();
-    checks.try_reserve_exact(queries.len()).map_err(|_| {
+    checks.try_reserve_exact(count).map_err(|_| {
         resource_limit(
             "native query event allocation failed",
             "max_batch_result_bytes",
@@ -1154,8 +1194,10 @@ fn run_batch<K: NativeTableau>(
     })?;
     let mut scheduler = SchedulerStatistics::default();
     let mut cache_hits = 0_u64;
-    for query in queries {
+    for pending in queries {
         controlled_poll(control, poisoned)?;
+        let query = pending?;
+        let query = query.borrow();
         let result = if owned.permanent_satisfiable == Some(false) {
             SessionCheckResult::cached(false)
         } else {
