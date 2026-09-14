@@ -31,7 +31,7 @@ pub use cache::{
     BlockingCacheNamespace, BlockingSignatureCache, CachePromotion, CachePromotionContext,
 };
 pub use checker::DirectChecker;
-pub(crate) use compiled::CompiledClauseBlockingValidator;
+pub(crate) use compiled::{CompiledBlockingShapes, CompiledClauseBlockingValidator};
 pub use manager::{
     full_recompute, AssignmentChange, BlockingCheckpoint, BlockingEvent, BlockingManager,
     BlockingStateMutate, BlockingTraceEvent, ComputeResult, ComputeStats,

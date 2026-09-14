@@ -98,6 +98,11 @@ _ENCODED_DIAGNOSTIC_DEFAULTS: Mapping[str, bool | int] = MappingProxyType(
         "native_metadata_validation": False,
         "native_result_validation": False,
         "native_result_publications": 0,
+        "native_query_delta_loads": 0,
+        "native_query_full_program_loads": 0,
+        "native_query_fallback_rebuilds": 0,
+        "native_query_local_rule_plans": 0,
+        "native_query_peak_local_records": 0,
         "native_metadata_domain_copies": 0,
         "native_symbol_index": False,
         "native_symbol_index_bytes": 0,
@@ -993,6 +998,9 @@ class Reasoner:
                 "encoded query compilation lost its negotiated native capability",
                 context={"reason": "encoded_session_capability_lost"},
             )
+        record = getattr(self._runtime.session, "record_query_fallback", None)
+        if callable(record):
+            record()
         try:
             return session.check()
         finally:

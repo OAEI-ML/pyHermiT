@@ -270,9 +270,9 @@ impl<N: Copy + fmt::Debug + Eq + Ord> BlockingProjection<N> {
                 continue;
             }
             let arity_matches = (fact.arguments.len() == 1
-                && vocabulary.atomic_concepts.contains(&fact.predicate_id))
+                && vocabulary.atomic_concepts.contains(fact.predicate_id))
                 || (fact.arguments.len() == 2
-                    && vocabulary.atomic_object_roles.contains(&fact.predicate_id));
+                    && vocabulary.atomic_object_roles.contains(fact.predicate_id));
             if !arity_matches || fact.arguments.iter().any(|node| !nodes.contains_key(node)) {
                 continue;
             }

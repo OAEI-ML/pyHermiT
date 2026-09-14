@@ -1061,6 +1061,20 @@ pub struct DecodedConfig {
     pub deterministic: bool,
 }
 
+/// No permanent symbols, rules, automata, datatype payloads, or provenance are copied here.
+/// Only this crate's native builders can place one in a session query; wire decoding cannot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeQueryDelta {
+    pub provenance: DecodedProvenanceEntry,
+    pub predicates: Vec<DecodedPredicate>,
+    pub clauses: Vec<DecodedClause>,
+    pub facts: Vec<DecodedGroundAtom>,
+    pub disjunctions: Vec<DecodedGroundDisjunction>,
+    pub individual_count: u32,
+    pub data_count: u32,
+    pub enable_datatypes: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecodedQuery {
     pub permanent_program_sha256: [u8; 32],
@@ -1070,6 +1084,7 @@ pub struct DecodedQuery {
     pub first_local_symbols: [u32; 8],
     pub requires_rebuild: bool,
     pub program: Option<DecodedProgram>,
+    pub(crate) native_delta: Option<NativeQueryDelta>,
     pub reason: Option<String>,
     pub interpretation: Vec<String>,
 }
@@ -1384,6 +1399,7 @@ pub fn decode_query(bytes: Vec<u8>, limits: &DecodeLimits) -> InputResult<Decode
         first_local_symbols,
         requires_rebuild,
         program,
+        native_delta: None,
         reason,
         interpretation,
     })

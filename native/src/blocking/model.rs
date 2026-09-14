@@ -236,10 +236,59 @@ pub trait BlockingStateRead {
     fn active_fact_records(&self) -> Result<Vec<FactRecord<Self::Node>>, BlockingError>;
 }
 
+/// Immutable base predicate sets plus bounded, ordered query-local additions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockingPredicateSet {
+    base: std::sync::Arc<BTreeSet<u32>>,
+    local: BTreeSet<u32>,
+}
+
+impl BlockingPredicateSet {
+    fn new(base: BTreeSet<u32>) -> Self {
+        Self {
+            base: std::sync::Arc::new(base),
+            local: BTreeSet::new(),
+        }
+    }
+
+    pub fn contains(&self, id: u32) -> bool {
+        self.base.contains(&id) || self.local.contains(&id)
+    }
+    pub fn len(&self) -> usize {
+        self.base.len() + self.local.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.base.is_empty() && self.local.is_empty()
+    }
+    fn insert_local(&mut self, id: u32) -> Result<(), BlockingError> {
+        if self.base.contains(&id) {
+            return Ok(());
+        }
+        if self.base.last().is_some_and(|last| *last >= id) {
+            return Err(BlockingError::invalid(
+                "query blocking ID precedes permanent vocabulary",
+            ));
+        }
+        self.local.insert(id);
+        Ok(())
+    }
+}
+
+impl<'a> IntoIterator for &'a BlockingPredicateSet {
+    type Item = &'a u32;
+    type IntoIter = std::iter::Chain<
+        std::collections::btree_set::Iter<'a, u32>,
+        std::collections::btree_set::Iter<'a, u32>,
+    >;
+    fn into_iter(self) -> Self::IntoIter {
+        self.base.iter().chain(self.local.iter())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockingVocabulary {
-    pub atomic_concepts: BTreeSet<u32>,
-    pub atomic_object_roles: BTreeSet<u32>,
+    pub atomic_concepts: BlockingPredicateSet,
+    pub atomic_object_roles: BlockingPredicateSet,
 }
 
 impl BlockingVocabulary {
@@ -255,9 +304,30 @@ impl BlockingVocabulary {
             ));
         }
         Ok(Self {
-            atomic_concepts,
-            atomic_object_roles,
+            atomic_concepts: BlockingPredicateSet::new(atomic_concepts),
+            atomic_object_roles: BlockingPredicateSet::new(atomic_object_roles),
         })
+    }
+
+    pub(crate) fn extend(&self, concepts: &[u32], roles: &[u32]) -> Result<Self, BlockingError> {
+        let mut result = self.clone();
+        for id in concepts {
+            if result.atomic_object_roles.contains(*id) || roles.contains(id) {
+                return Err(BlockingError::invalid(
+                    "query blocking predicate sort collision",
+                ));
+            }
+            result.atomic_concepts.insert_local(*id)?;
+        }
+        for id in roles {
+            if result.atomic_concepts.contains(*id) {
+                return Err(BlockingError::invalid(
+                    "query blocking predicate sort collision",
+                ));
+            }
+            result.atomic_object_roles.insert_local(*id)?;
+        }
+        Ok(result)
     }
 }
 

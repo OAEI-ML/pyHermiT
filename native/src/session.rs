@@ -1400,3 +1400,17 @@ fn panic_error(message: &'static str) -> NativeError {
 fn poisoned_error(code: &'static str, message: impl Into<String>) -> NativeError {
     NativeError::new(ErrorKind::Poisoned, code, message)
 }
+
+impl SessionScheduler<crate::native_tableau::ProductionTableau> {
+    pub(crate) fn query_reuse_statistics(
+        &self,
+    ) -> NativeResult<crate::native_tableau::QueryReuseStatistics> {
+        self.run_locked(|owned| Ok(owned.kernel.query_reuse_statistics()))
+    }
+
+    pub(crate) fn native_query_base(
+        &self,
+    ) -> NativeResult<Arc<crate::query_delta::NativeQueryBase>> {
+        self.run_locked(|owned| Ok(owned.kernel.query_base()))
+    }
+}

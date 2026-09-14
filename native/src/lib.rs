@@ -32,6 +32,8 @@ pub mod native_tableau;
 pub mod nominals;
 pub mod operation_bridge;
 pub mod program_bridge;
+mod query_delta;
+mod query_formula;
 mod realization_bridge;
 pub mod result_wire;
 pub mod roles;
@@ -235,6 +237,20 @@ impl NativeServiceSymbols {
     ) -> PyResult<Option<u32>> {
         self.control
             .run(|_| self.index.find(domain, key.as_bytes()))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    fn find_query_individual(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyBytes>,
+    ) -> PyResult<Option<u32>> {
+        let key = key.as_bytes();
+        self.control
+            .run(|owned| {
+                let base = owned.scheduler.native_query_base()?;
+                Ok(base.find_individual(key))
+            })
             .map_err(|error| error.into_pyerr(py))
     }
 
@@ -490,6 +506,107 @@ impl NativeSession {
             })
         });
         result.map_err(|error| error.into_pyerr(py))
+    }
+
+    fn _query_reuse_diagnostics_v1(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<std::collections::BTreeMap<String, u64>> {
+        self.control
+            .run(|owned| {
+                let stats = owned.scheduler.query_reuse_statistics()?;
+                Ok(std::collections::BTreeMap::from([
+                    ("native_query_delta_loads".into(), stats.delta_loads),
+                    (
+                        "native_query_full_program_loads".into(),
+                        stats.full_program_loads,
+                    ),
+                    (
+                        "native_query_local_rule_plans".into(),
+                        stats.local_rule_plans,
+                    ),
+                    (
+                        "native_query_peak_local_records".into(),
+                        stats.peak_local_records,
+                    ),
+                ]))
+            })
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    /// Bounded query syntax only; all lookup, normalization, rule extension and solving are native.
+    fn _check_assertions_many_v1(
+        &self,
+        py: Python<'_>,
+        queries: &Bound<'_, PySequence>,
+    ) -> PyResult<Vec<u8>> {
+        if self.compiler_digest.is_none() {
+            return Err(
+                NativeError::feature("native assertion deltas require an encoded session")
+                    .with_context("feature_id", "native_query_delta_ineligible")
+                    .into_pyerr(py),
+            );
+        }
+        let count = queries.len()?;
+        if count > 4096 {
+            return Err(
+                NativeError::wire("native assertion batch exceeds item bound").into_pyerr(py),
+            );
+        }
+        let mut total = 0usize;
+        let mut wires = Vec::new();
+        for index in 0..count {
+            let item = queries.get_item(index)?;
+            let bytes = item.cast::<PyBytes>().map_err(|_| {
+                NativeError::wire("native assertion requests must be exact bytes").into_pyerr(py)
+            })?;
+            total = total.checked_add(bytes.as_bytes().len()).ok_or_else(|| {
+                NativeError::wire("native assertion batch bytes overflow").into_pyerr(py)
+            })?;
+            if total > query_formula::MAX_BATCH_BYTES {
+                return Err(NativeError::new(
+                    ErrorKind::Resource,
+                    "RESOURCE_LIMIT",
+                    "native assertion batch exceeds byte bound",
+                )
+                .into_pyerr(py));
+            }
+            wires.push(
+                copy_capped_bytes(
+                    bytes,
+                    query_formula::MAX_QUERY_BYTES,
+                    "native assertion request",
+                )
+                .map_err(|error| error.into_pyerr(py))?,
+            );
+        }
+        let control = Arc::clone(&self.control);
+        control
+            .run(|owned| {
+                py.detach(|| {
+                    let base = owned.scheduler.native_query_base()?;
+                    let started = Instant::now();
+                    let results = owned.scheduler.check_generated(
+                        count,
+                        |index| {
+                            query_formula::compile_request(
+                                Arc::clone(&base),
+                                &wires[index],
+                                Arc::clone(&control.cancellation),
+                            )
+                        },
+                        control.cancellation.as_ref(),
+                    )?;
+                    let elapsed = started.elapsed();
+                    encode_check_many(
+                        &results
+                            .into_iter()
+                            .map(|result| check_wire_result(result, elapsed))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            })
+            .map_err(|error| error.into_pyerr(py))
     }
 
     fn check_many(&self, py: Python<'_>, queries: &Bound<'_, PySequence>) -> PyResult<Vec<u8>> {
@@ -6430,20 +6547,24 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("NATIVE_PIPELINE_API_VERSION", 1)?;
     module.add(
         "FEATURES",
-        (
-            "abi3-py310",
-            "cancellable-mock-work",
-            "classification",
-            "encoded-structural-compiler-v2",
-            "full_reasoner",
-            "incremental_updates",
-            "native-profile-summary-v1",
-            "native-result-owner-v1",
-            "realization",
-            "state-trace-v1",
-            "strict-native-input-v1",
-            "wire-v1",
-        ),
+        PyTuple::new(
+            module.py(),
+            [
+                "abi3-py310",
+                "cancellable-mock-work",
+                "classification",
+                "encoded-structural-compiler-v2",
+                "full_reasoner",
+                "incremental_updates",
+                "native-profile-summary-v1",
+                "native-query-delta-v1",
+                "native-result-owner-v1",
+                "realization",
+                "state-trace-v1",
+                "strict-native-input-v1",
+                "wire-v1",
+            ],
+        )?,
     )?;
     module.add_class::<CancellationHandle>()?;
     module.add_class::<NativeSession>()?;

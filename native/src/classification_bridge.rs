@@ -9,17 +9,18 @@ use sha2::{Digest, Sha256};
 use crate::cancel::CancellationState;
 use crate::error::{NativeError, NativeResult};
 use crate::input_wire::{
-    DecodedAtom, DecodedClause, DecodedConfig, DecodedGroundAtom, DecodedOntology,
-    DecodedPredicate, DecodedProgram, DecodedProvenanceEntry, DecodedQuery, DecodedSymbolDomain,
-    DecodedSymbolValue, DecodedTerm, PredicateKind, SymbolKind, TermSort,
+    DecodedAtom, DecodedClause, DecodedConfig, DecodedGroundAtom, DecodedOntology, DecodedProgram,
+    DecodedProvenanceEntry, DecodedQuery, DecodedSymbolValue, DecodedTerm, PredicateKind,
+    SymbolKind, TermSort,
 };
 use crate::native_tableau::ProductionTableau;
+use crate::query_delta::{NativeQueryBase, QueryDeltaBuilder};
 use crate::rules::{RuleAtom, Term as RuleTerm, TermSort as RuleTermSort};
 use crate::services::{
     classify_cached, ClassificationCache, ClassificationCacheKey, ClassificationDomain,
     ClassificationLimits, ClassificationMode, ClassificationProblem, HierarchyIds,
 };
-use crate::session::{OperationControl, QueryKey, SessionQuery, SessionScheduler};
+use crate::session::{OperationControl, SessionQuery, SessionScheduler};
 
 const OWL_THING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Thing";
 const OWL_NOTHING_DISPLAY: &str = "class:http://www.w3.org/2002/07/owl#Nothing";
@@ -381,11 +382,13 @@ fn test_subsumptions(
     control: &dyn OperationControl,
 ) -> NativeResult<Vec<bool>> {
     control.poll()?;
+    let base = scheduler.native_query_base()?;
+    let bounds = domain_bounds(&ontology.program, domain)?;
     let results = scheduler.check_generated(
         pairs.len(),
         |index| {
             let (child, parent) = pairs[index];
-            build_counterexample_query(ontology, domain, child, parent)
+            build_counterexample_query(Arc::clone(&base), bounds, domain, child, parent)
         },
         control,
     )?;
@@ -402,217 +405,120 @@ fn test_subsumptions(
 }
 
 fn build_counterexample_query(
-    ontology: &DecodedOntology,
+    base: Arc<NativeQueryBase>,
+    (top, bottom): (u32, u32),
     domain: ClassificationDomain,
     child: u32,
     parent: u32,
 ) -> NativeResult<SessionQuery<DecodedQuery>> {
-    let query_hash = classification_query_hash(
-        &ontology.metadata.ontology_fingerprint,
+    let hash = classification_query_hash(
+        &base.ontology.metadata.ontology_fingerprint,
         domain,
         child,
         parent,
     );
-    let mut symbol_domains = ontology.program.symbol_domains.clone();
-    let first_local_symbols = symbol_boundaries(&symbol_domains)?;
-    let first_local_predicate_id = u32::try_from(ontology.program.predicates.len())
-        .map_err(|_| NativeError::wire("classification predicate boundary exceeds u32"))?;
-    let mut predicates = ontology.program.predicates.clone();
-    if domain == ClassificationDomain::DataProperties {
-        ensure_data_inequality_predicate(&mut predicates)?;
-    }
-    let mut facts = Vec::new();
-
-    let first_individual = append_query_symbol(
-        &mut symbol_domains,
-        SymbolKind::Individual,
-        &query_hash,
-        0,
-        "classification witness",
-    )?;
-    let second_individual = if domain == ClassificationDomain::ObjectProperties {
-        Some(append_query_symbol(
-            &mut symbol_domains,
-            SymbolKind::Individual,
-            &query_hash,
-            1,
-            "classification target",
-        )?)
-    } else {
-        None
-    };
-    let data_term = if domain == ClassificationDomain::DataProperties {
-        let source_literal_id = append_query_symbol(
-            &mut symbol_domains,
-            SymbolKind::SourceLiteral,
-            &query_hash,
-            2,
-            "classification symbolic literal",
-        )?;
-        let data_identity_id = append_query_symbol(
-            &mut symbol_domains,
-            SymbolKind::DataValue,
-            &query_hash,
-            3,
-            "classification symbolic data value",
-        )?;
-        Some(DecodedTerm::Data {
-            source_literal_id,
-            data_identity_id,
-        })
-    } else {
-        None
-    };
-
-    let (positive_kind, negative_kind, argument_sorts, ground_arguments) = match domain {
+    let mut query = QueryDeltaBuilder::new(base, hash);
+    let first = query.individual()?;
+    let (positive, negative, sorts, arguments) = match domain {
         ClassificationDomain::Classes => (
             PredicateKind::Concept,
             PredicateKind::NegatedConcept,
             vec![TermSort::Object],
             vec![DecodedTerm::Individual {
-                individual_id: first_individual,
+                individual_id: first,
             }],
         ),
-        ClassificationDomain::ObjectProperties => (
-            PredicateKind::ObjectRole,
-            PredicateKind::NegatedObjectRole,
-            vec![TermSort::Object, TermSort::Object],
-            vec![
-                DecodedTerm::Individual {
-                    individual_id: first_individual,
-                },
-                DecodedTerm::Individual {
-                    individual_id: second_individual.ok_or_else(|| {
-                        NativeError::invariant("object classification target is absent")
-                    })?,
-                },
-            ],
-        ),
-        ClassificationDomain::DataProperties => (
-            PredicateKind::DataRole,
-            PredicateKind::NegatedDataRole,
-            vec![TermSort::Object, TermSort::Data],
-            vec![
-                DecodedTerm::Individual {
-                    individual_id: first_individual,
-                },
-                data_term.ok_or_else(|| {
-                    NativeError::invariant("data classification target is absent")
-                })?,
-            ],
-        ),
+        ClassificationDomain::ObjectProperties => {
+            let second = query.individual()?;
+            (
+                PredicateKind::ObjectRole,
+                PredicateKind::NegatedObjectRole,
+                vec![TermSort::Object, TermSort::Object],
+                vec![
+                    DecodedTerm::Individual {
+                        individual_id: first,
+                    },
+                    DecodedTerm::Individual {
+                        individual_id: second,
+                    },
+                ],
+            )
+        }
+        ClassificationDomain::DataProperties => {
+            let data = query.data()?;
+            (
+                PredicateKind::DataRole,
+                PredicateKind::NegatedDataRole,
+                vec![TermSort::Object, TermSort::Data],
+                vec![
+                    DecodedTerm::Individual {
+                        individual_id: first,
+                    },
+                    DecodedTerm::Data {
+                        source_literal_id: query.base.boundaries
+                            [SymbolKind::SourceLiteral as usize],
+                        data_identity_id: data,
+                    },
+                ],
+            )
+        }
     };
-
-    let (top, bottom) = domain_bounds(&ontology.program, domain)?;
-    // OWL Thing is true of every object witness. Top object/data properties, in contrast,
-    // are represented as ordinary role predicates by the rule runtime and must be asserted
-    // for this fresh pair to make the counterexample reduction explicit.
+    let ids = |value| {
+        if domain == ClassificationDomain::Classes {
+            (Some(value), None)
+        } else {
+            (None, Some(value))
+        }
+    };
     if domain != ClassificationDomain::Classes || child != top {
-        let predicate_id = ensure_predicate(
-            &mut predicates,
-            positive_kind,
-            domain,
-            child,
-            &argument_sorts,
-        )?;
-        facts.push(DecodedGroundAtom {
+        let (symbol, role) = ids(child);
+        let predicate_id = query.predicate(positive, symbol, role, &sorts)?;
+        query.delta.facts.push(DecodedGroundAtom {
             predicate_id,
-            arguments: ground_arguments.clone(),
-            provenance_ids: vec![0],
+            arguments: arguments.clone(),
+            provenance_ids: vec![query.base.provenance_id],
         });
     }
-
-    let mut clauses = Vec::new();
     if parent != bottom {
-        let positive_parent = ensure_predicate(
-            &mut predicates,
-            positive_kind,
-            domain,
-            parent,
-            &argument_sorts,
-        )?;
-        let negative_parent = ensure_predicate(
-            &mut predicates,
-            negative_kind,
-            domain,
-            parent,
-            &argument_sorts,
-        )?;
-        facts.push(DecodedGroundAtom {
-            predicate_id: negative_parent,
-            arguments: ground_arguments,
-            provenance_ids: vec![0],
+        let (symbol, role) = ids(parent);
+        let positive_id = query.predicate(positive, symbol, role, &sorts)?;
+        let negative_id = query.predicate(negative, symbol, role, &sorts)?;
+        query.delta.facts.push(DecodedGroundAtom {
+            predicate_id: negative_id,
+            arguments,
+            provenance_ids: vec![query.base.provenance_id],
         });
-        let variables = argument_sorts
+        let variables = sorts
             .iter()
             .copied()
             .enumerate()
             .map(|(index, sort)| {
                 Ok(DecodedTerm::Variable {
                     index: u32::try_from(index)
-                        .map_err(|_| NativeError::invariant("query variable exceeds u32"))?,
+                        .map_err(|_| NativeError::invariant("native query variable exceeds u32"))?,
                     sort,
                 })
             })
             .collect::<NativeResult<Vec<_>>>()?;
         let body = canonical_atoms(vec![
             DecodedAtom {
-                predicate_id: positive_parent,
+                predicate_id: positive_id,
                 arguments: variables.clone(),
             },
             DecodedAtom {
-                predicate_id: negative_parent,
+                predicate_id: negative_id,
                 arguments: variables,
             },
         ])?;
-        let join_order = (0..body.len())
-            .map(|index| {
-                u32::try_from(index)
-                    .map_err(|_| NativeError::invariant("query join position exceeds u32"))
-            })
-            .collect::<NativeResult<Vec<_>>>()?;
-        clauses.push(DecodedClause {
+        query.clause(DecodedClause {
             clause_id: 0,
             body,
             head: Vec::new(),
-            provenance_ids: vec![0],
-            join_order,
-        });
+            provenance_ids: Vec::new(),
+            join_order: vec![0, 1],
+        })?;
     }
-
-    let mut expressivity = ontology.program.expressivity;
-    expressivity.abox = true;
-    if domain == ClassificationDomain::DataProperties {
-        expressivity.datatypes = true;
-    }
-    let overlay = DecodedProgram {
-        symbol_domains,
-        predicates,
-        clauses,
-        positive_facts: facts,
-        negative_facts: Vec::new(),
-        ground_disjunctions: Vec::new(),
-        role_model: ontology.program.role_model.clone(),
-        datatype_model: ontology.program.datatype_model.clone(),
-        expressivity,
-        provenance: vec![DecodedProvenanceEntry {
-            provenance_id: 0,
-            source_sha256: vec![query_hash],
-            generated: true,
-        }],
-    };
-    let query = DecodedQuery {
-        permanent_program_sha256: ontology.metadata.program_sha256,
-        query_hash,
-        overlay_program_sha256: Some(query_hash),
-        first_local_predicate_id,
-        first_local_symbols,
-        requires_rebuild: false,
-        program: Some(overlay),
-        reason: None,
-        interpretation: vec![format!("classification:{domain:?}:{child}:{parent}")],
-    };
-    Ok(SessionQuery::new(QueryKey::new(query_hash), query))
+    Ok(query.finish(vec![format!("classification:{domain:?}:{child}:{parent}")]))
 }
 
 fn domain_bounds(
@@ -636,138 +542,6 @@ fn domain_bounds(
             program.role_model.bottom_data_property_id,
         )),
     }
-}
-
-fn symbol_boundaries(domains: &[DecodedSymbolDomain]) -> NativeResult<[u32; 8]> {
-    let mut boundaries = [0_u32; 8];
-    let mut seen = [false; 8];
-    for domain in domains {
-        let index = domain.kind as usize;
-        if seen[index] {
-            return Err(NativeError::wire(
-                "query symbol domain identity is duplicated",
-            ));
-        }
-        seen[index] = true;
-        boundaries[index] = u32::try_from(domain.values.len())
-            .map_err(|_| NativeError::wire("query symbol boundary exceeds u32"))?;
-    }
-    if seen.iter().any(|present| !present) {
-        return Err(NativeError::wire("query symbol domain is absent"));
-    }
-    Ok(boundaries)
-}
-
-fn append_query_symbol(
-    domains: &mut [DecodedSymbolDomain],
-    kind: SymbolKind,
-    query_hash: &[u8; 32],
-    discriminator: u8,
-    label: &str,
-) -> NativeResult<u32> {
-    let domain = domains
-        .iter_mut()
-        .find(|domain| domain.kind == kind)
-        .ok_or_else(|| NativeError::wire("query symbol domain is absent"))?;
-    let identifier = u32::try_from(domain.values.len())
-        .map_err(|_| NativeError::wire("query symbol identifier exceeds u32"))?;
-    let mut key = Vec::with_capacity(34);
-    key.extend_from_slice(query_hash);
-    key.push(kind as u8);
-    key.push(discriminator);
-    domain.values.push(DecodedSymbolValue {
-        identifier,
-        key,
-        display: format!("{label}:{discriminator}"),
-        generated: false,
-        query_local: true,
-    });
-    Ok(identifier)
-}
-
-fn ensure_predicate(
-    predicates: &mut Vec<DecodedPredicate>,
-    kind: PredicateKind,
-    domain: ClassificationDomain,
-    symbol_or_role_id: u32,
-    argument_sorts: &[TermSort],
-) -> NativeResult<u32> {
-    let matches = predicates
-        .iter()
-        .filter(|predicate| {
-            predicate.kind == kind
-                && match domain {
-                    ClassificationDomain::Classes => predicate.symbol_id == Some(symbol_or_role_id),
-                    ClassificationDomain::ObjectProperties
-                    | ClassificationDomain::DataProperties => {
-                        predicate.role_id == Some(symbol_or_role_id)
-                    }
-                }
-        })
-        .map(|predicate| predicate.predicate_id)
-        .collect::<Vec<_>>();
-    if matches.len() > 1 {
-        return Err(NativeError::wire(
-            "classification predicate identity is duplicated",
-        ));
-    }
-    if let Some(identifier) = matches.first() {
-        return Ok(*identifier);
-    }
-    let predicate_id = u32::try_from(predicates.len())
-        .map_err(|_| NativeError::wire("classification predicate ID exceeds u32"))?;
-    predicates.push(DecodedPredicate {
-        predicate_id,
-        kind,
-        argument_sorts: argument_sorts.to_vec(),
-        symbol_id: (domain == ClassificationDomain::Classes).then_some(symbol_or_role_id),
-        role_id: (domain != ClassificationDomain::Classes).then_some(symbol_or_role_id),
-        cardinality: None,
-        filler_predicate_id: None,
-        annotation: Vec::new(),
-        internal_key: None,
-    });
-    Ok(predicate_id)
-}
-
-fn ensure_data_inequality_predicate(predicates: &mut Vec<DecodedPredicate>) -> NativeResult<u32> {
-    let matches = predicates
-        .iter()
-        .filter(|predicate| {
-            predicate.kind == PredicateKind::Inequality
-                && predicate.argument_sorts == [TermSort::Data, TermSort::Data]
-                && predicate.symbol_id.is_none()
-                && predicate.role_id.is_none()
-                && predicate.cardinality.is_none()
-                && predicate.filler_predicate_id.is_none()
-                && predicate.annotation.is_empty()
-                && predicate.internal_key.is_none()
-        })
-        .map(|predicate| predicate.predicate_id)
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [identifier] => return Ok(*identifier),
-        [] => {}
-        _ => {
-            return Err(NativeError::wire(
-                "classification program contains duplicate data-inequality predicates",
-            ));
-        }
-    }
-    let predicate_id = u32::try_from(predicates.len())
-        .map_err(|_| NativeError::wire("classification predicate ID exceeds u32"))?;
-    predicates.push(DecodedPredicate {
-        predicate_id,
-        kind: PredicateKind::Inequality,
-        argument_sorts: vec![TermSort::Data, TermSort::Data],
-        symbol_id: None,
-        role_id: None,
-        cardinality: None,
-        filler_predicate_id: None,
-        annotation: Vec::new(),
-        internal_key: None,
-    });
-    Ok(predicate_id)
 }
 
 fn canonical_atoms(values: Vec<DecodedAtom>) -> NativeResult<Vec<DecodedAtom>> {
@@ -829,6 +603,7 @@ fn classification_query_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input_wire::DecodedPredicate;
     use crate::input_wire::{DecodedDatatypeModel, DecodedExpressivity, DecodedRoleModel};
 
     fn concept(predicate_id: u32, symbol_id: u32, kind: PredicateKind) -> DecodedPredicate {
@@ -1027,30 +802,6 @@ mod tests {
             ClassificationDomain::DataProperties,
             &elements,
         ));
-    }
-
-    #[test]
-    fn data_classification_reuses_one_compiled_inequality_predicate() {
-        let mut predicates = vec![role(
-            0,
-            10,
-            PredicateKind::DataRole,
-            vec![TermSort::Object, TermSort::Data],
-        )];
-
-        let first = ensure_data_inequality_predicate(&mut predicates)
-            .expect("data inequality should be appended");
-        let second = ensure_data_inequality_predicate(&mut predicates)
-            .expect("data inequality should be reused");
-
-        assert_eq!(first, 1);
-        assert_eq!(second, first);
-        assert_eq!(predicates.len(), 2);
-        assert_eq!(predicates[1].kind, PredicateKind::Inequality);
-        assert_eq!(
-            predicates[1].argument_sorts,
-            [TermSort::Data, TermSort::Data]
-        );
     }
 
     #[test]

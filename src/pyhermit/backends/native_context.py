@@ -372,6 +372,7 @@ class _NativeSymbols(Protocol):
     def id_at(self, domain: str, offset: int) -> int | None: ...
     def find(self, domain: str, key: bytes) -> int | None: ...
     def key(self, domain: str, identifier: int) -> bytes | None: ...
+    def find_query_individual(self, key: bytes) -> int | None: ...
 
 
 class _NativeDomainMapping(Mapping[int, _T], Generic[_T]):
@@ -402,6 +403,11 @@ class _NativeDomainMapping(Mapping[int, _T], Generic[_T]):
         # The native constructor validates identities. This creates the requested
         # public result object and does not scan or revalidate the source domain.
         return cast(_T, owl.decode_canonical(key))
+
+    def native_query_individual_id(self, value: owl.Individual) -> int | None:
+        if self._domain != "individual":
+            raise TypeError("query individual lookup requires the individual domain")
+        return self._owner.find_query_individual(value.canonical_bytes())
 
     def native_id(self, value: owl.StructuralNode) -> int:
         identifier = self._owner.find(self._domain, value.canonical_bytes())

@@ -72,13 +72,27 @@ capabilities before loading an ontology. Opt in with
 metadata, compilation and hierarchy processing. Defaults retain their existing behavior.
 Strict mode currently supports consistency and class/object/data-property hierarchies on
 core-validated native snapshot/segment owners. It rejects unsupported owners, Python or
-verification backends, and Python byte-indexing fallback explicitly. Generic query overlays,
-realization publication and committed updates are not yet admitted in strict mode.
+verification backends, and Python byte-indexing fallback explicitly. Assertion-local generic
+queries share the permanent native rules, join plans, role automata, datatype registries and
+existential templates. Only their facts, clauses, witnesses and mutable tableau state are local.
+Batches retain at most one active query state; result caches contain bounded Boolean results.
+
+The admitted query syntax includes Boolean class expressions, nominals/equality, known role
+assertions, existing source literals, universal restrictions and ground existential witnesses.
+Unknown roles or new literal payloads, newly required inverse-role blocking, nested existential
+expansions below variable-valued universal restrictions, and global schema/role changes retain
+the full native rebuild path by default. Strict mode rejects these cases before publication.
+Realization publication and committed updates are not yet admitted in strict mode. Recurring
+committed updates have not been established as an Exact workload, so incremental admission
+remains conditional rather than widening this query envelope.
 
 `Reasoner.diagnostics()` reports the actual core receipt, metadata validation and domain
 copies. `native_result_validation` becomes true after a successful native hierarchy result;
 `native_result_publications` counts these publications. A positive capability probe does not
-replace owner validation or admit an unsupported operation.
+replace owner validation or admit an unsupported operation. The `native_query_*` counters
+separately record delta loads, local rule plans, peak local records, legacy full-program loads
+and default full-rebuild fallbacks. Query syntax is limited to 1 MiB per request, 16 MiB and
+4,096 items per batch; exhausting a resource bound never enables a fallback.
 
 ## Documentation
 

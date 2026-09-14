@@ -12,7 +12,7 @@ from typing import TypeAlias, cast
 import pyowl_core.model as owl
 
 from pyhermit.config import FreshEntityPolicy
-from pyhermit.exceptions import FreshEntityError, InconsistentOntologyError
+from pyhermit.exceptions import FreshEntityError, InconsistentOntologyError, ResourceLimitError
 from pyhermit.normalize import DataRangeInclusion, NormalizedOntology
 
 from .checks import CompiledQueryExecutor, EncodedQueryExecutor, QueryExecutor, QueryPlan
@@ -255,10 +255,32 @@ class EntailmentService:
     def entails(self, axiom: owl.LogicalAxiom) -> bool:
         return self.entails_all((axiom,))
 
+    def _snapshot_axioms(self, axioms: Iterable[owl.LogicalAxiom]) -> tuple[owl.LogicalAxiom, ...]:
+        if not isinstance(self._executor, EncodedQueryExecutor):
+            return tuple(axioms)
+        values = tuple(itertools.islice(axioms, 4097))
+        if len(values) > 4096:
+            raise ResourceLimitError(
+                "native entailment batch exceeds item limit",
+                limit="native_query_batch_items",
+                observed=len(values),
+                allowed=4096,
+            )
+        # Bound known reduction fan-out before constructing the query plans.
+        count = sum(_native_reduction_count(value) for value in values)
+        if count > 4096:
+            raise ResourceLimitError(
+                "native entailment reduction exceeds plan limit",
+                limit="native_query_batch_items",
+                observed=count,
+                allowed=4096,
+            )
+        return values
+
     def entails_all(self, axioms: Iterable[owl.LogicalAxiom]) -> bool:
         """Return exact conjunction after fully snapshotting and validating the input."""
 
-        values = tuple(axioms)
+        values = self._snapshot_axioms(axioms)
         if not all(isinstance(value, owl.LOGICAL_AXIOM_TYPES) for value in values):
             raise TypeError("axioms must contain exact core logical axiom values")
         if not values:
@@ -292,7 +314,7 @@ class EntailmentService:
         for a jointly scoped conclusion ontology.
         """
 
-        values = tuple(axioms)
+        values = self._snapshot_axioms(axioms)
         if not all(isinstance(value, owl.LOGICAL_AXIOM_TYPES) for value in values):
             raise TypeError("axioms must contain exact core logical axiom values")
         if not values:
@@ -1341,3 +1363,22 @@ def _roll_expression(
 
 
 __all__ = ["ENTAILMENT_REDUCTION_TYPES", "EntailmentService"]
+
+
+def _native_reduction_count(value: object) -> int:
+    if isinstance(value, (owl.DisjointClasses, owl.DisjointUnion)):
+        count = len(value.expressions)
+        return count * (count - 1) // 2 + (count + 1 if isinstance(value, owl.DisjointUnion) else 0)
+    if isinstance(value, (owl.DisjointObjectProperties, owl.DisjointDataProperties)):
+        count = len(value.properties)
+        return count * (count - 1) // 2
+    if isinstance(value, owl.DifferentIndividuals):
+        count = len(value.individuals)
+        return count * (count - 1) // 2
+    if isinstance(value, owl.SameIndividual):
+        return max(0, len(value.individuals) - 1)
+    if isinstance(value, owl.EquivalentClasses):
+        return 2 * max(0, len(value.expressions) - 1)
+    if isinstance(value, (owl.EquivalentObjectProperties, owl.EquivalentDataProperties)):
+        return 2 * max(0, len(value.properties) - 1)
+    return 1

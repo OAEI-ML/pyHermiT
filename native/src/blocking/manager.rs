@@ -139,6 +139,22 @@ type RecomputeResult<N> = (
 );
 
 impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
+    /// Fresh mutable blocker state; the permanent predicate vocabulary remains shared.
+    pub(crate) fn fork_for_query(
+        &self,
+        concepts: &[u32],
+        roles: &[u32],
+    ) -> Result<Self, BlockingError> {
+        let mut plan = self.plan;
+        plan.cache_allowed = false;
+        let checker = DirectChecker::new(
+            self.checker.kind(),
+            self.checker.vocabulary().extend(concepts, roles)?,
+            self.checker.has_inverses(),
+        )?;
+        Self::new(plan, checker, None, self.limits, self.max_trace_events)
+    }
+
     pub fn new(
         plan: BlockingPlan,
         checker: DirectChecker,
@@ -257,12 +273,12 @@ impl<N: Copy + fmt::Debug + Eq + Ord> BlockingManager<N> {
             .checker
             .vocabulary()
             .atomic_concepts
-            .contains(&fact.predicate_id)
+            .contains(fact.predicate_id)
             || self
                 .checker
                 .vocabulary()
                 .atomic_object_roles
-                .contains(&fact.predicate_id);
+                .contains(fact.predicate_id);
         if !relevant {
             return;
         }

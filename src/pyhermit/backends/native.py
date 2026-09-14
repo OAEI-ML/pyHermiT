@@ -141,6 +141,11 @@ def _encoded_ingestion_counters(lease: object) -> Mapping[str, bool | int]:
             "native_metadata_validation": False,
             "native_result_validation": False,
             "native_result_publications": 0,
+            "native_query_delta_loads": 0,
+            "native_query_full_program_loads": 0,
+            "native_query_fallback_rebuilds": 0,
+            "native_query_local_rule_plans": 0,
+            "native_query_peak_local_records": 0,
             "native_metadata_domain_copies": 0,
             "native_symbol_index": False,
             "native_symbol_index_bytes": 0,
@@ -935,6 +940,9 @@ class NativeBackendSession:
     def ingestion_counters(self) -> Mapping[str, bool | int]:
         """Return the immutable ledger captured for this session's input path."""
 
+        call = getattr(self._native, "_query_reuse_diagnostics_v1", None)
+        if callable(call):
+            return MappingProxyType({**self._ingestion_counters, **call()})
         return self._ingestion_counters
 
     def _encoded_service_context(self) -> NativeServiceContext:
@@ -1008,6 +1016,32 @@ class NativeBackendSession:
             self._poisoned = True
             raise BackendMismatchError(
                 "native batch result cardinality differs from its query batch",
+                context={"reason": "batch_cardinality_mismatch"},
+            )
+        return result
+
+    def record_query_fallback(self) -> None:
+        previous = self._ingestion_counters.get("native_query_fallback_rebuilds", 0)
+        self._ingestion_counters = MappingProxyType(
+            {**self._ingestion_counters, "native_query_fallback_rebuilds": int(previous) + 1}
+        )
+
+    def check_assertions_many(self, requests: Sequence[bytes]) -> tuple[CheckResult, ...]:
+        """Execute bounded assertion syntax through the retained native compiler."""
+        self._begin_call()
+        call = getattr(self._native, "_check_assertions_many_v1", None)
+        if not callable(call):
+            from pyhermit.exceptions import FeatureNotImplementedError
+
+            raise FeatureNotImplementedError(
+                "native query delta capability is unavailable",
+                feature_id="native_query_delta_ineligible",
+            )
+        result = self._invoke(decode_check_many, lambda: call(tuple(requests)))
+        if len(result) != len(requests):
+            self._poisoned = True
+            raise BackendMismatchError(
+                "native assertion result cardinality differs from its batch",
                 context={"reason": "batch_cardinality_mismatch"},
             )
         return result

@@ -22,7 +22,8 @@ use crate::input_wire::{
 use crate::model::NodeHandle;
 use crate::nominals::NominalIntroductionManager;
 use crate::operation_bridge::OperationControlBridge;
-use crate::program_bridge::{load_rule_state, LoadedRuleState};
+use crate::program_bridge::{load_native_query_state, load_rule_state, LoadedRuleState};
+use crate::query_delta::NativeQueryBase;
 use crate::rules::RuleEngineCheckpoint;
 use crate::session::{
     ClashResolution, DatatypePhaseResult, DeltaPhaseResult, NativeTableau, OperationControl,
@@ -42,6 +43,16 @@ pub struct ProductionTableau {
     cancellation: Arc<CancellationState>,
     permanent: LoadedRuleState,
     query: Option<LoadedRuleState>,
+    query_base: Arc<NativeQueryBase>,
+    query_reuse: QueryReuseStatistics,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct QueryReuseStatistics {
+    pub delta_loads: u64,
+    pub full_program_loads: u64,
+    pub local_rule_plans: u64,
+    pub peak_local_records: u64,
 }
 
 pub struct ProductionCheckpoint(Option<PermanentCheckpoint>);
@@ -63,13 +74,24 @@ impl ProductionTableau {
     ) -> NativeResult<Self> {
         permanent.kernel.check_invariants()?;
         permanent.engine.check_invariants(&permanent.kernel)?;
+        let query_base = NativeQueryBase::new(Arc::clone(&ontology))?;
         Ok(Self {
+            query_base,
+            query_reuse: QueryReuseStatistics::default(),
             ontology,
             config,
             cancellation,
             permanent,
             query: None,
         })
+    }
+
+    pub(crate) fn query_base(&self) -> Arc<NativeQueryBase> {
+        Arc::clone(&self.query_base)
+    }
+
+    pub(crate) const fn query_reuse_statistics(&self) -> QueryReuseStatistics {
+        self.query_reuse
     }
 
     fn active(&self) -> &LoadedRuleState {
@@ -179,6 +201,30 @@ impl NativeTableau for ProductionTableau {
             return Err(NativeError::feature("query_rebuild"));
         }
         control.poll()?;
+        if let Some(delta) = &query.payload().native_delta {
+            let loaded = load_native_query_state(
+                &self.ontology,
+                &self.permanent,
+                &self.query_base,
+                delta,
+                Arc::clone(&self.cancellation),
+                self.config.disjunction_learning,
+            )?;
+            control.poll()?;
+            self.query_reuse.delta_loads = self.query_reuse.delta_loads.saturating_add(1);
+            self.query_reuse.local_rule_plans = self
+                .query_reuse
+                .local_rule_plans
+                .saturating_add(loaded.engine.compiled_rules().local_join_plan_count() as u64);
+            self.query_reuse.peak_local_records = self.query_reuse.peak_local_records.max(
+                (delta.predicates.len()
+                    + delta.clauses.len()
+                    + delta.facts.len()
+                    + delta.disjunctions.len()) as u64,
+            );
+            self.query = Some(loaded);
+            return Ok(());
+        }
         let combined = combine_query_ontology(&self.ontology, query.payload())?;
         // Exact decoded equality includes opposites, join order, and provenance IDs.
         // Changed query rules retain the existing full native compilation path.
@@ -197,6 +243,7 @@ impl NativeTableau for ProductionTableau {
             roles,
         )?;
         control.poll()?;
+        self.query_reuse.full_program_loads = self.query_reuse.full_program_loads.saturating_add(1);
         self.query = Some(loaded);
         Ok(())
     }
@@ -446,8 +493,11 @@ impl NativeTableau for ProductionTableau {
         let bridge = OperationControlBridge::new(control);
         let active = self.active_mut();
         if active.blocking.plan().validated() {
-            let mut validator = CompiledClauseBlockingValidator::new(
+            let mut validator = CompiledClauseBlockingValidator::from_shapes(
                 active.engine.program(),
+                Arc::clone(active.blocking_shapes.as_ref().ok_or_else(|| {
+                    NativeError::invariant("validated blocking has no retained clause shapes")
+                })?),
                 active.blocking.plan().core_mode,
             )
             .map_err(crate::operation_bridge::blocking_error_to_native)?;
@@ -1045,6 +1095,7 @@ mod tests {
             first_local_symbols,
             requires_rebuild: false,
             program: Some(ontology.program.clone()),
+            native_delta: None,
             reason: None,
             interpretation: vec!["duplicate-prefix-regression".to_owned()],
         };

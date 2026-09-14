@@ -13,6 +13,7 @@ import hashlib
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
+from itertools import islice
 from typing import Protocol, TypeVar, cast, runtime_checkable
 
 import pyowl_core.model as owl
@@ -33,7 +34,7 @@ from pyhermit.clauses import (
     compile_query_program,
     prepare_query_compilation,
 )
-from pyhermit.exceptions import FeatureNotImplementedError
+from pyhermit.exceptions import FeatureNotImplementedError, ResourceLimitError
 from pyhermit.normalize import NormalizedOntology, normalize_query
 
 _DEFAULT_QUERY_CACHE_SIZE = 4_096
@@ -309,31 +310,99 @@ class EncodedQueryExecutor:
         return _require_result(self._session.check())
 
     def check(self, plan: QueryPlan) -> CheckResult:
-        if not isinstance(plan, QueryPlan):
-            raise TypeError("plan must be QueryPlan")
-        key = _plan_key(plan)
-        retained = self._cache.get(key)
-        if retained is not None:
-            self._cache.move_to_end(key)
-            return retained
-        _raise_if_cancelled(self._cancelled)
-        result = _require_result(self._temporary_check(plan.axioms))
-        _raise_if_cancelled(self._cancelled)
-        if self._cache_size:
-            self._cache[key] = result
-            self._cache.move_to_end(key)
-            while len(self._cache) > self._cache_size:
-                self._cache.popitem(last=False)
-        return result
+        return self.check_many((plan,))[0]
 
     def check_many(
         self,
         plans: Sequence[QueryPlan] | Iterable[QueryPlan],
     ) -> tuple[CheckResult, ...]:
-        values = tuple(plans)
+        from pyhermit.backends.native_queries import serialize_query
+
+        values = tuple(islice(plans, 4097))
         if not all(isinstance(value, QueryPlan) for value in values):
             raise TypeError("plans must contain QueryPlan values")
-        return tuple(self.check(value) for value in values)
+        if not values:
+            return ()
+        if len(values) > 4096:
+            raise ResourceLimitError(
+                "native query batch exceeds item limit",
+                limit="native_query_batch_items",
+                observed=len(values),
+                allowed=4096,
+            )
+        keys = tuple(_plan_key(value) for value in values)
+        results: dict[str, CheckResult] = {}
+        pending: dict[str, QueryPlan] = {}
+        for key, value in zip(keys, values, strict=True):
+            retained = self._cache.get(key)
+            if retained is not None:
+                results[key] = retained
+                self._cache.move_to_end(key)
+            else:
+                pending.setdefault(key, value)
+        native_keys: list[str] = []
+        native_requests: list[bytes] = []
+        fallback: list[str] = []
+        total = 0
+        for key, value in pending.items():
+            _raise_if_cancelled(self._cancelled)
+            try:
+                request = serialize_query(value.axioms, self._context)
+            except FeatureNotImplementedError as error:
+                if (
+                    self._require_native_pipeline
+                    or error.feature_id != "native_query_delta_ineligible"
+                ):
+                    raise
+                fallback.append(key)
+                continue
+            total += len(request)
+            if total > 16 * 1024 * 1024:
+                raise ResourceLimitError(
+                    "native query batch exceeds byte limit",
+                    limit="native_query_batch_bytes",
+                    observed=total,
+                    allowed=16 * 1024 * 1024,
+                )
+            native_keys.append(key)
+            native_requests.append(request)
+        if native_requests:
+            call = getattr(self._session, "check_assertions_many", None)
+            if not callable(call):
+                if self._require_native_pipeline:
+                    raise FeatureNotImplementedError(
+                        "native query delta capability is unavailable",
+                        feature_id="native_query_delta_ineligible",
+                    )
+                fallback.extend(native_keys)
+            else:
+                try:
+                    checked = tuple(call(tuple(native_requests)))
+                except FeatureNotImplementedError as error:
+                    if (
+                        self._require_native_pipeline
+                        or error.feature_id != "native_query_delta_ineligible"
+                    ):
+                        raise
+                    fallback.extend(native_keys)
+                else:
+                    if len(checked) != len(native_keys):
+                        raise RuntimeError("native query batch returned the wrong result count")
+                    results.update(
+                        (key, _require_result(result))
+                        for key, result in zip(native_keys, checked, strict=True)
+                    )
+        for key in fallback:
+            results[key] = _require_result(self._temporary_check(pending[key].axioms))
+        _raise_if_cancelled(self._cancelled)
+        # Publish no successful prefix if a later query or fallback fails.
+        if self._cache_size:
+            for key in pending:
+                self._cache[key] = results[key]
+                self._cache.move_to_end(key)
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+        return tuple(results[key] for key in keys)
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -388,6 +457,10 @@ class EncodedQueryExecutor:
                 self._data_properties(),
                 tuple(axiom.properties),
             )
+        if self._require_native_pipeline:
+            # Optional realization publication is not admitted; supported ABox entailments
+            # continue through the native assertion-local counterexample compiler.
+            return None
         if (
             isinstance(axiom, owl.ClassAssertion)
             and isinstance(axiom.class_expression, owl.Class)

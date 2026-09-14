@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::blocking::{
     select_blocking_plan, BlockingLimits, BlockingManager, BlockingMode, BlockingRequirements,
-    BlockingVocabulary, DirectChecker,
+    BlockingVocabulary, CompiledBlockingShapes, DirectChecker,
 };
 use crate::cancel::CancellationState;
 use crate::datatype_tableau::TableauDatatypeRuntime;
@@ -37,8 +37,9 @@ pub struct LoadedRuleState {
     pub roles: Arc<RoleRuntime>,
     pub datatypes: TableauDatatypeRuntime,
     pub nominals: NominalIntroductionManager,
-    pub existentials: ExistentialExpansionManager,
+    pub existentials: Arc<ExistentialExpansionManager>,
     pub blocking: BlockingManager<NodeHandle>,
+    pub(crate) blocking_shapes: Option<Arc<CompiledBlockingShapes>>,
 }
 
 /// Convert the one fully validated input program into the checked rule-engine model.
@@ -160,6 +161,13 @@ pub(crate) fn load_rule_state(
     )
     .map_err(expansion_to_native)?;
     let blocking = load_blocking_manager(&ontology.program, rule_program, blocking_choice)?;
+    let blocking_shapes = if blocking.plan().validated() {
+        Some(Arc::new(
+            CompiledBlockingShapes::new(rule_program).map_err(blocking_error_to_native)?,
+        ))
+    } else {
+        None
+    };
     let mut engine =
         RuleEngine::from_compiled(compiled, source_nodes, data_nodes, disjunction_learning)?;
     // Establish the engine's recovery root before installing compiled ABox rows.  A ground
@@ -205,8 +213,201 @@ pub(crate) fn load_rule_state(
         roles: role_runtime,
         datatypes,
         nominals: NominalIntroductionManager::default(),
-        existentials,
+        existentials: Arc::new(existentials),
         blocking,
+        blocking_shapes,
+    })
+}
+
+/// Install only native-validated assertion-local additions. Mutable nodes and `ABox` state are
+/// fresh, while rule plans, role automata, datatype registries and existential templates share
+/// their permanent owners. No `DecodedProgram` or base symbol/provenance vectors are cloned.
+pub(crate) fn load_native_query_state(
+    ontology: &DecodedOntology,
+    permanent: &LoadedRuleState,
+    base: &crate::query_delta::NativeQueryBase,
+    delta: &crate::input_wire::NativeQueryDelta,
+    cancellation: Arc<CancellationState>,
+    disjunction_learning: bool,
+) -> NativeResult<LoadedRuleState> {
+    cancellation.poll()?;
+    if delta.individual_count < base.boundaries[SymbolKind::Individual as usize]
+        || delta.data_count < base.boundaries[SymbolKind::DataValue as usize]
+    {
+        return Err(NativeError::wire(
+            "native query removes permanent node identities",
+        ));
+    }
+    let mut overrides = Vec::new();
+    let mut predicates = Vec::new();
+    for predicate in &delta.predicates {
+        let opposite_kind = match predicate.kind {
+            InputPredicateKind::Equality => Some(InputPredicateKind::Inequality),
+            InputPredicateKind::Inequality => Some(InputPredicateKind::Equality),
+            InputPredicateKind::Concept => Some(InputPredicateKind::NegatedConcept),
+            InputPredicateKind::NegatedConcept => Some(InputPredicateKind::Concept),
+            InputPredicateKind::Nominal => Some(InputPredicateKind::NegatedNominal),
+            InputPredicateKind::NegatedNominal => Some(InputPredicateKind::Nominal),
+            InputPredicateKind::ObjectRole => Some(InputPredicateKind::NegatedObjectRole),
+            InputPredicateKind::NegatedObjectRole => Some(InputPredicateKind::ObjectRole),
+            InputPredicateKind::DataRole => Some(InputPredicateKind::NegatedDataRole),
+            InputPredicateKind::NegatedDataRole => Some(InputPredicateKind::DataRole),
+            InputPredicateKind::DataRange => Some(InputPredicateKind::NegatedDataRange),
+            InputPredicateKind::NegatedDataRange => Some(InputPredicateKind::DataRange),
+            _ => None,
+        };
+        let opposite = opposite_kind.and_then(|kind| {
+            base.find(
+                kind,
+                predicate.symbol_id,
+                predicate.role_id,
+                &predicate.argument_sorts,
+            )
+            .or_else(|| {
+                delta
+                    .predicates
+                    .iter()
+                    .find(|candidate| {
+                        candidate.kind == kind
+                            && candidate.symbol_id == predicate.symbol_id
+                            && candidate.role_id == predicate.role_id
+                            && candidate.argument_sorts == predicate.argument_sorts
+                    })
+                    .map(|candidate| candidate.predicate_id)
+            })
+        });
+        predicates.push(compile_predicate(predicate, opposite.as_ref())?);
+        if let Some(id) = opposite.filter(|id| *id < base.predicate_count) {
+            let original = permanent.engine.program().predicate(id)?;
+            let mut value = original.clone();
+            value.opposite_predicate_id = Some(predicate.predicate_id);
+            overrides.push(value);
+        }
+    }
+    let clauses = delta
+        .clauses
+        .iter()
+        .map(compile_clause)
+        .collect::<NativeResult<Vec<_>>>()?;
+    let compiled = CompiledRules::extend(
+        permanent.engine.compiled_rules(),
+        predicates,
+        overrides,
+        clauses,
+    )?;
+    let blocking_shapes = permanent
+        .blocking_shapes
+        .as_ref()
+        .map(|base_shapes| {
+            CompiledBlockingShapes::extend(Arc::clone(base_shapes), compiled.program())
+                .map(Arc::new)
+                .map_err(blocking_error_to_native)
+        })
+        .transpose()?;
+    let mut kernel = TableauKernel::new();
+    let named: BTreeSet<_> = ontology.named_individuals.iter().copied().collect();
+    let mut source_nodes = BTreeMap::new();
+    for id in 0..delta.individual_count {
+        cancellation.poll()?;
+        source_nodes.insert(
+            id,
+            kernel.create_node(
+                NodeKind::Root,
+                None,
+                named.contains(&id),
+                Some(id),
+                None,
+                None,
+            )?,
+        );
+    }
+    let mut data_nodes = BTreeMap::new();
+    let mut datatype_nodes = Vec::new();
+    for id in 0..delta.data_count {
+        cancellation.poll()?;
+        let node = kernel.create_node(NodeKind::Concrete, None, false, None, None, None)?;
+        data_nodes.insert(id, node);
+        datatype_nodes.push(node);
+    }
+    let datatypes = permanent.datatypes.fork_for_query(
+        datatype_nodes,
+        &delta.predicates,
+        delta.enable_datatypes,
+        cancellation.as_ref(),
+    )?;
+    let concepts = delta
+        .predicates
+        .iter()
+        .filter(|p| {
+            matches!(
+                p.kind,
+                InputPredicateKind::Concept
+                    | InputPredicateKind::NegatedConcept
+                    | InputPredicateKind::Nominal
+                    | InputPredicateKind::NegatedNominal
+            )
+        })
+        .map(|p| p.predicate_id)
+        .collect::<Vec<_>>();
+    let roles = delta
+        .predicates
+        .iter()
+        .filter(|p| p.kind == InputPredicateKind::ObjectRole)
+        .map(|p| p.predicate_id)
+        .collect::<Vec<_>>();
+    let blocking = permanent
+        .blocking
+        .fork_for_query(&concepts, &roles)
+        .map_err(blocking_error_to_native)?;
+    let mut engine =
+        RuleEngine::from_compiled(compiled, source_nodes, data_nodes, disjunction_learning)?;
+    engine.initialize(&mut kernel, Arc::clone(&cancellation))?;
+    for fact in ontology
+        .program
+        .positive_facts
+        .iter()
+        .chain(&ontology.program.negative_facts)
+        .chain(&delta.facts)
+    {
+        cancellation.poll()?;
+        engine.dispatch_ground_atom(
+            &mut kernel,
+            compile_ground_atom(fact, &engine)?,
+            DependencySet::empty(),
+            true,
+            &fact.provenance_ids,
+        )?;
+    }
+    for disjunction in ontology
+        .program
+        .ground_disjunctions
+        .iter()
+        .chain(&delta.disjunctions)
+    {
+        cancellation.poll()?;
+        let atoms = disjunction
+            .disjuncts
+            .iter()
+            .map(|atom| compile_ground_atom(atom, &engine))
+            .collect::<NativeResult<Vec<_>>>()?;
+        engine.apply_ground_head(
+            &mut kernel,
+            atoms,
+            DependencySet::empty(),
+            &disjunction.provenance_ids,
+            &[],
+        )?;
+    }
+    kernel.check_invariants()?;
+    Ok(LoadedRuleState {
+        kernel,
+        engine,
+        roles: Arc::clone(&permanent.roles),
+        datatypes,
+        nominals: NominalIntroductionManager::default(),
+        existentials: Arc::clone(&permanent.existentials),
+        blocking,
+        blocking_shapes,
     })
 }
 
@@ -388,7 +589,7 @@ fn domain_count(
     u32::try_from(count).map_err(|_| NativeError::wire("symbol domain exceeds u32 identifiers"))
 }
 
-fn compile_ground_atom(
+pub(crate) fn compile_ground_atom(
     source: &DecodedGroundAtom,
     engine: &RuleEngine,
 ) -> NativeResult<GroundAtom> {
@@ -412,7 +613,7 @@ fn compile_ground_atom(
     GroundAtom::new(source.predicate_id, arguments)
 }
 
-fn compile_predicate(
+pub(crate) fn compile_predicate(
     source: &DecodedPredicate,
     opposite: Option<&u32>,
 ) -> NativeResult<RulePredicate> {
@@ -450,7 +651,7 @@ fn compile_predicate(
     Ok(predicate)
 }
 
-fn compile_clause(source: &DecodedClause) -> NativeResult<RuleClause> {
+pub(crate) fn compile_clause(source: &DecodedClause) -> NativeResult<RuleClause> {
     RuleClause::new(
         source.clause_id,
         source
@@ -468,7 +669,7 @@ fn compile_clause(source: &DecodedClause) -> NativeResult<RuleClause> {
     )
 }
 
-fn compile_atom(source: &DecodedAtom) -> NativeResult<RuleAtom> {
+pub(crate) fn compile_atom(source: &DecodedAtom) -> NativeResult<RuleAtom> {
     RuleAtom::new(
         source.predicate_id,
         source.arguments.iter().map(compile_term).collect(),
