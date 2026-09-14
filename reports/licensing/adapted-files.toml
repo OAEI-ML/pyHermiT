@@ -17,7 +17,7 @@ legal_review = "pending"
 
 [[adapted_file]]
 path = "native/src/blocking/compiled.rs"
-sha256 = "1e14b7e0bfe235a3bdc7769cd55b04e6deb5e62696861e062c9674b9c5ea2a6f"
+sha256 = "7496881433e5b67f1ae7b226c6ab0becd5e471baf6bba8e5732454cbe6bb71ce"
 adaptation = "Native port of HermiT validated/core blocking clause checks with conservative unsupported-shape handling"
 upstream_components = ["src/main/java/org/semanticweb/HermiT/blocking/BlockingValidator.java", "src/main/java/org/semanticweb/HermiT/blocking/ValidatedPairwiseDirectBlockingChecker.java", "src/main/java/org/semanticweb/HermiT/blocking/ValidatedSingleDirectBlockingChecker.java"]
 
@@ -95,7 +95,7 @@ upstream_components = ["src/main/java/org/semanticweb/HermiT/structural/OWLClaus
 
 [[adapted_file]]
 path = "src/pyhermit/config.py"
-sha256 = "e533990dfb09a291b8b2c0cd75f511ac9ba99b2aedeb14782529d20ed80fd127"
+sha256 = "579289f72d97b2f4f9406ae63acc8584013e1512f5bfcbb4ca4745cd623af496"
 adaptation = "Serializable Python configuration contract retaining pinned public defaults and strategies"
 upstream_components = ["src/main/java/org/semanticweb/HermiT/Configuration.java"]
 

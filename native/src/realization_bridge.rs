@@ -18,17 +18,17 @@ use crate::classification_bridge::classify_domain;
 use crate::error::{ErrorKind, NativeError, NativeResult};
 use crate::input_wire::{
     DecodedConfig, DecodedGroundAtom, DecodedOntology, DecodedPredicate, DecodedProgram,
-    DecodedProvenanceEntry, DecodedQuery, DecodedSymbolDomain, DecodedTerm, PredicateKind,
-    SymbolKind, TermSort,
+    DecodedQuery, DecodedTerm, PredicateKind, SymbolKind, TermSort,
 };
 use crate::native_tableau::ProductionTableau;
+use crate::query_delta::{NativeQueryBase, QueryDeltaBuilder};
 use crate::services::{
     realize_cached, ClassificationCache, ClassificationDomain, CompletedModelAccess,
     DataTargetFact, DifferentFromFact, DirectTypeFact, HierarchyIds, ModelIndividual,
     NamedIndividualRecord, ObjectTargetFact, RealizationCache, RealizationCacheKey, RealizationIds,
     RealizationLimits,
 };
-use crate::session::{OperationControl, QueryKey, SessionQuery, SessionScheduler};
+use crate::session::{OperationControl, SessionQuery, SessionScheduler};
 
 const QUERY_BATCH_SIZE: usize = 4_096;
 const MAX_SEMANTIC_TESTS: u64 = 100_000_000;
@@ -607,6 +607,13 @@ fn entails_many(
     assertions: &[Assertion],
     control: &dyn OperationControl,
 ) -> NativeResult<Vec<bool>> {
+    control.poll()?;
+    let base = scheduler.native_query_base()?;
+    if !Arc::ptr_eq(&base.ontology, ontology) {
+        return Err(NativeError::invariant(
+            "realization query source is not the retained ontology",
+        ));
+    }
     let mut outcomes = Vec::new();
     outcomes
         .try_reserve_exact(assertions.len())
@@ -616,7 +623,7 @@ fn entails_many(
         let queries = chunk
             .iter()
             .copied()
-            .map(|assertion| counterexample_query(ontology, assertion))
+            .map(|assertion| counterexample_query(Arc::clone(&base), assertion))
             .collect::<NativeResult<Vec<_>>>()?;
         let results = scheduler.check_many(&queries, control)?;
         if results.len() != chunk.len() {
@@ -631,257 +638,86 @@ fn entails_many(
 }
 
 fn counterexample_query(
-    ontology: &DecodedOntology,
+    base: Arc<NativeQueryBase>,
     assertion: Assertion,
 ) -> NativeResult<SessionQuery<DecodedQuery>> {
-    let query_hash = assertion_hash(&ontology.metadata.ontology_fingerprint, assertion);
-    let first_local_symbols = symbol_boundaries(&ontology.program.symbol_domains)?;
-    let first_local_predicate_id = u32::try_from(ontology.program.predicates.len())
-        .map_err(|_| NativeError::wire("realization predicate boundary exceeds u32"))?;
-    let mut predicates = ontology.program.predicates.clone();
-    let (counter_kind, arguments) = match assertion {
-        Assertion::Class {
-            class_id,
-            individual_id,
-        } => {
-            ensure_opposite_pair(
-                &mut predicates,
-                PredicateKind::Concept,
-                PredicateKind::NegatedConcept,
-                &[TermSort::Object],
-                Some(class_id),
-                None,
-            )?;
-            (
-                PredicateKind::NegatedConcept,
-                vec![DecodedTerm::Individual { individual_id }],
-            )
-        }
+    let query_hash = assertion_hash(&base.ontology.metadata.ontology_fingerprint, assertion);
+    let mut query = QueryDeltaBuilder::new(base, query_hash);
+    let (positive, negative, arguments) = match assertion {
+        Assertion::Class { individual_id, .. } => (
+            PredicateKind::Concept,
+            PredicateKind::NegatedConcept,
+            vec![DecodedTerm::Individual { individual_id }],
+        ),
         Assertion::Object {
-            property_id,
             subject_id,
             object_id,
-        } => {
-            ensure_opposite_pair(
-                &mut predicates,
-                PredicateKind::ObjectRole,
-                PredicateKind::NegatedObjectRole,
-                &[TermSort::Object, TermSort::Object],
-                None,
-                Some(property_id),
-            )?;
-            (
-                PredicateKind::NegatedObjectRole,
-                vec![
-                    DecodedTerm::Individual {
-                        individual_id: subject_id,
-                    },
-                    DecodedTerm::Individual {
-                        individual_id: object_id,
-                    },
-                ],
-            )
-        }
+            ..
+        } => (
+            PredicateKind::ObjectRole,
+            PredicateKind::NegatedObjectRole,
+            vec![
+                DecodedTerm::Individual {
+                    individual_id: subject_id,
+                },
+                DecodedTerm::Individual {
+                    individual_id: object_id,
+                },
+            ],
+        ),
         Assertion::Data {
-            property_id,
             subject_id,
             source_literal_id,
             data_identity_id,
-        } => {
-            ensure_opposite_pair(
-                &mut predicates,
-                PredicateKind::DataRole,
-                PredicateKind::NegatedDataRole,
-                &[TermSort::Object, TermSort::Data],
-                None,
-                Some(property_id),
-            )?;
-            (
-                PredicateKind::NegatedDataRole,
-                vec![
-                    DecodedTerm::Individual {
-                        individual_id: subject_id,
-                    },
-                    DecodedTerm::Data {
-                        source_literal_id,
-                        data_identity_id,
-                    },
-                ],
-            )
-        }
-        Assertion::Same { left_id, right_id } => {
-            ensure_opposite_pair(
-                &mut predicates,
-                PredicateKind::Equality,
-                PredicateKind::Inequality,
-                &[TermSort::Object, TermSort::Object],
-                None,
-                None,
-            )?;
-            (
-                PredicateKind::Inequality,
-                vec![
-                    DecodedTerm::Individual {
-                        individual_id: left_id,
-                    },
-                    DecodedTerm::Individual {
-                        individual_id: right_id,
-                    },
-                ],
-            )
-        }
-        Assertion::Different { left_id, right_id } => {
-            ensure_opposite_pair(
-                &mut predicates,
-                PredicateKind::Equality,
-                PredicateKind::Inequality,
-                &[TermSort::Object, TermSort::Object],
-                None,
-                None,
-            )?;
-            (
-                PredicateKind::Equality,
-                vec![
-                    DecodedTerm::Individual {
-                        individual_id: left_id,
-                    },
-                    DecodedTerm::Individual {
-                        individual_id: right_id,
-                    },
-                ],
-            )
-        }
+            ..
+        } => (
+            PredicateKind::DataRole,
+            PredicateKind::NegatedDataRole,
+            vec![
+                DecodedTerm::Individual {
+                    individual_id: subject_id,
+                },
+                DecodedTerm::Data {
+                    source_literal_id,
+                    data_identity_id,
+                },
+            ],
+        ),
+        Assertion::Same { left_id, right_id } | Assertion::Different { left_id, right_id } => (
+            PredicateKind::Equality,
+            PredicateKind::Inequality,
+            vec![
+                DecodedTerm::Individual {
+                    individual_id: left_id,
+                },
+                DecodedTerm::Individual {
+                    individual_id: right_id,
+                },
+            ],
+        ),
     };
-    let predicate_id = find_predicate_id(
-        &predicates,
-        counter_kind,
-        assertion_argument_sorts(assertion),
+    let positive_id = query.predicate(
+        positive,
         assertion_symbol_id(assertion),
         assertion_role_id(assertion),
+        assertion_argument_sorts(assertion),
     )?;
-    let fact = DecodedGroundAtom {
-        predicate_id,
+    let negative_id = query.predicate(
+        negative,
+        assertion_symbol_id(assertion),
+        assertion_role_id(assertion),
+        assertion_argument_sorts(assertion),
+    )?;
+    query.delta.facts.push(DecodedGroundAtom {
+        predicate_id: if matches!(assertion, Assertion::Different { .. }) {
+            positive_id
+        } else {
+            negative_id
+        },
         arguments,
-        provenance_ids: vec![0],
-    };
-    let mut expressivity = ontology.program.expressivity;
-    expressivity.abox = true;
-    let overlay = DecodedProgram {
-        symbol_domains: ontology.program.symbol_domains.clone(),
-        predicates,
-        clauses: Vec::new(),
-        positive_facts: vec![fact],
-        negative_facts: Vec::new(),
-        ground_disjunctions: Vec::new(),
-        role_model: ontology.program.role_model.clone(),
-        datatype_model: ontology.program.datatype_model.clone(),
-        expressivity,
-        provenance: vec![DecodedProvenanceEntry {
-            provenance_id: 0,
-            source_sha256: vec![query_hash],
-            generated: true,
-        }],
-    };
-    let query = DecodedQuery {
-        permanent_program_sha256: ontology.metadata.program_sha256,
-        query_hash,
-        overlay_program_sha256: Some(query_hash),
-        first_local_predicate_id,
-        first_local_symbols,
-        requires_rebuild: false,
-        program: Some(overlay),
-        reason: None,
-        interpretation: vec![format!("realization:{assertion:?}")],
-    };
-    Ok(SessionQuery::new(QueryKey::new(query_hash), query))
-}
-
-fn ensure_opposite_pair(
-    predicates: &mut Vec<DecodedPredicate>,
-    positive: PredicateKind,
-    negative: PredicateKind,
-    sorts: &[TermSort],
-    symbol_id: Option<u32>,
-    role_id: Option<u32>,
-) -> NativeResult<()> {
-    ensure_predicate(predicates, positive, sorts, symbol_id, role_id)?;
-    ensure_predicate(predicates, negative, sorts, symbol_id, role_id)?;
-    Ok(())
-}
-
-fn ensure_predicate(
-    predicates: &mut Vec<DecodedPredicate>,
-    kind: PredicateKind,
-    sorts: &[TermSort],
-    symbol_id: Option<u32>,
-    role_id: Option<u32>,
-) -> NativeResult<u32> {
-    let matches = predicates
-        .iter()
-        .filter(|predicate| {
-            predicate.kind == kind
-                && predicate.argument_sorts == sorts
-                && predicate.symbol_id == symbol_id
-                && predicate.role_id == role_id
-                && predicate.cardinality.is_none()
-                && predicate.filler_predicate_id.is_none()
-                && predicate.annotation.is_empty()
-        })
-        .map(|predicate| predicate.predicate_id)
-        .collect::<Vec<_>>();
-    if matches.len() > 1 {
-        return Err(NativeError::wire(
-            "realization predicate identity is duplicated",
-        ));
-    }
-    if let Some(identifier) = matches.first().copied() {
-        return Ok(identifier);
-    }
-    let predicate_id = u32::try_from(predicates.len())
-        .map_err(|_| NativeError::wire("realization predicate ID exceeds u32"))?;
-    predicates.push(DecodedPredicate {
-        predicate_id,
-        kind,
-        argument_sorts: sorts.to_vec(),
-        symbol_id,
-        role_id,
-        cardinality: None,
-        filler_predicate_id: None,
-        annotation: Vec::new(),
-        internal_key: None,
+        provenance_ids: vec![query.base.provenance_id],
     });
-    Ok(predicate_id)
-}
-
-fn find_predicate_id(
-    predicates: &[DecodedPredicate],
-    kind: PredicateKind,
-    sorts: &[TermSort],
-    symbol_id: Option<u32>,
-    role_id: Option<u32>,
-) -> NativeResult<u32> {
-    let values = predicates
-        .iter()
-        .filter(|predicate| {
-            predicate.kind == kind
-                && predicate.argument_sorts == sorts
-                && predicate.symbol_id == symbol_id
-                && predicate.role_id == role_id
-                && predicate.cardinality.is_none()
-                && predicate.filler_predicate_id.is_none()
-                && predicate.annotation.is_empty()
-        })
-        .map(|predicate| predicate.predicate_id)
-        .collect::<Vec<_>>();
-    match values.as_slice() {
-        [identifier] => Ok(*identifier),
-        [] => Err(NativeError::invariant(
-            "realization counterexample predicate was not installed",
-        )),
-        _ => Err(NativeError::wire(
-            "realization counterexample predicate is ambiguous",
-        )),
-    }
+    Ok(query.finish(vec![format!("realization:{assertion:?}")]))
 }
 
 const fn assertion_symbol_id(assertion: Assertion) -> Option<u32> {
@@ -1020,15 +856,6 @@ fn source_literal_identities(
         ));
     }
     Ok(identities)
-}
-
-fn symbol_boundaries(domains: &[DecodedSymbolDomain]) -> NativeResult<[u32; 8]> {
-    let mut boundaries = [0_u32; 8];
-    for domain in domains {
-        boundaries[domain.kind as usize] = u32::try_from(domain.values.len())
-            .map_err(|_| NativeError::wire("realization symbol boundary exceeds u32"))?;
-    }
-    Ok(boundaries)
 }
 
 fn hierarchy_children(hierarchy: &HierarchyIds) -> NativeResult<Vec<BTreeSet<u32>>> {
@@ -1192,6 +1019,119 @@ impl UnionFind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn realization_counterexamples_keep_only_one_fact_and_bounded_native_predicate_delta(
+    ) -> NativeResult<()> {
+        use crate::input_wire::{decode_ontology, DecodeLimits};
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/data/native-input-v1.json"))
+                .map_err(|error| NativeError::wire(error.to_string()))?;
+        let hex = fixture["documents"]["ontology"]["hex"]
+            .as_str()
+            .ok_or_else(|| NativeError::wire("missing golden ontology"))?;
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                std::str::from_utf8(pair)
+                    .ok()
+                    .and_then(|text| u8::from_str_radix(text, 16).ok())
+                    .ok_or_else(|| NativeError::wire("invalid golden ontology hex"))
+            })
+            .collect::<NativeResult<Vec<_>>>()?;
+        let ontology = Arc::new(
+            decode_ontology(bytes, &DecodeLimits::default())
+                .map_err(|error| NativeError::wire(error.message))?,
+        );
+        let unchanged = ontology.program.clone();
+        let base = NativeQueryBase::new(Arc::clone(&ontology))?;
+        let assertions = [
+            (
+                Assertion::Class {
+                    class_id: 0,
+                    individual_id: 0,
+                },
+                PredicateKind::NegatedConcept,
+            ),
+            (
+                Assertion::Object {
+                    property_id: ontology.program.role_model.top_object_role_id,
+                    subject_id: 0,
+                    object_id: 0,
+                },
+                PredicateKind::NegatedObjectRole,
+            ),
+            (
+                Assertion::Data {
+                    property_id: ontology.program.role_model.top_data_property_id,
+                    subject_id: 0,
+                    source_literal_id: 0,
+                    data_identity_id: 0,
+                },
+                PredicateKind::NegatedDataRole,
+            ),
+            (
+                Assertion::Same {
+                    left_id: 0,
+                    right_id: 0,
+                },
+                PredicateKind::Inequality,
+            ),
+            (
+                Assertion::Different {
+                    left_id: 0,
+                    right_id: 0,
+                },
+                PredicateKind::Equality,
+            ),
+        ];
+        for (assertion, expected_kind) in assertions {
+            let query = counterexample_query(Arc::clone(&base), assertion)?;
+            let payload = query.payload();
+            assert!(payload.program.is_none());
+            assert!(!payload.requires_rebuild);
+            assert_eq!(
+                payload.query_hash,
+                assertion_hash(&ontology.metadata.ontology_fingerprint, assertion)
+            );
+            assert_eq!(payload.first_local_symbols, base.boundaries);
+            let delta = payload
+                .native_delta
+                .as_ref()
+                .ok_or_else(|| NativeError::invariant("missing native realization delta"))?;
+            assert!(delta.predicates.len() <= 2);
+            assert!(delta.clauses.is_empty());
+            assert!(delta.disjunctions.is_empty());
+            assert_eq!(delta.facts.len(), 1);
+            assert_eq!(
+                delta.individual_count,
+                base.boundaries[SymbolKind::Individual as usize]
+            );
+            assert_eq!(
+                delta.data_count,
+                base.boundaries[SymbolKind::DataValue as usize]
+            );
+            let fact = &delta.facts[0];
+            assert_eq!(fact.provenance_ids, vec![base.provenance_id]);
+            let predicate = if fact.predicate_id < base.predicate_count {
+                &ontology.program.predicates[usize::try_from(fact.predicate_id)
+                    .map_err(|_| NativeError::invariant("predicate ID overflow"))?]
+            } else {
+                &delta.predicates[usize::try_from(fact.predicate_id - base.predicate_count)
+                    .map_err(|_| NativeError::invariant("predicate ID overflow"))?]
+            };
+            assert_eq!(predicate.kind, expected_kind);
+            assert_eq!(
+                predicate.argument_sorts,
+                assertion_argument_sorts(assertion)
+            );
+            assert_eq!(predicate.symbol_id, assertion_symbol_id(assertion));
+            assert_eq!(predicate.role_id, assertion_role_id(assertion));
+        }
+        assert_eq!(ontology.program, unchanged);
+        Ok(())
+    }
 
     #[test]
     fn union_find_and_group_order_are_canonical() -> NativeResult<()> {
