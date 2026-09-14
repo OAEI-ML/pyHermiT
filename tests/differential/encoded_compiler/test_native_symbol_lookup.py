@@ -57,6 +57,7 @@ def test_native_facade_initialization_avoids_eager_signature_and_domain_enumerat
         patch.setattr(native_context._NativeSignature, "__iter__", forbidden)
         patch.setattr(native_context._NativeDomainMapping, "__iter__", forbidden)
         patch.setattr(native_context, "decode_service_context", forbidden)
+        patch.setattr(type(snapshot), "origin_index", property(forbidden))
         with Reasoner(snapshot, config=ReasonerConfig(backend=BackendName.NATIVE)) as reasoner:
             assert reasoner.is_consistent()
             diagnostics = reasoner.diagnostics()

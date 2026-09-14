@@ -636,7 +636,12 @@ class NativeBackendFactory:
         config_wire = codec.encode_config(config)
         _require_bytes(metadata, "encoded ontology metadata")
         _require_bytes(config_wire, "encoded configuration")
-        contexts = _encoded_profile_contexts(view)
+        summary_only = "native-profile-summary-v1" in self._info.complete_features
+        contexts = (
+            _encoded_profile_contexts(view, include_origins=False)
+            if summary_only
+            else _encoded_profile_contexts(view)
+        )
         return self._construct_adapter_session(
             ontology.ontology_fingerprint,
             config,
@@ -649,6 +654,7 @@ class NativeBackendFactory:
                 cancellation=handle,
                 ontology_identity_context=contexts.ontology_identity_context,
                 origin_context=contexts.origin_context,
+                **({"profile_summary_only": True} if summary_only else {}),
             ),
             ingestion_counters=ingestion_counters,
         )
@@ -709,7 +715,14 @@ class NativeBackendFactory:
         config_wire = codec.encode_config(config)
         _require_bytes(metadata, "encoded ontology metadata")
         _require_bytes(config_wire, "encoded configuration")
-        contexts = _encoded_profile_contexts(captured.view) if validate_profile else None
+        summary_only = "native-profile-summary-v1" in self._info.complete_features
+        contexts = None
+        if validate_profile:
+            contexts = (
+                _encoded_profile_contexts(captured.view, include_origins=False)
+                if summary_only
+                else _encoded_profile_contexts(captured.view)
+            )
         return self._construct_adapter_session(
             expected_fingerprint,
             config,
@@ -726,6 +739,7 @@ class NativeBackendFactory:
                     None if contexts is None else contexts.ontology_identity_context
                 ),
                 origin_context=None if contexts is None else contexts.origin_context,
+                **({"profile_summary_only": True} if summary_only else {}),
             ),
             ingestion_counters=ingestion_counters,
         )

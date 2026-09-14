@@ -3112,10 +3112,10 @@ def test_facade_native_first_dispatch_never_retraverses_the_core_view(
     def forbidden(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("production native dispatch traversed the scalar core view")
 
-    def tracked_contexts(view: pyowl_core.OntologyView) -> Any:
+    def tracked_contexts(view: pyowl_core.OntologyView, **kwargs: Any) -> Any:
         nonlocal context_calls
         context_calls += 1
-        return build_contexts(view)
+        return build_contexts(view, **kwargs)
 
     monkeypatch.setattr(
         native_backend,

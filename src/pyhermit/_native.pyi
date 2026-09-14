@@ -421,6 +421,7 @@ def _create_encoded_session_v1(
     config: bytes,
     cancellation: CancellationHandle,
     validate_profile: bool = True,
+    profile_summary_only: bool = False,
     deferred_fingerprints: tuple[int, str, str, bytes, bytes] | None = None,
     ontology_identity_context: (
         tuple[int, tuple[tuple[str, str | None, str | None], ...]] | None

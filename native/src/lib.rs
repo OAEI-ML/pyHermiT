@@ -5816,6 +5816,7 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
     ontology_identifiers: &[encoded::profile::ProfileOntologyIdentifier],
     origins: Option<&[encoded::profile::ProfileOrigin]>,
     validate_profile: bool,
+    profile_summary_only: bool,
     cancellation_state: &Arc<CancellationState>,
     checkpoint: &mut u64,
     cancel_at_checkpoint: Option<u64>,
@@ -5837,13 +5838,24 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
             unsupported_datatypes,
             &mut poll,
         )?;
-        let profile = apply_encoded_profile_contexts_controlled(
-            profile,
-            ontology_identifiers,
-            origins,
-            encoded::profile::ProfilePhaseLimits::default(),
-            &mut poll,
-        )?;
+        let profile = if profile_summary_only {
+            encoded::profile::apply_ontology_identity_context_controlled(
+                profile,
+                ontology_identifiers,
+                true,
+                encoded::profile::ProfilePhaseLimits::default(),
+                &mut poll,
+            )
+            .map_err(encoded_profile_error)?
+        } else {
+            apply_encoded_profile_contexts_controlled(
+                profile,
+                ontology_identifiers,
+                origins,
+                encoded::profile::ProfilePhaseLimits::default(),
+                &mut poll,
+            )?
+        };
         ensure_encoded_profile_conforms(profile.conforms, &profile.issues)?;
     }
     let mut poll = |phase: &'static str| {
@@ -5967,6 +5979,7 @@ fn finish_encoded_session_construction(
     config,
     cancellation,
     validate_profile=true,
+    profile_summary_only=false,
     deferred_fingerprints=None,
     ontology_identity_context=None,
     origin_context=None,
@@ -5981,6 +5994,7 @@ fn create_encoded_session_v1(
     config: &Bound<'_, PyBytes>,
     cancellation: PyRef<'_, CancellationHandle>,
     validate_profile: bool,
+    profile_summary_only: bool,
     deferred_fingerprints: Option<&Bound<'_, PyAny>>,
     ontology_identity_context: Option<&Bound<'_, PyAny>>,
     origin_context: Option<&Bound<'_, PyAny>>,
@@ -5991,6 +6005,11 @@ fn create_encoded_session_v1(
         if cancel_at_checkpoint == Some(0) {
             return Err(encoded_slice_invalid(
                 "encoded session cancellation checkpoint must be positive",
+            ));
+        }
+        if profile_summary_only && origin_context.is_some() {
+            return Err(encoded_slice_invalid(
+                "summary-only profile must not receive origin rows",
             ));
         }
         let limits = DecodeLimits::default();
@@ -6061,6 +6080,7 @@ fn create_encoded_session_v1(
                     &ontology_identifiers,
                     origins.as_deref(),
                     validate_profile,
+                    profile_summary_only,
                     &cancellation_state,
                     &mut checkpoint,
                     cancel_at_checkpoint,
@@ -6091,6 +6111,7 @@ fn create_encoded_session_v1(
             &ontology_identifiers,
             origins.as_deref(),
             validate_profile,
+            profile_summary_only,
             &cancellation_state,
             &mut checkpoint,
             cancel_at_checkpoint,
@@ -6349,6 +6370,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
             "encoded-structural-compiler-v2",
             "full_reasoner",
             "incremental_updates",
+            "native-profile-summary-v1",
             "realization",
             "state-trace-v1",
             "wire-v1",

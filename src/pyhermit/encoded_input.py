@@ -203,10 +203,14 @@ class EncodedInputNegotiation:
 @dataclass(frozen=True, slots=True)
 class _EncodedProfileContexts:
     ontology_identity_context: _OntologyIdentityContext
-    origin_context: _ProfileOriginContext
+    origin_context: _ProfileOriginContext | None
 
 
-def _encoded_profile_contexts(view: owl.OntologyView) -> _EncodedProfileContexts:
+def _encoded_profile_contexts(
+    view: owl.OntologyView,
+    *,
+    include_origins: bool = True,
+) -> _EncodedProfileContexts:
     """Build the canonical side contexts omitted from structural-columns v2."""
 
     identity = view.view(OntologyIdentityIndex)
@@ -231,6 +235,8 @@ def _encoded_profile_contexts(view: owl.OntologyView) -> _EncodedProfileContexts
             )
         ),
     )
+    if not include_origins:
+        return _EncodedProfileContexts(ontology_identity_context, None)
     origin_rows: list[tuple[bytes, tuple[str, ...]]] = []
     for provenance, occurrences in view.origin_index.entries.items():
         document_keys = tuple(sorted({occurrence.document_key for occurrence in occurrences}))
