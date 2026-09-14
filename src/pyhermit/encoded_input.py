@@ -134,6 +134,7 @@ class EncodedStructuralLease:
     buffers: Mapping[str, memoryview]
     segments: tuple[EncodedStructuralSegmentLease, ...]
     structural_fingerprint: owl.Fingerprint
+    native_validated: bool = False
 
     @property
     def buffer_count(self) -> int:
@@ -283,6 +284,7 @@ def negotiate_encoded_input(
     native_schemas: Mapping[str, int],
     *,
     scope: owl.AxiomScope = owl.AxiomScope.CLOSURE,
+    require_native_validation: bool = False,
 ) -> EncodedInputNegotiation:
     """Acquire structural columns only when core and native schemas overlap.
 
@@ -291,6 +293,8 @@ def negotiate_encoded_input(
     closed so callers cannot fall back after observing malformed native input.
     """
 
+    if type(require_native_validation) is not bool:
+        raise TypeError("require_native_validation must be bool")
     if not isinstance(view, owl.OntologyView):
         raise TypeError("view must implement pyowl_core.OntologyView")
     if not isinstance(native_schemas, Mapping):
@@ -303,6 +307,13 @@ def negotiate_encoded_input(
         raise _compatibility_error("core view capabilities have the wrong public type")
     core_schemas = capabilities.encoded_view_schemas
     advertised = _schema_version(core_schemas, "core")
+    if require_native_validation and (
+        supported is None
+        or supported < ENCODED_SCHEMA_VERSION
+        or advertised is None
+        or advertised < ENCODED_SCHEMA_VERSION
+    ):
+        raise _compatibility_error("strict native structural columns are unavailable")
     if supported is None:
         return EncodedInputNegotiation(
             lease=None,
@@ -333,16 +344,19 @@ def negotiate_encoded_input(
         )
 
     encoded_type = getattr(owl, "EncodedStructuralView", None)
+    if require_native_validation:
+        from pyowl_core.backends.native_views import EncodedStructuralViewV2
+
+        encoded_type = EncodedStructuralViewV2
     if not isinstance(encoded_type, type):
         raise _compatibility_error(
             "core advertises structural columns but exports no EncodedStructuralView"
         )
     try:
-        encoded: Any = view.view(
-            encoded_type,
-            schema_version=ENCODED_SCHEMA_VERSION,
-            scope=scope,
-        )
+        if require_native_validation:
+            encoded: Any = view.view(encoded_type, scope=scope, require_native_validation=True)
+        else:
+            encoded = view.view(encoded_type, schema_version=ENCODED_SCHEMA_VERSION, scope=scope)
     except (MemoryError, KeyboardInterrupt, SystemExit):
         raise
     except Exception as error:
@@ -359,6 +373,7 @@ def negotiate_encoded_input(
         document_key=None,
         active=frozenset(),
         validated={},
+        require_native_validation=require_native_validation,
     )
     return EncodedInputNegotiation(
         lease=lease,
@@ -376,7 +391,23 @@ def _validate_encoded_view(
     document_key: str | None,
     active: frozenset[int],
     validated: dict[int, EncodedStructuralLease],
+    require_native_validation: bool = False,
 ) -> EncodedStructuralLease:
+    if require_native_validation:
+        from pyowl_core.backends.native_views import validate_encoded_structural_view_v2
+
+        try:
+            encoded = validate_encoded_structural_view_v2(
+                encoded,
+                expected_owner=owner,
+                expected_scope=scope,
+                expected_document_key=document_key,
+                require_native_validation=True,
+            )
+        except Exception as error:
+            raise _protocol_error(
+                "core rejected the native structural validation receipt"
+            ) from error
     identity = id(encoded)
     if identity in active:
         raise _protocol_error("encoded structural segment graph is cyclic")
@@ -461,8 +492,11 @@ def _validate_encoded_view(
         local_root_count=buffers["root_ids"].nbytes // 4,
         active=active,
         validated=validated,
+        native_validated=require_native_validation,
     )
-    if fingerprint != _encoded_fingerprint(buffers, segments, descriptor):
+    if not require_native_validation and fingerprint != _encoded_fingerprint(
+        buffers, segments, descriptor
+    ):
         raise _protocol_error("encoded structural fingerprint does not cover its publication")
     lease = EncodedStructuralLease(
         encoded_view=encoded,
@@ -477,6 +511,7 @@ def _validate_encoded_view(
         buffers=MappingProxyType(dict(sorted(buffers.items()))),
         segments=segments,
         structural_fingerprint=fingerprint,
+        native_validated=require_native_validation,
     )
     validated[identity] = lease
     return lease
@@ -509,6 +544,7 @@ def _validate_segments(
     local_root_count: int,
     active: frozenset[int],
     validated: dict[int, EncodedStructuralLease],
+    native_validated: bool = False,
 ) -> tuple[EncodedStructuralSegmentLease, ...]:
     if not raw_segments:
         raise _protocol_error("encoded structural segment table must not be empty")
@@ -572,33 +608,36 @@ def _validate_segments(
                 document_key=source_document_key,
                 active=active,
                 validated=validated,
+                require_native_validation=native_validated,
             )
             referenced_root_count = source_lease.buffers["root_ids"].nbytes // 4
 
-        previous_root_id = 0
-        for offset in range(0, root_ids.nbytes, 4):
-            root_id = int.from_bytes(root_ids[offset : offset + 4], "little")
-            if root_id <= previous_root_id or root_id > referenced_root_count:
-                raise _protocol_error(
-                    "encoded structural segment postings are not sorted unique in-range IDs"
-                )
-            previous_root_id = root_id
-        if posting_mode == _POSTINGS_ALL and root_ids.nbytes:
-            raise _protocol_error("ALL encoded segment mode requires empty postings")
-        if posting_mode in {_POSTINGS_INCLUDE, _POSTINGS_EXCLUDE} and not root_ids.nbytes:
-            raise _protocol_error("INCLUDE and EXCLUDE encoded segment modes require postings")
+        if not native_validated:
+            previous_root_id = 0
+            for offset in range(0, root_ids.nbytes, 4):
+                root_id = int.from_bytes(root_ids[offset : offset + 4], "little")
+                if root_id <= previous_root_id or root_id > referenced_root_count:
+                    raise _protocol_error(
+                        "encoded structural segment postings are not sorted unique in-range IDs"
+                    )
+                previous_root_id = root_id
+            if posting_mode == _POSTINGS_ALL and root_ids.nbytes:
+                raise _protocol_error("ALL encoded segment mode requires empty postings")
+            if posting_mode in {_POSTINGS_INCLUDE, _POSTINGS_EXCLUDE} and not root_ids.nbytes:
+                raise _protocol_error("INCLUDE and EXCLUDE encoded segment modes require postings")
 
-        previous_scope: bytes | None = None
-        for offset in range(0, anonymous_scope_map.nbytes, 64):
-            current_scope = bytes(anonymous_scope_map[offset : offset + 32])
-            target_scope = bytes(anonymous_scope_map[offset + 32 : offset + 64])
-            if (
-                previous_scope is not None and current_scope <= previous_scope
-            ) or current_scope == target_scope:
-                raise _protocol_error(
-                    "encoded anonymous scope sources are not sorted unique or contain identity rows"
-                )
-            previous_scope = current_scope
+            previous_scope: bytes | None = None
+            for offset in range(0, anonymous_scope_map.nbytes, 64):
+                current_scope = bytes(anonymous_scope_map[offset : offset + 32])
+                target_scope = bytes(anonymous_scope_map[offset + 32 : offset + 64])
+                if (
+                    previous_scope is not None and current_scope <= previous_scope
+                ) or current_scope == target_scope:
+                    raise _protocol_error(
+                        "encoded anonymous scope sources are not sorted unique "
+                        "or contain identity rows"
+                    )
+                previous_scope = current_scope
         if role == _SEGMENT_COMPOSITE_MEMBER:
             if type(member_token) is not bytes or len(member_token) != 32:
                 raise _protocol_error("encoded composite member requires an exact bytes32 token")
