@@ -7,7 +7,7 @@ mod model;
 mod plans;
 
 pub use crate::branching::BranchTransition;
-pub use engine::{RuleCheckpointLimits, RuleEngine, RuleEngineCheckpoint};
+pub use engine::{CompiledRules, RuleCheckpointLimits, RuleEngine, RuleEngineCheckpoint};
 pub use joins::{IndexedJoinEvaluator, NaiveJoinEvaluator};
 pub use model::{
     GroundAtom, JoinMatch, PendingAnnotatedEquality, PredicateKind, RuleAtom, RuleClause,

@@ -105,16 +105,38 @@ struct StoredRuleCheckpoint {
     estimated_bytes: u64,
 }
 
-pub struct RuleEngine {
+/// Immutable checked rules, join plans, and merge vocabulary shared by isolated tableaux.
+pub struct CompiledRules {
     program: RuleProgram,
     join_program: JoinProgram,
+    merger: MergingManager,
+}
+
+impl CompiledRules {
+    pub fn new(program: RuleProgram) -> NativeResult<Arc<Self>> {
+        let join_program = compile_join_program(&program)?;
+        let merger = MergingManager::new(&program)?;
+        Ok(Arc::new(Self {
+            program,
+            join_program,
+            merger,
+        }))
+    }
+
+    #[must_use]
+    pub const fn program(&self) -> &RuleProgram {
+        &self.program
+    }
+}
+
+pub struct RuleEngine {
+    compiled: Arc<CompiledRules>,
     source_nodes: Arc<BTreeMap<u32, NodeHandle>>,
     data_nodes: Arc<BTreeMap<u32, NodeHandle>>,
     atom_ids: BTreeMap<GroundAtom, u32>,
     atoms: Vec<GroundAtom>,
     disjunction_keys: BTreeMap<Vec<GroundAtom>, u32>,
     brancher: DisjunctionBrancher,
-    merger: MergingManager,
     limits: RuleLimits,
     initialized: bool,
     checkpoint_owner: u64,
@@ -165,6 +187,40 @@ impl RuleEngine {
         checkpoint_limits: RuleCheckpointLimits,
         disjunction_learning: bool,
     ) -> NativeResult<Self> {
+        Self::from_compiled_with_limits(
+            CompiledRules::new(program)?,
+            source_nodes,
+            data_nodes,
+            limits,
+            checkpoint_limits,
+            disjunction_learning,
+        )
+    }
+
+    pub fn from_compiled(
+        compiled: Arc<CompiledRules>,
+        source_nodes: BTreeMap<u32, NodeHandle>,
+        data_nodes: BTreeMap<u32, NodeHandle>,
+        disjunction_learning: bool,
+    ) -> NativeResult<Self> {
+        Self::from_compiled_with_limits(
+            compiled,
+            source_nodes,
+            data_nodes,
+            RuleLimits::default(),
+            RuleCheckpointLimits::default(),
+            disjunction_learning,
+        )
+    }
+
+    fn from_compiled_with_limits(
+        compiled: Arc<CompiledRules>,
+        source_nodes: BTreeMap<u32, NodeHandle>,
+        data_nodes: BTreeMap<u32, NodeHandle>,
+        limits: RuleLimits,
+        checkpoint_limits: RuleCheckpointLimits,
+        disjunction_learning: bool,
+    ) -> NativeResult<Self> {
         let limits = RuleLimits::new(
             limits.max_join_steps,
             limits.max_matches_per_generation,
@@ -174,19 +230,15 @@ impl RuleEngine {
             checkpoint_limits.max_checkpoints,
             checkpoint_limits.max_total_checkpoint_bytes,
         )?;
-        let join_program = compile_join_program(&program)?;
-        let merger = MergingManager::new(&program)?;
         let checkpoint_owner = next_rule_engine_owner()?;
         Ok(Self {
-            program,
-            join_program,
+            compiled,
             source_nodes: Arc::new(source_nodes),
             data_nodes: Arc::new(data_nodes),
             atom_ids: BTreeMap::new(),
             atoms: Vec::new(),
             disjunction_keys: BTreeMap::new(),
             brancher: DisjunctionBrancher::new(disjunction_learning),
-            merger,
             limits,
             initialized: false,
             checkpoint_owner,
@@ -198,13 +250,18 @@ impl RuleEngine {
     }
 
     #[must_use]
-    pub const fn program(&self) -> &RuleProgram {
-        &self.program
+    pub fn compiled_rules(&self) -> Arc<CompiledRules> {
+        Arc::clone(&self.compiled)
     }
 
     #[must_use]
-    pub const fn join_program(&self) -> &JoinProgram {
-        &self.join_program
+    pub fn program(&self) -> &RuleProgram {
+        &self.compiled.program
+    }
+
+    #[must_use]
+    pub fn join_program(&self) -> &JoinProgram {
+        &self.compiled.join_program
     }
 
     #[must_use]
@@ -246,8 +303,8 @@ impl RuleEngine {
         let mut bytes = u64::try_from(size_of::<Self>())
             .map_err(|_| NativeError::invariant("rule-engine size estimate exceeds u64"))?;
         for count in [
-            self.program.predicates().len(),
-            self.program.clauses().len(),
+            self.compiled.program.predicates().len(),
+            self.compiled.program.clauses().len(),
             self.source_nodes.len(),
             self.data_nodes.len(),
             self.atom_ids.len(),
@@ -553,6 +610,7 @@ impl RuleEngine {
             }
             let predicate_id = kernel.fact(*row_id)?.key.predicate_id;
             let plans: Vec<_> = self
+                .compiled
                 .join_program
                 .for_predicate(predicate_id)
                 .into_iter()
@@ -565,7 +623,7 @@ impl RuleEngine {
                 let limits = remaining_join_limits(self.limits, join_steps)?;
                 let (matches, local_steps) = {
                     let mut evaluator = IndexedJoinEvaluator::from_prevalidated_maps(
-                        &self.program,
+                        &self.compiled.program,
                         kernel,
                         Arc::clone(&self.source_nodes),
                         Arc::clone(&self.data_nodes),
@@ -646,7 +704,7 @@ impl RuleEngine {
     ) -> NativeResult<Vec<JoinMatch>> {
         IndexedJoinEvaluator::validate_node_maps(kernel, &self.source_nodes, &self.data_nodes)?;
         let mut evaluator = IndexedJoinEvaluator::from_prevalidated_maps(
-            &self.program,
+            &self.compiled.program,
             kernel,
             Arc::clone(&self.source_nodes),
             Arc::clone(&self.data_nodes),
@@ -666,7 +724,7 @@ impl RuleEngine {
     ) -> NativeResult<Vec<JoinMatch>> {
         IndexedJoinEvaluator::validate_node_maps(kernel, &self.source_nodes, &self.data_nodes)?;
         let mut indexed = IndexedJoinEvaluator::from_prevalidated_maps(
-            &self.program,
+            &self.compiled.program,
             kernel,
             Arc::clone(&self.source_nodes),
             Arc::clone(&self.data_nodes),
@@ -688,6 +746,7 @@ impl RuleEngine {
             NodeSort::Data => TermSort::Data,
         };
         let predicate_id = self
+            .compiled
             .program
             .predicates()
             .iter()
@@ -711,6 +770,7 @@ impl RuleEngine {
 
     fn seed_reflexive_equalities(&self, kernel: &mut TableauKernel) -> NativeResult<()> {
         let equality_by_sort: BTreeMap<_, _> = self
+            .compiled
             .program
             .predicates()
             .iter()
@@ -741,7 +801,11 @@ impl RuleEngine {
         kernel: &mut TableauKernel,
         cancellation: Arc<CancellationState>,
     ) -> NativeResult<()> {
-        let clause_ids = self.join_program.unconditional_clause_ids().to_vec();
+        let clause_ids = self
+            .compiled
+            .join_program
+            .unconditional_clause_ids()
+            .to_vec();
         let mut join_steps = 0_u64;
         let mut match_count = 0_u64;
         for clause_id in clause_ids {
@@ -749,7 +813,7 @@ impl RuleEngine {
             let limits = remaining_join_limits(self.limits, join_steps)?;
             let (matches, local_steps) = {
                 let mut indexed = IndexedJoinEvaluator::from_prevalidated_maps(
-                    &self.program,
+                    &self.compiled.program,
                     kernel,
                     Arc::clone(&self.source_nodes),
                     Arc::clone(&self.data_nodes),
@@ -798,7 +862,7 @@ impl RuleEngine {
         }
         let identifier = u32::try_from(self.atoms.len())
             .map_err(|_| NativeError::invariant("ground-atom registry exceeds u32 IDs"))?;
-        self.program.validate_ground_atom(&atom)?;
+        self.compiled.program.validate_ground_atom(&atom)?;
         self.atoms.push(atom.clone());
         self.atom_ids.insert(atom, identifier);
         Ok(identifier)
@@ -812,7 +876,9 @@ impl RuleEngine {
             return Ok(None);
         };
         let atom = self.atom_for_id(action_id)?.clone();
-        if self.program.predicate_kind(atom.predicate_id)? != PredicateKind::AnnotatedEquality {
+        if self.compiled.program.predicate_kind(atom.predicate_id)?
+            != PredicateKind::AnnotatedEquality
+        {
             return Err(NativeError::invariant(
                 "annotated-equality queue references a different predicate kind",
             ));
@@ -837,9 +903,10 @@ impl RuleEngine {
         dependency: DependencySet,
         cancellation: Option<&CancellationState>,
     ) -> NativeResult<MergeResult> {
-        let mut result = self
-            .merger
-            .merge(kernel, left, right, dependency, cancellation)?;
+        let mut result =
+            self.compiled
+                .merger
+                .merge(kernel, left, right, dependency, cancellation)?;
         if result.clashed || result.merged.is_none() {
             return Ok(result);
         }
@@ -947,7 +1014,7 @@ impl RuleEngine {
         kernel: &mut TableauKernel,
         matched: &JoinMatch,
     ) -> NativeResult<bool> {
-        let clause = self.program.clause(matched.clause_id)?.clone();
+        let clause = self.compiled.program.clause(matched.clause_id)?.clone();
         let bindings: Bindings = matched
             .bindings
             .iter()
@@ -995,7 +1062,7 @@ impl RuleEngine {
         core: bool,
         provenance_ids: &[u32],
     ) -> NativeResult<bool> {
-        let predicate = self.program.predicate(atom.predicate_id)?.clone();
+        let predicate = self.compiled.program.predicate(atom.predicate_id)?.clone();
         match predicate.kind {
             PredicateKind::OrderingGuard => Err(NativeError::invariant(
                 "ordering guards cannot be dispatched as heads",
@@ -1095,6 +1162,7 @@ impl RuleEngine {
         let source = atom.arguments[0];
         let target = atom.arguments[1];
         let inequality_id = self
+            .compiled
             .program
             .predicates()
             .iter()
@@ -1178,6 +1246,7 @@ impl RuleEngine {
             );
         }
         if let Some(opposite) = self
+            .compiled
             .program
             .predicate(atom.predicate_id)?
             .opposite_predicate_id
@@ -1282,7 +1351,10 @@ impl RuleEngine {
         atom: &GroundAtom,
     ) -> NativeResult<bool> {
         let (normalized, _path) = self.canonical_atom(kernel, atom.clone())?;
-        let kind = self.program.predicate_kind(normalized.predicate_id)?;
+        let kind = self
+            .compiled
+            .program
+            .predicate_kind(normalized.predicate_id)?;
         if kind == PredicateKind::Equality {
             return Ok(normalized.arguments[0] == normalized.arguments[1]);
         }
@@ -1298,7 +1370,7 @@ impl RuleEngine {
         atom: &GroundAtom,
     ) -> NativeResult<Option<DependencySet>> {
         let (normalized, path) = self.canonical_atom(kernel, atom.clone())?;
-        let predicate = self.program.predicate(normalized.predicate_id)?;
+        let predicate = self.compiled.program.predicate(normalized.predicate_id)?;
         if predicate.kind == PredicateKind::Inequality
             && normalized.arguments[0] == normalized.arguments[1]
         {
@@ -1341,8 +1413,8 @@ impl RuleEngine {
         kernel: &TableauKernel,
         atom: GroundAtom,
     ) -> NativeResult<(GroundAtom, DependencySet)> {
-        self.program.validate_ground_atom(&atom)?;
-        let predicate = self.program.predicate(atom.predicate_id)?;
+        self.compiled.program.validate_ground_atom(&atom)?;
+        let predicate = self.compiled.program.predicate(atom.predicate_id)?;
         let mut arguments = Vec::new();
         let mut dependencies = Vec::new();
         for (handle, sort) in atom
@@ -1438,7 +1510,7 @@ impl RuleEngine {
         kernel: &TableauKernel,
         atom: &GroundAtom,
     ) -> NativeResult<DisjunctRank> {
-        let kind = self.program.predicate_kind(atom.predicate_id)?;
+        let kind = self.compiled.program.predicate_kind(atom.predicate_id)?;
         let kind_rank = match kind {
             PredicateKind::Equality => 0,
             PredicateKind::AnnotatedEquality => 1,
@@ -1458,7 +1530,7 @@ impl RuleEngine {
     }
 
     fn single_atom_clash_kind(&self, atom: &GroundAtom) -> NativeResult<&'static str> {
-        let predicate = self.program.predicate(atom.predicate_id)?;
+        let predicate = self.compiled.program.predicate(atom.predicate_id)?;
         if matches!(
             predicate.kind,
             PredicateKind::Equality | PredicateKind::Inequality

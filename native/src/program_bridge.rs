@@ -25,8 +25,8 @@ use crate::nominals::NominalIntroductionManager;
 use crate::operation_bridge::{blocking_error_to_native, role_error_to_native};
 use crate::roles::{RoleAutomatonWire, RoleLimits, RoleRuntime, RoleTransition};
 use crate::rules::{
-    GroundAtom, PredicateKind, RuleAtom, RuleClause, RuleEngine, RulePredicate, RuleProgram, Term,
-    TermSort,
+    CompiledRules, GroundAtom, PredicateKind, RuleAtom, RuleClause, RuleEngine, RulePredicate,
+    RuleProgram, Term, TermSort,
 };
 use crate::store::TableauKernel;
 
@@ -34,7 +34,7 @@ use crate::store::TableauKernel;
 pub struct LoadedRuleState {
     pub kernel: TableauKernel,
     pub engine: RuleEngine,
-    pub roles: RoleRuntime,
+    pub roles: Arc<RoleRuntime>,
     pub datatypes: TableauDatatypeRuntime,
     pub nominals: NominalIntroductionManager,
     pub existentials: ExistentialExpansionManager,
@@ -70,8 +70,32 @@ pub fn load_permanent_rule_state(
     existential_choice: ExistentialChoice,
     blocking_choice: BlockingChoice,
 ) -> NativeResult<LoadedRuleState> {
+    load_rule_state(
+        ontology,
+        cancellation,
+        disjunction_learning,
+        existential_choice,
+        blocking_choice,
+        None,
+        None,
+    )
+}
+
+/// Reuse only an exactly matching immutable rule program; all mutable state is newly owned.
+pub(crate) fn load_rule_state(
+    ontology: &DecodedOntology,
+    cancellation: Arc<CancellationState>,
+    disjunction_learning: bool,
+    existential_choice: ExistentialChoice,
+    blocking_choice: BlockingChoice,
+    compiled: Option<Arc<CompiledRules>>,
+    roles: Option<Arc<RoleRuntime>>,
+) -> NativeResult<LoadedRuleState> {
     cancellation.poll()?;
-    let role_runtime = load_role_runtime(&ontology.program, cancellation.as_ref())?;
+    let role_runtime = match roles {
+        Some(value) => value,
+        None => Arc::new(load_role_runtime(&ontology.program, cancellation.as_ref())?),
+    };
     let mut kernel = TableauKernel::new();
     let named: BTreeSet<_> = ontology.named_individuals.iter().copied().collect();
     let individual_count =
@@ -111,11 +135,15 @@ pub fn load_permanent_rule_state(
         datatype_nodes,
         cancellation.as_ref(),
     )?;
-    let rule_program = compile_rule_program(&ontology.program)?;
+    let compiled = match compiled {
+        Some(value) => value,
+        None => CompiledRules::new(compile_rule_program(&ontology.program)?)?,
+    };
+    let rule_program = compiled.program();
     let reusable_fillers = reusable_atomic_fillers(&ontology.program)?;
     let expansion_program = expansion_program_from_rules(
-        &rule_program,
-        expansion_special_roles(&ontology.program, &rule_program)?,
+        rule_program,
+        expansion_special_roles(&ontology.program, rule_program)?,
         &reusable_fillers,
     )
     .map_err(expansion_to_native)?;
@@ -131,8 +159,9 @@ pub fn load_permanent_rule_state(
         ExpansionLimits::default(),
     )
     .map_err(expansion_to_native)?;
-    let blocking = load_blocking_manager(&ontology.program, &rule_program, blocking_choice)?;
-    let mut engine = RuleEngine::new(rule_program, source_nodes, data_nodes, disjunction_learning)?;
+    let blocking = load_blocking_manager(&ontology.program, rule_program, blocking_choice)?;
+    let mut engine =
+        RuleEngine::from_compiled(compiled, source_nodes, data_nodes, disjunction_learning)?;
     // Establish the engine's recovery root before installing compiled ABox rows.  A ground
     // disjunction legitimately creates a live choice branch, and operation-root replacement is
     // deliberately forbidden once such a branch exists.  The session-level checkpoint still

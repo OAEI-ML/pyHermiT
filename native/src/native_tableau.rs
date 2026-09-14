@@ -22,7 +22,7 @@ use crate::input_wire::{
 use crate::model::NodeHandle;
 use crate::nominals::NominalIntroductionManager;
 use crate::operation_bridge::OperationControlBridge;
-use crate::program_bridge::{load_permanent_rule_state, LoadedRuleState};
+use crate::program_bridge::{load_rule_state, LoadedRuleState};
 use crate::rules::RuleEngineCheckpoint;
 use crate::session::{
     ClashResolution, DatatypePhaseResult, DeltaPhaseResult, NativeTableau, OperationControl,
@@ -180,12 +180,21 @@ impl NativeTableau for ProductionTableau {
         }
         control.poll()?;
         let combined = combine_query_ontology(&self.ontology, query.payload())?;
-        let loaded = load_permanent_rule_state(
+        // Exact decoded equality includes opposites, join order, and provenance IDs.
+        // Changed query rules retain the existing full native compilation path.
+        let compiled = (combined.program.predicates == self.ontology.program.predicates
+            && combined.program.clauses == self.ontology.program.clauses)
+            .then(|| self.permanent.engine.compiled_rules());
+        let roles = (combined.program.role_model == self.ontology.program.role_model)
+            .then(|| Arc::clone(&self.permanent.roles));
+        let loaded = load_rule_state(
             &combined,
             Arc::clone(&self.cancellation),
             self.config.disjunction_learning,
             self.config.existentials,
             self.config.blocking,
+            compiled,
+            roles,
         )?;
         control.poll()?;
         self.query = Some(loaded);
@@ -818,6 +827,7 @@ mod tests {
         DecodedGroundAtom, DecodedPredicate, DecodedSymbolValue, DecodedTerm, ExistentialChoice,
         PredicateKind, SymbolKind, TermSort,
     };
+    use crate::program_bridge::load_permanent_rule_state;
     use crate::session::{NeverAbort, SessionLimits, SessionScheduler};
 
     fn decode_hex(value: &str) -> Vec<u8> {
@@ -892,6 +902,62 @@ mod tests {
         let session = SessionScheduler::new(fresh, SessionLimits::default())?;
         let expected = session.check_query(&query, &NeverAbort)?.satisfiable;
         assert_eq!(results, vec![expected, expected]);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_rule_queries_share_permanent_plans_and_changed_rules_recompile() -> NativeResult<()> {
+        let (mut tableau, golden) = golden_tableau_and_query()?;
+        let permanent = tableau.permanent.engine.compiled_rules();
+        let before = tableau.permanent.kernel.canonical_snapshot()?;
+        for changed in [false, true, false] {
+            let mut payload = golden.payload().clone();
+            payload.query_hash = [if changed { 23 } else { 22 }; 32];
+            payload.overlay_program_sha256 = Some(payload.query_hash);
+            payload.program = Some(tableau.ontology.program.clone());
+            if changed {
+                let program = payload
+                    .program
+                    .as_mut()
+                    .ok_or_else(|| NativeError::invariant("query program missing"))?;
+                program.clauses.push(DecodedClause {
+                    clause_id: u32::try_from(program.clauses.len())
+                        .map_err(|_| NativeError::invariant("test clause overflow"))?,
+                    body: Vec::new(),
+                    head: Vec::new(),
+                    provenance_ids: vec![0],
+                    join_order: Vec::new(),
+                });
+            }
+            let query =
+                SessionQuery::new(crate::session::QueryKey::new(payload.query_hash), payload);
+            let checkpoint = tableau.query_checkpoint(&NeverAbort)?;
+            tableau.install_query(&query, &NeverAbort)?;
+            let active = tableau.active().engine.compiled_rules();
+            assert_eq!(Arc::ptr_eq(&permanent, &active), !changed);
+            assert!(Arc::ptr_eq(
+                &tableau.permanent.roles,
+                &tableau.active().roles
+            ));
+            let answer = crate::session::drive_tableau(
+                &mut tableau,
+                &NeverAbort,
+                SessionLimits::default().max_scheduler_steps,
+            )?
+            .satisfiable;
+            if changed {
+                assert!(!answer);
+            }
+            tableau.finish_operation(checkpoint, OperationDisposition::RollbackQuery)?;
+            assert_eq!(tableau.permanent.kernel.canonical_snapshot()?, before);
+            let (fresh, _) = golden_tableau_and_query()?;
+            let session = SessionScheduler::new(fresh, SessionLimits::default())?;
+            assert_eq!(
+                answer,
+                session.check_query(&query, &NeverAbort)?.satisfiable
+            );
+        }
+        assert_eq!(Arc::strong_count(&permanent), 2);
         Ok(())
     }
 
