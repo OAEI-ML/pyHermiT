@@ -27,6 +27,7 @@ pub mod existentials;
 pub mod input_wire;
 pub mod merging;
 pub mod model;
+mod native_results;
 pub mod native_tableau;
 pub mod nominals;
 pub mod operation_bridge;
@@ -535,6 +536,64 @@ impl NativeSession {
             })
         });
         result.map_err(|error| error.into_pyerr(py))
+    }
+
+    fn _hierarchy_result_v1(
+        &self,
+        py: Python<'_>,
+        domain: &str,
+    ) -> PyResult<native_results::NativeHierarchyResult> {
+        if self.compiler_digest.is_none() {
+            return Err(NativeError::feature("native_result_owner").into_pyerr(py));
+        }
+        let domain = match domain {
+            "class" => ClassificationDomain::Classes,
+            "object_property" => ClassificationDomain::ObjectProperties,
+            "data_property" => ClassificationDomain::DataProperties,
+            _ => return Err(NativeError::wire("unknown hierarchy result domain").into_pyerr(py)),
+        };
+        let control = Arc::clone(&self.control);
+        let value = control
+            .run(|owned| {
+                py.detach(|| {
+                    classification_bridge::classify_domain(
+                        &owned.ontology,
+                        &owned.config,
+                        &owned.scheduler,
+                        &mut owned.classification,
+                        &control.cancellation,
+                        domain,
+                    )
+                })
+            })
+            .map_err(|error| error.into_pyerr(py))?;
+        py.detach(|| native_results::NativeHierarchyResult::new(control, value, domain))
+            .map_err(|error| error.into_pyerr(py))
+    }
+
+    fn _realization_result_v1(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<native_results::NativeRealizationResult> {
+        if self.compiler_digest.is_none() {
+            return Err(NativeError::feature("native_result_owner").into_pyerr(py));
+        }
+        let control = Arc::clone(&self.control);
+        let value = control
+            .run(|owned| {
+                py.detach(|| {
+                    realization_bridge::realize_ontology(
+                        &owned.ontology,
+                        &owned.config,
+                        &owned.scheduler,
+                        &mut owned.classification,
+                        &mut owned.realization,
+                        &control.cancellation,
+                    )
+                })
+            })
+            .map_err(|error| error.into_pyerr(py))?;
+        Ok(native_results::NativeRealizationResult { control, value })
     }
 
     fn classify_classes(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
@@ -6371,6 +6430,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
             "full_reasoner",
             "incremental_updates",
             "native-profile-summary-v1",
+            "native-result-owner-v1",
             "realization",
             "state-trace-v1",
             "wire-v1",
@@ -6379,6 +6439,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CancellationHandle>()?;
     module.add_class::<NativeSession>()?;
     module.add_class::<NativeServiceSymbols>()?;
+    module.add_class::<native_results::NativeHierarchyResult>()?;
+    module.add_class::<native_results::NativeRealizationResult>()?;
     module.add_function(wrap_pyfunction!(validate_encoded_columns_v1, module)?)?;
     module.add_function(wrap_pyfunction!(validate_encoded_selection_v1, module)?)?;
     module.add_function(wrap_pyfunction!(validate_encoded_slices_v1, module)?)?;

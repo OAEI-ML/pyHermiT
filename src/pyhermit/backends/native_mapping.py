@@ -17,6 +17,7 @@ from typing import NoReturn, TypeVar
 
 import pyowl_core.model as owl
 
+from pyhermit.backends import native_results
 from pyhermit.backends.protocol import Hierarchy, HierarchyIds, RealizationIds
 from pyhermit.clauses import ClauseProgram, SymbolKind
 from pyhermit.exceptions import BackendMismatchError
@@ -233,12 +234,9 @@ class CompiledResultMapper:
         nodes[hierarchy.bottom_node] = nodes[hierarchy.bottom_node] | frozenset(
             (owl.inverse_property(owl.OWL_BOTTOM_OBJECT_PROPERTY),)
         )
-        return Hierarchy(
-            tuple(nodes),
-            hierarchy.edges,
-            hierarchy.top_node,
-            hierarchy.bottom_node,
-        )
+        if hierarchy._native_owner is not None:
+            return native_results.mapped_hierarchy(hierarchy, tuple(nodes))
+        return Hierarchy(tuple(nodes), hierarchy.edges, hierarchy.top_node, hierarchy.bottom_node)
 
     def data_property_hierarchy(
         self,
@@ -270,30 +268,38 @@ class CompiledResultMapper:
             )
             for group in value.same_as
         )
-        observed_individuals = frozenset(
-            identifier for group in value.same_as for identifier in group
-        )
-        if observed_individuals != frozenset(self._individuals):
-            _fail(
-                "native realization same-as partition does not cover exactly the named individuals",
-                "realization_partition_mismatch",
+        trusted = native_results.matches(value, self._individuals)
+        if trusted:
+            native_results.require_same_hierarchy(value, class_hierarchy)
+        else:
+            observed_individuals = frozenset(
+                identifier for group in value.same_as for identifier in group
             )
-        _canonical_rows(value.direct_types, "direct-type")
+            if observed_individuals != frozenset(self._individuals):
+                _fail(
+                    "native realization same-as partition does not cover exactly "
+                    "the named individuals",
+                    "realization_partition_mismatch",
+                )
+            _canonical_rows(value.direct_types, "direct-type")
         direct_types: list[tuple[int, frozenset[int]]] = []
         for group_id, type_nodes in value.direct_types:
-            _require_group(group_id, groups, "direct type")
-            if any(node_id >= len(class_hierarchy.nodes) for node_id in type_nodes):
+            if not trusted:
+                _require_group(group_id, groups, "direct type")
+            if not trusted and any(node_id >= len(class_hierarchy.nodes) for node_id in type_nodes):
                 _fail(
                     "native realization direct type references an absent class node",
                     "realization_class_node_missing",
                 )
             direct_types.append((group_id, frozenset(type_nodes)))
 
-        _canonical_rows(value.object_targets, "object-target")
+        if not trusted:
+            _canonical_rows(value.object_targets, "object-target")
         object_targets: list[tuple[int, owl.ObjectPropertyExpression, frozenset[int]]] = []
         for group_id, property_id, targets in value.object_targets:
-            _require_group(group_id, groups, "object-property subject")
-            if any(target >= len(groups) for target in targets):
+            if not trusted:
+                _require_group(group_id, groups, "object-property subject")
+            if not trusted and any(target >= len(groups) for target in targets):
                 _fail(
                     "native realization object target is not a same-as group ID",
                     "realization_object_group_missing",
@@ -310,10 +316,12 @@ class CompiledResultMapper:
                 )
             )
 
-        _canonical_rows(value.data_targets, "data-target")
+        if not trusted:
+            _canonical_rows(value.data_targets, "data-target")
         data_targets: list[tuple[int, owl.DataProperty, frozenset[owl.Literal]]] = []
         for group_id, property_id, targets in value.data_targets:
-            _require_group(group_id, groups, "data-property subject")
+            if not trusted:
+                _require_group(group_id, groups, "data-property subject")
             data_targets.append(
                 (
                     group_id,
@@ -389,16 +397,20 @@ def _map_hierarchy(
 ) -> Hierarchy[_T]:
     if not isinstance(value, HierarchyIds):
         raise TypeError("value must be HierarchyIds")
-    observed = frozenset(member for node in value.nodes for member in node)
-    if observed != frozenset(symbols):
-        _fail(
-            f"native {label} hierarchy does not cover exactly its compiled domain",
-            "hierarchy_partition_mismatch",
-        )
+    trusted = native_results.matches(value, symbols)
+    if not trusted:
+        observed = frozenset(member for node in value.nodes for member in node)
+        if observed != frozenset(symbols):
+            _fail(
+                f"native {label} hierarchy does not cover exactly its compiled domain",
+                "hierarchy_partition_mismatch",
+            )
     nodes = tuple(
         frozenset(_lookup(symbols, member, f"{label} hierarchy member") for member in node)
         for node in value.nodes
     )
+    if trusted:
+        return native_results.mapped_hierarchy(value, nodes, symbols)
     if top not in nodes[value.top_node] or bottom not in nodes[value.bottom_node]:
         _fail(
             f"native {label} hierarchy top/bottom nodes do not contain the built-ins",

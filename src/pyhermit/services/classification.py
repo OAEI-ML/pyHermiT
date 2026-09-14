@@ -458,7 +458,7 @@ class ClassificationService:
         if provider is not None:
             self._classes = self._coarse_index(
                 ClassificationDomain.CLASSES,
-                self._class_elements(),
+                self._class_elements,
                 provider,
                 top=owl.OWL_THING,
                 bottom=owl.OWL_NOTHING,
@@ -485,7 +485,7 @@ class ClassificationService:
         if provider is not None:
             self._object_properties = self._coarse_index(
                 ClassificationDomain.OBJECT_PROPERTIES,
-                self._object_elements(),
+                self._object_elements,
                 provider,
                 top=owl.OWL_TOP_OBJECT_PROPERTY,
                 bottom=owl.OWL_BOTTOM_OBJECT_PROPERTY,
@@ -512,7 +512,7 @@ class ClassificationService:
         if provider is not None:
             self._data_properties = self._coarse_index(
                 ClassificationDomain.DATA_PROPERTIES,
-                self._data_elements(),
+                self._data_elements,
                 provider,
                 top=owl.OWL_TOP_DATA_PROPERTY,
                 bottom=owl.OWL_BOTTOM_DATA_PROPERTY,
@@ -534,7 +534,7 @@ class ClassificationService:
     def _coarse_index(
         self,
         domain: ClassificationDomain,
-        elements: Iterable[T],
+        elements: Callable[[], Iterable[T]],
         provider: Callable[[], Hierarchy[T]],
         *,
         top: T,
@@ -542,7 +542,22 @@ class ClassificationService:
     ) -> HierarchyIndex[T]:
         self._require_consistent()
         self._checkpoint()
-        expected = frozenset(elements)
+        from pyhermit.backends.native_context import _NativeSignature
+        from pyhermit.backends.native_results import hierarchy_index
+
+        native_source = self._service.source_signature
+        expected = None if type(native_source) is _NativeSignature else frozenset(elements())
+        if expected is None:
+            domain_name = {
+                ClassificationDomain.CLASSES: "class",
+                ClassificationDomain.OBJECT_PROPERTIES: "object_property",
+                ClassificationDomain.DATA_PROPERTIES: "data_property",
+            }[domain]
+            total = cast(_NativeSignature, native_source)._owner.count(domain_name)
+            if domain is ClassificationDomain.OBJECT_PROPERTIES:
+                total += 2
+        else:
+            total = len(expected)
         self._operation_sequence += 1
         operation_id = f"classification-{domain.value}-{self._operation_sequence}"
         started = time.perf_counter()
@@ -550,7 +565,7 @@ class ClassificationService:
             operation_id,
             "classification-started",
             0,
-            len(expected),
+            total,
             started,
         )
         hierarchy = provider()
@@ -559,29 +574,34 @@ class ClassificationService:
                 "coarse classification provider returned an incompatible result",
                 context={"reason": "coarse_hierarchy_type"},
             )
-        by_member = {
-            member: node_id for node_id, node in enumerate(hierarchy.nodes) for member in node
-        }
-        if frozenset(by_member) != expected:
-            raise BackendMismatchError(
-                "coarse classification hierarchy does not cover exactly its public domain",
-                context={"domain": domain.value, "reason": "coarse_hierarchy_partition"},
-            )
-        if (
-            top not in hierarchy.nodes[hierarchy.top_node]
-            or bottom not in hierarchy.nodes[hierarchy.bottom_node]
-        ):
-            raise BackendMismatchError(
-                "coarse classification hierarchy has invalid top or bottom membership",
-                context={"domain": domain.value, "reason": "coarse_hierarchy_boundary"},
-            )
-        result = HierarchyIndex(hierarchy, by_member)
+        if hierarchy._native_owner is not None:
+            result = hierarchy_index(hierarchy)
+        else:
+            if expected is None:
+                expected = frozenset(elements())
+            by_member = {
+                member: node_id for node_id, node in enumerate(hierarchy.nodes) for member in node
+            }
+            if frozenset(by_member) != expected:
+                raise BackendMismatchError(
+                    "coarse classification hierarchy does not cover exactly its public domain",
+                    context={"domain": domain.value, "reason": "coarse_hierarchy_partition"},
+                )
+            if (
+                top not in hierarchy.nodes[hierarchy.top_node]
+                or bottom not in hierarchy.nodes[hierarchy.bottom_node]
+            ):
+                raise BackendMismatchError(
+                    "coarse classification hierarchy has invalid top or bottom membership",
+                    context={"domain": domain.value, "reason": "coarse_hierarchy_boundary"},
+                )
+            result = HierarchyIndex(hierarchy, by_member)
         self._checkpoint()
         self._emit_progress(
             operation_id,
             "classification-completed",
-            len(expected),
-            len(expected),
+            total,
+            total,
             started,
         )
         return result

@@ -91,6 +91,7 @@ _SESSION_METHODS = (
     "reset_query_state",
 )
 _T = TypeVar("_T")
+_Input = TypeVar("_Input")
 
 
 class _EncodedSegmentLease(Protocol):
@@ -986,15 +987,28 @@ class NativeBackendSession:
         return result
 
     def classify_classes(self) -> HierarchyIds:
-        return self._invoke(decode_hierarchy, self._native.classify_classes)
+        return self._hierarchy("class", self._native.classify_classes)
 
     def classify_object_properties(self) -> HierarchyIds:
-        return self._invoke(decode_hierarchy, self._native.classify_object_properties)
+        return self._hierarchy("object_property", self._native.classify_object_properties)
 
     def classify_data_properties(self) -> HierarchyIds:
-        return self._invoke(decode_hierarchy, self._native.classify_data_properties)
+        return self._hierarchy("data_property", self._native.classify_data_properties)
+
+    def _hierarchy(self, domain: str, legacy: Callable[[], bytes]) -> HierarchyIds:
+        from .native_results import hierarchy_ids
+
+        call = getattr(self._native, "_hierarchy_result_v1", None)
+        if getattr(self._native, "compiler_digest", None) is not None and callable(call):
+            return self._invoke(hierarchy_ids, lambda: call(domain))
+        return self._invoke(decode_hierarchy, legacy)
 
     def realize(self) -> RealizationIds:
+        from .native_results import realization_ids
+
+        call = getattr(self._native, "_realization_result_v1", None)
+        if getattr(self._native, "compiler_digest", None) is not None and callable(call):
+            return self._invoke(realization_ids, call)
         return self._invoke(decode_realization, self._native.realize)
 
     def apply_delta(self, delta: CompiledDelta) -> DeltaOutcome:
@@ -1026,7 +1040,7 @@ class NativeBackendSession:
         self._require_usable()
         self._cancellation.check()
 
-    def _decode(self, decoder: Callable[[bytes], _T], encoded: bytes) -> _T:
+    def _decode(self, decoder: Callable[[_Input], _T], encoded: _Input) -> _T:
         try:
             value = decoder(encoded)
             self._cancellation.check()
@@ -1035,7 +1049,7 @@ class NativeBackendSession:
             self._poisoned = True
             raise
 
-    def _invoke(self, decoder: Callable[[bytes], _T], call: Callable[[], bytes]) -> _T:
+    def _invoke(self, decoder: Callable[[_Input], _T], call: Callable[[], _Input]) -> _T:
         self._begin_call()
         started = time.perf_counter()
         try:

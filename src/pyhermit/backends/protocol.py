@@ -390,6 +390,7 @@ class HierarchyIds:
     edges: tuple[tuple[int, int], ...]
     top_node: int
     bottom_node: int
+    _native_owner: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         nodes = tuple(tuple(node) for node in self.nodes)
@@ -427,6 +428,9 @@ class Hierarchy(Generic[T]):
     edges: frozenset[tuple[int, int]]
     top_node: int
     bottom_node: int
+    _native_owner: object | None = field(default=None, init=False, repr=False, compare=False)
+
+    _native_symbols: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         nodes = tuple(frozenset(node) for node in self.nodes)
@@ -457,6 +461,10 @@ class Hierarchy(Generic[T]):
     def _closure(self, node: int, *, upward: bool) -> frozenset[int]:
         if isinstance(node, bool) or not isinstance(node, int) or not 0 <= node < len(self.nodes):
             raise IndexError("hierarchy node index out of range")
+        if self._native_owner is not None:
+            from .native_results import hierarchy_related
+
+            return hierarchy_related(self, node, upward=upward, direct=False)
         reached: set[int] = set()
         frontier = [node]
         while frontier:
@@ -487,6 +495,7 @@ class RealizationIds:
     object_targets: tuple[tuple[int, int, tuple[int, ...]], ...] = ()
     data_targets: tuple[tuple[int, int, tuple[int, ...]], ...] = ()
     different_from: tuple[tuple[int, int], ...] = ()
+    _native_owner: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         groups = tuple(tuple(group) for group in self.same_as)

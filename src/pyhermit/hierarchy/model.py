@@ -52,10 +52,18 @@ class HierarchyIndex(Generic[T]):
 
     def direct_supernodes(self, node_id: int) -> frozenset[int]:
         self._require_node(node_id)
+        if self.hierarchy._native_owner is not None:
+            from pyhermit.backends.native_results import hierarchy_related
+
+            return hierarchy_related(self.hierarchy, node_id, upward=True, direct=True)
         return frozenset(parent for child, parent in self.hierarchy.edges if child == node_id)
 
     def direct_subnodes(self, node_id: int) -> frozenset[int]:
         self._require_node(node_id)
+        if self.hierarchy._native_owner is not None:
+            from pyhermit.backends.native_results import hierarchy_related
+
+            return hierarchy_related(self.hierarchy, node_id, upward=False, direct=True)
         return frozenset(child for child, parent in self.hierarchy.edges if parent == node_id)
 
     def supernodes(self, node_id: int, *, direct: bool) -> frozenset[int]:
