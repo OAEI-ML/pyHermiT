@@ -2562,13 +2562,14 @@ mod tests {
             Vec::new()
         )
         .is_err());
-        assert!(CompiledRules::extend(
+        let duplicate = CompiledRules::extend(
             Arc::clone(&base),
             Vec::new(),
             Vec::new(),
-            vec![chain_clause(1, 0, 1)?]
-        )
-        .is_err());
+            vec![chain_clause(1, 0, 1)?],
+        )?;
+        assert_eq!(duplicate.program.clause(0)?.provenance_ids, [0, 1]);
+        assert_eq!(duplicate.local_join_plan_count(), 0);
         assert!(CompiledRules::extend(
             Arc::clone(&base),
             Vec::new(),
@@ -2663,6 +2664,56 @@ mod tests {
             vec![inequality(2, TermSort::Object)?],
             Vec::new(),
             Vec::new()
+        )
+        .is_err());
+        Ok(())
+    }
+    #[test]
+    fn duplicate_query_clauses_union_provenance_without_recompiling_base_plans() -> NativeResult<()>
+    {
+        let base = CompiledRules::new(RuleProgram::new(
+            (0..4).map(concept).collect::<NativeResult<Vec<_>>>()?,
+            vec![chain_clause(0, 0, 1)?, chain_clause(1, 1, 2)?],
+        )?)?;
+        let query = CompiledRules::extend(
+            Arc::clone(&base),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                chain_clause(2, 0, 1)?,
+                chain_clause(3, 2, 3)?,
+                chain_clause(4, 2, 3)?,
+                chain_clause(5, 0, 1)?,
+            ],
+        )?;
+        assert!(query.program.extends_storage(base.program()));
+        assert!(base.program.shares_storage(&base.program.clone()));
+        assert!(!base.program.extends_storage(query.program()));
+        assert!(!query.program.shares_storage(base.program()));
+        assert_eq!(query.program.clauses().len(), 3);
+        assert_eq!(query.program.clause(0)?.provenance_ids, [0, 2, 5]);
+        assert_eq!(query.program.clause(2)?.provenance_ids, [3, 4]);
+        assert_eq!(base.program.clause(0)?.provenance_ids, [0]);
+        assert_eq!(query.local_join_plan_count(), 1);
+        assert!(std::ptr::eq(
+            &query.join_program.plans()[0],
+            &base.join_program.plans()[0]
+        ));
+        assert!(std::ptr::eq(
+            query.program.clause(1)?,
+            base.program.clause(1)?
+        ));
+        let rebuilt = CompiledRules::new(RuleProgram::new(
+            query.program.predicates().to_vec(),
+            query.program.clauses().to_vec(),
+        )?)?;
+        assert!(!query.program.shares_storage(rebuilt.program()));
+        assert!(!rebuilt.program.extends_storage(base.program()));
+        assert_eq!(query.join_program.plans(), rebuilt.join_program.plans());
+        assert_eq!(shared_rule_outcome(query)?, shared_rule_outcome(rebuilt)?);
+        assert!(RuleProgram::new(
+            vec![concept(0)?, concept(1)?],
+            vec![chain_clause(0, 0, 1)?, chain_clause(1, 0, 1)?]
         )
         .is_err());
         Ok(())

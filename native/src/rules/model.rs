@@ -466,15 +466,14 @@ type ClauseIdentity = (Vec<RuleAtom>, Vec<RuleAtom>, Vec<u32>);
 #[derive(Debug)]
 struct ClauseIdentities {
     base: Option<Arc<Self>>,
-    local: BTreeSet<ClauseIdentity>,
+    local: BTreeMap<ClauseIdentity, u32>,
 }
 impl ClauseIdentities {
-    fn contains(&self, identity: &ClauseIdentity) -> bool {
-        self.local.contains(identity)
-            || self
-                .base
-                .as_ref()
-                .is_some_and(|base| base.contains(identity))
+    fn find(&self, identity: &ClauseIdentity) -> Option<u32> {
+        self.local
+            .get(identity)
+            .copied()
+            .or_else(|| self.base.as_ref().and_then(|base| base.find(identity)))
     }
 }
 
@@ -497,7 +496,8 @@ impl RuleProgram {
         Self::checked(None, predicates, Vec::new(), clauses)
     }
 
-    /// Preserve all permanent IDs and validate only additions and reciprocal-link overrides.
+    /// Preserve permanent IDs, union duplicate-clause provenance, and validate local changes.
+    /// Requested local clause IDs are dense on input; duplicates do not consume output IDs.
     pub fn extend(
         base: &Self,
         predicates: Vec<RulePredicate>,
@@ -547,28 +547,65 @@ impl RuleProgram {
                 return Err(NativeError::wire("duplicate predicate override"));
             }
         }
-        let mut identities = BTreeSet::new();
-        for (index, clause) in clauses.iter().enumerate() {
+        let mut identities = BTreeMap::new();
+        let mut normalized: Vec<RuleClause> = Vec::new();
+        let mut clause_changes = BTreeMap::new();
+        for (index, mut clause) in clauses.into_iter().enumerate() {
             if usize::try_from(clause.clause_id).ok() != clause_offset.checked_add(index) {
                 return Err(NativeError::wire("clause IDs must be dense and ordered"));
+            }
+            if clause.provenance_ids.is_empty() || !strictly_sorted(&clause.provenance_ids) {
+                return Err(NativeError::wire(
+                    "clause provenance IDs must be nonempty, sorted, and unique",
+                ));
             }
             let identity = (
                 clause.body.clone(),
                 clause.head.clone(),
                 clause.join_order.clone(),
             );
-            if base.is_some_and(|p| p.identities.contains(&identity))
-                || !identities.insert(identity)
-            {
-                return Err(NativeError::wire(
-                    "clauses must have unique semantic identities",
-                ));
+            let existing = identities
+                .get(&identity)
+                .copied()
+                .or_else(|| base.and_then(|p| p.identities.find(&identity)));
+            if let Some(existing) = existing {
+                let base = base.ok_or_else(|| {
+                    NativeError::wire("clauses must have unique semantic identities")
+                })?;
+                let existing_index = usize_from_u32(existing, "clause ID")?;
+                let target = if existing_index < clause_offset {
+                    match clause_changes.entry(existing_index) {
+                        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(base.clause(existing)?.clone())
+                        }
+                    }
+                } else {
+                    normalized
+                        .get_mut(existing_index - clause_offset)
+                        .ok_or_else(|| {
+                            NativeError::invariant("local clause identity lost its row")
+                        })?
+                };
+                target.provenance_ids.extend(clause.provenance_ids);
+                target.provenance_ids.sort_unstable();
+                target.provenance_ids.dedup();
+            } else {
+                clause.clause_id = u32::try_from(
+                    clause_offset
+                        .checked_add(normalized.len())
+                        .ok_or_else(|| NativeError::wire("normalized clause count overflow"))?,
+                )
+                .map_err(|_| NativeError::wire("normalized clause ID exceeds u32"))?;
+                identities.insert(identity, clause.clause_id);
+                normalized.push(clause);
             }
         }
+        let clauses = normalized;
         let (predicates, clauses) = if let Some(base) = base {
             (
                 SharedRows::extend(base.predicates.clone(), predicates, changes)?,
-                SharedRows::extend(base.clauses.clone(), clauses, BTreeMap::new())?,
+                SharedRows::extend(base.clauses.clone(), clauses, clause_changes)?,
             )
         } else {
             (SharedRows::new(predicates), SharedRows::new(clauses))
@@ -618,6 +655,29 @@ impl RuleProgram {
             ));
         }
         Ok(())
+    }
+
+    /// Exact immutable row owners, without comparing or traversing their contents.
+    #[must_use]
+    pub fn shares_storage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.predicates.0, &other.predicates.0)
+            && Arc::ptr_eq(&self.clauses.0, &other.clauses.0)
+    }
+
+    /// Only immediate extensions qualify; equal rebuilt content is not ownership proof.
+    #[must_use]
+    pub fn extends_storage(&self, base: &Self) -> bool {
+        self.predicates
+            .0
+            .base
+            .as_ref()
+            .is_some_and(|rows| Arc::ptr_eq(&rows.0, &base.predicates.0))
+            && self
+                .clauses
+                .0
+                .base
+                .as_ref()
+                .is_some_and(|rows| Arc::ptr_eq(&rows.0, &base.clauses.0))
     }
 
     #[must_use]
