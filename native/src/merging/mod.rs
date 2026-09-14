@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use crate::cancel::CancellationState;
 use crate::error::{NativeError, NativeResult};
 use crate::model::{DependencySet, NodeHandle, NodeSort};
-use crate::rules::{PredicateKind, RuleProgram, TermSort};
+use crate::rules::{PredicateKind, RulePredicate, RuleProgram, TermSort};
 use crate::store::TableauKernel;
 
 /// Canonical result of one equality consequence.
@@ -30,11 +30,19 @@ pub struct MergingManager {
 
 impl MergingManager {
     pub fn new(program: &RuleProgram) -> NativeResult<Self> {
-        let mut inequality_by_sort = BTreeMap::new();
-        for predicate in program
-            .predicates()
-            .iter()
-            .filter(|predicate| predicate.kind == PredicateKind::Inequality)
+        Self {
+            inequality_by_sort: BTreeMap::new(),
+        }
+        .extend(program.predicates().iter())
+    }
+
+    /// Extend only the query-local inequality vocabulary; the permanent map is tiny.
+    pub fn extend<'a>(
+        &self,
+        predicates: impl Iterator<Item = &'a RulePredicate>,
+    ) -> NativeResult<Self> {
+        let mut inequality_by_sort = self.inequality_by_sort.clone();
+        for predicate in predicates.filter(|predicate| predicate.kind == PredicateKind::Inequality)
         {
             let sort = *predicate
                 .argument_sorts

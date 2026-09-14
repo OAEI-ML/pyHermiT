@@ -23,7 +23,7 @@ upstream_components = ["src/main/java/org/semanticweb/HermiT/blocking/BlockingVa
 
 [[adapted_file]]
 path = "native/src/merging/mod.rs"
-sha256 = "dbd9278a8faab5192e0dfddeb0b97363db13e049ad2bfe6449aa3d98487785b9"
+sha256 = "0e208ea1eb3ac1028374de22a74fdfe09ff9bbe42d819ec79a057b06f83e82d4"
 adaptation = "Native implementation of HermiT merge orientation, dependency transfer, and rescheduling mechanics"
 upstream_components = ["src/main/java/org/semanticweb/HermiT/tableau/MergingManager.java"]
 

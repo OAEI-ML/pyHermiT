@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{Index, Range};
+use std::sync::Arc;
 
 use crate::error::{NativeError, NativeResult};
 use crate::model::{DependencySet, NodeHandle, NodeSort};
@@ -345,67 +347,294 @@ impl RuleClause {
     }
 }
 
-/// Fully checked native rule program.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuleProgram {
-    predicates: Vec<RulePredicate>,
-    clauses: Vec<RuleClause>,
+/// Immutable rows shared by a permanent program and its small query extension.
+#[derive(Clone, Debug)]
+pub struct SharedRows<T>(Arc<SharedRowData<T>>);
+
+#[derive(Debug)]
+struct SharedRowData<T> {
+    base: Option<SharedRows<T>>,
+    local: Vec<T>,
+    overrides: BTreeMap<usize, T>,
+    len: usize,
 }
+
+impl<T> SharedRows<T> {
+    pub(super) fn new(local: Vec<T>) -> Self {
+        let len = local.len();
+        Self(Arc::new(SharedRowData {
+            base: None,
+            local,
+            overrides: BTreeMap::new(),
+            len,
+        }))
+    }
+
+    pub(super) fn extend(
+        base: Self,
+        local: Vec<T>,
+        overrides: BTreeMap<usize, T>,
+    ) -> NativeResult<Self> {
+        let len = base
+            .len()
+            .checked_add(local.len())
+            .ok_or_else(|| NativeError::wire("shared row count overflow"))?;
+        Ok(Self(Arc::new(SharedRowData {
+            base: Some(base),
+            local,
+            overrides,
+            len,
+        })))
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len
+    }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if let Some(value) = self.0.overrides.get(&index) {
+            return Some(value);
+        }
+        let base_len = self.0.base.as_ref().map_or(0, Self::len);
+        if index < base_len {
+            return self.0.base.as_ref()?.get(index);
+        }
+        self.0.local.get(index.checked_sub(base_len)?)
+    }
+    #[must_use]
+    pub fn iter(&self) -> SharedRowIter<'_, T> {
+        SharedRowIter {
+            rows: self,
+            range: 0..self.len(),
+        }
+    }
+}
+
+impl<T: Clone> SharedRows<T> {
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<T> {
+        self.iter().cloned().collect()
+    }
+}
+impl<T: PartialEq> PartialEq for SharedRows<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+impl<T: Eq> Eq for SharedRows<T> {}
+impl<T> Index<usize> for SharedRows<T> {
+    type Output = T;
+    #[allow(clippy::expect_used)]
+    fn index(&self, index: usize) -> &T {
+        self.get(index).expect("shared row index out of bounds")
+    }
+}
+impl<'a, T> IntoIterator for &'a SharedRows<T> {
+    type Item = &'a T;
+    type IntoIter = SharedRowIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+pub struct SharedRowIter<'a, T> {
+    rows: &'a SharedRows<T>,
+    range: Range<usize>,
+}
+impl<'a, T> Iterator for SharedRowIter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.range.next().and_then(|i| self.rows.get(i))
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.range.size_hint()
+    }
+}
+impl<T> DoubleEndedIterator for SharedRowIter<'_, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.range.next_back().and_then(|i| self.rows.get(i))
+    }
+}
+impl<T> ExactSizeIterator for SharedRowIter<'_, T> {}
+
+type ClauseIdentity = (Vec<RuleAtom>, Vec<RuleAtom>, Vec<u32>);
+#[derive(Debug)]
+struct ClauseIdentities {
+    base: Option<Arc<Self>>,
+    local: BTreeSet<ClauseIdentity>,
+}
+impl ClauseIdentities {
+    fn contains(&self, identity: &ClauseIdentity) -> bool {
+        self.local.contains(identity)
+            || self
+                .base
+                .as_ref()
+                .is_some_and(|base| base.contains(identity))
+    }
+}
+
+/// Fully checked native rule program; cloning retains its immutable rows.
+#[derive(Clone, Debug)]
+pub struct RuleProgram {
+    predicates: SharedRows<RulePredicate>,
+    clauses: SharedRows<RuleClause>,
+    identities: Arc<ClauseIdentities>,
+}
+impl PartialEq for RuleProgram {
+    fn eq(&self, other: &Self) -> bool {
+        self.predicates == other.predicates && self.clauses == other.clauses
+    }
+}
+impl Eq for RuleProgram {}
 
 impl RuleProgram {
     pub fn new(predicates: Vec<RulePredicate>, clauses: Vec<RuleClause>) -> NativeResult<Self> {
-        for (expected, predicate) in predicates.iter().enumerate() {
-            if usize::try_from(predicate.predicate_id).ok() != Some(expected) {
+        Self::checked(None, predicates, Vec::new(), clauses)
+    }
+
+    /// Preserve all permanent IDs and validate only additions and reciprocal-link overrides.
+    pub fn extend(
+        base: &Self,
+        predicates: Vec<RulePredicate>,
+        overrides: Vec<RulePredicate>,
+        clauses: Vec<RuleClause>,
+    ) -> NativeResult<Self> {
+        Self::checked(Some(base), predicates, overrides, clauses)
+    }
+
+    fn checked(
+        base: Option<&Self>,
+        predicates: Vec<RulePredicate>,
+        overrides: Vec<RulePredicate>,
+        clauses: Vec<RuleClause>,
+    ) -> NativeResult<Self> {
+        let predicate_offset = base.map_or(0, |p| p.predicates.len());
+        let clause_offset = base.map_or(0, |p| p.clauses.len());
+        for (index, predicate) in predicates.iter().enumerate() {
+            if usize::try_from(predicate.predicate_id).ok() != predicate_offset.checked_add(index) {
                 return Err(NativeError::wire("predicate IDs must be dense and ordered"));
             }
             validate_predicate_signature(predicate.kind, &predicate.argument_sorts)?;
             validate_predicate_semantics(predicate)?;
         }
-        for predicate in &predicates {
-            let Some(opposite_id) = predicate.opposite_predicate_id else {
-                continue;
-            };
-            if opposite_id == predicate.predicate_id {
-                return Err(NativeError::wire(
-                    "a predicate cannot be its own logical opposite",
-                ));
-            }
-            let opposite = predicates
-                .get(usize_from_u32(opposite_id, "opposite predicate ID")?)
-                .ok_or_else(|| NativeError::wire("opposite predicate ID is dangling"))?;
-            if opposite.opposite_predicate_id != Some(predicate.predicate_id)
-                || opposite.argument_sorts != predicate.argument_sorts
-                || !opposite_kinds(predicate.kind, opposite.kind)
-                || predicate.symbol_id != opposite.symbol_id
-                || predicate.role_id != opposite.role_id
+        let mut changes = BTreeMap::new();
+        for predicate in overrides {
+            let original = base
+                .ok_or_else(|| NativeError::wire("predicate override needs a base"))?
+                .predicate(predicate.predicate_id)?;
+            let mut allowed = original.clone();
+            allowed.opposite_predicate_id = predicate.opposite_predicate_id;
+            if allowed != predicate
+                || (original.opposite_predicate_id.is_some()
+                    && original.opposite_predicate_id != predicate.opposite_predicate_id)
             {
                 return Err(NativeError::wire(
-                    "opposite predicate links must be reciprocal and sort-compatible",
+                    "only a new reciprocal opposite link may override a base predicate",
+                ));
+            }
+            if changes
+                .insert(
+                    usize_from_u32(predicate.predicate_id, "predicate ID")?,
+                    predicate,
+                )
+                .is_some()
+            {
+                return Err(NativeError::wire("duplicate predicate override"));
+            }
+        }
+        let mut identities = BTreeSet::new();
+        for (index, clause) in clauses.iter().enumerate() {
+            if usize::try_from(clause.clause_id).ok() != clause_offset.checked_add(index) {
+                return Err(NativeError::wire("clause IDs must be dense and ordered"));
+            }
+            let identity = (
+                clause.body.clone(),
+                clause.head.clone(),
+                clause.join_order.clone(),
+            );
+            if base.is_some_and(|p| p.identities.contains(&identity))
+                || !identities.insert(identity)
+            {
+                return Err(NativeError::wire(
+                    "clauses must have unique semantic identities",
                 ));
             }
         }
-        for (expected, clause) in clauses.iter().enumerate() {
-            if usize::try_from(clause.clause_id).ok() != Some(expected) {
-                return Err(NativeError::wire("clause IDs must be dense and ordered"));
-            }
-        }
+        let (predicates, clauses) = if let Some(base) = base {
+            (
+                SharedRows::extend(base.predicates.clone(), predicates, changes)?,
+                SharedRows::extend(base.clauses.clone(), clauses, BTreeMap::new())?,
+            )
+        } else {
+            (SharedRows::new(predicates), SharedRows::new(clauses))
+        };
         let program = Self {
             predicates,
             clauses,
+            identities: Arc::new(ClauseIdentities {
+                base: base.map(|p| Arc::clone(&p.identities)),
+                local: identities,
+            }),
         };
-        program.validate_predicate_references()?;
-        program.validate_clauses()?;
+        for predicate in program
+            .predicates
+            .0
+            .local
+            .iter()
+            .chain(program.predicates.0.overrides.values())
+        {
+            program.validate_opposite(predicate)?;
+            program.validate_predicate_reference(predicate)?;
+        }
+        for clause in &program.clauses.0.local {
+            program.validate_clause(clause)?;
+        }
         Ok(program)
     }
 
-    #[must_use]
-    pub fn predicates(&self) -> &[RulePredicate] {
-        &self.predicates
+    fn validate_opposite(&self, predicate: &RulePredicate) -> NativeResult<()> {
+        let Some(opposite_id) = predicate.opposite_predicate_id else {
+            return Ok(());
+        };
+        if opposite_id == predicate.predicate_id {
+            return Err(NativeError::wire(
+                "a predicate cannot be its own logical opposite",
+            ));
+        }
+        let opposite = self.predicate(opposite_id)?;
+        if opposite.opposite_predicate_id != Some(predicate.predicate_id)
+            || opposite.argument_sorts != predicate.argument_sorts
+            || !opposite_kinds(predicate.kind, opposite.kind)
+            || predicate.symbol_id != opposite.symbol_id
+            || predicate.role_id != opposite.role_id
+        {
+            return Err(NativeError::wire(
+                "opposite predicate links must be reciprocal and sort-compatible",
+            ));
+        }
+        Ok(())
     }
 
     #[must_use]
-    pub fn clauses(&self) -> &[RuleClause] {
+    pub const fn predicates(&self) -> &SharedRows<RulePredicate> {
+        &self.predicates
+    }
+    #[must_use]
+    pub const fn clauses(&self) -> &SharedRows<RuleClause> {
         &self.clauses
+    }
+    #[must_use]
+    pub fn local_predicates(&self) -> &[RulePredicate] {
+        &self.predicates.0.local
+    }
+    #[must_use]
+    pub fn local_clauses(&self) -> &[RuleClause] {
+        &self.clauses.0.local
     }
 
     pub fn predicate(&self, predicate_id: u32) -> NativeResult<&RulePredicate> {
@@ -445,59 +674,39 @@ impl RuleProgram {
         Ok(())
     }
 
-    fn validate_clauses(&self) -> NativeResult<()> {
-        let mut identities = BTreeSet::new();
-        for clause in &self.clauses {
-            let identity = (
-                clause.body.clone(),
-                clause.head.clone(),
-                clause.join_order.clone(),
-            );
-            if !identities.insert(identity) {
-                return Err(NativeError::wire(
-                    "clauses must have unique semantic identities",
-                ));
-            }
-            self.validate_clause(clause)?;
+    fn validate_predicate_reference(&self, predicate: &RulePredicate) -> NativeResult<()> {
+        let Some(filler_id) = predicate.filler_predicate_id else {
+            return Ok(());
+        };
+        if filler_id == predicate.predicate_id {
+            return Err(NativeError::wire(
+                "a cardinality predicate cannot be its own filler",
+            ));
         }
-        Ok(())
-    }
-
-    fn validate_predicate_references(&self) -> NativeResult<()> {
-        for predicate in &self.predicates {
-            let Some(filler_id) = predicate.filler_predicate_id else {
-                continue;
-            };
-            if filler_id == predicate.predicate_id {
-                return Err(NativeError::wire(
-                    "a cardinality predicate cannot be its own filler",
-                ));
-            }
-            let filler = self.predicate(filler_id)?;
-            let valid = match predicate.kind {
-                PredicateKind::AtLeastObject | PredicateKind::AnnotatedEquality => {
-                    filler.argument_sorts == [TermSort::Object]
-                        && matches!(
-                            filler.kind,
-                            PredicateKind::Concept
-                                | PredicateKind::NegatedConcept
-                                | PredicateKind::Nominal
-                                | PredicateKind::NegatedNominal
-                        )
-                }
-                PredicateKind::AtLeastData => {
-                    matches!(
+        let filler = self.predicate(filler_id)?;
+        let valid = match predicate.kind {
+            PredicateKind::AtLeastObject | PredicateKind::AnnotatedEquality => {
+                filler.argument_sorts == [TermSort::Object]
+                    && matches!(
                         filler.kind,
-                        PredicateKind::DataRange | PredicateKind::NegatedDataRange
-                    ) && filler.argument_sorts.len() == predicate.annotation.len()
-                }
-                _ => false,
-            };
-            if !valid {
-                return Err(NativeError::wire(
-                    "cardinality predicate has an incompatible filler predicate",
-                ));
+                        PredicateKind::Concept
+                            | PredicateKind::NegatedConcept
+                            | PredicateKind::Nominal
+                            | PredicateKind::NegatedNominal
+                    )
             }
+            PredicateKind::AtLeastData => {
+                matches!(
+                    filler.kind,
+                    PredicateKind::DataRange | PredicateKind::NegatedDataRange
+                ) && filler.argument_sorts.len() == predicate.annotation.len()
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(NativeError::wire(
+                "cardinality predicate has an incompatible filler predicate",
+            ));
         }
         Ok(())
     }

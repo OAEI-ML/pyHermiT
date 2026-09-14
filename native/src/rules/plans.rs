@@ -3,10 +3,11 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::error::{NativeError, NativeResult};
 
-use super::model::{PredicateKind, RuleAtom, RuleClause, RuleProgram, Term};
+use super::model::{PredicateKind, RuleAtom, RuleClause, RuleProgram, SharedRows, Term};
 
 type PlanRank<'a> = (u8, Reverse<usize>, usize, usize, &'a RuleAtom);
 
@@ -57,8 +58,10 @@ impl ClauseJoinPlan {
 /// All deterministic plans plus clauses without any physical trigger atom.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JoinProgram {
-    plans: Vec<ClauseJoinPlan>,
-    unconditional_clause_ids: Vec<u32>,
+    plans: SharedRows<ClauseJoinPlan>,
+    unconditional_clause_ids: SharedRows<u32>,
+    base: Option<Arc<Self>>,
+    local_plan_offset: usize,
     plans_by_predicate: BTreeMap<u32, Vec<usize>>,
 }
 
@@ -107,37 +110,70 @@ impl JoinProgram {
             }
         }
         Ok(Self {
-            plans,
-            unconditional_clause_ids,
+            plans: SharedRows::new(plans),
+            unconditional_clause_ids: SharedRows::new(unconditional_clause_ids),
+            base: None,
+            local_plan_offset: 0,
             plans_by_predicate,
         })
     }
 
     #[must_use]
-    pub fn plans(&self) -> &[ClauseJoinPlan] {
+    pub const fn plans(&self) -> &SharedRows<ClauseJoinPlan> {
         &self.plans
     }
 
     #[must_use]
-    pub fn unconditional_clause_ids(&self) -> &[u32] {
+    pub const fn unconditional_clause_ids(&self) -> &SharedRows<u32> {
         &self.unconditional_clause_ids
     }
 
     #[must_use]
     pub fn for_predicate(&self, predicate_id: u32) -> Vec<&ClauseJoinPlan> {
-        self.plans_by_predicate
-            .get(&predicate_id)
-            .map_or_else(Vec::new, |indices| {
-                indices.iter().map(|index| &self.plans[*index]).collect()
-            })
+        let mut plans = self
+            .base
+            .as_ref()
+            .map_or_else(Vec::new, |base| base.for_predicate(predicate_id));
+        if let Some(indices) = self.plans_by_predicate.get(&predicate_id) {
+            plans.extend(
+                indices
+                    .iter()
+                    .map(|index| &self.plans[self.local_plan_offset + *index]),
+            );
+        }
+        plans
     }
 }
 
 /// Compile every legal delta designation using the Python WP09 ranking tuple.
 pub fn compile_join_program(program: &RuleProgram) -> NativeResult<JoinProgram> {
+    compile_clauses(program, program.clauses().iter())
+}
+
+/// Compile only added clauses and retain the permanent plan and trigger tables.
+pub(super) fn extend_join_program(
+    program: &RuleProgram,
+    base: Arc<JoinProgram>,
+) -> NativeResult<Arc<JoinProgram>> {
+    let mut local = compile_clauses(program, program.local_clauses().iter())?;
+    local.local_plan_offset = base.plans.len();
+    local.plans = SharedRows::extend(base.plans.clone(), local.plans.to_vec(), BTreeMap::new())?;
+    local.unconditional_clause_ids = SharedRows::extend(
+        base.unconditional_clause_ids.clone(),
+        local.unconditional_clause_ids.to_vec(),
+        BTreeMap::new(),
+    )?;
+    local.base = Some(base);
+    Ok(Arc::new(local))
+}
+
+fn compile_clauses<'a>(
+    program: &RuleProgram,
+    clauses: impl Iterator<Item = &'a RuleClause>,
+) -> NativeResult<JoinProgram> {
     let mut plans = Vec::new();
     let mut unconditional = Vec::new();
-    for clause in program.clauses() {
+    for clause in clauses {
         let mut triggers = Vec::new();
         for (index, atom) in clause.body.iter().enumerate() {
             if program.predicate_kind(atom.predicate_id)?.can_trigger() {
@@ -368,7 +404,7 @@ mod tests {
         let program = RuleProgram::new(vec![guard], clauses)?;
         let joins = compile_join_program(&program)?;
         assert!(joins.plans().is_empty());
-        assert_eq!(joins.unconditional_clause_ids(), [0, 1]);
+        assert_eq!(joins.unconditional_clause_ids().to_vec(), [0, 1]);
         Ok(())
     }
 }

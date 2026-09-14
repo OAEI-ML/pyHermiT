@@ -16,10 +16,10 @@ use crate::store::TableauKernel;
 
 use super::joins::{IndexedJoinEvaluator, NaiveJoinEvaluator};
 use super::model::{
-    GroundAtom, JoinMatch, PendingAnnotatedEquality, PredicateKind, RuleAtom, RuleLimits,
-    RuleProgram, Term, TermSort,
+    GroundAtom, JoinMatch, PendingAnnotatedEquality, PredicateKind, RuleAtom, RuleClause,
+    RuleLimits, RulePredicate, RuleProgram, Term, TermSort,
 };
-use super::plans::{compile_join_program, JoinProgram};
+use super::plans::{compile_join_program, extend_join_program, JoinProgram};
 
 type BindingKey = (TermSort, u32);
 type Bindings = BTreeMap<BindingKey, NodeHandle>;
@@ -108,19 +108,61 @@ struct StoredRuleCheckpoint {
 /// Immutable checked rules, join plans, and merge vocabulary shared by isolated tableaux.
 pub struct CompiledRules {
     program: RuleProgram,
-    join_program: JoinProgram,
+    join_program: Arc<JoinProgram>,
     merger: MergingManager,
+    base: Option<Arc<Self>>,
 }
 
 impl CompiledRules {
     pub fn new(program: RuleProgram) -> NativeResult<Arc<Self>> {
-        let join_program = compile_join_program(&program)?;
+        let join_program = Arc::new(compile_join_program(&program)?);
         let merger = MergingManager::new(&program)?;
         Ok(Arc::new(Self {
             program,
             join_program,
             merger,
+            base: None,
         }))
+    }
+
+    /// Share validated permanent rules/plans; validate and compile only local additions.
+    pub fn extend(
+        base: Arc<Self>,
+        added_predicates: Vec<RulePredicate>,
+        predicate_overrides: Vec<RulePredicate>,
+        added_clauses: Vec<RuleClause>,
+    ) -> NativeResult<Arc<Self>> {
+        let program = RuleProgram::extend(
+            &base.program,
+            added_predicates,
+            predicate_overrides,
+            added_clauses,
+        )?;
+        let join_program = extend_join_program(&program, Arc::clone(&base.join_program))?;
+        let merger = base.merger.extend(program.local_predicates().iter())?;
+        Ok(Arc::new(Self {
+            program,
+            join_program,
+            merger,
+            base: Some(base),
+        }))
+    }
+
+    #[must_use]
+    pub fn shares_base(&self, base: &Arc<Self>) -> bool {
+        self.base
+            .as_ref()
+            .is_some_and(|retained| Arc::ptr_eq(retained, base))
+    }
+
+    /// Actual newly compiled plans, excluding retained permanent plans.
+    #[must_use]
+    pub fn local_join_plan_count(&self) -> usize {
+        self.join_program.plans().len()
+            - self
+                .base
+                .as_ref()
+                .map_or(0, |base| base.join_program.plans().len())
     }
 
     #[must_use]
@@ -2408,5 +2450,221 @@ mod tests {
         assert_eq!(engine.interned_atom_count(), 0);
         assert_eq!(engine.disjunction_key_count(), 0);
         kernel.check_invariants()
+    }
+    fn chain_clause(id: u32, from: u32, to: u32) -> NativeResult<RuleClause> {
+        let variable = Term::variable(0, TermSort::Object);
+        RuleClause::new(
+            id,
+            vec![RuleAtom::new(from, vec![variable.clone()])?],
+            vec![RuleAtom::new(to, vec![variable])?],
+            vec![id],
+            vec![0],
+        )
+    }
+
+    #[test]
+    fn local_extensions_retain_base_rows_plans_and_constant_local_work() -> NativeResult<()> {
+        for count in [4, 256] {
+            let predicates = (0..=count).map(concept).collect::<NativeResult<Vec<_>>>()?;
+            let clauses = (0..count)
+                .map(|id| chain_clause(id, id, id + 1))
+                .collect::<NativeResult<Vec<_>>>()?;
+            let base = CompiledRules::new(RuleProgram::new(predicates, clauses)?)?;
+            let cloned = base.program().clone();
+            assert!(std::ptr::eq(
+                cloned.predicate(0)?,
+                base.program().predicate(0)?
+            ));
+            assert!(std::ptr::eq(cloned.clause(0)?, base.program().clause(0)?));
+            let extended = CompiledRules::extend(
+                Arc::clone(&base),
+                vec![concept(count + 1)?],
+                Vec::new(),
+                vec![chain_clause(count, count, count + 1)?],
+            )?;
+            assert!(extended.shares_base(&base));
+            assert_eq!(extended.program.local_predicates().len(), 1);
+            assert_eq!(extended.program.local_clauses().len(), 1);
+            assert_eq!(extended.local_join_plan_count(), 1);
+            assert!(std::ptr::eq(
+                extended.program.clause(0)?,
+                base.program.clause(0)?
+            ));
+            assert!(std::ptr::eq(
+                &extended.join_program.plans()[0],
+                &base.join_program.plans()[0]
+            ));
+            assert!(std::ptr::eq(
+                extended.join_program.for_predicate(0)[0],
+                base.join_program.for_predicate(0)[0]
+            ));
+            let rebuilt = CompiledRules::new(RuleProgram::new(
+                extended.program.predicates().to_vec(),
+                extended.program.clauses().to_vec(),
+            )?)?;
+            assert_eq!(extended.program, rebuilt.program);
+            assert_eq!(extended.join_program.plans(), rebuilt.join_program.plans());
+            for predicate in 0..=count + 1 {
+                assert_eq!(
+                    extended.join_program.for_predicate(predicate),
+                    rebuilt.join_program.for_predicate(predicate)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn opposite_link_overrides_are_isolated_and_invalid_extensions_leave_base_untouched(
+    ) -> NativeResult<()> {
+        let base = CompiledRules::new(RuleProgram::new(
+            vec![concept(0)?, concept(1)?],
+            vec![chain_clause(0, 0, 1)?],
+        )?)?;
+        let negative = |symbol| {
+            RulePredicate::new(2, PredicateKind::NegatedConcept, vec![TermSort::Object])
+                .map(|p| p.with_symbol_id(symbol).with_opposite(symbol))
+        };
+        let left = CompiledRules::extend(
+            Arc::clone(&base),
+            vec![negative(0)?],
+            vec![concept(0)?.with_opposite(2)],
+            Vec::new(),
+        )?;
+        let right = CompiledRules::extend(
+            Arc::clone(&base),
+            vec![negative(1)?],
+            vec![concept(1)?.with_opposite(2)],
+            Vec::new(),
+        )?;
+        assert_eq!(left.program.predicate(0)?.opposite_predicate_id, Some(2));
+        assert_eq!(right.program.predicate(0)?.opposite_predicate_id, None);
+        assert_eq!(base.program.predicate(0)?.opposite_predicate_id, None);
+        assert_eq!(left.local_join_plan_count(), 0);
+        assert!(CompiledRules::extend(
+            Arc::clone(&base),
+            vec![negative(0)?],
+            Vec::new(),
+            Vec::new()
+        )
+        .is_err());
+        assert!(CompiledRules::extend(
+            Arc::clone(&base),
+            Vec::new(),
+            vec![concept(0)?.with_symbol_id(1)],
+            Vec::new()
+        )
+        .is_err());
+        assert!(CompiledRules::extend(
+            Arc::clone(&base),
+            vec![concept(4)?],
+            Vec::new(),
+            Vec::new()
+        )
+        .is_err());
+        assert!(CompiledRules::extend(
+            Arc::clone(&base),
+            Vec::new(),
+            Vec::new(),
+            vec![chain_clause(1, 0, 1)?]
+        )
+        .is_err());
+        assert!(CompiledRules::extend(
+            Arc::clone(&base),
+            Vec::new(),
+            Vec::new(),
+            vec![chain_clause(1, 0, 9)?]
+        )
+        .is_err());
+        assert_eq!(base.program.clauses().len(), 1);
+        drop(base);
+        assert_eq!(left.program.clause(0)?.provenance_ids, [0]);
+        assert_eq!(right.program.predicate(2)?.symbol_id, Some(1));
+        Ok(())
+    }
+
+    fn shared_rule_outcome(compiled: Arc<CompiledRules>) -> NativeResult<String> {
+        let mut kernel = TableauKernel::new();
+        let node = kernel.create_node(NodeKind::Root, None, false, Some(0), None, None)?;
+        let mut engine = RuleEngine::from_compiled(
+            compiled,
+            BTreeMap::from([(0, node)]),
+            BTreeMap::new(),
+            true,
+        )?;
+        engine.dispatch_ground_atom(
+            &mut kernel,
+            atom(0, node)?,
+            DependencySet::empty(),
+            true,
+            &[7],
+        )?;
+        let control = cancellation()?;
+        engine.initialize(&mut kernel, Arc::clone(&control))?;
+        engine.saturate_hyperresolution(&mut kernel, control)?;
+        assert!(has_fact(&kernel, 2, &[node])?);
+        kernel.check_invariants()?;
+        kernel.canonical_snapshot()
+    }
+
+    #[test]
+    fn extended_rule_saturation_and_provenance_equal_full_rebuild() -> NativeResult<()> {
+        let base = CompiledRules::new(RuleProgram::new(
+            vec![concept(0)?, concept(1)?],
+            vec![chain_clause(0, 0, 1)?],
+        )?)?;
+        let query = CompiledRules::extend(
+            base,
+            vec![concept(2)?],
+            Vec::new(),
+            vec![chain_clause(1, 1, 2)?],
+        )?;
+        let rebuilt = CompiledRules::new(RuleProgram::new(
+            query.program.predicates().to_vec(),
+            query.program.clauses().to_vec(),
+        )?)?;
+        assert_eq!(
+            shared_rule_outcome(Arc::clone(&query))?,
+            shared_rule_outcome(rebuilt)?
+        );
+        assert_eq!(
+            shared_rule_outcome(Arc::clone(&query))?,
+            shared_rule_outcome(query)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_unconditional_plans_and_inequality_sorts_preserve_base_semantics() -> NativeResult<()>
+    {
+        let inequality =
+            |id, sort| RulePredicate::new(id, PredicateKind::Inequality, vec![sort, sort]);
+        let base = CompiledRules::new(RuleProgram::new(
+            vec![concept(0)?, inequality(1, TermSort::Object)?],
+            Vec::new(),
+        )?)?;
+        let ground = RuleClause::new(
+            0,
+            Vec::new(),
+            vec![RuleAtom::new(0, vec![Term::individual(0)])?],
+            vec![11],
+            Vec::new(),
+        )?;
+        let query = CompiledRules::extend(
+            Arc::clone(&base),
+            vec![inequality(2, TermSort::Data)?],
+            Vec::new(),
+            vec![ground],
+        )?;
+        assert_eq!(query.join_program.unconditional_clause_ids().to_vec(), [0]);
+        assert_eq!(query.local_join_plan_count(), 0);
+        assert!(CompiledRules::extend(
+            base,
+            vec![inequality(2, TermSort::Object)?],
+            Vec::new(),
+            Vec::new()
+        )
+        .is_err());
+        Ok(())
     }
 }
