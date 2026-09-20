@@ -47,6 +47,25 @@ _ENCODED_FORBIDDEN_WORK_COUNTERS = {
     "wire_encoder_calls",
 }
 
+_NATIVE_PIPELINE_FLAGS = {
+    "native_pipeline_required",
+    "native_core_receipt_validated",
+    "native_metadata_validation",
+    "native_result_validation",
+    "native_symbol_index",
+}
+_NATIVE_PIPELINE_COUNTERS = {
+    "native_result_publications",
+    "native_query_delta_loads",
+    "native_query_full_program_loads",
+    "native_query_fallback_rebuilds",
+    "native_query_local_rule_plans",
+    "native_query_peak_local_records",
+    "native_metadata_domain_copies",
+    "native_symbol_index_bytes",
+    "python_symbol_validation_rows",
+}
+
 
 def functional(*body: str) -> bytes:
     return (
@@ -126,6 +145,8 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
         "implementation_version",
         "ingestion_path",
         "ir_schema_version",
+        *_NATIVE_PIPELINE_FLAGS,
+        *_NATIVE_PIPELINE_COUNTERS,
     }
     expected_path = "scalar-python" if reasoner.backend.name == "python" else "encoded-native"
     if reasoner.backend.name in {"native", "verify"}:
@@ -134,6 +155,14 @@ def test_diagnostics_are_bounded_immutable_and_survive_dispose() -> None:
 
     assert tuple(diagnostics) == tuple(sorted(expected_keys))
     assert diagnostics["ingestion_path"] == expected_path
+    assert all(type(diagnostics[name]) is bool for name in _NATIVE_PIPELINE_FLAGS)
+    assert all(
+        type(diagnostics[name]) is int and diagnostics[name] >= 0
+        for name in _NATIVE_PIPELINE_COUNTERS
+    )
+    if reasoner.backend.name == "python":
+        assert all(diagnostics[name] is False for name in _NATIVE_PIPELINE_FLAGS)
+        assert all(diagnostics[name] == 0 for name in _NATIVE_PIPELINE_COUNTERS)
     digest = diagnostics["compiler_digest"]
     assert isinstance(digest, str)
     assert len(digest) == 64
@@ -214,6 +243,8 @@ def test_public_encoded_native_handoff_has_complete_zero_forbidden_work_ledger()
         "ir_schema_version",
         "native_abi_version",
         *_ENCODED_FORBIDDEN_WORK_COUNTERS,
+        *_NATIVE_PIPELINE_FLAGS,
+        *_NATIVE_PIPELINE_COUNTERS,
     }
     assert tuple(diagnostics) == tuple(sorted(expected_keys))
     assert diagnostics["ingestion_path"] == "encoded-native"
