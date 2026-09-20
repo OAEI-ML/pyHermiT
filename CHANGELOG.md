@@ -13,6 +13,8 @@ All notable user-visible changes are recorded here.
   clauses, and mutable tableau state remain isolated.
 - Added query/rebuild differential tests, resource limits, atomic failure behavior, and
   work-count diagnostics; existing default fallback and reasoning semantics are preserved.
+- Preserved immutable query diagnostics after reasoner disposal, including nonzero
+  counters and cleanup when the final diagnostics snapshot is unavailable.
 - Requires `pyowl-core>=0.2.1,<0.3` for the coordinated native capability contract.
 
 ## 0.2.0 — 2026-08-02
