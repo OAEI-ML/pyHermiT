@@ -940,9 +940,11 @@ class NativeBackendSession:
     def ingestion_counters(self) -> Mapping[str, bool | int]:
         """Return the immutable ledger captured for this session's input path."""
 
+        if self._closed:
+            return self._ingestion_counters
         call = getattr(self._native, "_query_reuse_diagnostics_v1", None)
         if callable(call):
-            return MappingProxyType({**self._ingestion_counters, **call()})
+            self._ingestion_counters = MappingProxyType({**self._ingestion_counters, **call()})
         return self._ingestion_counters
 
     def _encoded_service_context(self) -> NativeServiceContext:
@@ -1108,6 +1110,9 @@ class NativeBackendSession:
     def close(self) -> None:
         if self._closed:
             return
+        # Preserve the final ledger; unavailable diagnostics must never prevent cleanup.
+        with suppress(Exception):
+            _ = self.ingestion_counters
         self._native.close()
         self._cancellation._detach(self._observer_id)
         self._closed = True

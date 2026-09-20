@@ -387,6 +387,36 @@ def test_factory_maps_all_coarse_operations_and_cancellation(
     session.close()
 
 
+@pytest.mark.parametrize("diagnostics_fail", [False, True])
+def test_close_retains_query_counters_even_when_final_diagnostics_fail(
+    monkeypatch: pytest.MonkeyPatch, diagnostics_fail: bool
+) -> None:
+    _install_codec(monkeypatch)
+    extension, _handles, sessions = _extension()
+    session = NativeBackendFactory(extension).create_session(
+        _compiled(), ReasonerConfig(), CancellationSource().token
+    )
+    counters = {"native_query_delta_loads": 3}
+    monkeypatch.setattr(sessions[0], "_query_reuse_diagnostics_v1", lambda: counters, raising=False)
+    original = session.ingestion_counters
+    assert original["native_query_delta_loads"] == 3
+
+    if diagnostics_fail:
+
+        def unavailable() -> dict[str, int]:
+            raise BackendPoisonedError("native session is poisoned")
+
+        monkeypatch.setattr(sessions[0], "_query_reuse_diagnostics_v1", unavailable)
+    else:
+        counters["native_query_delta_loads"] = 4
+
+    session.close()
+    session.close()
+    assert sessions[0].closed
+    assert session.ingestion_counters["native_query_delta_loads"] == (3 if diagnostics_fail else 4)
+    assert original["native_query_delta_loads"] == 3
+
+
 def test_invalid_result_poisoning_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_codec(monkeypatch)
     extension, _handles, sessions = _extension()
