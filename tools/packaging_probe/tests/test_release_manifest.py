@@ -307,9 +307,9 @@ class ReleaseManifestTests(unittest.TestCase):
             provenance["tested_runtime"],
             {
                 "pyowl_core": {
-                    "commit": "adef8e54b35412b245223eb312a68dbd000ad01a",
+                    "commit": "11649ea0cf17b09f0d476f2141b827786b71b4b3",
                     "repository": "https://github.com/OAEI-ML/pyOWLCore",
-                    "tree": "452e4e34e8707b5ed83d6cac683a9eb065876247",
+                    "tree": "015128b3715940272a8bba16974a97bf38518737",
                     "version": "0.2.1",
                 }
             },
@@ -423,7 +423,7 @@ class ReleaseManifestTests(unittest.TestCase):
     def test_unbound_core_implementation_is_rejected(self) -> None:
         compatibility = (self.root / "release/core-compatibility.json").read_bytes()
         mutated = compatibility.replace(
-            b"adef8e54b35412b245223eb312a68dbd000ad01a",
+            b"11649ea0cf17b09f0d476f2141b827786b71b4b3",
             b"7a9f69d5617da81c031ad61ff2fb7d9e571ed4a0",
         )
         self.assertNotEqual(mutated, compatibility)
@@ -450,7 +450,7 @@ class ReleaseManifestTests(unittest.TestCase):
         compatibility = (self.root / "release/core-compatibility.json").read_bytes()
         mutations = (
             (
-                b"452e4e34e8707b5ed83d6cac683a9eb065876247",
+                b"015128b3715940272a8bba16974a97bf38518737",
                 b"9ec8e46a3b1444bbc6603e09083eabc4369b1372",
             ),
             (
