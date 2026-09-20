@@ -49,11 +49,11 @@ _INSTALLED_WP18_CONTRACT = (
     "::test_facade_constructs_encoded_services_without_scalar_service_context"
 )
 _INSTALLED_WP18_FEATURE = "encoded-structural-compiler-v2"
-_CORE_REQUIREMENT = "pyowl-core>=0.2,<0.3"
-_TESTED_CORE_REQUIREMENT = "pyowl-core==0.2.0"
+_CORE_REQUIREMENT = "pyowl-core>=0.2.1,<0.3"
+_TESTED_CORE_REQUIREMENT = "pyowl-core==0.2.1"
 _CORE_COMPATIBILITY_SCHEMA = "pyhermit.core-compatibility/2"
-_TESTED_CORE_COMMIT = "d39fe9c9bb9513db8c14fe2bc6d4864377901ad1"
-_TESTED_CORE_TREE = "d29bbcc65684c5a246b5d952a91d8a62e07e1b35"
+_TESTED_CORE_COMMIT = "649e270bc3aa4becbf59bc4b9fb134542161f586"
+_TESTED_CORE_TREE = "d22703b022e6940d813aeda58ce04b37e415724b"
 _ENCODED_INGESTION_CONTRACT = {
     "schema_name": "pyowl-core/structural-columns",
     "schema_version": 2,
@@ -77,7 +77,7 @@ _MATERIAL_FILES = (
     "pyproject.toml",
     _CORE_COMPATIBILITY_PATH,
     "reports/licensing/adapted-files.toml",
-    "reports/release/0.2.0-owner-release-override.md",
+    "reports/release/0.2.1-owner-release-override.md",
     "setup.cfg",
     "setup.py",
     "src/pyhermit/_version.py",
@@ -467,7 +467,7 @@ def _build_provenance(
         or compatibility.get("dependency_constraint") != _CORE_REQUIREMENT
         or not isinstance(tested_core, dict)
         or tested_core.get("repository") != "https://github.com/OAEI-ML/pyOWLCore"
-        or tested_core.get("version") != "0.2.0"
+        or tested_core.get("version") != "0.2.1"
         or tested_core.get("commit") != _TESTED_CORE_COMMIT
         or tested_core.get("tree") != _TESTED_CORE_TREE
         or not isinstance(redesign, dict)

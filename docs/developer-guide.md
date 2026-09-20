@@ -96,4 +96,6 @@ live-reference sample, and controlled performance calibration as post-release fo
 The release workflow still requires the complete hosted native-wheel matrix. `LIC-001`
 is waived as-is without claiming legal review. The exact scope is recorded in
 [the owner release override](../reports/release/0.2.0-owner-release-override.md), and the
-fail-closed checker permits publication only while that record remains valid.
+current `0.2.1` authorization is recorded in
+[the release authorization](../reports/release/0.2.1-owner-release-override.md).
+The fail-closed checker requires evidence matching the runtime release version.

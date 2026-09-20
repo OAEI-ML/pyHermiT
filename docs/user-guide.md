@@ -2,7 +2,7 @@
 
 ## Install and select a backend
 
-pyHermiT supports CPython 3.10 and 3.12 and requires `pyowl-core>=0.2,<0.3`.
+pyHermiT supports CPython 3.10 and 3.12 and requires `pyowl-core>=0.2.1,<0.3`.
 A compatible native wheel contains one `abi3` Rust extension; the universal wheel is
 the compiler-free Python fallback. Neither artifact contains or starts Java.
 
@@ -184,7 +184,7 @@ reasoning, classification, realization, updates, and peak RSS; see
 
 Local wheels and semantic suites are verified. The historical `0.1.1`
 [release report](../reports/release-report-local.json) records the prior universal
-publication, while the `0.2.0` workflow requires the complete hosted wheel set. The owner
+publication, while the `0.2.1` workflow requires the complete hosted wheel set. The owner
 accepted only the remaining external WP17 runs as post-release follow-up.
 
 pyHermiT 0.2.0 rejects the pyowl-core 0.1 API/model contract. Persisted pyowl-core 0.1

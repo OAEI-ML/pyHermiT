@@ -1,15 +1,15 @@
 {
   "schema": "pyhermit.core-compatibility/2",
-  "dependency_constraint": "pyowl-core>=0.2,<0.3",
+  "dependency_constraint": "pyowl-core>=0.2.1,<0.3",
   "tested_source": {
     "repository": "https://github.com/OAEI-ML/pyOWLCore",
-    "commit": "d39fe9c9bb9513db8c14fe2bc6d4864377901ad1",
-    "tree": "d29bbcc65684c5a246b5d952a91d8a62e07e1b35",
-    "version": "0.2.0"
+    "commit": "649e270bc3aa4becbf59bc4b9fb134542161f586",
+    "tree": "d22703b022e6940d813aeda58ce04b37e415724b",
+    "version": "0.2.1"
   },
   "native_ontology_redesign": {
-    "commit": "d39fe9c9bb9513db8c14fe2bc6d4864377901ad1",
-    "tree": "d29bbcc65684c5a246b5d952a91d8a62e07e1b35",
+    "commit": "649e270bc3aa4becbf59bc4b9fb134542161f586",
+    "tree": "d22703b022e6940d813aeda58ce04b37e415724b",
     "classification": "behavior-preserving-native-ontology-redesign",
     "workpackages": ["WP14", "WP15", "WP16", "WP17", "WP18", "WP19", "WP20", "WP21", "WP22", "WP23"]
   },

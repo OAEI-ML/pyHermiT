@@ -2,7 +2,7 @@ schema = 1
 
 [[dependency]]
 name = "pyowl-core"
-requirement = "pyowl-core>=0.2,<0.3"
+requirement = "pyowl-core>=0.2.1,<0.3"
 scope = "runtime"
 license = "Apache-2.0"
 source = "https://github.com/OAEI-ML/pyOWLCore"

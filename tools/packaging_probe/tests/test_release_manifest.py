@@ -24,7 +24,7 @@ from tools.packaging_probe.release_manifest import (
 )
 
 _REVISION = "a" * 40
-_VERSION = "0.2.0"
+_VERSION = "0.2.1"
 _NATIVE_PLATFORMS = (
     "manylinux_2_17_x86_64",
     "manylinux_2_17_aarch64",
@@ -302,15 +302,15 @@ class ReleaseManifestTests(unittest.TestCase):
         )
         self.assertIn("tests/packaging/installed_smoke.py", _MATERIAL_FILES)
         self.assertIn("release/core-compatibility.json", _MATERIAL_FILES)
-        self.assertIn("reports/release/0.2.0-owner-release-override.md", _MATERIAL_FILES)
+        self.assertIn("reports/release/0.2.1-owner-release-override.md", _MATERIAL_FILES)
         self.assertEqual(
             provenance["tested_runtime"],
             {
                 "pyowl_core": {
-                    "commit": "d39fe9c9bb9513db8c14fe2bc6d4864377901ad1",
+                    "commit": "649e270bc3aa4becbf59bc4b9fb134542161f586",
                     "repository": "https://github.com/OAEI-ML/pyOWLCore",
-                    "tree": "d29bbcc65684c5a246b5d952a91d8a62e07e1b35",
-                    "version": "0.2.0",
+                    "tree": "d22703b022e6940d813aeda58ce04b37e415724b",
+                    "version": "0.2.1",
                 }
             },
         )
@@ -393,8 +393,8 @@ class ReleaseManifestTests(unittest.TestCase):
     def test_release_workflow_cannot_float_the_provenance_bound_core_version(self) -> None:
         workflow = (self.root / ".github/workflows/wheels.yml").read_bytes()
         mutated = workflow.replace(
-            b'"pyowl-core==0.2.0"',
-            b'"pyowl-core>=0.2,<0.3"',
+            b'"pyowl-core==0.2.1"',
+            b'"pyowl-core>=0.2.1,<0.3"',
             1,
         )
         self.assertNotEqual(mutated, workflow)
@@ -423,7 +423,7 @@ class ReleaseManifestTests(unittest.TestCase):
     def test_unbound_core_implementation_is_rejected(self) -> None:
         compatibility = (self.root / "release/core-compatibility.json").read_bytes()
         mutated = compatibility.replace(
-            b"d39fe9c9bb9513db8c14fe2bc6d4864377901ad1",
+            b"649e270bc3aa4becbf59bc4b9fb134542161f586",
             b"7a9f69d5617da81c031ad61ff2fb7d9e571ed4a0",
         )
         self.assertNotEqual(mutated, compatibility)
@@ -450,7 +450,7 @@ class ReleaseManifestTests(unittest.TestCase):
         compatibility = (self.root / "release/core-compatibility.json").read_bytes()
         mutations = (
             (
-                b"d29bbcc65684c5a246b5d952a91d8a62e07e1b35",
+                b"d22703b022e6940d813aeda58ce04b37e415724b",
                 b"9ec8e46a3b1444bbc6603e09083eabc4369b1372",
             ),
             (

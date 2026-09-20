@@ -2,6 +2,19 @@
 
 All notable user-visible changes are recorded here.
 
+## 0.2.1 — 2026-09-20
+
+- Added opt-in strict native pipeline admission using owner-bound pyowl-core validation
+  receipts, with explicit rejection of unsupported owners and operations.
+- Retained native symbol, hierarchy, and result indexes behind lazy public views, so
+  hierarchy neighbor queries enumerate the relevant adjacency rather than the full graph.
+- Shared immutable rules, role automata, datatype registries, and existential templates
+  across bounded assertion queries and realization counterexamples. Query-local facts,
+  clauses, and mutable tableau state remain isolated.
+- Added query/rebuild differential tests, resource limits, atomic failure behavior, and
+  work-count diagnostics; existing default fallback and reasoning semantics are preserved.
+- Requires `pyowl-core>=0.2.1,<0.3` for the coordinated native capability contract.
+
 ## 0.2.0 — 2026-08-02
 
 - Migrated the shared ontology contract to `pyowl-core>=0.2,<0.3`, API 0.2,

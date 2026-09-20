@@ -9,7 +9,7 @@ HermiT OWL 2 DL reasoner, with a complete pure-Python fallback. It targets Pytho
 and uses the Java-free `pyowl-core` package for shared ontology parsing, immutable views,
 overlays, composites, and zero-reparse communication with Exact-OM and other consumers.
 
-The 0.2.0 production implementation provides the public reasoner facade, complete
+The 0.2.1 production implementation provides the public reasoner facade, complete
 pure-Python path, and an optional private Rust backend. It consumes the pyowl-core 0.2
 model and can compile its encoded structural-view schema 2 directly in Rust. The normative
 architecture, compatibility rules, backend completeness requirements, and verification plan
@@ -57,9 +57,10 @@ error handling. Existing 0.1 deployments should follow the
 The owner has selected the source-guided implementation mode and
 `LGPL-3.0-or-later`, matching the pinned upstream declaration. `LICENSE` contains the
 LGPL text, `COPYING` the GPL text it incorporates, and `NOTICE.md` the initial upstream
-attribution. For `0.2.0`, the owner explicitly waived the remaining `LIC-001` legal-review
-signoff as-is without representing that legal review occurred. The waiver is recorded in
-[`reports/release/0.2.0-owner-release-override.md`](reports/release/0.2.0-owner-release-override.md).
+attribution. The owner authorized `0.2.1` publication under the existing licensing policy;
+`LIC-001` remains waived without representing that legal review occurred. The authorization
+is recorded in
+[`reports/release/0.2.1-owner-release-override.md`](reports/release/0.2.1-owner-release-override.md).
 The completed repository audits are under
 [`reports/licensing/`](reports/licensing/) and
 [`reports/release/artifact-audit.md`](reports/release/artifact-audit.md).
@@ -117,7 +118,7 @@ Use Python 3.10 or newer and install a compatible `pyowl-core`:
 
 ```shell
 python -m pip install \
-  "pyowl-core>=0.2,<0.3" \
+  "pyowl-core>=0.2.1,<0.3" \
   "build>=1.2,<2" "hypothesis>=6.100,<7" "import-linter>=2.1,<3" \
   "mypy>=1.10,<3" "packaging>=24,<27" "pytest>=8.2,<10" \
   "pytest-cov>=5,<8" "ruff==0.15.22" "setuptools==83.0.0" \

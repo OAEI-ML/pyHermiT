@@ -26,7 +26,7 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
 _PROJECT_NAME = "pyhermit"
-_CORE_SPECIFIERS = frozenset({">=0.2", "<0.3"})
+_CORE_SPECIFIERS = frozenset({">=0.2.1", "<0.3"})
 _JAVA_SUFFIXES = (".class", ".jar", ".java", ".jmod", ".war", ".ear")
 _NATIVE_SUFFIXES = (".so", ".pyd", ".dll", ".dylib")
 _PYTHON_SUFFIXES = (".py", ".pyi")
@@ -357,7 +357,7 @@ def _check_runtime_dependencies(metadata: Message | str) -> None:
         raise ArtifactError("metadata must contain exactly one runtime pyowl-core requirement")
     actual_specifiers = frozenset(str(specifier) for specifier in core_requirements[0].specifier)
     if actual_specifiers != _CORE_SPECIFIERS:
-        raise ArtifactError("pyowl-core requirement must be exactly pyowl-core>=0.2,<0.3")
+        raise ArtifactError("pyowl-core requirement must be exactly pyowl-core>=0.2.1,<0.3")
 
 
 def _check_names_and_payloads(content: ArchiveContent) -> tuple[str, ...]:
