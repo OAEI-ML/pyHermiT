@@ -67,7 +67,10 @@ def test_native_result_parity_without_python_domain_or_graph_validation(
         assert tuple(actual) == expected
         realization = native_results.realization_ids(session._realization_result_v1())
         assert realization == expected_realization
-        assert mapper.realization(realization, cast(Hierarchy[owl.Class], actual[0])) == expected_mapped
+        assert (
+            mapper.realization(realization, cast(Hierarchy[owl.Class], actual[0]))
+            == expected_mapped
+        )
     finally:
         session.close()
 

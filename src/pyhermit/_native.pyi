@@ -80,9 +80,13 @@ class _NativeHierarchyResult:
     def related(self, node: int, upward: bool, direct: bool) -> list[int]: ...
 
 class _NativeRealizationResult:
-    def rows(self) -> tuple[
-        list[list[int]], list[tuple[int, list[int]]],
-        list[tuple[int, int, list[int]]], list[tuple[int, int, list[int]]],
+    def rows(
+        self,
+    ) -> tuple[
+        list[list[int]],
+        list[tuple[int, list[int]]],
+        list[tuple[int, int, list[int]]],
+        list[tuple[int, int, list[int]]],
         list[tuple[int, int]],
     ]: ...
     def matches(self, symbols: _NativeServiceSymbols, domain: str) -> bool: ...
