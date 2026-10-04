@@ -168,6 +168,8 @@ class ReasonerConfig:
             object.__setattr__(self, config_field.name, value)
         self.__post_init__()
 
+    _restore_pickle_state = __setstate__
+
     def semantic_items(self) -> tuple[tuple[str, ConfigScalar], ...]:
         """Canonical options that affect compilation or reasoning semantics.
 
@@ -207,6 +209,12 @@ class ReasonerConfig:
         """Return a stable diagnostic mapping without callback/object identities."""
 
         return dict(self.semantic_items())
+
+
+# Python 3.10 replaces __setstate__ when adding slots to a frozen dataclass.
+# Restore the validated method after decoration, retaining the generated fields,
+# constructor, equality and hashing behavior on every supported Python version.
+ReasonerConfig.__setstate__ = ReasonerConfig._restore_pickle_state  # type: ignore[method-assign]
 
 
 __all__ = [

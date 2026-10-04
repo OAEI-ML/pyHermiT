@@ -95,7 +95,7 @@ upstream_components = ["src/main/java/org/semanticweb/HermiT/structural/OWLClaus
 
 [[adapted_file]]
 path = "src/pyhermit/config.py"
-sha256 = "579289f72d97b2f4f9406ae63acc8584013e1512f5bfcbb4ca4745cd623af496"
+sha256 = "f64eddaea488fccf0ca98f39626adf318adfd80c1a04ca98678320a38f3ee2a3"
 adaptation = "Serializable Python configuration contract retaining pinned public defaults and strategies"
 upstream_components = ["src/main/java/org/semanticweb/HermiT/Configuration.java"]
 

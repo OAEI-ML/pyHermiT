@@ -62,3 +62,15 @@ PYTHONPATH=src:../pyOWLCore/src python -m pytest -q \
   tests/release/test_licensing_evidence.py tools/specs/tests/test_release_gate.py
 python -m tools.specs.check_release_gate --assert-blocked
 ```
+
+## Source-hash refresh — 2026-10-04
+
+The configurable native symbol-index limit and compatible configuration-pickle restoration
+changed `src/pyhermit/config.py`, the only adapted file changed by this resource-limit PR.
+Its inventory SHA-256 was refreshed against the final source bytes. The other 31 adapted-file
+hashes still match; the complete executable audit verifies all 32 hashes, headers, explicit
+adaptation admissions, and retained upstream provenance mappings. The existing Oxford,
+modification, SPDX, and pinned-HermiT notices remain intact.
+
+This engineering refresh does not change the license, upstream mapping, legal-review status,
+LIC-001 gate, or existing release authorization. It is not legal advice or approval to publish.

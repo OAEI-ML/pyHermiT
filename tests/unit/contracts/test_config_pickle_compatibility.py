@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import pickle
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -52,6 +53,10 @@ def test_config_pickle_round_trip_preserves_option_and_callbacks(
     restored = pickle.loads(pickle.dumps(config, protocol=protocol))
 
     assert restored == config
+    assert hash(restored) == hash(config)
+    assert not hasattr(restored, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        restored.deterministic = True
     assert restored.max_native_symbol_index_bytes == limit
     assert restored.deterministic is False
     assert restored.progress is print
