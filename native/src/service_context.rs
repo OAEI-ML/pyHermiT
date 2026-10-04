@@ -18,6 +18,7 @@ use crate::input_wire::{DecodedOntology, DecodedSymbolValue, SymbolKind};
 
 const SERVICE_CONTEXT_SCHEMA_VERSION: u16 = 3;
 const MAX_SERVICE_CONTEXT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_NATIVE_SYMBOL_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct ServiceContext {
@@ -171,7 +172,9 @@ impl ServiceSymbolIndex {
     pub(crate) fn new(
         ontology: Arc<DecodedOntology>,
         control: &crate::CancellationState,
+        max_bytes: u64,
     ) -> NativeResult<Self> {
+        control.poll()?;
         let named: BTreeSet<_> = ontology.named_individuals.iter().copied().collect();
         let mut domains = BTreeMap::new();
         let mut estimated_bytes = 0_u64;
@@ -213,18 +216,7 @@ impl ServiceSymbolIndex {
                             .saturating_add(128),
                     )
                     .ok_or_else(|| NativeError::invariant("native symbol index size overflow"))?;
-                if estimated_bytes > MAX_SERVICE_CONTEXT_BYTES as u64 {
-                    return Err(NativeError::new(
-                        ErrorKind::Resource,
-                        "RESOURCE_LIMIT",
-                        "native symbol index exceeds its byte limit",
-                    )
-                    .with_context("limit", "native_symbol_index_bytes")
-                    .with_context("observed", estimated_bytes.to_string())
-                    .with_context("allowed", MAX_SERVICE_CONTEXT_BYTES.to_string()));
-                }
-                control.observe_memory(estimated_bytes);
-                control.poll()?;
+                check_index_memory(estimated_bytes, max_bytes, control)?;
                 if by_key.insert(value.key.clone(), value.identifier).is_some()
                     || ids
                         .last()
@@ -243,6 +235,15 @@ impl ServiceSymbolIndex {
             domains,
             estimated_bytes,
         })
+    }
+
+    pub(crate) fn check_limits(
+        &self,
+        max_bytes: u64,
+        control: &crate::CancellationState,
+    ) -> NativeResult<()> {
+        control.poll()?;
+        check_index_memory(self.estimated_bytes, max_bytes, control)
     }
 
     fn domain(&self, label: &str) -> NativeResult<&SymbolDomainIndex> {
@@ -285,5 +286,44 @@ impl ServiceSymbolIndex {
             )
             .ok_or_else(|| NativeError::invariant("native symbol ID is dangling"))?;
         Ok(Some(&value.key))
+    }
+}
+
+/// Recheck retained index memory after an operation resets its shared control.
+fn check_index_memory(
+    estimated_bytes: u64,
+    max_bytes: u64,
+    control: &crate::CancellationState,
+) -> NativeResult<()> {
+    if estimated_bytes > max_bytes {
+        return Err(NativeError::new(
+            ErrorKind::Resource,
+            "RESOURCE_LIMIT",
+            "native symbol index exceeds its byte limit",
+        )
+        .with_context("limit", "native_symbol_index_bytes")
+        .with_context("observed", estimated_bytes.to_string())
+        .with_context("allowed", max_bytes.to_string()));
+    }
+    control.observe_memory(estimated_bytes);
+    control.poll()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_index_default_and_legacy_export_limits_remain_independent() -> NativeResult<()> {
+        let control = crate::CancellationHandle::from_options(None, None)?.state();
+        assert_eq!(MAX_SERVICE_CONTEXT_BYTES, 64 * 1024 * 1024);
+        assert_eq!(DEFAULT_MAX_NATIVE_SYMBOL_INDEX_BYTES, 64 * 1024 * 1024);
+        let required = DEFAULT_MAX_NATIVE_SYMBOL_INDEX_BYTES + 1;
+        let error = check_index_memory(required, DEFAULT_MAX_NATIVE_SYMBOL_INDEX_BYTES, &control)
+            .expect_err("default index limit must reject");
+        assert_eq!(error.kind, ErrorKind::Resource);
+        check_index_memory(required, required, &control)?;
+        assert_eq!(MAX_SERVICE_CONTEXT_BYTES, 64 * 1024 * 1024);
+        Ok(())
     }
 }

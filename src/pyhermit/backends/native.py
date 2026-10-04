@@ -496,16 +496,19 @@ class NativeBackendFactory:
         contexts = _encoded_profile_contexts(view)
         handle_value: object | None = None
         observer_id: int | None = None
+        remaining: float | None = None
         if cancellation is not None:
             cancellation.check()
             remaining = cancellation.remaining_seconds
             if remaining is not None and remaining <= 0:
                 cancellation.check()
+        if cancellation is not None or max_memory_bytes is not None:
             handle_value = self._handle_type(
                 timeout=remaining,
                 max_memory_bytes=max_memory_bytes,
             )
-            observer_id = cancellation._attach(cast(_CancellationHandle, handle_value))
+            if cancellation is not None:
+                observer_id = cancellation._attach(cast(_CancellationHandle, handle_value))
         try:
             result = profile_compiler(
                 slices=_encoded_slice_records(root_slices),
@@ -777,6 +780,14 @@ class NativeBackendFactory:
         *,
         ingestion_counters: Mapping[str, bool | int] | None = None,
     ) -> NativeBackendSession:
+        if (
+            config.max_native_symbol_index_bytes is not None
+            and "native-symbol-index-limit-v1" not in self._info.complete_features
+        ):
+            raise BackendVersionError(
+                "native backend does not support max_native_symbol_index_bytes",
+                context={"reason": "native_symbol_index_limit_unavailable"},
+            )
         cancellation.check()
         remaining = cancellation.remaining_seconds
         if remaining is not None and remaining <= 0:

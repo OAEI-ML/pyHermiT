@@ -59,6 +59,7 @@ def test_private_abi_handshake_claims_only_completed_versioned_features() -> Non
         "native-profile-summary-v1",
         "native-query-delta-v1",
         "native-result-owner-v1",
+        "native-symbol-index-limit-v1",
         "realization",
         "state-trace-v1",
         "strict-native-input-v1",

@@ -148,6 +148,34 @@ Timeout and interrupt paths roll back operation-local state before another query
 allowed. They raise `ReasonerTimeoutError`, `ReasonerInterruptedError`, or another
 `ReasoningAbortedError` subclass; they are not logical `False` answers.
 
+For the native public-symbol lookup index, the default estimate ceiling is 64 MiB.
+Large ontologies can opt into a larger bound without changing ontology content or inference
+rules:
+
+```python
+config = ReasonerConfig(
+    backend=BackendName.NATIVE,
+    max_native_symbol_index_bytes=256 * 1024 * 1024,
+    max_memory_bytes=4 * 1024 * 1024 * 1024,
+)
+```
+
+These sizes illustrate configuration, not a capacity recommendation for a particular ontology.
+`max_native_symbol_index_bytes` is keyword-only and accepts `None` (the existing 64 MiB default)
+or a positive unsigned 64-bit integer. An explicit value requires a compatible native backend;
+it is not silently ignored or replaced by a Python fallback. The separate legacy JSON export
+limit stays at 64 MiB. This option bounds native-owned symbol indexes; it does not bound
+Python mappings on scalar input paths. Use `require_native_pipeline=True` when native-only
+processing is required. A larger index allowance does not increase other engine limits.
+
+The index limit controls a deterministic estimate of its lookup storage, not measured total
+process RSS. `max_memory_bytes` continues to check reported operation-memory estimates;
+those estimates are not an aggregate guarantee for every resident allocation. Applications
+requiring a hard process limit should retain their operating-system resource controls.
+Exceeding either applicable estimate limit remains a resource failure, never a logical answer.
+The option and its compatibility boundary are specified in
+[Native symbol-index resource limits](../specs/native-symbol-index-limits.md).
+
 Failures produced after the pyowl-core input boundary derive from `PyHermiTError` and
 carry a stable code/context mapping through `as_dict()`. Python argument-contract errors
 remain `TypeError`/`ValueError`, and pyowl-core acquisition, parsing, import, and resolver
@@ -184,7 +212,7 @@ reasoning, classification, realization, updates, and peak RSS; see
 
 Local wheels and semantic suites are verified. The historical `0.1.1`
 [release report](../reports/release-report-local.json) records the prior universal
-publication, while the `0.2.1` workflow requires the complete hosted wheel set. The owner
+publication, while the `0.2.2` workflow requires the complete hosted wheel set. The owner
 accepted only the remaining external WP17 runs as post-release follow-up.
 
 pyHermiT 0.2.0 rejects the pyowl-core 0.1 API/model contract. Persisted pyowl-core 0.1

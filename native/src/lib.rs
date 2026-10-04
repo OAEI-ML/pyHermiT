@@ -448,13 +448,19 @@ impl NativeSession {
         let control = Arc::clone(&self.control);
         let index = control
             .run(|owned| {
+                let max_bytes = owned
+                    .config
+                    .max_native_symbol_index_bytes
+                    .unwrap_or(service_context::DEFAULT_MAX_NATIVE_SYMBOL_INDEX_BYTES);
                 if let Some(index) = &owned.service_symbols {
+                    index.check_limits(max_bytes, control.cancellation.as_ref())?;
                     return Ok(Arc::clone(index));
                 }
                 let index = Arc::new(py.detach(|| {
                     service_context::ServiceSymbolIndex::new(
                         Arc::clone(&owned.ontology),
                         control.cancellation.as_ref(),
+                        max_bytes,
                     )
                 })?);
                 owned.service_symbols = Some(Arc::clone(&index));
@@ -5719,7 +5725,7 @@ fn deferred_compiler_cache_key(
     metadata: &input_wire::OntologyMetadata,
     config: &DecodedConfig,
 ) -> NativeResult<[u8; 32]> {
-    let expected = serde_json::json!({
+    let mut expected = serde_json::json!({
         "compatibility_id": HERMIT_COMPATIBILITY_ID,
         "compiler_schema": COMPILER_CACHE_SCHEMA_VERSION,
         "config": {
@@ -5755,6 +5761,9 @@ fn deferred_compiler_cache_key(
         "logical_fingerprint": LOGICAL_FINGERPRINT_SENTINEL,
         "signature_fingerprint": SIGNATURE_FINGERPRINT_SENTINEL,
     });
+    if let Some(maximum) = config.max_native_symbol_index_bytes {
+        expected["config"]["max_native_symbol_index_bytes"] = maximum.into();
+    }
     let parsed: serde_json::Value = serde_json::from_slice(template)
         .map_err(|_| encoded_slice_invalid("deferred compiler-cache template is not valid JSON"))?;
     if parsed != expected {
@@ -6559,6 +6568,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
                 "native-profile-summary-v1",
                 "native-query-delta-v1",
                 "native-result-owner-v1",
+                "native-symbol-index-limit-v1",
                 "realization",
                 "state-trace-v1",
                 "strict-native-input-v1",
@@ -6706,7 +6716,7 @@ mod tests {
 
     #[test]
     fn native_version_comes_from_the_python_distribution_source() {
-        assert_eq!(python_package_version(), Some("0.2.0"));
+        assert_eq!(python_package_version(), Some(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
@@ -6831,7 +6841,11 @@ mod tests {
         let (ontology, _) = decoded_session_input()?;
         let ontology = Arc::new(ontology);
         let control = CancellationHandle::from_options(None, None)?.state();
-        let index = service_context::ServiceSymbolIndex::new(Arc::clone(&ontology), &control)?;
+        let index = service_context::ServiceSymbolIndex::new(
+            Arc::clone(&ontology),
+            &control,
+            service_context::DEFAULT_MAX_NATIVE_SYMBOL_INDEX_BYTES,
+        )?;
         let legacy: serde_json::Value = serde_json::from_slice(
             &service_context::encode_service_context(&ontology, &[7; 32])?,
         )
@@ -6864,11 +6878,70 @@ mod tests {
         assert!(index.count("foreign").is_err());
         assert!(index.estimated_bytes > 0);
         let limited = CancellationHandle::from_options(None, Some(1))?.state();
-        let error = service_context::ServiceSymbolIndex::new(Arc::clone(&ontology), &limited)
-            .err()
-            .ok_or_else(|| NativeError::invariant("symbol budget did not reject"))?;
+        let error = service_context::ServiceSymbolIndex::new(
+            Arc::clone(&ontology),
+            &limited,
+            service_context::DEFAULT_MAX_NATIVE_SYMBOL_INDEX_BYTES,
+        )
+        .err()
+        .ok_or_else(|| NativeError::invariant("symbol budget did not reject"))?;
         assert_eq!(error.kind, ErrorKind::Resource);
         assert_eq!(Arc::strong_count(&ontology), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn native_symbol_index_limits_preserve_boundaries_and_shared_guards() -> NativeResult<()> {
+        let (ontology, _) = decoded_session_input()?;
+        let ontology = Arc::new(ontology);
+        let control = CancellationHandle::from_options(None, None)?.state();
+        let baseline = service_context::ServiceSymbolIndex::new(
+            Arc::clone(&ontology),
+            &control,
+            service_context::DEFAULT_MAX_NATIVE_SYMBOL_INDEX_BYTES,
+        )?;
+        let required = baseline.estimated_bytes;
+        let exact =
+            service_context::ServiceSymbolIndex::new(Arc::clone(&ontology), &control, required)?;
+        assert_eq!(exact.ids("class")?, baseline.ids("class")?);
+        let error =
+            service_context::ServiceSymbolIndex::new(Arc::clone(&ontology), &control, required - 1)
+                .err()
+                .ok_or_else(|| NativeError::invariant("index limit did not reject"))?;
+        assert_eq!(
+            error.context.get("limit").map(String::as_str),
+            Some("native_symbol_index_bytes")
+        );
+        assert_eq!(
+            error.context.get("allowed"),
+            Some(&(required - 1).to_string())
+        );
+        assert_eq!(error.context.get("observed"), Some(&required.to_string()));
+        let larger =
+            service_context::ServiceSymbolIndex::new(Arc::clone(&ontology), &control, u64::MAX)?;
+        assert_eq!(larger.estimated_bytes, required);
+        control.reset(None, Some(required - 1))?;
+        let error = baseline
+            .check_limits(u64::MAX, &control)
+            .expect_err("cached global memory");
+        assert_eq!(
+            error.context.get("limit").map(String::as_str),
+            Some("max_memory_bytes")
+        );
+        control.reset(None, None)?;
+        control.interrupt(Some("index cancellation".to_owned()))?;
+        assert_eq!(
+            baseline
+                .check_limits(u64::MAX, &control)
+                .expect_err("cached cancellation")
+                .kind,
+            ErrorKind::Cancelled
+        );
+        let error =
+            service_context::ServiceSymbolIndex::new(Arc::clone(&ontology), &control, u64::MAX)
+                .err()
+                .ok_or_else(|| NativeError::invariant("index cancellation did not reject"))?;
+        assert_eq!(error.kind, ErrorKind::Cancelled);
         Ok(())
     }
 

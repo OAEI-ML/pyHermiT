@@ -110,6 +110,7 @@ class SectionKind(IntEnum):
     DELTA = 34
     DELTA_FACTS = 35
     STRING_REFS = 36
+    NATIVE_SYMBOL_INDEX_LIMIT = 37
 
 
 _SYMBOL_KIND: Final = {value: index for index, value in enumerate(SymbolKind)}
@@ -684,7 +685,16 @@ def encode_config(config: ReasonerConfig) -> bytes:
         _BLOCKING[config.blocking],
         _EXISTENTIAL[config.existentials],
     )
-    return _document(DocumentKind.CONFIG, [_Section(SectionKind.CONFIG, 1, payload)])
+    sections = [_Section(SectionKind.CONFIG, 1, payload)]
+    if config.max_native_symbol_index_bytes is not None:
+        sections.append(
+            _Section(
+                SectionKind.NATIVE_SYMBOL_INDEX_LIMIT,
+                1,
+                struct.pack("<Q", config.max_native_symbol_index_bytes),
+            )
+        )
+    return _document(DocumentKind.CONFIG, sections)
 
 
 def encode_query(query: CompiledQuery) -> bytes:

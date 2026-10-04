@@ -15,7 +15,7 @@ leaf: importing it performs no core loading or backend discovery.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import TypeAlias, cast
 
@@ -99,6 +99,7 @@ class ReasonerConfig:
     deterministic: bool = True
     progress: ProgressCallback | None = field(default=None, compare=False, repr=False)
     warnings: WarningCallback | None = field(default=None, compare=False, repr=False)
+    max_native_symbol_index_bytes: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         enum_fields: tuple[tuple[str, type[_StringEnum]], ...] = (
@@ -132,6 +133,13 @@ class ReasonerConfig:
             if self.max_memory_bytes <= 0:
                 raise ValueError("max_memory_bytes must be a positive integer or None")
 
+        if self.max_native_symbol_index_bytes is not None:
+            maximum = self.max_native_symbol_index_bytes
+            if isinstance(maximum, bool) or not isinstance(maximum, int):
+                raise TypeError("max_native_symbol_index_bytes must be a positive u64 or None")
+            if not 0 < maximum < (1 << 64):
+                raise ValueError("max_native_symbol_index_bytes must be a positive u64 or None")
+
         for name in (
             "require_native_pipeline",
             "buffer_changes",
@@ -145,6 +153,22 @@ class ReasonerConfig:
             callback = getattr(self, name)
             if callback is not None and not callable(callback):
                 raise TypeError(f"{name} must be callable or None")
+
+    def __setstate__(self, state: object) -> None:
+        """Restore current or pre-limit positional state without shifting old fields."""
+
+        if not isinstance(state, (list, tuple)):
+            raise TypeError("ReasonerConfig pickle state must be a list or tuple")
+        config_fields = fields(self)
+        if len(state) == len(config_fields) - 1:
+            state = (*state, None)
+        if len(state) != len(config_fields):
+            raise ValueError("ReasonerConfig pickle state has an unsupported field count")
+        for config_field, value in zip(config_fields, state, strict=True):
+            object.__setattr__(self, config_field.name, value)
+        self.__post_init__()
+
+    _restore_pickle_state = __setstate__
 
     def semantic_items(self) -> tuple[tuple[str, ConfigScalar], ...]:
         """Canonical options that affect compilation or reasoning semantics.
@@ -168,6 +192,14 @@ class ReasonerConfig:
             ("workers", self.workers),
         )
 
+        # Omit the new optional limit to preserve existing default cache identities.
+        if self.max_native_symbol_index_bytes is not None:
+            values = tuple(
+                sorted(
+                    (*values, ("max_native_symbol_index_bytes", self.max_native_symbol_index_bytes))
+                )
+            )
+
         # Preserve default cache identities; strict admission partitions opted-in sessions.
         return (
             (*values, ("require_native_pipeline", True)) if self.require_native_pipeline else values
@@ -177,6 +209,12 @@ class ReasonerConfig:
         """Return a stable diagnostic mapping without callback/object identities."""
 
         return dict(self.semantic_items())
+
+
+# Python 3.10 replaces __setstate__ when adding slots to a frozen dataclass.
+# Restore the validated method after decoration, retaining the generated fields,
+# constructor, equality and hashing behavior on every supported Python version.
+ReasonerConfig.__setstate__ = ReasonerConfig._restore_pickle_state  # type: ignore[method-assign]
 
 
 __all__ = [

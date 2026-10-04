@@ -77,7 +77,7 @@ _MATERIAL_FILES = (
     "pyproject.toml",
     _CORE_COMPATIBILITY_PATH,
     "reports/licensing/adapted-files.toml",
-    "reports/release/0.2.1-owner-release-override.md",
+    "reports/release/0.2.2-owner-release-override.md",
     "setup.cfg",
     "setup.py",
     "src/pyhermit/_version.py",

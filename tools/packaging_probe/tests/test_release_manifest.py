@@ -24,7 +24,7 @@ from tools.packaging_probe.release_manifest import (
 )
 
 _REVISION = "a" * 40
-_VERSION = "0.2.1"
+_VERSION = "0.2.2"
 _NATIVE_PLATFORMS = (
     "manylinux_2_17_x86_64",
     "manylinux_2_17_aarch64",
@@ -302,7 +302,7 @@ class ReleaseManifestTests(unittest.TestCase):
         )
         self.assertIn("tests/packaging/installed_smoke.py", _MATERIAL_FILES)
         self.assertIn("release/core-compatibility.json", _MATERIAL_FILES)
-        self.assertIn("reports/release/0.2.1-owner-release-override.md", _MATERIAL_FILES)
+        self.assertIn("reports/release/0.2.2-owner-release-override.md", _MATERIAL_FILES)
         self.assertEqual(
             provenance["tested_runtime"],
             {
