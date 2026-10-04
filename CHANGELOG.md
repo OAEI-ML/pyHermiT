@@ -2,6 +2,15 @@
 
 All notable user-visible changes are recorded here.
 
+## Unreleased
+
+- Added an explicit native symbol-index memory limit for large ontologies while preserving
+  the existing 64 MiB default, legacy service-context export limit and default configuration
+  identities. Existing pickled configurations retain their field alignment. Unsupported native
+  builds reject an explicit setting instead of ignoring it.
+- Recheck native symbol-index memory and cancellation when reacquiring a cached index owner, and retain memory
+  limits on internal profile handoffs even when no Python cancellation token is supplied.
+
 ## 0.2.1 — 2026-09-20
 
 - Added opt-in strict native pipeline admission using owner-bound pyowl-core validation

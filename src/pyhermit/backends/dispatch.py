@@ -123,6 +123,15 @@ def select_backend_factory(config: ReasonerConfig) -> BackendFactory:
             )
         require_native_pipeline_support()
         selected = BackendName.NATIVE
+    if config.max_native_symbol_index_bytes is not None:
+        if selected is BackendName.PYTHON:
+            raise NativeBackendUnavailableError(
+                "max_native_symbol_index_bytes requires a native or verification backend",
+                context={"reason": "native_symbol_index_backend_mismatch"},
+            )
+        # An explicitly requested native resource policy must never disappear in fallback.
+        if selected is BackendName.AUTO:
+            selected = BackendName.NATIVE
     if selected is BackendName.PYTHON:
         from pyhermit.backends.python import PythonBackendFactory
 
@@ -135,6 +144,15 @@ def select_backend_factory(config: ReasonerConfig) -> BackendFactory:
         return PythonBackendFactory()
     if not probe.availability.available:
         _raise_native_unavailable(probe.availability)
+
+    if (
+        config.max_native_symbol_index_bytes is not None
+        and "native-symbol-index-limit-v1" not in getattr(probe.module, "FEATURES", ())
+    ):
+        raise BackendVersionError(
+            "native backend does not support max_native_symbol_index_bytes",
+            context={"reason": "native_symbol_index_limit_unavailable"},
+        )
 
     # WPR4 owns the complete adapter. Importing this module is deliberately deferred until
     # a complete extension has passed its handshake, so Python mode never imports native code.

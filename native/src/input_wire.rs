@@ -146,6 +146,7 @@ enum SectionKind {
     Delta = 34,
     DeltaFacts = 35,
     StringRefs = 36,
+    NativeSymbolIndexLimit = 37,
 }
 
 impl SectionKind {
@@ -182,6 +183,7 @@ impl SectionKind {
             34 => Some(Self::Delta),
             35 => Some(Self::DeltaFacts),
             36 => Some(Self::StringRefs),
+            37 => Some(Self::NativeSymbolIndexLimit),
             _ => None,
         }
     }
@@ -211,7 +213,7 @@ impl SectionKind {
             Self::Datatype => Some(16),
             Self::Expressivity => Some(8),
             Self::Entities => Some(20),
-            Self::DatatypeDefinitions | Self::StringRefs => Some(8),
+            Self::DatatypeDefinitions | Self::StringRefs | Self::NativeSymbolIndexLimit => Some(8),
             Self::Config => Some(64),
             Self::Query => Some(152),
             Self::Delta => Some(108),
@@ -1058,6 +1060,7 @@ pub struct DecodedConfig {
     pub force_quasi_order_classification: bool,
     pub workers: u32,
     pub max_memory_bytes: Option<u64>,
+    pub max_native_symbol_index_bytes: Option<u64>,
     pub deterministic: bool,
 }
 
@@ -1284,7 +1287,26 @@ pub fn decode_ontology(bytes: Vec<u8>, limits: &DecodeLimits) -> InputResult<Dec
 /// Decode and validate one semantic configuration input document.
 pub fn decode_config(bytes: Vec<u8>, limits: &DecodeLimits) -> InputResult<DecodedConfig> {
     let document = Document::parse(bytes, DocumentKind::Config, limits)?;
-    document.reject_unexpected(&[SectionKind::Config])?;
+    document.reject_unexpected(&[SectionKind::Config, SectionKind::NativeSymbolIndexLimit])?;
+    let max_native_symbol_index_bytes = if document
+        .sections
+        .contains_key(&SectionKind::NativeSymbolIndexLimit)
+    {
+        if document.count(SectionKind::NativeSymbolIndexLimit)? != 1 {
+            return Err(InputWireError::wire(
+                "native symbol index limit must contain exactly one record",
+            ));
+        }
+        let maximum = read_u64(document.require(SectionKind::NativeSymbolIndexLimit)?, 0)?;
+        if maximum == 0 {
+            return Err(InputWireError::wire(
+                "native symbol index limit must be positive",
+            ));
+        }
+        Some(maximum)
+    } else {
+        None
+    };
     let record = document.require(SectionKind::Config)?;
     if record[..32].iter().any(|value| *value != 0) {
         return Err(InputWireError::version(
@@ -1324,6 +1346,7 @@ pub fn decode_config(bytes: Vec<u8>, limits: &DecodeLimits) -> InputResult<Decod
         force_quasi_order_classification: flags & (1 << 2) != 0,
         workers,
         max_memory_bytes: has_maximum.then_some(maximum),
+        max_native_symbol_index_bytes,
         deterministic: flags & (1 << 3) != 0,
     })
 }
