@@ -750,8 +750,11 @@ impl Budget {
             EncodedValidationError::resource("permanent-program work count overflowed")
         })?;
         if following > self.limits.max_work {
-            return Err(EncodedValidationError::resource(
+            return Err(EncodedValidationError::work_limit(
                 "permanent-program assembly exceeds its work limit",
+                self.work,
+                amount,
+                self.limits.max_work,
             ));
         }
         self.work = following;
@@ -4333,6 +4336,38 @@ fn sort_work(count: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assembly_work_limit_is_inclusive_and_overflow_is_checked() -> EncodedResult<()> {
+        let mut budget = Budget::new(
+            PermanentProgramLimits {
+                max_work: 64,
+                ..PermanentProgramLimits::default()
+            },
+            0,
+        )?;
+        budget.claim_work(32)?;
+        budget.claim_work(32)?;
+        let error = budget.claim_work(1).expect_err("assembly work limit");
+        for (field, expected) in [
+            ("limit", "compilation-work"),
+            ("current_work", "64"),
+            ("requested_work", "1"),
+            ("max_work", "64"),
+        ] {
+            assert_eq!(error.context.get(field).map(String::as_str), Some(expected));
+        }
+        assert_eq!(budget.work, 64);
+
+        budget.limits.max_work = u64::MAX;
+        budget.work = u64::MAX - 1;
+        budget.claim_work(1)?;
+        let error = budget.claim_work(1).expect_err("assembly work overflow");
+        assert_eq!(error.code, "NATIVE_ENCODED_RESOURCE_LIMIT");
+        assert_eq!(error.message, "permanent-program work count overflowed");
+        assert_eq!(budget.work, u64::MAX);
+        Ok(())
+    }
 
     #[test]
     fn semantic_digest_writer_preserves_every_byte_across_poll_boundaries() {

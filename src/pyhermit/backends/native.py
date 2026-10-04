@@ -558,6 +558,12 @@ class NativeBackendFactory:
         if not isinstance(cancellation, CancellationToken):
             raise TypeError("cancellation must be CancellationToken")
         cancellation.check()
+        self._require_resource_limit_support(config)
+        if config.max_compile_work is not None:
+            raise BackendVersionError(
+                "max_compile_work requires encoded native input",
+                context={"reason": "native_compile_work_requires_encoded_input"},
+            )
         codec = _load_input_codec()
         ontology_wire = codec.encode_ontology(ontology)
         config_wire = codec.encode_config(config)
@@ -678,6 +684,11 @@ class NativeBackendFactory:
                 origin_context=contexts.origin_context,
                 **({"profile_summary_only": True} if summary_only else {}),
                 **({"require_native_pipeline": True} if config.require_native_pipeline else {}),
+                **(
+                    {"max_compile_work": config.max_compile_work}
+                    if config.max_compile_work is not None
+                    else {}
+                ),
             ),
             ingestion_counters=ingestion_counters,
         )
@@ -766,9 +777,32 @@ class NativeBackendFactory:
                 origin_context=None if contexts is None else contexts.origin_context,
                 **({"profile_summary_only": True} if summary_only else {}),
                 **({"require_native_pipeline": True} if config.require_native_pipeline else {}),
+                **(
+                    {"max_compile_work": config.max_compile_work}
+                    if config.max_compile_work is not None
+                    else {}
+                ),
             ),
             ingestion_counters=ingestion_counters,
         )
+
+    def _require_resource_limit_support(self, config: ReasonerConfig) -> None:
+        if (
+            config.max_native_symbol_index_bytes is not None
+            and "native-symbol-index-limit-v1" not in self._info.complete_features
+        ):
+            raise BackendVersionError(
+                "native backend does not support max_native_symbol_index_bytes",
+                context={"reason": "native_symbol_index_limit_unavailable"},
+            )
+        if (
+            config.max_compile_work is not None
+            and "native-compilation-resource-limits-v1" not in self._info.complete_features
+        ):
+            raise BackendVersionError(
+                "native backend does not support max_compile_work",
+                context={"reason": "native_compile_work_unavailable"},
+            )
 
     def _construct_adapter_session(
         self,
@@ -780,14 +814,7 @@ class NativeBackendFactory:
         *,
         ingestion_counters: Mapping[str, bool | int] | None = None,
     ) -> NativeBackendSession:
-        if (
-            config.max_native_symbol_index_bytes is not None
-            and "native-symbol-index-limit-v1" not in self._info.complete_features
-        ):
-            raise BackendVersionError(
-                "native backend does not support max_native_symbol_index_bytes",
-                context={"reason": "native_symbol_index_limit_unavailable"},
-            )
+        self._require_resource_limit_support(config)
         cancellation.check()
         remaining = cancellation.remaining_seconds
         if remaining is not None and remaining <= 0:

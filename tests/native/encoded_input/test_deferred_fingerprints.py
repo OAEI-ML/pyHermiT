@@ -715,3 +715,58 @@ def test_fingerprint_cancellation_and_budget_failures_discard_then_retry() -> No
         assert retry._debug_source_fingerprints
     finally:
         retry.close()
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_deferred_identity_retains_combined_native_resource_options(strict: bool) -> None:
+    sources = tuple(
+        pyowl_core.load_snapshot(
+            _functional(
+                identifier, "Declaration(Class(:A))", "Declaration(Class(:B))", "SubClassOf(:A :B)"
+            ),
+            options=pyowl_core.LoadOptions(backend=pyowl_core.BackendPreference.NATIVE),
+        )
+        for identifier in ("combined-left", "combined-right")
+    )
+    composite = pyowl_core.compose_views(*sources, roles=("left", "right"))
+    eager = capture_compatible_view(composite)
+    deferred = capture_compatible_view_deferred(composite)
+    lease = negotiate_encoded_input(composite, {ENCODED_SCHEMA_NAME: ENCODED_SCHEMA_VERSION}).lease
+    assert lease is not None
+    config = ReasonerConfig(
+        backend="native",
+        require_native_pipeline=strict,
+        max_compile_work=(1 << 64) - 1,
+        max_memory_bytes=16 * 1024**2,
+        max_native_symbol_index_bytes=1024**2,
+    )
+    metadata, request = encode_deferred_encoded_session_metadata(
+        deferred, config, structural_mode=_deferred_structural_mode(lease)
+    )
+    arguments = {
+        "slices": _encoded_slice_records(lease.root_slices()),
+        "metadata": metadata,
+        "config": encode_config(config),
+        "cancellation": native.CancellationHandle(max_memory_bytes=config.max_memory_bytes),
+        "require_native_pipeline": strict,
+        "max_compile_work": config.max_compile_work,
+    }
+    stale_template = request[-1].replace(
+        b'"max_compile_work":18446744073709551615', b'"max_compile_work":1'
+    )
+    assert stale_template != request[-1]
+    with pytest.raises(BackendMismatchError, match="configuration"):
+        native._create_encoded_session_v1(
+            **arguments, deferred_fingerprints=(*request[:-1], stale_template)
+        )
+    session = native._create_encoded_session_v1(**arguments, deferred_fingerprints=request)
+    try:
+        assert session.ontology_fingerprint == compiler_cache_key(eager, config)
+        assert session._debug_source_fingerprints == (
+            eager.structural_fingerprint.hex,
+            eager.logical_fingerprint.hex,
+            eager.signature_fingerprint.hex,
+        )
+        assert session.check(None)
+    finally:
+        session.close()

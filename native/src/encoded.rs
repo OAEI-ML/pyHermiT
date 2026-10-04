@@ -77,6 +77,19 @@ impl EncodedValidationError {
         }
     }
 
+    pub(crate) fn work_limit(
+        message: impl Into<String>,
+        current: u64,
+        requested: u64,
+        maximum: u64,
+    ) -> Self {
+        Self::resource(message)
+            .with_context("limit", "compilation-work")
+            .with_context("current_work", current.to_string())
+            .with_context("requested_work", requested.to_string())
+            .with_context("max_work", maximum.to_string())
+    }
+
     fn invariant(message: impl Into<String>) -> Self {
         Self {
             code: "NATIVE_ENCODED_INVARIANT",
@@ -1887,8 +1900,11 @@ fn claim_work(work: &mut u64, amount: u64, maximum: u64) -> EncodedResult<()> {
         .checked_add(amount)
         .ok_or_else(|| EncodedValidationError::resource("encoded validation work overflow"))?;
     if following > maximum {
-        return Err(EncodedValidationError::resource(
+        return Err(EncodedValidationError::work_limit(
             "encoded validation exceeds its work limit",
+            *work,
+            amount,
+            maximum,
         ));
     }
     *work = following;

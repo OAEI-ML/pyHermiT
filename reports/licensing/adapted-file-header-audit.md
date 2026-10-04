@@ -74,3 +74,11 @@ modification, SPDX, and pinned-HermiT notices remain intact.
 
 This engineering refresh does not change the license, upstream mapping, legal-review status,
 LIC-001 gate, or existing release authorization. It is not legal advice or approval to publish.
+
+## Compilation-resource source-hash refresh — 2026-10-04
+
+The optional native compilation-work allowance and backward-compatible pickle restoration
+update `src/pyhermit/config.py`. It remains the only adapted file changed by this follow-up;
+its inventory hash was refreshed to the current source bytes after compatibility checks.
+The upstream components, adaptation statement, copyright/SPDX notices, license and release
+authorization remain unchanged. The complete executable inventory audit remains required.

@@ -56,6 +56,7 @@ def test_private_abi_handshake_claims_only_completed_versioned_features() -> Non
         "encoded-structural-compiler-v2",
         "full_reasoner",
         "incremental_updates",
+        "native-compilation-resource-limits-v1",
         "native-profile-summary-v1",
         "native-query-delta-v1",
         "native-result-owner-v1",

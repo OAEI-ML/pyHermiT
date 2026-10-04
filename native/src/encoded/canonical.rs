@@ -35,6 +35,12 @@ pub(crate) trait CanonicalBudget {
     fn claim_canonical_work(&mut self, amount: usize) -> EncodedResult<()>;
 
     fn claim_canonical_owned(&mut self, amount: usize) -> EncodedResult<()>;
+
+    /// Release temporary serialization bytes for budgets that track live ownership.
+    /// Other compiler phases retain their historical accounting until migrated.
+    fn release_canonical_owned(&mut self, _amount: usize) -> EncodedResult<()> {
+        Ok(())
+    }
 }
 
 pub(crate) fn validate_scope_maps(
@@ -69,7 +75,9 @@ pub(crate) fn source_axiom_digest<B: ByteSource>(
 ) -> EncodedResult<[u8; 32]> {
     let encoded = canonical_node_bytes(model, root, scope_maps, 0, None, budget)?;
     budget.claim_canonical_work(encoded.len())?;
-    Ok(Sha256::digest(encoded).into())
+    let digest = Sha256::digest(&encoded).into();
+    budget.release_canonical_owned(encoded.len())?;
+    Ok(digest)
 }
 
 /// Own the exact canonical key for one validated structural node.
@@ -111,7 +119,9 @@ pub(crate) fn annotation_stripped_axiom_digest<B: ByteSource>(
 ) -> EncodedResult<[u8; 32]> {
     let encoded = annotation_stripped_node_key(model, root, &[], budget)?;
     budget.claim_canonical_work(encoded.len())?;
-    Ok(Sha256::digest(encoded).into())
+    let digest = Sha256::digest(&encoded).into();
+    budget.release_canonical_owned(encoded.len())?;
+    Ok(digest)
 }
 
 /// Own the canonical key for an axiom or extension after removing only its
@@ -250,7 +260,8 @@ fn append_canonical_component<B: ByteSource>(
                 entity_keys.as_deref_mut(),
                 budget,
             )?;
-            push_frame(target, &encoded, budget)
+            push_frame(target, &encoded, budget)?;
+            budget.release_canonical_owned(encoded.len())
         }
         ComponentValue::Scalar(scalar) => {
             append_canonical_scalar(target, scalar, scope_maps, anonymous_scope, budget)
@@ -295,6 +306,7 @@ fn append_canonical_component<B: ByteSource>(
                         budget,
                     )?;
                     push_frame(target, &encoded, budget)?;
+                    budget.release_canonical_owned(encoded.len())?;
                 } else {
                     append_canonical_component(
                         target,

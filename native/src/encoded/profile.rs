@@ -525,6 +525,98 @@ pub struct ProfilePhase {
 }
 
 impl ProfilePhase {
+    /// Only allocations retained by the published phase belong to the next stage.
+    /// Traversal stacks, dropped canonical children and removed duplicate rows do not.
+    fn retained_owned_bytes(&self, limits: ProfilePhaseLimits) -> EncodedResult<usize> {
+        let mut budget = PhaseBudget::new(limits);
+        macro_rules! vectors {
+            ($($values:expr),+ $(,)?) => { $(
+                claim_vector_capacity($values, &mut budget)?;
+            )+ };
+        }
+        vectors!(
+            &self.issues,
+            &self.axiom_keys,
+            &self.extension_keys,
+            &self.anonymous_vertices,
+            &self.anonymous_assertions,
+            &self.entity_uses,
+            &self.entity_declarations,
+            &self.datatype_definitions,
+            &self.datatype_range_failures,
+            &self.literals,
+            &self.role_inclusions,
+            &self.complex_role_inclusions,
+            &self.non_simple_role_seeds,
+            &self.simple_role_requirements,
+        );
+        for issue in &self.issues {
+            if let Cow::Owned(message) = &issue.message {
+                budget.claim_owned(message.capacity())?;
+            }
+            vectors!(&issue.document_keys);
+            for document in &issue.document_keys {
+                budget.claim_owned(document.capacity())?;
+            }
+        }
+        for values in [
+            &self.axiom_keys,
+            &self.extension_keys,
+            &self.anonymous_vertices,
+        ] {
+            for value in values {
+                vectors!(value);
+            }
+        }
+        for assertion in &self.anonymous_assertions {
+            vectors!(&assertion.axiom_key);
+            for endpoint in [&assertion.source, &assertion.target].into_iter().flatten() {
+                vectors!(endpoint);
+            }
+        }
+        for values in [&self.entity_uses, &self.entity_declarations] {
+            for value in values {
+                vectors!(&value.iri);
+            }
+        }
+        for value in &self.datatype_definitions {
+            vectors!(
+                &value.statement_order_key,
+                &value.datatype_iri,
+                &value.references
+            );
+            for reference in &value.references {
+                vectors!(reference);
+            }
+        }
+        for value in &self.datatype_range_failures {
+            vectors!(&value.canonical_key);
+        }
+        for value in &self.literals {
+            vectors!(&value.canonical_key, &value.datatype_iri);
+        }
+        for value in &self.role_inclusions {
+            vectors!(&value.sub_role.iri, &value.super_role.iri);
+        }
+        for value in &self.complex_role_inclusions {
+            vectors!(
+                &value.super_role.iri,
+                &value.chain_roles,
+                &value.statement_order_key
+            );
+            for role in &value.chain_roles {
+                vectors!(&role.iri);
+            }
+        }
+        for value in &self.non_simple_role_seeds {
+            vectors!(&value.iri);
+        }
+        for value in &self.simple_role_requirements {
+            vectors!(&value.role.iri);
+        }
+        Ok(budget.owned_bytes)
+    }
+
     /// Canonical private manifest used for exact scalar differential checks.
     pub fn canonical_manifest_json(&self) -> EncodedResult<Vec<u8>> {
         self.canonical_manifest_json_with_origins(false)
@@ -688,8 +780,11 @@ impl PhaseBudget {
             .checked_add(amount)
             .ok_or_else(|| EncodedValidationError::resource("profile work overflowed"))?;
         if following > self.limits.max_work {
-            return Err(EncodedValidationError::resource(
+            return Err(EncodedValidationError::work_limit(
                 "profile compilation exceeds its work limit",
+                self.work,
+                amount,
+                self.limits.max_work,
             ));
         }
         self.work = following;
@@ -703,9 +798,20 @@ impl PhaseBudget {
         if following > self.limits.max_owned_bytes {
             return Err(EncodedValidationError::resource(
                 "profile compilation exceeds its owned-byte limit",
-            ));
+            )
+            .with_context("limit", "profile-owned-bytes")
+            .with_context("current_bytes", self.owned_bytes.to_string())
+            .with_context("requested_bytes", amount.to_string())
+            .with_context("max_owned_bytes", self.limits.max_owned_bytes.to_string()));
         }
         self.owned_bytes = following;
+        Ok(())
+    }
+
+    fn release_owned(&mut self, amount: usize) -> EncodedResult<()> {
+        self.owned_bytes = self.owned_bytes.checked_sub(amount).ok_or_else(|| {
+            EncodedValidationError::invariant("profile ownership release exceeds retained bytes")
+        })?;
         Ok(())
     }
 
@@ -892,6 +998,10 @@ impl CanonicalBudget for PhaseBudget {
 
     fn claim_canonical_owned(&mut self, amount: usize) -> EncodedResult<()> {
         self.claim_owned(amount)
+    }
+
+    fn release_canonical_owned(&mut self, amount: usize) -> EncodedResult<()> {
+        self.release_owned(amount)
     }
 }
 
@@ -1125,7 +1235,9 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
 
     let node_count = summary.node_count;
     budget
-        .claim_owned(node_count)
+        .claim_owned(node_count.checked_mul(size_of::<u32>()).ok_or_else(|| {
+            EncodedValidationError::resource("profile traversal mark size overflowed")
+        })?)
         .map_err(ProfilePhaseError::Encoded)?;
     budget
         .claim_owned(node_count.checked_mul(size_of::<NodeId>()).ok_or_else(|| {
@@ -1788,7 +1900,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         .map_err(ProfilePhaseError::Encoded)?;
     extension_keys.sort();
     extension_keys.dedup();
-    let phase = ProfilePhase {
+    let mut phase = ProfilePhase {
         conforms: profile_issues_conform(&issues),
         axioms_checked: axiom_keys.len(),
         extensions_checked: extension_keys.len(),
@@ -1810,6 +1922,7 @@ fn compile_profile_phase_with_selection<B: ByteSource, S: ByteSource, E>(
         simple_role_requirements,
         manifest_limit: limits.max_manifest_bytes,
     };
+    phase.owned_bytes = phase.retained_owned_bytes(limits)?;
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
     poll(control, "profile-complete")?;
     Ok(phase)
@@ -2453,7 +2566,7 @@ pub fn merge_profile_phases_controlled_with_policy<E>(
         .map_err(ProfilePhaseError::Encoded)?;
     extension_keys.sort();
     extension_keys.dedup();
-    let phase = ProfilePhase {
+    let mut phase = ProfilePhase {
         conforms: profile_issues_conform(&issues),
         axioms_checked: axiom_keys.len(),
         extensions_checked: extension_keys.len(),
@@ -2475,6 +2588,7 @@ pub fn merge_profile_phases_controlled_with_policy<E>(
         simple_role_requirements,
         manifest_limit: limits.max_manifest_bytes,
     };
+    phase.owned_bytes = phase.retained_owned_bytes(limits)?;
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
     poll(control, "profile-merge-complete")?;
     Ok(phase)
@@ -2618,7 +2732,7 @@ pub fn apply_ontology_identity_context_controlled<E>(
     phase.issues.dedup();
     phase.conforms = profile_issues_conform(&phase.issues);
     phase.work = budget.work;
-    phase.owned_bytes = budget.owned_bytes;
+    phase.owned_bytes = phase.retained_owned_bytes(limits)?;
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
     poll(control, "profile-ontology-identity-complete")?;
     Ok(phase)
@@ -2866,7 +2980,7 @@ pub fn apply_origin_context_controlled<E>(
     phase.issues.dedup();
     phase.conforms = profile_issues_conform(&phase.issues);
     phase.work = budget.work;
-    phase.owned_bytes = budget.owned_bytes;
+    phase.owned_bytes = phase.retained_owned_bytes(limits)?;
     validate_phase(&phase).map_err(ProfilePhaseError::Encoded)?;
     poll(control, "profile-origin-complete")?;
     Ok(phase)
@@ -6710,6 +6824,17 @@ fn clone_profile_bytes(
     Ok(owned)
 }
 
+fn claim_vector_capacity<T>(values: &Vec<T>, budget: &mut PhaseBudget) -> EncodedResult<()> {
+    budget.claim_owned(
+        values
+            .capacity()
+            .checked_mul(size_of::<T>())
+            .ok_or_else(|| {
+                EncodedValidationError::resource("profile retained vector capacity overflowed")
+            })?,
+    )
+}
+
 fn reserve_profile_one<T>(
     values: &mut Vec<T>,
     budget: &mut PhaseBudget,
@@ -7252,6 +7377,103 @@ mod tests {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect()
+    }
+
+    #[test]
+    fn canonical_scratch_is_released_between_profile_roots() -> EncodedResult<()> {
+        let columns = invalid_data_arity_columns();
+        let model = ValidatedModel::new(columns.borrowed(), EncodedLimits::default())?;
+        let root = model
+            .root(0)?
+            .ok_or_else(|| EncodedValidationError::invariant("test profile fixture has no root"))?;
+        let mut budget = PhaseBudget::new(ProfilePhaseLimits::default());
+        let key = canonical::canonical_node_key(&model, root.node(), &[], &mut budget)?;
+        // The returned key is retained; recursively built child buffers are already gone.
+        assert_eq!(budget.owned_bytes, key.len());
+        budget.release_owned(key.len())?;
+        assert_eq!(budget.owned_bytes, 0);
+        budget.limits.max_owned_bytes = key.len() * 3;
+        for _ in 0..100 {
+            let repeated = canonical::canonical_node_key(&model, root.node(), &[], &mut budget)?;
+            assert_eq!(repeated, key);
+            budget.release_owned(repeated.len())?;
+        }
+        assert_eq!(budget.owned_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn profile_ownership_limit_reports_current_request_and_allowance() -> EncodedResult<()> {
+        let mut budget = PhaseBudget::new(ProfilePhaseLimits {
+            max_owned_bytes: 64,
+            ..ProfilePhaseLimits::default()
+        });
+        budget.claim_owned(32)?;
+        let Err(error) = budget.claim_owned(33) else {
+            return Err(EncodedValidationError::invariant(
+                "profile limit was not enforced",
+            ));
+        };
+        assert_eq!(
+            error.context.get("limit").map(String::as_str),
+            Some("profile-owned-bytes")
+        );
+        assert_eq!(
+            error.context.get("current_bytes").map(String::as_str),
+            Some("32")
+        );
+        assert_eq!(
+            error.context.get("requested_bytes").map(String::as_str),
+            Some("33")
+        );
+        assert_eq!(
+            error.context.get("max_owned_bytes").map(String::as_str),
+            Some("64")
+        );
+        assert_eq!(budget.owned_bytes, 32);
+        budget.release_owned(32)?;
+        budget.claim_owned(64)?;
+        Ok(())
+    }
+
+    #[test]
+    fn profile_work_limit_reports_current_request_and_allowance() -> EncodedResult<()> {
+        let mut budget = PhaseBudget::new(ProfilePhaseLimits {
+            max_work: 64,
+            ..ProfilePhaseLimits::default()
+        });
+        budget.claim_work_u64(32)?;
+        let Err(error) = budget.claim_work_u64(33) else {
+            return Err(EncodedValidationError::invariant(
+                "profile work limit was not enforced",
+            ));
+        };
+        for (field, expected) in [
+            ("limit", "compilation-work"),
+            ("current_work", "32"),
+            ("requested_work", "33"),
+            ("max_work", "64"),
+        ] {
+            assert_eq!(error.context.get(field).map(String::as_str), Some(expected));
+        }
+        assert_eq!(budget.work, 32);
+        Ok(())
+    }
+
+    #[test]
+    fn profile_publication_counts_retained_allocations_and_keeps_validation() -> EncodedResult<()> {
+        let columns = invalid_data_arity_columns();
+        let model = ValidatedModel::new(columns.borrowed(), EncodedLimits::default())?;
+        let limits = ProfilePhaseLimits::default();
+        let phase = compile_profile_phase(&model, &[], limits)?;
+        assert!(!phase.conforms);
+        let manifest = phase.canonical_manifest_json()?;
+        let retained = phase.retained_owned_bytes(limits)?;
+        assert_eq!(phase.owned_bytes, retained);
+        let merged = merge_profile_phases(vec![phase.clone(), phase], limits)?;
+        assert_eq!(merged.canonical_manifest_json()?, manifest);
+        assert_eq!(merged.owned_bytes, merged.retained_owned_bytes(limits)?);
+        Ok(())
     }
 
     fn invalid_data_arity_columns() -> OwnedColumns {

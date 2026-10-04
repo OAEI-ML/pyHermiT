@@ -132,6 +132,15 @@ def select_backend_factory(config: ReasonerConfig) -> BackendFactory:
         # An explicitly requested native resource policy must never disappear in fallback.
         if selected is BackendName.AUTO:
             selected = BackendName.NATIVE
+    if config.max_compile_work is not None:
+        # Verification also performs reference/preflight compilation outside this allowance.
+        if selected in (BackendName.PYTHON, BackendName.VERIFY):
+            raise NativeBackendUnavailableError(
+                "max_compile_work requires native or auto mode with encoded native input",
+                context={"reason": "native_compile_work_backend_mismatch"},
+            )
+        if selected is BackendName.AUTO:
+            selected = BackendName.NATIVE
     if selected is BackendName.PYTHON:
         from pyhermit.backends.python import PythonBackendFactory
 
@@ -152,6 +161,15 @@ def select_backend_factory(config: ReasonerConfig) -> BackendFactory:
         raise BackendVersionError(
             "native backend does not support max_native_symbol_index_bytes",
             context={"reason": "native_symbol_index_limit_unavailable"},
+        )
+
+    if (
+        config.max_compile_work is not None
+        and "native-compilation-resource-limits-v1" not in getattr(probe.module, "FEATURES", ())
+    ):
+        raise BackendVersionError(
+            "native backend does not support max_compile_work",
+            context={"reason": "native_compile_work_unavailable"},
         )
 
     # WPR4 owns the complete adapter. Importing this module is deliberately deferred until

@@ -201,8 +201,11 @@ impl PhaseBudget {
             EncodedValidationError::resource("role-characteristic work overflowed")
         })?;
         if following > self.limits.max_work {
-            return Err(EncodedValidationError::resource(
+            return Err(EncodedValidationError::work_limit(
                 "role-characteristic compilation exceeds its work limit",
+                self.work,
+                amount,
+                self.limits.max_work,
             ));
         }
         self.work = following;

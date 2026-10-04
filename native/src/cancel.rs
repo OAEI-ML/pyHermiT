@@ -79,6 +79,13 @@ impl CancellationState {
         self.memory_bytes.fetch_max(amount, Ordering::AcqRel);
     }
 
+    /// Snapshot the allowance for the current serialized operation.
+    #[must_use]
+    pub(crate) fn max_memory_bytes(&self) -> Option<u64> {
+        let maximum = self.max_memory_bytes.load(Ordering::Acquire);
+        (maximum != 0).then_some(maximum)
+    }
+
     pub fn poll(&self) -> NativeResult<()> {
         let _ = self
             .poll_count
@@ -341,6 +348,7 @@ mod tests {
     #[test]
     fn interruption_and_resource_limits_are_stable() -> NativeResult<()> {
         let handle = CancellationHandle::from_options(None, Some(8))?;
+        assert_eq!(handle.state.max_memory_bytes(), Some(8));
         handle.state.observe_memory(9);
         assert_eq!(
             handle.state.poll().err().map(|error| error.kind),
@@ -348,6 +356,7 @@ mod tests {
         );
 
         let handle = CancellationHandle::from_options(None, None)?;
+        assert_eq!(handle.state.max_memory_bytes(), None);
         assert!(handle.state.interrupt(Some("stop".to_owned()))?);
         assert!(!handle.state.interrupt(None)?);
         assert_eq!(
@@ -356,6 +365,7 @@ mod tests {
         );
 
         handle.state.reset(None, Some(16))?;
+        assert_eq!(handle.state.max_memory_bytes(), Some(16));
         assert!(!handle.state.interrupted());
         handle.state.observe_memory(9);
         handle.state.poll()?;

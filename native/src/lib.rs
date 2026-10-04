@@ -2598,9 +2598,11 @@ fn compile_encoded_slice_symbol_phases<B: encoded::ByteSource>(
                 ),
             ));
         }
-        let model =
-            encoded::model::ValidatedModel::new(slice.columns, encoded::EncodedLimits::default())
-                .map_err(encoded_validation_error)?;
+        let model = encoded::model::ValidatedModel::new(
+            slice.columns,
+            configured_encoded_limits(limits.max_work),
+        )
+        .map_err(encoded_validation_error)?;
         let symbol_limits = encoded::symbols::SymbolPhaseLimits {
             max_owned_bytes: limits
                 .max_owned_bytes
@@ -2701,6 +2703,7 @@ fn compile_encoded_slice_program_inputs_controlled<B: encoded::ByteSource>(
         definition_namespace,
         None,
         None,
+        None,
         poll,
     )
     .map(|(program, _fingerprints)| program)
@@ -2714,6 +2717,7 @@ fn compile_encoded_slice_program_inputs_with_fingerprints_controlled<B: encoded:
         encoded::fingerprints::StructuralFingerprintMode,
     )>,
     max_owned_bytes: Option<usize>,
+    max_compile_work: Option<u64>,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<(
     encoded::permanent_program::EncodedSliceProgram,
@@ -2722,6 +2726,9 @@ fn compile_encoded_slice_program_inputs_with_fingerprints_controlled<B: encoded:
     let mut limits = encoded::named_classes::NamedClassPhaseLimits::default();
     if let Some(maximum) = max_owned_bytes {
         limits.max_owned_bytes = maximum;
+    }
+    if let Some(maximum) = max_compile_work {
+        limits.max_work = maximum;
     }
     if slices.is_empty() {
         return Err(encoded_slice_invalid(
@@ -2745,6 +2752,7 @@ fn compile_encoded_slice_program_inputs_with_fingerprints_controlled<B: encoded:
         }
         let fingerprint_limits = encoded::fingerprints::FingerprintPhaseLimits {
             max_owned_bytes: limits.max_owned_bytes,
+            max_work: limits.max_work,
             ..encoded::fingerprints::FingerprintPhaseLimits::default()
         };
         let symbol_headers = symbol_phases
@@ -2799,7 +2807,7 @@ fn compile_encoded_slice_program_inputs_with_fingerprints_controlled<B: encoded:
         for (slice, symbols) in slices.iter().zip(&symbol_phases) {
             let model = encoded::model::ValidatedModel::new(
                 slice.columns,
-                encoded::EncodedLimits::default(),
+                configured_encoded_limits(limits.max_work),
             )
             .map_err(encoded_validation_error)?;
             let retained_owned =
@@ -2950,9 +2958,11 @@ fn compile_encoded_slice_program_inputs_with_fingerprints_controlled<B: encoded:
     let mut source_work = 0_u64;
     let mut source_owned = 0_usize;
     for slice in slices {
-        let model =
-            encoded::model::ValidatedModel::new(slice.columns, encoded::EncodedLimits::default())
-                .map_err(encoded_validation_error)?;
+        let model = encoded::model::ValidatedModel::new(
+            slice.columns,
+            configured_encoded_limits(limits.max_work),
+        )
+        .map_err(encoded_validation_error)?;
         let symbols = symbol_phases.next().ok_or_else(|| {
             NativeError::new(
                 ErrorKind::Invariant,
@@ -4052,20 +4062,21 @@ fn permanent_program_mismatch(
 
 fn compile_encoded_profile_slices_controlled(
     slices: &Bound<'_, PyAny>,
+    limits: encoded::profile::ProfilePhaseLimits,
     unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<encoded::profile::ProfilePhase> {
     let leases = prepare_borrowed_encoded_slices(slices)?;
     let inputs = borrowed_encoded_slice_inputs(&leases)?;
-    compile_encoded_profile_slice_inputs_controlled(&inputs, unsupported_datatypes, poll)
+    compile_encoded_profile_slice_inputs_controlled(&inputs, limits, unsupported_datatypes, poll)
 }
 
 fn compile_encoded_profile_slice_inputs_controlled<B: encoded::ByteSource>(
     slices: &[EncodedSliceInput<B>],
+    limits: encoded::profile::ProfilePhaseLimits,
     unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<encoded::profile::ProfilePhase> {
-    let limits = encoded::profile::ProfilePhaseLimits::default();
     if slices.is_empty() {
         return Err(encoded_slice_invalid(
             "encoded profile slice program requires at least one slice",
@@ -4124,9 +4135,11 @@ fn compile_encoded_profile_slice_inputs_controlled<B: encoded::ByteSource>(
             ))
         })?;
 
-        let model =
-            encoded::model::ValidatedModel::new(slice.columns, encoded::EncodedLimits::default())
-                .map_err(encoded_validation_error)?;
+        let model = encoded::model::ValidatedModel::new(
+            slice.columns,
+            configured_encoded_limits(limits.max_work),
+        )
+        .map_err(encoded_validation_error)?;
         let phase = encoded::profile::compile_profile_phase_selected_controlled_with_policy(
             &model,
             &scope_maps,
@@ -4164,16 +4177,17 @@ fn compile_encoded_profile_slice_inputs_controlled<B: encoded::ByteSource>(
 
 fn compile_encoded_profile_slices_manifest_controlled(
     slices: &Bound<'_, PyAny>,
+    limits: encoded::profile::ProfilePhaseLimits,
     unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
     ontology_identity_context: Option<&Bound<'_, PyAny>>,
     origin_context: Option<&Bound<'_, PyAny>>,
     poll: &mut impl FnMut(&'static str) -> NativeResult<()>,
 ) -> NativeResult<Vec<u8>> {
-    let limits = encoded::profile::ProfilePhaseLimits::default();
     let ontology_identifiers =
         decode_profile_ontology_identity_context(ontology_identity_context, limits, poll)?;
     let origins = decode_profile_origin_context(origin_context, limits, poll)?;
-    let phase = compile_encoded_profile_slices_controlled(slices, unsupported_datatypes, poll)?;
+    let phase =
+        compile_encoded_profile_slices_controlled(slices, limits, unsupported_datatypes, poll)?;
     let phase = apply_encoded_profile_contexts_controlled(
         phase,
         &ontology_identifiers,
@@ -4237,8 +4251,18 @@ fn encoded_profile_slices_manifest_v1(
         };
         let unsupported_datatypes =
             encoded_profile_unsupported_datatype_policy(unsupported_datatypes)?;
+        let limits = configured_profile_limits(
+            session_owned_limit(
+                None,
+                cancellation
+                    .as_ref()
+                    .and_then(|state| state.max_memory_bytes()),
+            )?,
+            None,
+        );
         compile_encoded_profile_slices_manifest_controlled(
             slices,
+            limits,
             unsupported_datatypes,
             ontology_identity_context,
             origin_context,
@@ -4281,6 +4305,7 @@ fn debug_encoded_profile_context_cancel_v1(
         };
         compile_encoded_profile_slices_manifest_controlled(
             slices,
+            encoded::profile::ProfilePhaseLimits::default(),
             encoded::profile::ProfileUnsupportedDatatypePolicy::Error,
             Some(ontology_identity_context),
             origin_context,
@@ -4319,7 +4344,15 @@ fn encoded_profile_manifest_v1(
         poll("profile-program-preflight")?;
         let unsupported_datatypes =
             encoded_profile_unsupported_datatype_policy(unsupported_datatypes)?;
-        let limits = encoded::profile::ProfilePhaseLimits::default();
+        let limits = configured_profile_limits(
+            session_owned_limit(
+                None,
+                cancellation
+                    .as_ref()
+                    .and_then(|state| state.max_memory_bytes()),
+            )?,
+            None,
+        );
         let ontology_identifiers =
             decode_profile_ontology_identity_context(ontology_identity_context, limits, &mut poll)?;
         let origins = decode_profile_origin_context(origin_context, limits, &mut poll)?;
@@ -5724,6 +5757,8 @@ fn deferred_compiler_cache_key(
     template: &[u8],
     metadata: &input_wire::OntologyMetadata,
     config: &DecodedConfig,
+    max_compile_work: Option<u64>,
+    require_native_pipeline: bool,
 ) -> NativeResult<[u8; 32]> {
     let mut expected = serde_json::json!({
         "compatibility_id": HERMIT_COMPATIBILITY_ID,
@@ -5763,6 +5798,12 @@ fn deferred_compiler_cache_key(
     });
     if let Some(maximum) = config.max_native_symbol_index_bytes {
         expected["config"]["max_native_symbol_index_bytes"] = maximum.into();
+    }
+    if let Some(maximum) = max_compile_work {
+        expected["config"]["max_compile_work"] = serde_json::json!(maximum);
+    }
+    if require_native_pipeline {
+        expected["config"]["require_native_pipeline"] = serde_json::json!(true);
     }
     let parsed: serde_json::Value = serde_json::from_slice(template)
         .map_err(|_| encoded_slice_invalid("deferred compiler-cache template is not valid JSON"))?;
@@ -5988,6 +6029,52 @@ const fn unsupported_datatype_choice_name(
     }
 }
 
+/// A private compiler override may tighten, but never exceed, the public allowance.
+fn session_owned_limit(
+    requested: Option<usize>,
+    configured: Option<u64>,
+) -> NativeResult<Option<usize>> {
+    let configured = configured
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                NativeError::new(
+                    ErrorKind::Resource,
+                    "RESOURCE_LIMIT",
+                    "configured memory allowance exceeds the platform width",
+                )
+                .with_context("limit", "max_memory_bytes")
+            })
+        })
+        .transpose()?;
+    Ok(match (requested, configured) {
+        (Some(requested), Some(configured)) => Some(requested.min(configured)),
+        (requested, configured) => requested.or(configured),
+    })
+}
+
+/// Keep the historical standalone default, but honor an explicit session allowance.
+fn configured_profile_limits(
+    max_owned_bytes: Option<usize>,
+    max_compile_work: Option<u64>,
+) -> encoded::profile::ProfilePhaseLimits {
+    let mut limits = encoded::profile::ProfilePhaseLimits::default();
+    if let Some(max_owned_bytes) = max_owned_bytes {
+        limits.max_owned_bytes = max_owned_bytes;
+        limits.max_manifest_bytes = max_owned_bytes;
+    }
+    if let Some(maximum) = max_compile_work {
+        limits.max_work = maximum;
+    }
+    limits
+}
+
+fn configured_encoded_limits(max_work: u64) -> encoded::EncodedLimits {
+    encoded::EncodedLimits {
+        max_work,
+        ..encoded::EncodedLimits::default()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compile_encoded_session_phases<B: encoded::ByteSource>(
     slices: &[EncodedSliceInput<B>],
@@ -5997,6 +6084,7 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
         encoded::fingerprints::StructuralFingerprintMode,
     )>,
     max_owned_bytes: Option<usize>,
+    max_compile_work: Option<u64>,
     unsupported_datatypes: encoded::profile::ProfileUnsupportedDatatypePolicy,
     ontology_identifiers: &[encoded::profile::ProfileOntologyIdentifier],
     origins: Option<&[encoded::profile::ProfileOrigin]>,
@@ -6010,6 +6098,7 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
     Option<encoded::fingerprints::ViewFingerprints>,
 )> {
     if validate_profile {
+        let profile_limits = configured_profile_limits(max_owned_bytes, max_compile_work);
         let mut poll = |phase: &'static str| {
             poll_encoded_session_checkpoint(
                 cancellation_state,
@@ -6020,6 +6109,7 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
         };
         let profile = compile_encoded_profile_slice_inputs_controlled(
             slices,
+            profile_limits,
             unsupported_datatypes,
             &mut poll,
         )?;
@@ -6028,7 +6118,7 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
                 profile,
                 ontology_identifiers,
                 true,
-                encoded::profile::ProfilePhaseLimits::default(),
+                profile_limits,
                 &mut poll,
             )
             .map_err(encoded_profile_error)?
@@ -6037,7 +6127,7 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
                 profile,
                 ontology_identifiers,
                 origins,
-                encoded::profile::ProfilePhaseLimits::default(),
+                profile_limits,
                 &mut poll,
             )?
         };
@@ -6051,6 +6141,7 @@ fn compile_encoded_session_phases<B: encoded::ByteSource>(
         namespace,
         fingerprint_request,
         max_owned_bytes,
+        max_compile_work,
         &mut poll,
     )
 }
@@ -6066,15 +6157,22 @@ fn finish_encoded_session_construction(
     mut checkpoint: u64,
     cancel_at_checkpoint: Option<u64>,
     max_owned_bytes: Option<usize>,
+    max_compile_work: Option<u64>,
     compiler_gil_released: bool,
+    require_native_pipeline: bool,
 ) -> NativeResult<NativeSession> {
     match (fingerprints, compiler_cache_template) {
         (Some(fingerprints), Some(template)) => {
             metadata.structural_fingerprint.digest = fingerprints.structural;
             metadata.logical_fingerprint.digest = fingerprints.logical;
             metadata.signature_fingerprint.digest = fingerprints.signature;
-            metadata.ontology_fingerprint =
-                deferred_compiler_cache_key(&template, &metadata, &config)?;
+            metadata.ontology_fingerprint = deferred_compiler_cache_key(
+                &template,
+                &metadata,
+                &config,
+                max_compile_work,
+                require_native_pipeline,
+            )?;
         }
         (None, None) => {}
         _ => {
@@ -6086,6 +6184,10 @@ fn finish_encoded_session_construction(
     let mut assembly_limits = encoded::permanent_program::PermanentProgramLimits::default();
     if let Some(maximum) = max_owned_bytes {
         assembly_limits.max_owned_bytes = maximum;
+        assembly_limits.max_manifest_bytes = maximum;
+    }
+    if let Some(maximum) = max_compile_work {
+        assembly_limits.max_work = maximum;
     }
     let assembled = {
         let mut poll = |phase: &'static str| {
@@ -6170,6 +6272,7 @@ fn finish_encoded_session_construction(
     ontology_identity_context=None,
     origin_context=None,
     max_owned_bytes=None,
+    max_compile_work=None,
     cancel_at_checkpoint=None
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -6186,9 +6289,15 @@ fn create_encoded_session_v1(
     ontology_identity_context: Option<&Bound<'_, PyAny>>,
     origin_context: Option<&Bound<'_, PyAny>>,
     max_owned_bytes: Option<usize>,
+    max_compile_work: Option<u64>,
     cancel_at_checkpoint: Option<u64>,
 ) -> PyResult<NativeSession> {
     let result = catch_unwind(AssertUnwindSafe(|| {
+        if max_compile_work == Some(0) {
+            return Err(encoded_slice_invalid(
+                "compilation work allowance must be positive",
+            ));
+        }
         if cancel_at_checkpoint == Some(0) {
             return Err(encoded_slice_invalid(
                 "encoded session cancellation checkpoint must be positive",
@@ -6212,6 +6321,7 @@ fn create_encoded_session_v1(
             &limits,
         )
         .map_err(map_input_wire_error)?;
+        let max_owned_bytes = session_owned_limit(max_owned_bytes, config.max_memory_bytes)?;
         let deferred_fingerprints = decode_deferred_fingerprint_request(deferred_fingerprints)?;
         if deferred_fingerprints.is_some() {
             validate_deferred_metadata(&metadata)?;
@@ -6235,12 +6345,12 @@ fn create_encoded_session_v1(
             (
                 decode_profile_ontology_identity_context(
                     ontology_identity_context,
-                    encoded::profile::ProfilePhaseLimits::default(),
+                    configured_profile_limits(max_owned_bytes, max_compile_work),
                     &mut poll,
                 )?,
                 decode_profile_origin_context(
                     origin_context,
-                    encoded::profile::ProfilePhaseLimits::default(),
+                    configured_profile_limits(max_owned_bytes, max_compile_work),
                     &mut poll,
                 )?,
             )
@@ -6263,6 +6373,7 @@ fn create_encoded_session_v1(
                         .as_ref()
                         .map(|request| (&request.context, request.structural_mode)),
                     max_owned_bytes,
+                    max_compile_work,
                     unsupported_datatypes,
                     &ontology_identifiers,
                     origins.as_deref(),
@@ -6282,7 +6393,9 @@ fn create_encoded_session_v1(
                     checkpoint,
                     cancel_at_checkpoint,
                     max_owned_bytes,
+                    max_compile_work,
                     true,
+                    require_native_pipeline,
                 )
             });
         }
@@ -6299,6 +6412,7 @@ fn create_encoded_session_v1(
                 .as_ref()
                 .map(|request| (&request.context, request.structural_mode)),
             max_owned_bytes,
+            max_compile_work,
             unsupported_datatypes,
             &ontology_identifiers,
             origins.as_deref(),
@@ -6319,7 +6433,9 @@ fn create_encoded_session_v1(
                 checkpoint,
                 cancel_at_checkpoint,
                 max_owned_bytes,
+                max_compile_work,
                 false,
+                require_native_pipeline,
             )
         })
     }));
@@ -6565,6 +6681,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
                 "encoded-structural-compiler-v2",
                 "full_reasoner",
                 "incremental_updates",
+                "native-compilation-resource-limits-v1",
                 "native-profile-summary-v1",
                 "native-query-delta-v1",
                 "native-result-owner-v1",
@@ -6713,6 +6830,38 @@ mod tests {
 
     use super::*;
     use crate::program_bridge::LoadedRuleState;
+
+    #[test]
+    fn configured_profile_budget_reaches_every_phase_without_relaxing_private_limits(
+    ) -> NativeResult<()> {
+        assert_eq!(session_owned_limit(None, None)?, None);
+        assert_eq!(
+            configured_profile_limits(None, None).max_owned_bytes,
+            512 * 1024 * 1024
+        );
+        let configured = 2 * 1024 * 1024 * 1024;
+        let effective = session_owned_limit(None, Some(configured))?;
+        assert_eq!(
+            configured_profile_limits(effective, None).max_owned_bytes,
+            2 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            session_owned_limit(Some(1024), Some(configured))?,
+            Some(1024)
+        );
+        assert_eq!(session_owned_limit(Some(4096), Some(2048))?, Some(2048));
+        assert_eq!(
+            configured_profile_limits(None, Some(u64::MAX)).max_work,
+            u64::MAX
+        );
+        let validation = configured_encoded_limits(u64::MAX);
+        assert_eq!(validation.max_work, u64::MAX);
+        assert_eq!(
+            validation.max_nodes,
+            encoded::EncodedLimits::default().max_nodes
+        );
+        Ok(())
+    }
 
     #[test]
     fn native_version_comes_from_the_python_distribution_source() {

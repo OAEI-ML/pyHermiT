@@ -161,8 +161,11 @@ impl PhaseBudget {
             .checked_add(amount)
             .ok_or_else(|| EncodedValidationError::resource("complex-role work overflowed"))?;
         if following > self.limits.max_work {
-            return Err(EncodedValidationError::resource(
+            return Err(EncodedValidationError::work_limit(
                 "complex-role compilation exceeds its work limit",
+                self.work,
+                amount,
+                self.limits.max_work,
             ));
         }
         self.work = following;

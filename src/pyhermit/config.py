@@ -100,6 +100,7 @@ class ReasonerConfig:
     progress: ProgressCallback | None = field(default=None, compare=False, repr=False)
     warnings: WarningCallback | None = field(default=None, compare=False, repr=False)
     max_native_symbol_index_bytes: int | None = field(default=None, kw_only=True)
+    max_compile_work: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         enum_fields: tuple[tuple[str, type[_StringEnum]], ...] = (
@@ -133,12 +134,13 @@ class ReasonerConfig:
             if self.max_memory_bytes <= 0:
                 raise ValueError("max_memory_bytes must be a positive integer or None")
 
-        if self.max_native_symbol_index_bytes is not None:
-            maximum = self.max_native_symbol_index_bytes
-            if isinstance(maximum, bool) or not isinstance(maximum, int):
-                raise TypeError("max_native_symbol_index_bytes must be a positive u64 or None")
-            if not 0 < maximum < (1 << 64):
-                raise ValueError("max_native_symbol_index_bytes must be a positive u64 or None")
+        for name in ("max_native_symbol_index_bytes", "max_compile_work"):
+            maximum = getattr(self, name)
+            if maximum is not None:
+                if isinstance(maximum, bool) or not isinstance(maximum, int):
+                    raise TypeError(f"{name} must be a positive u64 or None")
+                if not 0 < maximum < (1 << 64):
+                    raise ValueError(f"{name} must be a positive u64 or None")
 
         for name in (
             "require_native_pipeline",
@@ -155,13 +157,14 @@ class ReasonerConfig:
                 raise TypeError(f"{name} must be callable or None")
 
     def __setstate__(self, state: object) -> None:
-        """Restore current or pre-limit positional state without shifting old fields."""
+        """Restore current, symbol-limit, or pre-limit state without shifting fields."""
 
         if not isinstance(state, (list, tuple)):
             raise TypeError("ReasonerConfig pickle state must be a list or tuple")
         config_fields = fields(self)
-        if len(state) == len(config_fields) - 1:
-            state = (*state, None)
+        missing = len(config_fields) - len(state)
+        if missing in (1, 2):
+            state = (*state, *((None,) * missing))
         if len(state) != len(config_fields):
             raise ValueError("ReasonerConfig pickle state has an unsupported field count")
         for config_field, value in zip(config_fields, state, strict=True):
@@ -192,13 +195,11 @@ class ReasonerConfig:
             ("workers", self.workers),
         )
 
-        # Omit the new optional limit to preserve existing default cache identities.
-        if self.max_native_symbol_index_bytes is not None:
-            values = tuple(
-                sorted(
-                    (*values, ("max_native_symbol_index_bytes", self.max_native_symbol_index_bytes))
-                )
-            )
+        # Omit unset optional limits to preserve existing default cache identities.
+        for name in ("max_native_symbol_index_bytes", "max_compile_work"):
+            maximum = getattr(self, name)
+            if maximum is not None:
+                values = tuple(sorted((*values, (name, maximum))))
 
         # Preserve default cache identities; strict admission partitions opted-in sessions.
         return (
