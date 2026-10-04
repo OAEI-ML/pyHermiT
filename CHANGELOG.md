@@ -2,7 +2,7 @@
 
 All notable user-visible changes are recorded here.
 
-## Unreleased
+## 0.2.2 — 2026-10-04
 
 - Added an explicit native symbol-index memory limit for large ontologies while preserving
   the existing 64 MiB default, legacy service-context export limit and default configuration
