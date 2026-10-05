@@ -120,7 +120,7 @@ def test_installed_suite_loads_runtime_before_repository_test_support() -> None:
     assert 'assert owl.__version__ == "0.2.1"' in smoke
 
 
-def test_installed_suite_adds_native_resource_checks_only_to_native_backend(
+def test_installed_suite_separates_native_resources_from_default_semantic_matrix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = runpy.run_path(str(ROOT / "tests/packaging/run_installed_suite.py"))
@@ -131,18 +131,17 @@ def test_installed_suite_adds_native_resource_checks_only_to_native_backend(
 
     monkeypatch.setattr(subprocess, "run", capture)
     monkeypatch.setenv("PYTHONPATH", str(ROOT / "src"))
-    for backend in ("python", "native"):
-        monkeypatch.setattr(sys, "argv", ["run_installed_suite.py", "--backend", backend])
+    for backend, extra in (("python", []), ("native", []), ("native", ["--resource-limits-only"])):
+        monkeypatch.setattr(sys, "argv", ["run_installed_suite.py", "--backend", backend, *extra])
         assert runner["main"]() == 0
 
-    assert len(calls) == 4
-    python_targets, native_targets = calls[1][0][6:], calls[3][0][6:]
+    assert len(calls) == 6
+    python_targets, native_targets, focused = (calls[index][0][6:] for index in (1, 3, 5))
     expected_base = [
         str(ROOT / f"tests/{suite}") for suite in ("unit", "conformance", "parity", "integration")
     ]
     assert python_targets == expected_base
-    assert native_targets[: len(expected_base)] == expected_base
-    focused = native_targets[len(expected_base) :]
+    assert native_targets == expected_base
     assert len(focused) == 5
     assert any("public_memory_allowance" in target for target in focused)
     assert any("public_compile_work_limit" in target for target in focused)
@@ -174,3 +173,29 @@ def test_release_requires_gates_attestation_and_atomic_trusted_publication() -> 
     assert 'os.environ["RELEASE_TAG"] == f"v{match.group(1)}"' in workflow
     assert "(len(native), len(pure), len(sdist)) == (8, 1, 1)" in workflow
     assert "skip-existing: false" in workflow
+
+
+def test_resource_only_mode_requires_native_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = runpy.run_path(str(ROOT / "tests/packaging/run_installed_suite.py"))
+    monkeypatch.setattr(
+        sys, "argv", ["run_installed_suite.py", "--backend", "python", "--resource-limits-only"]
+    )
+    with pytest.raises(SystemExit) as captured:
+        runner["main"]()
+    assert captured.value.code == 2
+
+
+def test_native_resource_phase_requires_native_core_after_original_semantic_checks() -> None:
+    metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    commands = (
+        '"python {project}/tests/packaging/run_installed_suite.py --backend native"',
+        '"python {project}/tests/packaging/installed_smoke.py --expected-backend python"',
+        '"python {project}/tests/packaging/ensure_native_core.py"',
+        '"python {project}/tests/packaging/installed_smoke.py --expected-backend native '
+        '--expected-core-backend native"',
+        '"python {project}/tests/packaging/run_installed_suite.py --backend native '
+        '--resource-limits-only"',
+    )
+    positions = [metadata.index(command) for command in commands]
+    assert positions == sorted(positions)
+    assert all(metadata.count(command) == 1 for command in commands)
