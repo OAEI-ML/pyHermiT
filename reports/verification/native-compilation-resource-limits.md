@@ -68,3 +68,16 @@ bumped, no package was published or installed into an experiment, and no live jo
 Full NCIT admission, peak process RSS, runtime and full scientific results remain unmeasured.
 Memory controls retain their documented estimate-based scope; independent shape, index,
 query and datatype limits remain active. A larger work allowance is not a completion guarantee.
+
+The native installed-wheel suite now also selects the bounded compiled resource regressions:
+public memory/work limits, profile-manifest handle limits, combined deferred resource identity,
+and symbol-index limits. They run in the existing installed-package and network-denied process;
+the Python-backend selection remains unchanged. This closes the wheel-selection gap left by
+the general semantic suite, which does not collect the native-only test directories.
+
+The added selection passed locally through the real installed-suite subprocess: 15 cases in
+1.65 seconds, with unrelated semantic cases deselected. Validation used an isolated installed
+package layout containing the already compiled candidate extension, not a newly built platform
+wheel. All 10 packaging workflow-contract tests and focused Ruff checks passed. An injected
+source-path override was rejected by the runner's initial origin assertion before pytest ran.
+Hosted execution against the built platform wheels is still required.

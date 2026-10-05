@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import runpy
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -112,6 +118,45 @@ def test_installed_suite_loads_runtime_before_repository_test_support() -> None:
 
     assert runner.index("import pyhermit") < runner.index("sys.path.insert(0, {str(root)!r})")
     assert 'assert owl.__version__ == "0.2.1"' in smoke
+
+
+def test_installed_suite_adds_native_resource_checks_only_to_native_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = runpy.run_path(str(ROOT / "tests/packaging/run_installed_suite.py"))
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def capture(command: list[str], **kwargs: Any) -> None:
+        calls.append((command, kwargs))
+
+    monkeypatch.setattr(subprocess, "run", capture)
+    monkeypatch.setenv("PYTHONPATH", str(ROOT / "src"))
+    for backend in ("python", "native"):
+        monkeypatch.setattr(sys, "argv", ["run_installed_suite.py", "--backend", backend])
+        assert runner["main"]() == 0
+
+    assert len(calls) == 4
+    python_targets, native_targets = calls[1][0][6:], calls[3][0][6:]
+    expected_base = [
+        str(ROOT / f"tests/{suite}") for suite in ("unit", "conformance", "parity", "integration")
+    ]
+    assert python_targets == expected_base
+    assert native_targets[: len(expected_base)] == expected_base
+    focused = native_targets[len(expected_base) :]
+    assert len(focused) == 5
+    assert any("public_memory_allowance" in target for target in focused)
+    assert any("public_compile_work_limit" in target for target in focused)
+    assert any("combined_native_resource_options" in target for target in focused)
+    assert any(target.endswith("test_profile_manifest_memory.py") for target in focused)
+    assert any(target.endswith("test_native_symbol_limits.py") for target in focused)
+    for index, (command, options) in enumerate(calls):
+        assert options["check"] is True
+        assert "PYTHONPATH" not in options["env"]
+        assert options["env"]["PYTHONSAFEPATH"] == "1"
+        if index % 2 == 0:
+            assert "Path(pyhermit.__file__).resolve().parents" in command[2]
+        else:
+            assert "sys.addaudithook(deny_network)" in command[2]
 
 
 def test_release_requires_gates_attestation_and_atomic_trusted_publication() -> None:
