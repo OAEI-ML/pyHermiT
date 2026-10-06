@@ -452,6 +452,7 @@ def _create_encoded_session_v1(
     ) = None,
     origin_context: (tuple[int, tuple[tuple[bytes, tuple[str, ...]], ...]] | None) = None,
     max_owned_bytes: int | None = None,
+    max_compile_work: int | None = None,
     cancel_at_checkpoint: int | None = None,
 ) -> NativeSession: ...
 def self_test() -> None: ...

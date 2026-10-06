@@ -136,6 +136,22 @@ impl NativeError {
                 kwargs.set_item("feature_id", feature)?;
             }
             ErrorKind::Resource => {
+                // Export allocation diagnostics without exposing private transport
+                // fields such as observed_hex or changing scalar error parity.
+                let context = PyDict::new(py);
+                for field in [
+                    "current_bytes",
+                    "requested_bytes",
+                    "max_owned_bytes",
+                    "current_work",
+                    "requested_work",
+                    "max_work",
+                ] {
+                    if let Some(value) = self.context.get(field) {
+                        context.set_item(field, value)?;
+                    }
+                }
+                kwargs.set_item("context", context)?;
                 if let Some(limit) = self.context.get("limit") {
                     kwargs.set_item("limit", limit)?;
                 }

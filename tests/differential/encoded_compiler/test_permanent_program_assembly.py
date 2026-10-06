@@ -219,6 +219,7 @@ def _direct_session(
         slices=records or (_slice_record(snapshot),),
         metadata=encode_ontology_metadata(compiled),
         config=encode_config(selected_config),
+        max_compile_work=selected_config.max_compile_work,
         cancellation=native.CancellationHandle(),
         max_owned_bytes=max_owned_bytes,
         cancel_at_checkpoint=cancel_at_checkpoint,
@@ -246,6 +247,7 @@ def _direct_lifecycle_session(
         slices=records or (_slice_record(snapshot),),
         metadata=encode_encoded_session_metadata(captured, selected_config),
         config=encode_config(selected_config),
+        max_compile_work=selected_config.max_compile_work,
         cancellation=native.CancellationHandle() if cancellation is None else cancellation,
         max_owned_bytes=max_owned_bytes,
         cancel_at_checkpoint=cancel_at_checkpoint,
@@ -1761,6 +1763,121 @@ def test_direct_program_publication_rejects_false_program_digest_then_retries() 
         retry.close()
 
 
+def test_public_memory_allowance_controls_profile_compilation_without_changing_results() -> None:
+    snapshot = pyowl_core.load_snapshot(
+        functional(
+            *(f"Declaration(Class(:C{i}))" for i in range(300)),
+            *(f"SubClassOf(:C{i} :C{i + 1})" for i in range(299)),
+        ),
+        options=pyowl_core.LoadOptions(backend=pyowl_core.BackendPreference.NATIVE),
+    )
+    with pytest.raises(ResourceLimitError) as rejected:
+        Reasoner(
+            snapshot,
+            config=ReasonerConfig(
+                backend="native",
+                require_native_pipeline=True,
+                max_memory_bytes=32 * 1024,
+            ),
+        )
+    assert rejected.value.context["limit"] == "profile-owned-bytes"
+    assert int(rejected.value.context["max_owned_bytes"]) == 32 * 1024
+    assert (
+        int(rejected.value.context["current_bytes"])
+        + int(rejected.value.context["requested_bytes"])
+        > 32 * 1024
+    )
+
+    results = []
+    for allowance in (None, 16 * 1024**2):
+        reasoner = Reasoner(
+            snapshot,
+            config=ReasonerConfig(
+                backend="native",
+                require_native_pipeline=True,
+                max_memory_bytes=allowance,
+            ),
+        )
+        try:
+            results.append(
+                (
+                    reasoner.is_consistent(),
+                    reasoner.entails(
+                        owl.SubClassOf(
+                            owl.Class(owl.IRI("urn:test:permanent#C0")),
+                            owl.Class(owl.IRI("urn:test:permanent#C299")),
+                        )
+                    ),
+                )
+            )
+        finally:
+            reasoner.dispose()
+    assert results == [(True, True), (True, True)]
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_public_compile_work_limit_and_deferred_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    strict: bool,
+) -> None:
+    snapshots = tuple(
+        pyowl_core.load_snapshot(
+            functional(*body),
+            options=pyowl_core.LoadOptions(backend=pyowl_core.BackendPreference.NATIVE),
+        )
+        for body in (
+            ("Declaration(Class(:A))", "Declaration(Class(:B))", "SubClassOf(:A :B)"),
+            ("Declaration(Class(:B))", "Declaration(Class(:C))", "SubClassOf(:B :C)"),
+        )
+    )
+    composite = pyowl_core.compose_views(*snapshots, roles=("source", "target"))
+    view = snapshots[0] if strict else composite
+    with pytest.raises(ResourceLimitError) as rejected:
+        Reasoner(
+            view,
+            config=ReasonerConfig(
+                backend="native", require_native_pipeline=strict, max_compile_work=1
+            ),
+        )
+    assert rejected.value.context["limit"] == "compilation-work"
+    assert int(rejected.value.context["max_work"]) == 1
+    assert (
+        int(rejected.value.context["current_work"]) + int(rejected.value.context["requested_work"])
+        > 1
+    )
+    original = native_input.encode_deferred_encoded_session_metadata
+    deferred_calls = []
+
+    def tracked(*args: Any, **kwargs: Any) -> Any:
+        deferred_calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(native_input, "encode_deferred_encoded_session_metadata", tracked)
+    for work in (None, (1 << 64) - 1):
+        reasoner = Reasoner(
+            view,
+            config=ReasonerConfig(
+                backend="native",
+                require_native_pipeline=strict,
+                max_compile_work=work,
+                max_native_symbol_index_bytes=1024 * 1024,
+            ),
+        )
+        try:
+            assert reasoner.is_consistent()
+            assert reasoner.entails(
+                owl.SubClassOf(
+                    owl.Class(owl.IRI("urn:test:permanent#A")),
+                    owl.Class(
+                        owl.IRI("urn:test:permanent#B" if strict else "urn:test:permanent#C")
+                    ),
+                )
+            )
+        finally:
+            reasoner.dispose()
+    assert len(deferred_calls) == (0 if strict else 2)
+
+
 def test_no_reference_lifecycle_matches_scalar_consistency_and_classification() -> None:
     snapshot = _direct_snapshot()
 
@@ -2678,7 +2795,10 @@ def test_direct_publication_limit_and_cancellation_discard_then_retry() -> None:
         retry.close()
 
 
-def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactional() -> None:
+@pytest.mark.parametrize("work", [None, (1 << 64) - 1])
+def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactional(
+    work: int | None,
+) -> None:
     snapshot = pyowl_core.load_snapshot(
         functional(
             "Declaration(Class(:A))",
@@ -2688,16 +2808,19 @@ def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactiona
         options=OPTIONS,
     )
     records = (_slice_record(snapshot),)
+    config = ReasonerConfig(max_compile_work=work)
 
     with pytest.raises(ResourceLimitError):
         _direct_lifecycle_session(
             snapshot,
+            config=config,
             records=records,
             max_owned_bytes=1,
         )
     with pytest.raises(ReasonerInterruptedError) as captured:
         _direct_lifecycle_session(
             snapshot,
+            config=config,
             records=records,
             cancel_at_checkpoint=81,
         )
@@ -2708,17 +2831,18 @@ def test_no_reference_lifecycle_limit_interrupt_close_and_retry_are_transactiona
     with pytest.raises(ReasonerInterruptedError):
         _direct_lifecycle_session(
             snapshot,
+            config=config,
             records=records,
             cancellation=interrupted,
         )
 
-    first = _direct_lifecycle_session(snapshot, records=records)
+    first = _direct_lifecycle_session(snapshot, records=records, config=config)
     first_digest = first.permanent_program_sha256
     first.close()
     with pytest.raises(DisposedReasonerError):
         first.check(None)
 
-    retry = _direct_lifecycle_session(snapshot, records=records)
+    retry = _direct_lifecycle_session(snapshot, records=records, config=config)
     try:
         assert retry.permanent_program_sha256 == first_digest
         assert _check_signature(retry.check(None))[0]

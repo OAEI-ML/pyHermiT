@@ -53,8 +53,10 @@ def _snapshot(*body: str) -> core.OntologyView:
     ),
     ids=("declaration-only", "annotation-range-only", "logical-range", "typed-literal"),
 )
+@pytest.mark.parametrize("work", (None, (1 << 64) - 1))
 def test_raised_symbol_index_limit_preserves_unsupported_datatype_errors(
     body: tuple[str, ...],
+    work: int | None,
 ) -> None:
     view = _snapshot(*body)
     failures = []
@@ -63,6 +65,8 @@ def test_raised_symbol_index_limit_preserves_unsupported_datatype_errors(
             backend="native",
             require_native_pipeline=True,
             max_native_symbol_index_bytes=limit,
+            max_compile_work=work,
+            max_memory_bytes=16 * 1024**2,
         )
         with pytest.raises(OntologyProfileError, match="UNSUPPORTED_DATATYPE") as caught:
             Reasoner(view, config=config)
@@ -72,7 +76,8 @@ def test_raised_symbol_index_limit_preserves_unsupported_datatype_errors(
     assert failures[0]["code"] == "OWL2DL_PROFILE_VIOLATION"
 
 
-def test_raised_symbol_index_limit_preserves_native_reasoning_answers() -> None:
+@pytest.mark.parametrize("work", (None, (1 << 64) - 1))
+def test_raised_symbol_index_limit_preserves_native_reasoning_answers(work: int | None) -> None:
     view = _snapshot(
         "Declaration(Class(:A))",
         "Declaration(Class(:B))",
@@ -95,6 +100,8 @@ def test_raised_symbol_index_limit_preserves_native_reasoning_answers() -> None:
             backend="native",
             require_native_pipeline=True,
             max_native_symbol_index_bytes=limit,
+            max_compile_work=work,
+            max_memory_bytes=16 * 1024**2,
         )
         with Reasoner(view, config=config) as reasoner:
             answers.append(

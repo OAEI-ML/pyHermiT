@@ -225,8 +225,11 @@ where
             EncodedValidationError::resource("fingerprint work accounting overflowed")
         })?;
         if self.work > self.limits.max_work {
-            return Err(EncodedValidationError::resource(
+            return Err(EncodedValidationError::work_limit(
                 "encoded fingerprint work exceeds its limit",
+                self.work - amount_u64,
+                amount_u64,
+                self.limits.max_work,
             ));
         }
         self.unpolled_work = self.unpolled_work.saturating_add(amount);

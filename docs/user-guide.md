@@ -148,6 +148,24 @@ Timeout and interrupt paths roll back operation-local state before another query
 allowed. They raise `ReasonerTimeoutError`, `ReasonerInterruptedError`, or another
 `ReasoningAbortedError` subclass; they are not logical `False` answers.
 
+Native encoded compilation also honors an explicit `max_memory_bytes` allowance in its
+profile validation, retained temporary storage, structural compilation, and permanent-program
+assembly. When omitted, those compiler phases retain their historical 512 MiB ownership
+allowance. Accounting releases temporary canonical buffers after copying them into their
+retained parent; it does not accumulate every temporary allocation as permanently live memory.
+
+`ReasonerConfig(max_compile_work=...)` optionally changes the native compiler's checked work
+allowance. It is keyword-only and accepts a positive unsigned 64-bit integer; `None` preserves
+the existing 2,000,000,000-unit phase budgets and configuration identity. Units are internal
+compiler operations, not elapsed time or a single process-wide instruction count. The option
+covers structural validation, profile checks, fingerprints, compilation phases and final
+assembly. It requires a native extension advertising `native-compilation-resource-limits-v1`
+and encoded input. Python, VERIFY, scalar compilation and incompatible native extensions reject an
+explicit request; AUTO does not silently fall back. `require_native_pipeline=True` separately
+requires the complete native input path. A raised work allowance retains cancellation, timeout,
+memory checks, arithmetic-overflow checks and strict datatype admission. See
+[Native compilation resource limits](../specs/native-compilation-resource-limits.md).
+
 For the native public-symbol lookup index, the default estimate ceiling is 64 MiB.
 Large ontologies can opt into a larger bound without changing ontology content or inference
 rules:
@@ -212,7 +230,7 @@ reasoning, classification, realization, updates, and peak RSS; see
 
 Local wheels and semantic suites are verified. The historical `0.1.1`
 [release report](../reports/release-report-local.json) records the prior universal
-publication, while the `0.2.2` workflow requires the complete hosted wheel set. The owner
+publication, while the `0.2.3` workflow requires the complete hosted wheel set. The owner
 accepted only the remaining external WP17 runs as post-release follow-up.
 
 pyHermiT 0.2.0 rejects the pyowl-core 0.1 API/model contract. Persisted pyowl-core 0.1
