@@ -2,6 +2,17 @@
 
 All notable user-visible changes are recorded here.
 
+## 0.2.3 — 2026-10-06
+
+- Honor explicit memory allowances throughout native encoded profile validation, structural
+  compilation, and permanent-program assembly; release canonical scratch ownership once
+  copied into retained buffers.
+- Add the optional keyword-only `max_compile_work` allowance while preserving default
+  configuration and wire identities, historical pickles, cancellation, and datatype policy.
+  Unsupported backends reject explicit work settings instead of silently ignoring them.
+- Verify compiled resource limits in installed native wheels across the platform matrix,
+  with the required native pyowl-core prerequisite.
+
 ## 0.2.2 — 2026-10-04
 
 - Added an explicit native symbol-index memory limit for large ontologies while preserving
